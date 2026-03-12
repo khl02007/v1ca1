@@ -1,0 +1,31 @@
+name: v1ca1
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - seaborn
+  - xarray
+  - pynwb
+  - pip:
+      - -e .
+      - spikeinterface>=0.100
+      - pynapple>=0.7
+      - probeinterface>=0.2
+
+# Additional packages used by some analyses may need to be installed manually,
+# depending on which workflows you run and how your lab environment is managed:
+# - jax
+# - nemos
+# - replay_trajectory_classification
+# - position_tools
+# - track_linearization
+# - ripple_detection
+# - non_local_detector
+# - trajectory_analysis_tools
+# - kyutils  # lab/internal dependency
