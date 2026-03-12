@@ -1,198 +1,314 @@
-import spikeinterface.full as si
-import probeinterface as pi
-import numpy as np
-import kyutils
-import time
-from pathlib import Path
-import os
-import pickle
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+"""Run Mountainsort4 spike sorting for one animal/date probe shank session.
+
+This script reads a single-session NWB recording, selects one shank from one
+probe, runs Mountainsort4 if sorter output does not already exist, and then
+computes the corresponding SpikeInterface sorting analyzer outputs and quality
+metrics under the configured analysis directory.
+"""
+
 import argparse
+import pickle
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-animal_name = "L14"
-date = "20240611"
-analysis_path = Path("/nimbus/kyu") / animal_name / "singleday_sort" / date
+import numpy as np
 
-nwb_file_base_path = Path("/stelmo/nwb/raw")
-nwb_file_name = f"{animal_name}{date}.nwb"
+DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
+DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
+_SPIKEINTERFACE = None
 
-si.set_global_job_kwargs(chunk_size=30000, n_jobs=8, progress_bar=True)
+
+def get_spikeinterface():
+    global _SPIKEINTERFACE
+    if _SPIKEINTERFACE is None:
+        import spikeinterface.full as si
+
+        si.set_global_job_kwargs(chunk_size=30000, n_jobs=8, progress_bar=True)
+        _SPIKEINTERFACE = si
+    return _SPIKEINTERFACE
+
+
+@dataclass(frozen=True)
+class SpikeSortingSession:
+    animal_name: str
+    date: str
+    analysis_root: Path = DEFAULT_ANALYSIS_ROOT
+    nwb_root: Path = DEFAULT_NWB_ROOT
+
+    @property
+    def analysis_path(self) -> Path:
+        return self.analysis_root / self.animal_name / "singleday_sort" / self.date
+
+    @property
+    def nwb_path(self) -> Path:
+        return self.nwb_root / f"{self.animal_name}{self.date}.nwb"
+
+    def sorting_path(self, probe_idx: int, shank_idx: int) -> Path:
+        return (
+            self.analysis_path
+            / "sorting"
+            / f"sorting_probe{probe_idx}_shank{shank_idx}_ms4"
+        )
+
+    def sorting_analyzer_path(self, probe_idx: int, shank_idx: int) -> Path:
+        return (
+            self.analysis_path
+            / "sorting_analyzer"
+            / f"sorting_analyzer_probe{probe_idx}_shank{shank_idx}_ms4"
+        )
+
+
+def get_recording_shank(
+    session: SpikeSortingSession, probe_idx: int, shank_idx: int
+) -> Any:
+    si = get_spikeinterface()
+    if not session.nwb_path.exists():
+        raise FileNotFoundError(f"NWB file not found: {session.nwb_path}")
+
+    print(f"Loading recording from {session.nwb_path}...")
+    recording = si.read_nwb_recording(session.nwb_path)
+    channel_ids = np.arange(
+        128 * probe_idx + 32 * shank_idx, 128 * probe_idx + 32 * (shank_idx + 1)
+    )
+    return recording.select_channels(channel_ids=channel_ids)
+
+
+def get_sorting(
+    recording_filt: Any,
+    sort_save_path: Path,
+    recompute_sorting: bool,
+) -> Any:
+    si = get_spikeinterface()
+    print("Sorting...")
+    firings_path = sort_save_path / "sorter_output" / "firings.npz"
+    if firings_path.exists() and not recompute_sorting:
+        print("Sorting already exists.")
+        sorting = si.NpzSortingExtractor(firings_path)
+        print(sorting)
+        return sorting
+
+    sort_save_path.parent.mkdir(parents=True, exist_ok=True)
+    recording_filt_whiten = si.whiten(recording_filt, dtype=np.float64)
+
+    ms4_params = si.get_default_sorter_params("mountainsort4")
+    ms4_params["adjacency_radius"] = 150
+    ms4_params["filter"] = False
+    ms4_params["whiten"] = False
+    ms4_params["num_workers"] = 8
+
+    start_sort_time = time.time()
+    sorting = si.run_sorter(
+        "mountainsort4",
+        recording=recording_filt_whiten,
+        folder=sort_save_path,
+        **ms4_params,
+    )
+    end_sort_time = time.time()
+    print(f"Sorting took {end_sort_time - start_sort_time} seconds.")
+    return sorting
+
+
+def compute_sorting_analyzer(
+    sorting: Any,
+    recording_filt: Any,
+    sorting_analyzer_path: Path,
+    recompute_sorting_analyzer: bool,
+) -> None:
+    si = get_spikeinterface()
+    if sorting_analyzer_path.exists() and not recompute_sorting_analyzer:
+        print("Sorting analyzer already exists.")
+        si.load_sorting_analyzer(
+            folder=sorting_analyzer_path, load_extensions=False
+        )
+        return
+
+    print("Computing sorting analyzer extensions...")
+    start_sorting_analyzer_compute_time = time.time()
+    sorting_analyzer_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sorting_analyzer = si.create_sorting_analyzer(
+        sorting,
+        recording_filt,
+        format="binary_folder",
+        folder=sorting_analyzer_path,
+        sparse=False,
+        overwrite=recompute_sorting_analyzer,
+    )
+    sorting_analyzer.compute(
+        input=[
+            "random_spikes",
+            "noise_levels",
+            "templates",
+            "waveforms",
+            "principal_components",
+            "quality_metrics",
+            "spike_amplitudes",
+            "correlograms",
+        ],
+        extension_params={
+            "random_spikes": {"max_spikes_per_unit": 10000, "seed": 0},
+            "waveforms": {"ms_before": 1.0, "ms_after": 1.0},
+            "templates": {
+                "ms_before": 1.0,
+                "ms_after": 1.0,
+                "operators": ["median", "average"],
+            },
+            "principal_components": {
+                "n_components": 10,
+                "mode": "by_channel_local",
+                "whiten": True,
+                "dtype": "float32",
+            },
+            "noise_levels": {"num_chunks_per_segment": 20, "seed": 1},
+            "correlograms": {"window_ms": 50, "bin_ms": 1.0, "method": "auto"},
+            "spike_amplitudes": {"peak_sign": "neg"},
+            "quality_metrics": {
+                "metric_names": [
+                    "isi_violation",
+                    "snr",
+                    "firing_range",
+                    "amplitude_median",
+                ],
+                "qm_params": {
+                    "isi_violation": {"isi_threshold_ms": 1.5, "min_isi_ms": 0},
+                    "snr": {"peak_sign": "neg", "peak_mode": "extremum"},
+                    "firing_range": {"bin_size_s": 5, "percentiles": (5, 95)},
+                    "amplitude_median": {"peak_sign": "neg"},
+                },
+                "peak_sign": "neg",
+                "seed": 1,
+            },
+        },
+    )
+    pc_metrics = si.compute_pc_metrics(
+        sorting_analyzer=sorting_analyzer,
+        metric_names=["nn_isolation", "nn_noise_overlap"],
+        qm_params={
+            "nn_isolation": {
+                "max_spikes": 5000,
+                "min_spikes": 10,
+                "min_fr": 0.0,
+                "n_neighbors": 4,
+                "n_components": 10,
+                "radius_um": 100,
+                "peak_sign": "neg",
+            },
+            "nn_noise_overlap": {
+                "max_spikes": 5000,
+                "min_spikes": 10,
+                "min_fr": 0.0,
+                "n_neighbors": 4,
+                "n_components": 10,
+                "radius_um": 100,
+                "peak_sign": "neg",
+            },
+        },
+        unit_ids=None,
+        seed=1,
+        progress_bar=True,
+    )
+    with open(sorting_analyzer_path / "pc_metrics.pkl", "wb") as file:
+        pickle.dump(pc_metrics, file)
+
+    end_sorting_analyzer_compute_time = time.time()
+    print(
+        "Sorting analyzer took "
+        f"{end_sorting_analyzer_compute_time - start_sorting_analyzer_compute_time} "
+        "seconds."
+    )
 
 
 def sort(
-    probe_idx, shank_idx, recompute_sorting=False, recompute_sorting_analyzer=False
-):
-
-    print(f"Processing probe {probe_idx} shank {shank_idx}.")
-    sort_save_path = (
-        analysis_path / "sorting" / f"sorting_probe{probe_idx}_shank{shank_idx}_ms4"
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+    recompute_sorting: bool = False,
+    recompute_sorting_analyzer: bool = False,
+    analysis_root: Path = DEFAULT_ANALYSIS_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
+) -> None:
+    si = get_spikeinterface()
+    session = SpikeSortingSession(
+        animal_name=animal_name,
+        date=date,
+        analysis_root=analysis_root,
+        nwb_root=nwb_root,
     )
 
-    print("Loading recording...")
-    recording = si.read_nwb_recording(nwb_file_base_path / nwb_file_name)
-
-    recording_shank = recording.select_channels(
-        channel_ids=np.arange(
-            128 * probe_idx + 32 * shank_idx, 128 * probe_idx + 32 * (shank_idx + 1)
-        )
+    print(
+        f"Processing {session.animal_name} {session.date} "
+        f"probe {probe_idx} shank {shank_idx}."
     )
-
+    recording_shank = get_recording_shank(session, probe_idx, shank_idx)
     recording_filt = si.bandpass_filter(recording_shank, dtype=np.float64)
-
-    print("Sorting...")
-    if os.path.exists(sort_save_path) and (recompute_sorting == False):
-        print("Sorting already exists.")
-        sorting = si.NpzSortingExtractor(
-            sort_save_path / "sorter_output" / "firings.npz"
-        )
-        print(sorting)
-    else:
-        recording_filt_whiten = si.whiten(recording_filt, dtype=np.float64)
-
-        ms4_params = si.get_default_sorter_params("mountainsort4")
-
-        ms4_params["adjacency_radius"] = 150
-        ms4_params["filter"] = False
-        ms4_params["whiten"] = False
-        ms4_params["num_workers"] = 8
-
-        start_sort_time = time.time()
-        sorting = si.run_sorter(
-            "mountainsort4",
-            recording=recording_filt_whiten,
-            folder=sort_save_path,
-            **ms4_params,
-        )
-        end_sort_time = time.time()
-        print(f"Sorting took {end_sort_time - start_sort_time} seconds.")
-
-    sorting_analyzer_path = (
-        analysis_path
-        / "sorting_analyzer"
-        / f"sorting_analyzer_probe{probe_idx}_shank{shank_idx}_ms4"
+    sorting = get_sorting(
+        recording_filt=recording_filt,
+        sort_save_path=session.sorting_path(probe_idx, shank_idx),
+        recompute_sorting=recompute_sorting,
     )
-    if os.path.exists(sorting_analyzer_path) and (recompute_sorting_analyzer == False):
-        print("Sorting analyzer already exists.")
-        sorting_analyzer = si.load_sorting_analyzer(
-            folder=sorting_analyzer_path, load_extensions=False
-        )
-    else:
-        print("Computing sorting analyzer extensions...")
-        start_sorting_analyzer_compute_time = time.time()
-
-        sorting_analyzer = si.create_sorting_analyzer(
-            sorting,
-            recording_filt,
-            format="binary_folder",
-            folder=sorting_analyzer_path,
-            sparse=False,
-            overwrite=recompute_sorting_analyzer,
-        )
-        sorting_analyzer.compute(
-            input=[
-                "random_spikes",
-                "noise_levels",
-                "templates",
-                "waveforms",
-                "principal_components",
-                "quality_metrics",
-                "spike_amplitudes",
-                "correlograms",
-            ],
-            extension_params={
-                "random_spikes": {"max_spikes_per_unit": 10000, "seed": 0},
-                "waveforms": {"ms_before": 1.0, "ms_after": 1.0},
-                "templates": {
-                    "ms_before": 1.0,
-                    "ms_after": 1.0,
-                    "operators": ["median", "average"],
-                },
-                "principal_components": {
-                    "n_components": 10,
-                    "mode": "by_channel_local",
-                    "whiten": True,
-                    "dtype": "float32",
-                },
-                "noise_levels": {
-                    "num_chunks_per_segment": 20,
-                    # "chunk_size": 10000,
-                    "seed": 1,
-                },
-                "correlograms": {"window_ms": 50, "bin_ms": 1.0, "method": "auto"},
-                "spike_amplitudes": {"peak_sign": "neg"},
-                "quality_metrics": {
-                    "metric_names": [
-                        "isi_violation",
-                        "snr",
-                        "firing_range",
-                        "amplitude_median",
-                    ],
-                    "qm_params": {
-                        "isi_violation": {"isi_threshold_ms": 1.5, "min_isi_ms": 0},
-                        "snr": {"peak_sign": "neg", "peak_mode": "extremum"},
-                        "firi+ng_range": {"bin_size_s": 5, "percentiles": (5, 95)},
-                        "amplitude_median": {"peak_sign": "neg"},
-                    },
-                    "peak_sign": "neg",
-                    "seed": 1,
-                },
-            },
-        )
-        pc_metrics = si.compute_pc_metrics(
-            sorting_analyzer=sorting_analyzer,
-            metric_names=["nn_isolation", "nn_noise_overlap"],
-            qm_params={
-                "nn_isolation": {
-                    "max_spikes": 5000,
-                    "min_spikes": 10,
-                    "min_fr": 0.0,
-                    "n_neighbors": 4,
-                    "n_components": 10,
-                    "radius_um": 100,
-                    "peak_sign": "neg",
-                },
-                "nn_noise_overlap": {
-                    "max_spikes": 5000,
-                    "min_spikes": 10,
-                    "min_fr": 0.0,
-                    "n_neighbors": 4,
-                    "n_components": 10,
-                    "radius_um": 100,
-                    "peak_sign": "neg",
-                },
-            },
-            unit_ids=None,
-            seed=1,
-            progress_bar=True,
-        )
-        with open(
-            sorting_analyzer_path / "pc_metrics.pkl",
-            "wb",
-        ) as f:
-            pickle.dump(pc_metrics, f)
-
-        end_sorting_analyzer_compute_time = time.time()
-        print(
-            f"Sorting analyzer took {end_sorting_analyzer_compute_time - start_sorting_analyzer_compute_time} seconds."
-        )
-
-    return None
+    compute_sorting_analyzer(
+        sorting=sorting,
+        recording_filt=recording_filt,
+        sorting_analyzer_path=session.sorting_analyzer_path(probe_idx, shank_idx),
+        recompute_sorting_analyzer=recompute_sorting_analyzer,
+    )
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run ms4 on concatenated run epochs")
-    parser.add_argument("--probe_idx", type=int, help="Probe index")
-    parser.add_argument("--shank_idx", type=int, help="Shank index")
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run mountainsort4 spike sorting")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
+    )
+    parser.add_argument("--probe-idx", type=int, required=True, help="Probe index")
+    parser.add_argument("--shank-idx", type=int, required=True, help="Shank index")
+    parser.add_argument(
+        "--recompute-sorting",
+        action="store_true",
+        help="Re-run mountainsort4 even if sorter output already exists",
+    )
+    parser.add_argument(
+        "--recompute-sorting-analyzer",
+        action="store_true",
+        help="Recompute the sorting analyzer even if it already exists",
+    )
+    parser.add_argument(
+        "--analysis-root",
+        type=Path,
+        default=DEFAULT_ANALYSIS_ROOT,
+        help=f"Base directory for analysis output. Default: {DEFAULT_ANALYSIS_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_arguments()
     sort(
-        args.probe_idx,
-        args.shank_idx,
-        recompute_sorting=False,
-        recompute_sorting_analyzer=True,
+        animal_name=args.animal_name,
+        date=args.date,
+        probe_idx=args.probe_idx,
+        shank_idx=args.shank_idx,
+        recompute_sorting=args.recompute_sorting,
+        recompute_sorting_analyzer=args.recompute_sorting_analyzer,
+        analysis_root=args.analysis_root,
+        nwb_root=args.nwb_root,
     )
 
 
