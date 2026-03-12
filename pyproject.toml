@@ -25,6 +25,10 @@ analysis = [
     "probeinterface>=0.2",
     "xarray>=2023.0",
 ]
+figurl = [
+    "kachery-cloud>=0.4",
+    "sortingview>=0.13",
+]
 glm = [
     "jax>=0.4",
     "nemos",

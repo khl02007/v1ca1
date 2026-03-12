@@ -29,3 +29,8 @@ dependencies:
 # - non_local_detector
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency
+# - sortingview
+# - kachery-cloud
+#
+# If you want figurl generation support, install the optional extra:
+#   pip install -e ".[figurl]"

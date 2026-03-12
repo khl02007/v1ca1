@@ -243,6 +243,7 @@ def sort(
     date: str,
     probe_idx: int,
     shank_idx: int,
+    ms4_params: dict[str, Any],
     recompute_sorting: bool = False,
     recompute_sorting_analyzer: bool = False,
     analysis_root: Path = DEFAULT_ANALYSIS_ROOT,
@@ -260,11 +261,6 @@ def sort(
     )
     recording_filt = si.bandpass_filter(recording_shank, dtype=np.float64)
     recording_filt_whiten = si.whiten(recording_filt, dtype=np.float64)
-    ms4_params = si.get_default_sorter_params("mountainsort4")
-    ms4_params["adjacency_radius"] = 150
-    ms4_params["filter"] = False
-    ms4_params["whiten"] = False
-    ms4_params["num_workers"] = 8
     sorting = run_mountainsort4(
         recording_filt=recording_filt_whiten,
         sort_save_path=get_sorting_path(
@@ -333,12 +329,19 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     """Run the CLI entrypoint."""
+    si = get_spikeinterface()
     args = parse_arguments()
+    ms4_params = si.get_default_sorter_params("mountainsort4")
+    ms4_params["adjacency_radius"] = 150
+    ms4_params["filter"] = False
+    ms4_params["whiten"] = False
+    ms4_params["num_workers"] = 8
     sort(
         animal_name=args.animal_name,
         date=args.date,
         probe_idx=args.probe_idx,
         shank_idx=args.shank_idx,
+        ms4_params=ms4_params,
         recompute_sorting=args.recompute_sorting,
         recompute_sorting_analyzer=args.recompute_sorting_analyzer,
         analysis_root=args.analysis_root,
