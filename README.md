@@ -22,6 +22,8 @@ All analysis code currently lives under `src/v1ca1`:
 - `src/v1ca1/motor`: decoding and visualization for speed, head direction, angular velocity, and related motor variables.
 - `src/v1ca1/ripple`: ripple detection and ripple-centered GLM analyses.
 - `src/v1ca1/oscillation`: theta phase extraction and oscillatory event detection.
+- `src/v1ca1/sleep`: sleep-focused analyses and utilities.
+- `src/v1ca1/nwb`: NWB-related utilities and workflows.
 - `src/v1ca1/xcorr`: auto/cross-correlogram analyses.
 - `src/v1ca1/task_progression`: task progression encoding/decoding and several GLM variants.
 - `src/v1ca1/communication_subspace`: cross-area latent subspace analyses.
@@ -120,6 +122,9 @@ The refactored spikesorting scripts also write per-run JSON metadata files under
 `analysis_root / animal_name / date / v1ca1_log/`. Each filename includes the
 script name and a UTC timestamp, and each file records the package version, git
 commit, run parameters, and the key output paths it wrote.
+
+The package version is now single-sourced from `v1ca1.__version__`, so the
+runtime logs and package metadata stay in sync.
 
 ## Data And Experimental Context
 

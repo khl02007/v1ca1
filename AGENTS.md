@@ -70,6 +70,8 @@ That style means:
 - `src/v1ca1/motor`: motor-variable decoding and tuning analyses.
 - `src/v1ca1/ripple`: ripple detection and ripple GLM analyses.
 - `src/v1ca1/oscillation`: theta phase and oscillatory event work.
+- `src/v1ca1/sleep`: sleep-related analyses and utilities.
+- `src/v1ca1/nwb`: NWB-related helpers and workflows.
 - `src/v1ca1/xcorr`: auto- and cross-correlation analyses.
 - `src/v1ca1/task_progression`: GLM, tuning, and task progression analyses.
 - `src/v1ca1/communication_subspace`, `signal_dim`, `topology`: more specialized downstream analyses.
@@ -78,5 +80,6 @@ That style means:
 
 - `environment.yml` gives a useful base environment, but several workflows also depend on additional packages not guaranteed to be installed.
 - Figurl generation uses the optional `.[figurl]` extra rather than the base install.
+- Package version is single-sourced from `src/v1ca1/__init__.py`.
 - `kyutils` is used throughout the repo and appears to be lab-specific.
 - Some subpackages depend on heavier neuroscience tooling such as `spikeinterface`, `pynwb`, `pynapple`, `position_tools`, `track_linearization`, and replay/ripple-related libraries.
