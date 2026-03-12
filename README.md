@@ -79,8 +79,17 @@ Examples:
 ```bash
 PYTHONPATH=src python src/v1ca1/helper/get_timestamps.py \
   --animal-name L14 \
-  --date 20240611
+  --date 20240611 \
+  --ephys-format both
 ```
+
+`get_timestamps.py` now derives per-epoch ephys timestamps directly from the
+NWB `e-series` timestamps by splitting on gaps larger than the configured
+threshold. The default threshold is 10 seconds, which is intended to treat
+shorter timestamp dropouts as part of the same epoch. The script always writes
+legacy `timestamps_position.pkl`, can write both legacy pickle and pynapple
+timestamp outputs for ephys, and records its segmentation details in the
+session run log under `v1ca1_log/`.
 
 ```bash
 PYTHONPATH=src python src/v1ca1/spikesorting/sort.py \
@@ -118,10 +127,12 @@ probe placements differ.
 
 Important: some scripts are now parameterized, but many downstream analyses still rely on hard-coded defaults inside the source file for items like `animal_name`, `date`, and root paths.
 
-The refactored spikesorting scripts also write per-run JSON metadata files under
-`analysis_root / animal_name / date / v1ca1_log/`. Each filename includes the
-script name and a UTC timestamp, and each file records the package version, git
-commit, run parameters, and the key output paths it wrote.
+The refactored helper and spikesorting scripts write per-run JSON metadata files
+under `analysis_root / animal_name / date / v1ca1_log/`. Each filename
+includes the script name and a UTC timestamp, and each file records the package
+version, git commit, run parameters, and the key output paths it wrote. For
+`get_timestamps.py`, that log also records the gap-based ephys segmentation
+summary that was used to derive epoch boundaries from the NWB timestamps.
 
 The package version is now single-sourced from `v1ca1.__version__`, so the
 runtime logs and package metadata stay in sync.
@@ -151,6 +162,9 @@ Many scripts expect precomputed intermediate files such as:
 - `timestamps_ephys.pkl`
 - `timestamps_position.pkl`
 - `timestamps_ephys_all.pkl`
+- `timestamps_ephys.npz`
+- `timestamps_ephys_all.npz`
+- `timestamps_position.npz`
 - `position.pkl`
 - `trajectory_times.pkl`
 - sorting outputs and sorting analyzer folders under the analysis directory
