@@ -1,34 +1,39 @@
-import numpy as np
-import kyutils
-from pathlib import Path
-import os
-import pickle
-import pynwb
+from __future__ import annotations
 
 import argparse
+import pickle
+from pathlib import Path
 
-animal_name = "L14"
-date = "20240611"
-data_path = Path("/nimbus/kyu") / animal_name
-analysis_path = data_path / "singleday_sort" / "20240611"
-num_sleep_epochs = 5
-num_run_epochs = 4
-
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
-)
-
-nwb_file_base_path = Path("/stelmo/nwb/raw")
+import kyutils
+import numpy as np
+import pynwb
 
 
-def get_timestamps():
+DEFAULT_DATA_ROOT = Path("/nimbus/kyu")
+DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
+
+
+def get_timestamps(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
+) -> None:
+    data_path = data_root / animal_name
+    analysis_path = data_path / date
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
 
     timestamps_position = {}
     timestamps_ephys = {}
 
-    nwb_file_path = nwb_file_base_path / f"{animal_name}{date}.nwb"
+    if not nwb_path.exists():
+        raise FileNotFoundError(f"NWB file not found: {nwb_path}")
 
-    with pynwb.NWBHDF5IO(nwb_file_path, "r") as io:
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
+
+    print(f"Processing {animal_name} {date}.")
+    with pynwb.NWBHDF5IO(nwb_path, "r") as io:
         nwbfile = io.read()
         epoch_tags = np.concatenate(list(nwbfile.epochs[:]["tags"]))
         timestamps_ephys_all = nwbfile.acquisition["e-series"].timestamps[:]
@@ -65,17 +70,42 @@ def get_timestamps():
     with open(analysis_path / "timestamps_ephys_all.pkl", "wb") as f:
         pickle.dump(timestamps_ephys_all, f)
 
-    return None
 
-
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Save timestamps")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing extracted Trodes data. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
     return parser.parse_args()
 
 
-def main():
-    # args = parse_arguments()
-    get_timestamps()
+def main() -> None:
+    args = parse_arguments()
+    get_timestamps(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        nwb_root=args.nwb_root,
+    )
 
 
 if __name__ == "__main__":

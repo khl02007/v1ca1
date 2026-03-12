@@ -11,7 +11,6 @@ metrics under the configured analysis directory.
 import argparse
 import pickle
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +22,7 @@ _SPIKEINTERFACE = None
 
 
 def get_spikeinterface():
+    """Import SpikeInterface lazily and configure shared job settings once."""
     global _SPIKEINTERFACE
     if _SPIKEINTERFACE is None:
         import spikeinterface.full as si
@@ -32,56 +32,78 @@ def get_spikeinterface():
     return _SPIKEINTERFACE
 
 
-@dataclass(frozen=True)
-class SpikeSortingSession:
-    animal_name: str
-    date: str
-    analysis_root: Path = DEFAULT_ANALYSIS_ROOT
-    nwb_root: Path = DEFAULT_NWB_ROOT
+def get_analysis_path(
+    animal_name: str,
+    date: str,
+    analysis_root: Path,
+) -> Path:
+    """Return the analysis directory for one animal/date session."""
+    return analysis_root / animal_name / date
 
-    @property
-    def analysis_path(self) -> Path:
-        return self.analysis_root / self.animal_name / "singleday_sort" / self.date
 
-    @property
-    def nwb_path(self) -> Path:
-        return self.nwb_root / f"{self.animal_name}{self.date}.nwb"
+def get_nwb_path(animal_name: str, date: str, nwb_root: Path) -> Path:
+    """Return the NWB file path for one animal/date session."""
+    return nwb_root / f"{animal_name}{date}.nwb"
 
-    def sorting_path(self, probe_idx: int, shank_idx: int) -> Path:
-        return (
-            self.analysis_path
-            / "sorting"
-            / f"sorting_probe{probe_idx}_shank{shank_idx}_ms4"
-        )
 
-    def sorting_analyzer_path(self, probe_idx: int, shank_idx: int) -> Path:
-        return (
-            self.analysis_path
-            / "sorting_analyzer"
-            / f"sorting_analyzer_probe{probe_idx}_shank{shank_idx}_ms4"
-        )
+def get_sorting_path(
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+    analysis_root: Path,
+) -> Path:
+    """Return the sorter output directory for one probe/shank."""
+    return (
+        get_analysis_path(animal_name, date, analysis_root)
+        / "sorting"
+        / f"sorting_probe{probe_idx}_shank{shank_idx}_ms4"
+    )
+
+
+def get_sorting_analyzer_path(
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+    analysis_root: Path,
+) -> Path:
+    """Return the sorting analyzer directory for one probe/shank."""
+    return (
+        get_analysis_path(animal_name, date, analysis_root)
+        / "sorting_analyzer"
+        / f"sorting_analyzer_probe{probe_idx}_shank{shank_idx}_ms4"
+    )
 
 
 def get_recording_shank(
-    session: SpikeSortingSession, probe_idx: int, shank_idx: int
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+    nwb_root: Path,
 ) -> Any:
+    """Load the NWB recording and select channels for the requested shank."""
     si = get_spikeinterface()
-    if not session.nwb_path.exists():
-        raise FileNotFoundError(f"NWB file not found: {session.nwb_path}")
+    nwb_path = get_nwb_path(animal_name, date, nwb_root)
+    if not nwb_path.exists():
+        raise FileNotFoundError(f"NWB file not found: {nwb_path}")
 
-    print(f"Loading recording from {session.nwb_path}...")
-    recording = si.read_nwb_recording(session.nwb_path)
+    print(f"Loading recording from {nwb_path}...")
+    recording = si.read_nwb_recording(nwb_path)
     channel_ids = np.arange(
         128 * probe_idx + 32 * shank_idx, 128 * probe_idx + 32 * (shank_idx + 1)
     )
     return recording.select_channels(channel_ids=channel_ids)
 
 
-def get_sorting(
+def run_mountainsort4(
     recording_filt: Any,
     sort_save_path: Path,
+    ms4_params: dict[str, Any],
     recompute_sorting: bool,
 ) -> Any:
+    """Run Mountainsort4 or load existing sorter output from disk."""
     si = get_spikeinterface()
     print("Sorting...")
     firings_path = sort_save_path / "sorter_output" / "firings.npz"
@@ -92,18 +114,11 @@ def get_sorting(
         return sorting
 
     sort_save_path.parent.mkdir(parents=True, exist_ok=True)
-    recording_filt_whiten = si.whiten(recording_filt, dtype=np.float64)
-
-    ms4_params = si.get_default_sorter_params("mountainsort4")
-    ms4_params["adjacency_radius"] = 150
-    ms4_params["filter"] = False
-    ms4_params["whiten"] = False
-    ms4_params["num_workers"] = 8
 
     start_sort_time = time.time()
     sorting = si.run_sorter(
         "mountainsort4",
-        recording=recording_filt_whiten,
+        recording=recording_filt,
         folder=sort_save_path,
         **ms4_params,
     )
@@ -118,6 +133,7 @@ def compute_sorting_analyzer(
     sorting_analyzer_path: Path,
     recompute_sorting_analyzer: bool,
 ) -> None:
+    """Compute or load analyzer extensions and derived quality metrics."""
     si = get_spikeinterface()
     if sorting_analyzer_path.exists() and not recompute_sorting_analyzer:
         print("Sorting analyzer already exists.")
@@ -232,34 +248,51 @@ def sort(
     analysis_root: Path = DEFAULT_ANALYSIS_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
 ) -> None:
+    """Run filtering, whitening, sorting, and analyzer computation for one shank."""
     si = get_spikeinterface()
-    session = SpikeSortingSession(
+    print(f"Processing {animal_name} {date} probe {probe_idx} shank {shank_idx}.")
+    recording_shank = get_recording_shank(
         animal_name=animal_name,
         date=date,
-        analysis_root=analysis_root,
+        probe_idx=probe_idx,
+        shank_idx=shank_idx,
         nwb_root=nwb_root,
     )
-
-    print(
-        f"Processing {session.animal_name} {session.date} "
-        f"probe {probe_idx} shank {shank_idx}."
-    )
-    recording_shank = get_recording_shank(session, probe_idx, shank_idx)
     recording_filt = si.bandpass_filter(recording_shank, dtype=np.float64)
-    sorting = get_sorting(
-        recording_filt=recording_filt,
-        sort_save_path=session.sorting_path(probe_idx, shank_idx),
+    recording_filt_whiten = si.whiten(recording_filt, dtype=np.float64)
+    ms4_params = si.get_default_sorter_params("mountainsort4")
+    ms4_params["adjacency_radius"] = 150
+    ms4_params["filter"] = False
+    ms4_params["whiten"] = False
+    ms4_params["num_workers"] = 8
+    sorting = run_mountainsort4(
+        recording_filt=recording_filt_whiten,
+        sort_save_path=get_sorting_path(
+            animal_name=animal_name,
+            date=date,
+            probe_idx=probe_idx,
+            shank_idx=shank_idx,
+            analysis_root=analysis_root,
+        ),
+        ms4_params=ms4_params,
         recompute_sorting=recompute_sorting,
     )
     compute_sorting_analyzer(
         sorting=sorting,
         recording_filt=recording_filt,
-        sorting_analyzer_path=session.sorting_analyzer_path(probe_idx, shank_idx),
+        sorting_analyzer_path=get_sorting_analyzer_path(
+            animal_name=animal_name,
+            date=date,
+            probe_idx=probe_idx,
+            shank_idx=shank_idx,
+            analysis_root=analysis_root,
+        ),
         recompute_sorting_analyzer=recompute_sorting_analyzer,
     )
 
 
 def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for spike sorting."""
     parser = argparse.ArgumentParser(description="Run mountainsort4 spike sorting")
     parser.add_argument(
         "--animal-name",
@@ -299,6 +332,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the CLI entrypoint."""
     args = parse_arguments()
     sort(
         animal_name=args.animal_name,
