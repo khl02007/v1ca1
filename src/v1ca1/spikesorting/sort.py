@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from v1ca1.helper.run_logging import write_run_log
+
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
 DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 _SPIKEINTERFACE = None
@@ -251,6 +253,7 @@ def sort(
 ) -> None:
     """Run filtering, whitening, sorting, and analyzer computation for one shank."""
     si = get_spikeinterface()
+    analysis_path = get_analysis_path(animal_name, date, analysis_root)
     print(f"Processing {animal_name} {date} probe {probe_idx} shank {shank_idx}.")
     recording_shank = get_recording_shank(
         animal_name=animal_name,
@@ -285,6 +288,38 @@ def sort(
         ),
         recompute_sorting_analyzer=recompute_sorting_analyzer,
     )
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.spikesorting.sort",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "probe_idx": probe_idx,
+            "shank_idx": shank_idx,
+            "ms4_params": ms4_params,
+            "recompute_sorting": recompute_sorting,
+            "recompute_sorting_analyzer": recompute_sorting_analyzer,
+            "analysis_root": analysis_root,
+            "nwb_root": nwb_root,
+        },
+        outputs={
+            "sorting_path": get_sorting_path(
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+                analysis_root=analysis_root,
+            ),
+            "sorting_analyzer_path": get_sorting_analyzer_path(
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+                analysis_root=analysis_root,
+            ),
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
 
 
 def parse_arguments() -> argparse.Namespace:

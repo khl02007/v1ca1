@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from v1ca1.helper.run_logging import write_run_log
+
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
 DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 DEFAULT_CURATION_BASE_URI = (
@@ -385,6 +387,30 @@ def generate_figurl(
         file.write(figurl)
 
     print(f"Saved figurl to {figurl_path}")
+    log_path = write_run_log(
+        analysis_path=get_analysis_path(animal_name, date, analysis_root),
+        script_name="v1ca1.spikesorting.generate_figurl",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "probe_idx": probe_idx,
+            "shank_idx": shank_idx,
+            "analysis_root": analysis_root,
+            "nwb_root": nwb_root,
+            "curation_base_uri": curation_base_uri,
+        },
+        outputs={
+            "figurl_path": figurl_path,
+            "curation_uri": get_curation_uri(
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+                curation_base_uri=curation_base_uri,
+            ),
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
 
 
 def parse_arguments() -> argparse.Namespace:

@@ -51,6 +51,8 @@ That style means:
   - `generate_figurl.py` writes a figurl URL tied to a remote `curation.json`
   - a human assigns labels in the browser
   - `consolidate_sorting.py` loads the local `sorting-curations` checkout and applies those labels with SpikeInterface
+- Probe-to-region assignment is not universal. `consolidate_sorting.py` defaults to one known layout, but callers should override `--v1-probes` and `--ca1-probes` when a session uses a different implant mapping.
+- Refactored spikesorting scripts now write one JSON run record per execution under `analysis_root / animal_name / date / v1ca1_log/`.
 
 ## Safe Editing Guidance
 

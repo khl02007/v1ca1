@@ -42,6 +42,7 @@ The spike sorting curation flow is:
 3. Open that URL in the browser and assign curation labels such as accept or reject.
 4. Those labels are stored in `LorenFrankLab/sorting-curations` as `curation.json`.
 5. Run `consolidate_sorting.py` to load that JSON locally and apply it to the SpikeInterface sorting object.
+6. If probe-to-region assignments differ for a session, pass them explicitly with `--v1-probes` and `--ca1-probes`.
 
 ## What Is In This Repo
 
@@ -102,14 +103,23 @@ you an interactive curation interface backed by a `curation.json` entry in the
 ```bash
 PYTHONPATH=src python src/v1ca1/spikesorting/consolidate_sorting.py \
   --animal-name L14 \
-  --date 20240611
+  --date 20240611 \
+  --v1-probes 0,3 \
+  --ca1-probes 1,2
 ```
 
 That command reads local `curation.json` files from a `sorting-curations`
 checkout, saves curated per-shank sortings, and then writes aggregated
-`sorting_v1` and `sorting_ca1` outputs.
+`sorting_v1` and `sorting_ca1` outputs. The probe lists are session-specific;
+the defaults match one common implant layout but should be overridden when the
+probe placements differ.
 
 Important: some scripts are now parameterized, but many downstream analyses still rely on hard-coded defaults inside the source file for items like `animal_name`, `date`, and root paths.
+
+The refactored spikesorting scripts also write per-run JSON metadata files under
+`analysis_root / animal_name / date / v1ca1_log/`. Each filename includes the
+script name and a UTC timestamp, and each file records the package version, git
+commit, run parameters, and the key output paths it wrote.
 
 ## Data And Experimental Context
 

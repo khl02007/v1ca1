@@ -12,6 +12,8 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from v1ca1.helper.run_logging import write_run_log
+
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
 DEFAULT_CURATION_ROOT = Path("/home/kyu/repos/sorting-curations/khl02007")
 DEFAULT_REGION_PROBES = {
@@ -19,6 +21,21 @@ DEFAULT_REGION_PROBES = {
     "ca1": [1, 2],
 }
 _SPIKEINTERFACE = None
+
+
+def parse_probe_list(probe_list: str) -> list[int]:
+    """Parse a comma-separated probe list such as '0,3' into integers."""
+    return [int(token.strip()) for token in probe_list.split(",") if token.strip()]
+
+
+def validate_region_probes(region_probes: dict[str, list[int]]) -> None:
+    """Validate that region probe assignments are non-empty and disjoint."""
+    for region, probe_indices in region_probes.items():
+        if not probe_indices:
+            raise ValueError(f"Probe list for {region} cannot be empty.")
+
+    if set(region_probes["v1"]) & set(region_probes["ca1"]):
+        raise ValueError("V1 and CA1 probe lists must be disjoint.")
 
 
 def get_spikeinterface():
@@ -233,6 +250,7 @@ def consolidate_region_sorting(
 def consolidate_sorting(
     animal_name: str,
     date: str,
+    region_probes: dict[str, list[int]],
     analysis_root: Path = DEFAULT_ANALYSIS_ROOT,
     curation_root: Path = DEFAULT_CURATION_ROOT,
 ) -> tuple[Any, Any]:
@@ -241,7 +259,7 @@ def consolidate_sorting(
         animal_name=animal_name,
         date=date,
         region="v1",
-        probe_indices=DEFAULT_REGION_PROBES["v1"],
+        probe_indices=region_probes["v1"],
         analysis_root=analysis_root,
         curation_root=curation_root,
     )
@@ -249,10 +267,36 @@ def consolidate_sorting(
         animal_name=animal_name,
         date=date,
         region="ca1",
-        probe_indices=DEFAULT_REGION_PROBES["ca1"],
+        probe_indices=region_probes["ca1"],
         analysis_root=analysis_root,
         curation_root=curation_root,
     )
+    log_path = write_run_log(
+        analysis_path=get_analysis_path(animal_name, date, analysis_root),
+        script_name="v1ca1.spikesorting.consolidate_sorting",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "region_probes": region_probes,
+            "analysis_root": analysis_root,
+            "curation_root": curation_root,
+        },
+        outputs={
+            "sorting_v1_path": get_region_sorting_path(
+                animal_name=animal_name,
+                date=date,
+                region="v1",
+                analysis_root=analysis_root,
+            ),
+            "sorting_ca1_path": get_region_sorting_path(
+                animal_name=animal_name,
+                date=date,
+                region="ca1",
+                analysis_root=analysis_root,
+            ),
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
     return sorting_v1, sorting_ca1
 
 
@@ -286,15 +330,37 @@ def parse_arguments() -> argparse.Namespace:
             f"Default: {DEFAULT_CURATION_ROOT}"
         ),
     )
+    parser.add_argument(
+        "--v1-probes",
+        default=",".join(str(idx) for idx in DEFAULT_REGION_PROBES["v1"]),
+        help=(
+            "Comma-separated probe indices assigned to V1 for this session. "
+            "Default: 0,3"
+        ),
+    )
+    parser.add_argument(
+        "--ca1-probes",
+        default=",".join(str(idx) for idx in DEFAULT_REGION_PROBES["ca1"]),
+        help=(
+            "Comma-separated probe indices assigned to CA1 for this session. "
+            "Default: 1,2"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the CLI entrypoint."""
     args = parse_arguments()
+    region_probes = {
+        "v1": parse_probe_list(args.v1_probes),
+        "ca1": parse_probe_list(args.ca1_probes),
+    }
+    validate_region_probes(region_probes)
     consolidate_sorting(
         animal_name=args.animal_name,
         date=args.date,
+        region_probes=region_probes,
         analysis_root=args.analysis_root,
         curation_root=args.curation_root,
     )
