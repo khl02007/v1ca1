@@ -486,7 +486,7 @@ def plot_sleep_phases():
 
         ax[1].set_ylabel("V1 LFP spectrogram\nPC1 (zscore)")
         ax[2].set_ylabel("CA1 Theta / Delta")
-        ax[3].set_ylabel("CA1 ripple band LFP ($\mu$V)")
+        ax[3].set_ylabel(r"CA1 ripple band LFP ($\mu$V)")
         ax[4].set_ylabel("Multiunit firing rate (Hz)")
         ax[5].set_ylabel("Firing rate CA1 (zscore)")
         ax[6].set_ylabel("Firing rate V1 (zscore)")
