@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Fit motor, task-progression, and place GLMs for one task-progression session.
 
-This script modernizes the legacy task-progression motor GLM workflow by using
-the shared session loaders under `v1ca1.task_progression._session`, exposing a
-CLI for session and fit settings, and writing one labeled NetCDF-backed
-`xarray.Dataset` per fit under the analysis directory.
+This script uses the shared session loaders under
+`v1ca1.task_progression._session`, exposes a CLI for session and fit settings,
+and writes one labeled NetCDF-backed `xarray.Dataset` per fit under the
+analysis directory.
 
 For each selected region and run epoch, the script compares five Poisson GLMs:
 
@@ -16,9 +16,11 @@ For each selected region and run epoch, the script compares five Poisson GLMs:
 - trajectory-specific place only
 
 Motor covariates can be represented either as instantaneous z-scored values or
-as spline-expanded features. Cross-validated full Poisson log-likelihood is
-reported in bits/spike, both pooled and per trajectory, and the saved dataset
-bundles those scores with fit coefficients, TP rate curves, and fit metadata.
+as spline-expanded features. Task progression uses one tuning curve per same-
+turn trajectory pair, whereas place uses one tuning curve per trajectory type.
+Cross-validated full Poisson log-likelihood is reported in bits/spike, both
+pooled and per trajectory, and the saved dataset bundles those scores with fit
+coefficients, TP/place rate curves, and fit metadata.
 """
 
 import argparse
