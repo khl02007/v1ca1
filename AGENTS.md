@@ -1,89 +1,52 @@
 # AGENTS.md
 
-This file is for LLM agents and coding assistants working in this repository.
+Concise guidance for LLM agents working in this repository.
 
-## Repo Summary
+## Core Context
 
-- This is a script-heavy neuroscience analysis repository for the Lee V1-CA1 project.
-- Most code lives under `src/v1ca1`.
-- The project is installable via `pyproject.toml`, but many modules still behave like lab scripts rather than polished package APIs.
-- The code assumes access to local NWB files, extracted Trodes data, and previously generated intermediate artifacts that are not stored in git.
+- Script-heavy neuroscience analysis repo for the Lee V1-CA1 project; most code lives in `src/v1ca1`.
+- `pyproject.toml` makes it installable, but many modules still behave like lab scripts.
+- Workflows assume local NWB data, extracted Trodes data, and intermediate artifacts that are not in git.
 
-## Important Path Assumptions
+## Paths
 
-- Current script conventions in the refactored files use:
-  - analysis root: `/stelmo/kyu/analysis`
-  - NWB root: `/stelmo/nwb/raw`
-  - extracted data root: `/nimbus/kyu`
-- The current analysis path convention is:
-  - `analysis_root / animal_name / date`
-- Do not reintroduce `singleday_sort` into analysis paths unless the user explicitly asks for it.
+- Default roots:
+  - analysis: `/stelmo/kyu/analysis`
+  - NWB: `/stelmo/nwb/raw`
+  - extracted data: `/nimbus/kyu`
+- Analysis path convention: `analysis_root / animal_name / date`
+- Do not reintroduce `singleday_sort` unless the user explicitly asks.
 
-## Current Script Style
+## Editing Style
 
-When editing scripts, prefer the lighter style now used in:
+- Match the style in `src/v1ca1/spikesorting/sort.py`, `src/v1ca1/spikesorting/generate_figurl.py`, `src/v1ca1/spikesorting/consolidate_sorting.py`, and `src/v1ca1/helper/get_timestamps.py`.
+- Prefer small helper functions over thin dataclasses; keep path building explicit.
+- Keep script-specific config near `main()`.
+- Prefer CLI flags for dataset IDs and roots, especially `--animal-name` and `--date`.
+- Add short module and top-level helper docstrings.
+- Prefer parquet for tabular summary outputs and pynapple-backed `.npz` for time-domain artifacts.
 
-- `src/v1ca1/spikesorting/sort.py`
-- `src/v1ca1/spikesorting/generate_figurl.py`
-- `src/v1ca1/spikesorting/consolidate_sorting.py`
-- `src/v1ca1/helper/get_timestamps.py`
+## Workflow Notes
 
-That style means:
+- Many scripts still hard-code `animal_name`, `date`, and absolute paths, so downstream scripts may need matching path/config updates.
+- Common intermediate files: `timestamps_ephys.pkl`, `timestamps_position.pkl`, `timestamps_ephys_all.pkl`, `position.pkl`, `trajectory_times.pkl`.
+- Spike sorting expects sorter outputs and sorting analyzer folders under the analysis directory.
+- Manual curation flow: `generate_figurl.py` writes a figurl URL for a remote `curation.json`, a human labels in the browser, then `consolidate_sorting.py` applies labels from the local `sorting-curations` checkout with SpikeInterface.
+- Probe-to-region mappings are session-specific; override `--v1-probes` and `--ca1-probes` when needed.
+- Refactored helper and spikesorting scripts write one JSON run log per execution to `analysis_root / animal_name / date / v1ca1_log/`, including script name, package version, git state, parameters, and key outputs. `get_timestamps.py` also records ephys gap segmentation.
 
-- Prefer plain helper functions over small dataclasses when the dataclass only wraps path composition.
-- Keep path-building logic explicit with small functions like `get_analysis_path(...)` or `get_sorting_path(...)`.
-- Put script-specific configuration close to `main()` when that makes the workflow easier to read.
-- Use CLI flags for dataset identifiers and root paths when practical, especially `--animal-name` and `--date`.
-- Add a short module-level docstring at the top of refactored scripts describing what the script produces and how it does it.
-- Add short docstrings to top-level helper functions.
-- Prefer parquet for per-unit or other tabular summary outputs where rows are units and columns are summary values.
-- Prefer pynapple-backed `.npz` outputs for time-domain artifacts such as timestamps, intervals, spikes, and continuous time series.
+## Guardrails
 
-## Working Assumptions
+- Preserve current repo conventions; do not restore older layouts unless asked.
+- Check `git diff` before cleanup in files you touch.
+- Avoid broad rewrites unless requested.
+- For quick verification, prefer `python -m py_compile <file>`.
 
-- Many scripts still contain hard-coded `animal_name`, `date`, and absolute paths.
-- A change in one workflow often needs matching path/config updates in downstream scripts.
-- Intermediate files commonly expected by downstream analyses include:
-  - `timestamps_ephys.pkl`
-  - `timestamps_position.pkl`
-  - `timestamps_ephys_all.pkl`
-  - `position.pkl`
-  - `trajectory_times.pkl`
-- Spike sorting workflows also expect sorter outputs and sorting analyzer folders under the analysis directory.
-- Manual curation currently follows this flow:
-  - `generate_figurl.py` writes a figurl URL tied to a remote `curation.json`
-  - a human assigns labels in the browser
-  - `consolidate_sorting.py` loads the local `sorting-curations` checkout and applies those labels with SpikeInterface
-- Probe-to-region assignment is not universal. `consolidate_sorting.py` defaults to one known layout, but callers should override `--v1-probes` and `--ca1-probes` when a session uses a different implant mapping.
-- Refactored helper and spikesorting scripts now write one new JSON run record each time they are executed under `analysis_root / animal_name / date / v1ca1_log/`.
-- Those run logs record the script name, package version, git state, parameters, and key output paths. `get_timestamps.py` also stores its ephys gap-segmentation summary there.
+## Navigation and Environment
 
-## Safe Editing Guidance
-
-- Preserve the user’s current path conventions and repo-specific choices; do not “restore” older layouts from historical code unless asked.
-- Assume the repo may contain user edits in progress. Check `git diff` before “cleanups” that touch the same files.
-- When modernizing a script, avoid broad architectural rewrites unless the user asks for them.
-- For quick verification, `python -m py_compile <file>` is usually the least disruptive check.
-
-## Navigation Guide
-
-- `src/v1ca1/helper`: timestamps and epoch helper scripts.
-- `src/v1ca1/spikesorting`: sorting, analyzer generation, and figurl export.
-- `src/v1ca1/decoding`: trajectory and sleep-box decoding models.
-- `src/v1ca1/raster`: place rasters, place fields, and STA-related plots.
-- `src/v1ca1/motor`: motor-variable decoding and tuning analyses.
-- `src/v1ca1/ripple`: ripple detection and ripple GLM analyses.
-- `src/v1ca1/oscillation`: theta phase and oscillatory event work.
-- `src/v1ca1/sleep`: sleep-related analyses and utilities.
-- `src/v1ca1/nwb`: NWB-related helpers and workflows.
-- `src/v1ca1/xcorr`: auto- and cross-correlation analyses.
-- `src/v1ca1/task_progression`: GLM, tuning, and task progression analyses.
-- `src/v1ca1/communication_subspace`, `signal_dim`, `topology`: more specialized downstream analyses.
-
-## Environment Notes
-
-- `environment.yml` gives a useful base environment, but several workflows also depend on additional packages not guaranteed to be installed.
-- Figurl generation uses the optional `.[figurl]` extra rather than the base install.
-- Package version is single-sourced from `src/v1ca1/__init__.py`.
-- `kyutils` is used throughout the repo and appears to be lab-specific.
-- Some subpackages depend on heavier neuroscience tooling such as `spikeinterface`, `pynwb`, `pynapple`, `position_tools`, `track_linearization`, and replay/ripple-related libraries.
+- Key areas: `helper`, `spikesorting`, `decoding`, `raster`, `motor`, `ripple`, `oscillation`, `sleep`, `nwb`, `xcorr`, `task_progression`, plus `communication_subspace`, `signal_dim`, and `topology`.
+- `environment.yml` is a base environment only; some workflows need extra packages.
+- Figurl uses the optional `.[figurl]` extra.
+- Package version is in `src/v1ca1/__init__.py`.
+- `kyutils` is lab-specific and widely used.
+- Common heavy dependencies include `spikeinterface`, `pynwb`, `pynapple`, `position_tools`, and `track_linearization`.
