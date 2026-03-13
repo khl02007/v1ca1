@@ -36,6 +36,8 @@ That style means:
 - Use CLI flags for dataset identifiers and root paths when practical, especially `--animal-name` and `--date`.
 - Add a short module-level docstring at the top of refactored scripts describing what the script produces and how it does it.
 - Add short docstrings to top-level helper functions.
+- Prefer parquet for per-unit or other tabular summary outputs where rows are units and columns are summary values.
+- Prefer pynapple-backed `.npz` outputs for time-domain artifacts such as timestamps, intervals, spikes, and continuous time series.
 
 ## Working Assumptions
 

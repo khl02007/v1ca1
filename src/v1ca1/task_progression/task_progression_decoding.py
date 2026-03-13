@@ -1,47 +1,66 @@
 from __future__ import annotations
-from typing import Any, Dict, Literal, Optional, Tuple, Union
 
-import pynapple as nap
-import numpy as np
-import matplotlib.pyplot as plt
+"""Compare place and task-progression decoding with lap-wise cross-validation.
+
+This script loads one dataset through shared task-progression utilities in
+`v1ca1.task_progression._session`, where movement intervals, linearized
+position, task progression, and trajectory-specific task progression are built.
+It then runs two decoding workflows on movement-restricted data:
+
+- within-epoch cross-validated decoding of concatenated linear position
+- within-epoch cross-validated decoding of combined task progression
+
+It also keeps the cross-trajectory task-progression decoder, where tuning
+curves fit on one trajectory are used to decode the paired same-turn
+trajectory.
+
+Primary time-series outputs are saved as pynapple-backed `.npz` files, because
+decoded and true trajectories are time-domain artifacts. Per-epoch decoding
+metrics, light-vs-dark comparisons, and binned error summaries are saved as
+parquet tables. The binned error plots can summarize either signed or absolute
+error, with either mean +/- std or median + IQR error bars. Light-vs-dark
+figures use fixed epochs `02_r1`, `04_r2`, and `06_r3` versus `08_r4`. A run
+log is written under
+`analysis_path / "v1ca1_log"`.
+"""
+
+import argparse
 import pickle
 from pathlib import Path
-import position_tools as pt
-import spikeinterface.full as si
-import kyutils
+from typing import Any
+
+import numpy as np
 import pandas as pd
-import track_linearization as tl
+from matplotlib import pyplot as plt
 from sklearn.model_selection import KFold
-from scipy.ndimage import gaussian_filter1d
 
-
-animal_name = "L14"
-date = "20240611"
-analysis_path = Path("/stelmo/kyu/analysis") / animal_name / date
-
-num_sleep_epochs = 5
-num_run_epochs = 4
-
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
+from v1ca1.helper.run_logging import write_run_log
+from v1ca1.task_progression._session import (
+    DEFAULT_DATA_ROOT,
+    DEFAULT_POSITION_OFFSET,
+    DEFAULT_SPEED_THRESHOLD_CM_S,
+    REGIONS,
+    TRAJECTORY_TYPES,
+    build_combined_task_progression_bins,
+    build_linear_position_bins,
+    build_task_progression_bins,
+    compute_movement_firing_rates,
+    get_analysis_path,
+    prepare_task_progression_session,
 )
-sleep_epoch_list = [epoch for epoch in epoch_list if epoch not in run_epoch_list]
 
-regions = ["v1", "ca1"]
 
-time_bin_size = 2e-3
-sampling_rate = int(1 / time_bin_size)
-speed_threshold = 4  # cm/s
-position_offset = 10
-
-trajectory_types = [
-    "center_to_left",
-    "left_to_center",
-    "center_to_right",
-    "right_to_center",
-]
-
-encoding_decoding = {
+DEFAULT_N_FOLDS = 5
+DEFAULT_BIN_SIZE_S = 0.02
+DEFAULT_SLIDING_WINDOW_SIZE_BINS = 4
+DEFAULT_RANDOM_STATE = 47
+DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ = 0.5
+DEFAULT_MIN_BIN_COUNT = 5
+DEFAULT_DARK_EPOCH = "08_r4"
+DEFAULT_LIGHT_EPOCHS = ("02_r1", "04_r2", "06_r3")
+SUMMARY_MODES = ("mean_std", "median_iqr")
+ERROR_MODES = ("signed", "absolute")
+CROSS_TRAJECTORY_DECODING_MAP = {
     "center_to_left": "right_to_center",
     "right_to_center": "center_to_left",
     "center_to_right": "left_to_center",
@@ -49,1296 +68,1215 @@ encoding_decoding = {
 }
 
 
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
-
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position_dict = pickle.load(f)
-
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
-
-with open(analysis_path / "position.pkl", "rb") as f:
-    position_dict = pickle.load(f)
-
-with open(analysis_path / "body_position.pkl", "rb") as f:
-    body_position_dict = pickle.load(f)
-
-with open(analysis_path / "trajectory_times.pkl", "rb") as f:
-    trajectory_times = pickle.load(f)
+def _intervalset_to_arrays(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted start and end arrays for one IntervalSet."""
+    starts = np.asarray(intervals.start, dtype=np.float64).ravel()
+    ends = np.asarray(intervals.end, dtype=np.float64).ravel()
+    if starts.size == 0:
+        return starts, ends
+    order = np.argsort(starts)
+    return starts[order], ends[order]
 
 
-sorting = {}
-for region in regions:
-    sorting[region] = si.load(analysis_path / f"sorting_{region}")
+def _make_intervalset(starts: list[np.ndarray], ends: list[np.ndarray]) -> Any:
+    """Create one IntervalSet from a list of interval arrays."""
+    import pynapple as nap
 
-
-def _sampling_rate(t_position: np.ndarray) -> float:
-    return (len(t_position) - 1) / (t_position[-1] - t_position[0])
-
-
-def get_tsgroup(sorting):
-    data = {}
-    for unit_id in sorting.get_unit_ids():
-        data[unit_id] = nap.Ts(
-            t=timestamps_ephys_all_ptp[sorting.get_unit_spike_train(unit_id)]
+    start_chunks = [chunk for chunk in starts if chunk.size]
+    end_chunks = [chunk for chunk in ends if chunk.size]
+    if not start_chunks:
+        return nap.IntervalSet(
+            start=np.array([], dtype=float),
+            end=np.array([], dtype=float),
+            time_units="s",
         )
-    tsgroup = nap.TsGroup(data, time_units="s")
-    return tsgroup
 
-
-def smooth_pf_along_position(pf, pos_dim: str, sigma_bins: float):
-    pf = pf.fillna(0)  # Replaces NaN values with 0
-    # gaussian_filter1d works on numpy; apply along the position axis
-    axis = pf.get_axis_num(pos_dim)
-    sm = gaussian_filter1d(pf.values, sigma=sigma_bins, axis=axis, mode="nearest")
-    return pf.copy(data=sm)
-
-
-spikes = {}
-for region in regions:
-    spikes[region] = get_tsgroup(sorting[region])
-
-
-all_ep = {}
-trajectory_ep = {}
-
-for epoch in run_epoch_list:
-    all_ep[epoch] = nap.IntervalSet(
-        start=timestamps_position_dict[epoch][position_offset],
-        end=timestamps_position_dict[epoch][-1],
+    start_array = np.concatenate(start_chunks).astype(float, copy=False)
+    end_array = np.concatenate(end_chunks).astype(float, copy=False)
+    order = np.argsort(start_array)
+    return nap.IntervalSet(
+        start=start_array[order],
+        end=end_array[order],
+        time_units="s",
     )
 
-    trajectory_ep[epoch] = {}
-    for trajectory_type in trajectory_types:
-        trajectory_ep[epoch][trajectory_type] = nap.IntervalSet(
-            start=trajectory_times[epoch][trajectory_type][:, 0],
-            end=trajectory_times[epoch][trajectory_type][:, -1],
-        )
 
+def _make_empty_tsd(time_support: Any | None = None) -> Any:
+    """Return an empty Tsd with second-based timestamps."""
+    import pynapple as nap
 
-# prepare linearization and movement
-dx = 9.5
-dy = 9
-diagonal_segment_length = np.sqrt(dx**2 + dy**2)
-
-long_segment_length = 81 - 17 - 2
-short_segment_length = 13.5
-
-total_length_per_trajectory = (
-    long_segment_length * 2 + short_segment_length + 2 * diagonal_segment_length
-)
-gap = 20
-
-node_positions_right = np.array(
-    [
-        (55.5, 81),  # center well
-        (55.5, 81 - long_segment_length),
-        (55.5 - dx, 81 - long_segment_length - dy),
-        (55.5 - dx - short_segment_length, 81 - long_segment_length - dy),
-        (55.5 - 2 * dx - short_segment_length, 81 - long_segment_length),
-        (55.5 - 2 * dx - short_segment_length, 81),
-    ]
-)
-
-node_positions_left = np.array(
-    [
-        (55.5, 81),  # center well
-        (55.5, 81 - long_segment_length),
-        (55.5 + dx, 81 - long_segment_length - dy),
-        (55.5 + dx + short_segment_length, 81 - long_segment_length - dy),
-        (55.5 + 2 * dx + short_segment_length, 81 - long_segment_length),
-        (55.5 + 2 * dx + short_segment_length, 81),
-    ]
-)
-
-edges_from_center = np.array([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)])
-edges_to_center = np.array([(5, 4), (4, 3), (3, 2), (2, 1), (1, 0)])
-
-linear_edge_order_from_center = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
-linear_edge_order_to_center = [(5, 4), (4, 3), (3, 2), (2, 1), (1, 0)]
-
-linear_edge_spacing = 0
-
-track_graph_from_center = {}
-track_graph_to_center = {}
-for trajectory_type in trajectory_types:
-    if trajectory_type in ["center_to_right", "right_to_center"]:
-        track_graph_from_center[trajectory_type] = tl.make_track_graph(
-            node_positions_right, edges_from_center
-        )
-        track_graph_to_center[trajectory_type] = tl.make_track_graph(
-            node_positions_right, edges_to_center
-        )
-    else:
-        track_graph_from_center[trajectory_type] = tl.make_track_graph(
-            node_positions_left, edges_from_center
-        )
-        track_graph_to_center[trajectory_type] = tl.make_track_graph(
-            node_positions_left, edges_to_center
-        )
-
-speed = {}
-movement = {}
-for epoch in run_epoch_list:
-    sp = pt.get_speed(
-        position=position_dict[epoch][position_offset:],
-        time=timestamps_position_dict[epoch][position_offset:],
-        sampling_frequency=_sampling_rate(
-            timestamps_position_dict[epoch][position_offset:]
-        ),
-        sigma=0.1,
-    )
-    speed[epoch] = nap.Tsd(t=timestamps_position_dict[epoch][position_offset:], d=sp)
-    movement[epoch] = speed[epoch].threshold(speed_threshold, method="above")
-
-
-total_fr = {}
-for region in regions:
-    total_fr[region] = {}
-    for epoch in run_epoch_list:
-        total_fr[region][epoch] = (
-            spikes[region].count(ep=all_ep[epoch]).to_numpy()
-            / all_ep[epoch].tot_length()
-        ).ravel()
-
-fr_during_movement = {}
-for region in regions:
-    fr_during_movement[region] = {}
-    for epoch in run_epoch_list:
-        fr_during_movement[region][epoch] = (
-            np.sum(
-                spikes[region].count(ep=movement[epoch].time_support).to_numpy()
-                / movement[epoch].time_support.tot_length(),
-                axis=0,
-            )
-        ).ravel()
-
-
-def get_linear_position(place_bin_size, gap=0):
-    # place field: concatenate all four trajectories
-    linear_position = {}
-    for epoch in run_epoch_list:
-        t_list = []
-        d_list = []
-        for i, trajectory_type in enumerate(trajectory_types):
-            position_df = tl.get_linearized_position(
-                position=position_dict[epoch][position_offset:],
-                track_graph=track_graph_from_center[trajectory_type],
-                edge_order=linear_edge_order_from_center,
-                edge_spacing=0,
-            )
-            lp = nap.Tsd(
-                t=timestamps_position_dict[epoch][position_offset:],
-                d=position_df["linear_position"]
-                + (total_length_per_trajectory + gap) * i,
-                time_support=trajectory_ep[epoch][trajectory_type],
-            )
-            t_list.append(lp.t)
-            d_list.append(lp.d)
-        t = np.concatenate(t_list)
-        d = np.concatenate(d_list)
-        sort_idx = np.argsort(t)
-        linear_position[epoch] = nap.Tsd(
-            t=t[sort_idx],
-            d=d[sort_idx],
-            time_support=movement[epoch].time_support,
-        )
-    position_bins = np.arange(
-        0, total_length_per_trajectory * 4 + gap * 3 + place_bin_size, place_bin_size
-    )
-    return linear_position, position_bins
-
-
-# task progression field: "fold" same turn trajectories on top of one another and concatenate across trajectory groups
-def get_task_progression(task_progression_bin_size, gap=0):
-    task_progression = {}
-    for epoch in run_epoch_list:
-        t_list = []
-        d_list = []
-        for i, trajectory_type in enumerate(trajectory_types):
-            if trajectory_type in ["center_to_left", "center_to_right"]:
-                tg = track_graph_from_center[trajectory_type]
-                eo = linear_edge_order_from_center
-            else:
-                tg = track_graph_to_center[trajectory_type]
-                eo = linear_edge_order_to_center
-
-            position_df = tl.get_linearized_position(
-                position=position_dict[epoch][position_offset:],
-                track_graph=tg,
-                edge_order=eo,
-                edge_spacing=0,
-            )
-            if trajectory_type in ["center_to_left", "right_to_center"]:
-                offset = 0
-            else:
-                offset = 1 + gap / total_length_per_trajectory
-
-            ltp = nap.Tsd(
-                t=timestamps_position_dict[epoch][position_offset:],
-                d=position_df["linear_position"] / total_length_per_trajectory + offset,
-                time_support=trajectory_ep[epoch][trajectory_type],
-            )
-            t_list.append(ltp.t)
-            d_list.append(ltp.d)
-
-        t = np.concatenate(t_list)
-        d = np.concatenate(d_list)
-        sort_idx = np.argsort(t)
-        task_progression[epoch] = nap.Tsd(
-            t=t[sort_idx],
-            d=d[sort_idx],
-            time_support=movement[epoch].time_support,
-        )
-    task_progression_bins = np.arange(
-        0,
-        2 + gap / total_length_per_trajectory + task_progression_bin_size,
-        task_progression_bin_size,
-    )
-    return task_progression, task_progression_bins
-
-
-def get_task_progression_by_trajectory(task_progression_bin_size):
-    # calculate task progression for each trajectory
-    task_progression_by_trajectory = {}
-    for epoch in run_epoch_list:
-        task_progression_by_trajectory[epoch] = {}
-        for i, trajectory_type in enumerate(trajectory_types):
-            if trajectory_type in ["center_to_left", "center_to_right"]:
-                tg = track_graph_from_center[trajectory_type]
-                eo = linear_edge_order_from_center
-            else:
-                tg = track_graph_to_center[trajectory_type]
-                eo = linear_edge_order_to_center
-
-            position_df = tl.get_linearized_position(
-                position=position_dict[epoch][position_offset:],
-                track_graph=tg,
-                edge_order=eo,
-                edge_spacing=0,
-            )
-            task_progression_by_trajectory[epoch][trajectory_type] = nap.Tsd(
-                t=timestamps_position_dict[epoch][position_offset:],
-                d=position_df["linear_position"] / total_length_per_trajectory,
-                time_support=trajectory_ep[epoch][trajectory_type],
-            )
-    # calculate task progression tuning curve and mutual info for each trajectory
-    # task_progression_by_trajectory_bins = np.linspace(0, 1, 41)
-    task_progression_by_trajectory_bins = np.arange(
-        0,
-        1 + task_progression_bin_size,
-        task_progression_bin_size,
-    )
-    return task_progression_by_trajectory, task_progression_by_trajectory_bins
-
-
-def get_train_test_splits(epoch, n_folds=5, random_state=47):
-    """generates random train-test splits across trajectories in an epoch
-
-    Parameters
-    ----------
-    epoch : str
-        _description_
-    n_folds : int, optional
-        _description_, by default 5
-    random_state : int, optional
-        _description_, by default 47
-
-    Returns
-    -------
-    _type_
-        _description_
-    """
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-
-    train_ep = {}
-    test_ep = {}
-    for trajectory_type in trajectory_types:
-        train_ep[trajectory_type] = []
-        test_ep[trajectory_type] = []
-        for fold, (train_idx, test_idx) in enumerate(
-            kf.split(trajectory_ep[epoch][trajectory_type])
-        ):
-            train_ep[trajectory_type].append(train_idx)
-            test_ep[trajectory_type].append(test_idx)
-
-    def get_start_end(tr_ep, n_folds):
-        start_times = {}
-        end_times = {}
-        for fold in range(n_folds):
-            st = []
-            en = []
-            for trajectory_type in trajectory_types:
-                t_ep = trajectory_ep[epoch][trajectory_type][
-                    tr_ep[trajectory_type][fold]
-                ]
-                st.append(t_ep.start)
-                en.append(t_ep.end)
-            start_times[fold] = np.concatenate(st)
-            end_times[fold] = np.concatenate(en)
-
-        train_eps = {}
-        for fold in range(n_folds):
-            sort_idx = np.argsort(start_times[fold])
-            train_eps[fold] = nap.IntervalSet(
-                start=start_times[fold][sort_idx],
-                end=end_times[fold][sort_idx],
-            )
-        return train_eps
-
-    train_eps = get_start_end(train_ep, n_folds=n_folds)
-    test_eps = get_start_end(test_ep, n_folds=n_folds)
-    return train_eps, test_eps
-
-
-def decode_cv(region, epoch, feature, bins, n_folds=5):
-
-    decoded_features = []
-    true_features = []
-
-    train_eps, test_eps = get_train_test_splits(epoch, n_folds=n_folds, random_state=47)
-
-    # kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-
-    # for train_idx, test_idx in kf.split(movement[epoch].time_support):
-    for k in range(n_folds):
-        tc = nap.compute_tuning_curves(
-            data=spikes[region],
-            features=feature[epoch],
-            bins=[bins],  # Use standardized bins
-            # epochs=movement[epoch].time_support[train_idx],
-            epochs=train_eps[k].intersect(movement[epoch].time_support),
-        )
-        decoded, proba_feature = nap.decode_bayes(
-            tuning_curves=tc,
-            data=spikes[region],
-            # epochs=movement[epoch].time_support[test_idx],
-            epochs=test_eps[k].intersect(movement[epoch].time_support),
-            sliding_window_size=4,
-            bin_size=0.02,
-        )
-        decoded_features.append(decoded)
-        true_features.append(
-            feature[epoch].restrict(test_eps[k].intersect(movement[epoch].time_support))
-        )
-
-    ts = []
-    ds = []
-    for feature in true_features:
-        ts.append(feature.t)
-        ds.append(feature.d)
-    ts = np.concatenate(ts)
-    ds = np.concatenate(ds)
-    sort_idx = np.argsort(ts)
-    true_tsd = nap.Tsd(
-        t=ts[sort_idx],
-        d=ds[sort_idx],
-        time_support=movement[epoch].time_support,
+    kwargs: dict[str, Any] = {"time_units": "s"}
+    if time_support is not None:
+        kwargs["time_support"] = time_support
+    return nap.Tsd(
+        t=np.array([], dtype=float),
+        d=np.array([], dtype=float),
+        **kwargs,
     )
 
-    ts = []
-    ds = []
-    for feature in decoded_features:
-        ts.append(feature.t)
-        ds.append(feature.d)
-    ts = np.concatenate(ts)
-    ds = np.concatenate(ds)
-    sort_idx = np.argsort(ts)
-    decoded_tsd = nap.Tsd(
-        t=ts[sort_idx],
-        d=ds[sort_idx],
-        time_support=movement[epoch].time_support,
+
+def _concatenate_tsds(tsds: list[Any], time_support: Any) -> Any:
+    """Concatenate Tsds and return one sorted Tsd."""
+    import pynapple as nap
+
+    if not tsds:
+        return _make_empty_tsd(time_support=time_support)
+
+    times = [np.asarray(tsd.t, dtype=float) for tsd in tsds if len(np.asarray(tsd.t)) > 0]
+    values = [np.asarray(tsd.d, dtype=float) for tsd in tsds if len(np.asarray(tsd.t)) > 0]
+    if not times:
+        return _make_empty_tsd(time_support=time_support)
+
+    all_times = np.concatenate(times)
+    all_values = np.concatenate(values)
+    order = np.argsort(all_times)
+    return nap.Tsd(
+        t=all_times[order],
+        d=all_values[order],
+        time_support=time_support,
+        time_units="s",
     )
 
-    return true_tsd, decoded_tsd
+
+def get_light_dark_epochs(
+    run_epochs: list[str],
+    dark_epoch: str = DEFAULT_DARK_EPOCH,
+    light_epochs: tuple[str, ...] = DEFAULT_LIGHT_EPOCHS,
+) -> tuple[tuple[str, ...], str]:
+    """Return validated fixed light and dark run epochs."""
+    if not run_epochs:
+        raise ValueError("No run epochs were found for this session.")
+
+    requested_epochs = [*light_epochs, dark_epoch]
+    missing = [epoch for epoch in requested_epochs if epoch not in run_epochs]
+    if missing:
+        raise ValueError(
+            "Requested light/dark epochs were not found in run epochs "
+            f"{run_epochs!r}: {missing!r}"
+        )
+    return light_epochs, dark_epoch
 
 
-def decode_task_cross_trajectory(region, epoch, feature, bins, fr_threshold=0.5):
+def get_min_lap_count(trajectory_intervals: dict[str, Any]) -> int:
+    """Return the minimum number of laps across the four trajectory types."""
+    return min(
+        _intervalset_to_arrays(trajectory_intervals[trajectory_type])[0].size
+        for trajectory_type in TRAJECTORY_TYPES
+    )
 
-    fr_dark = fr_during_movement[region][run_epoch_list[3]]
-    mask_dark_active = fr_dark > fr_threshold
 
-    encoding_decoding = {
-        "center_to_left": "right_to_center",
-        "right_to_center": "center_to_left",
-        "center_to_right": "left_to_center",
-        "left_to_center": "center_to_right",
+def validate_fold_count(
+    trajectory_intervals_by_epoch: dict[str, dict[str, Any]],
+    n_folds: int,
+) -> dict[str, int]:
+    """Validate that each epoch supports the requested lap-wise fold count."""
+    if n_folds < 2:
+        raise ValueError("--n-folds must be at least 2.")
+
+    min_lap_counts: dict[str, int] = {}
+    for epoch, trajectory_intervals in trajectory_intervals_by_epoch.items():
+        min_laps = get_min_lap_count(trajectory_intervals)
+        min_lap_counts[epoch] = min_laps
+        if min_laps < 2:
+            raise ValueError(
+                f"Epoch {epoch!r} has fewer than 2 laps in at least one trajectory "
+                f"(minimum lap count: {min_laps})."
+            )
+        if n_folds > min_laps:
+            raise ValueError(
+                f"Epoch {epoch!r} does not support --n-folds={n_folds}. "
+                f"Minimum lap count across trajectories is {min_laps}."
+            )
+    return min_lap_counts
+
+
+def build_train_test_folds(
+    trajectory_intervals: dict[str, Any],
+    n_folds: int,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[dict[int, Any], dict[int, Any]]:
+    """Build lap-wise train/test IntervalSets pooled across trajectory types."""
+    train_starts: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
+    train_ends: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
+    test_starts: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
+    test_ends: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
+
+    for trajectory_type in TRAJECTORY_TYPES:
+        starts, ends = _intervalset_to_arrays(trajectory_intervals[trajectory_type])
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        for fold, (train_idx, test_idx) in enumerate(kf.split(np.arange(starts.size))):
+            train_starts[fold].append(starts[train_idx])
+            train_ends[fold].append(ends[train_idx])
+            test_starts[fold].append(starts[test_idx])
+            test_ends[fold].append(ends[test_idx])
+
+    train_folds = {
+        fold: _make_intervalset(train_starts[fold], train_ends[fold])
+        for fold in range(n_folds)
     }
-
-    true_tsd = {}
-    decoded_tsd = {}
-    for encoding_trajectory, decoding_trajectory in encoding_decoding.items():
-        tc = nap.compute_tuning_curves(
-            data=spikes[region],
-            features=feature[epoch][encoding_trajectory],
-            bins=[bins],
-            epochs=trajectory_ep[epoch][encoding_trajectory].intersect(
-                movement[epoch].time_support
-            ),
-        )
-
-        decoded, proba_feature = nap.decode_bayes(
-            tuning_curves=tc,
-            data=spikes[region],
-            epochs=trajectory_ep[epoch][decoding_trajectory].intersect(
-                movement[epoch].time_support
-            ),
-            sliding_window_size=4,
-            bin_size=0.02,
-        )
-
-        true_tsd[(encoding_trajectory, decoding_trajectory)] = feature[epoch][
-            decoding_trajectory
-        ].restrict(
-            trajectory_ep[epoch][decoding_trajectory].intersect(
-                movement[epoch].time_support
-            )
-        )
-        decoded_tsd[(encoding_trajectory, decoding_trajectory)] = decoded
-
-    return true_tsd, decoded_tsd
+    test_folds = {
+        fold: _make_intervalset(test_starts[fold], test_ends[fold])
+        for fold in range(n_folds)
+    }
+    return train_folds, test_folds
 
 
-def plot_decode(true_place, decoded_place, true_tp, decoded_tp, fig_path):
+def _get_active_unit_ids(
+    spikes: Any,
+    firing_rates: np.ndarray,
+    threshold_hz: float,
+) -> list[Any]:
+    """Return unit ids above the requested firing-rate threshold."""
+    unit_ids = list(spikes.keys())
+    return [
+        unit_id
+        for unit_id, rate in zip(unit_ids, np.asarray(firing_rates, dtype=float), strict=False)
+        if np.isfinite(rate) and float(rate) > threshold_hz
+    ]
 
-    fig, ax = plt.subplots(figsize=(12, 8), nrows=2)
-    ax[0].scatter(
-        true_place.times(),
-        true_place.values,
-        label="True place",
+
+def _subset_spikes(spikes: Any, unit_ids: list[Any]) -> Any:
+    """Return a TsGroup restricted to the requested unit ids."""
+    import pynapple as nap
+
+    return nap.TsGroup({unit_id: spikes[unit_id] for unit_id in unit_ids}, time_units="s")
+
+
+def decode_cv(
+    spikes: Any,
+    feature_by_epoch: dict[str, Any],
+    trajectory_intervals: dict[str, Any],
+    movement_interval: Any,
+    epoch: str,
+    bins: np.ndarray,
+    n_folds: int,
+    bin_size_s: float,
+    sliding_window_size_bins: int,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[Any, Any]:
+    """Decode one feature with lap-wise train/test folds for one epoch."""
+    import pynapple as nap
+
+    train_folds, test_folds = build_train_test_folds(
+        trajectory_intervals,
+        n_folds=n_folds,
+        random_state=random_state,
     )
-    ax[0].scatter(
-        decoded_place.times(),
-        decoded_place.values,
-        label="Decoded place",
-        c="orange",
-        s=1,
-        alpha=0.7,
-    )
-    ax[0].legend(
-        frameon=False,
-        bbox_to_anchor=(1.0, 1.0),
-    )
-    ax[1].scatter(
-        true_tp.times(),
-        true_tp.values,
-        label="True tp",
-    )
-    ax[1].scatter(
-        decoded_tp.times(),
-        decoded_tp.values,
-        label="Decoded tp",
-        c="orange",
-        s=1,
-        alpha=0.7,
-    )
-    ax[1].legend(
-        frameon=False,
-        bbox_to_anchor=(1.0, 1.0),
-    )
-    plt.tight_layout()
-    plt.savefig(fig_path, dpi=300)
-    plt.close(fig)
+    decoded_chunks: list[Any] = []
+    true_chunks: list[Any] = []
 
-    return None
-
-
-def plot_error_vs_position(
-    decoded_pos: nap.Tsd,
-    true_pos: nap.Tsd,
-    *,
-    n_bins: int = 40,
-    min_count: int = 20,
-    error_mode: Literal["abs", "sq", "signed"] = "abs",
-    yerr_mode: Literal["sem", "sd", "q95"] = "sem",
-    q_level: float = 0.95,
-    clip_quantiles: Optional[Tuple[float, float]] = (0.01, 0.99),
-    ax: Optional[plt.Axes] = None,
-    color="black",
-    label="light",
-) -> plt.Axes:
-    """
-    Plot decoding error (y) vs true position (x) with error bars per position bin.
-
-    yerr_mode:
-        - "sem": SD/sqrt(n) around the mean
-        - "sd" : SD around the mean
-        - "q95": central q_level interval around the median (prevents negative yerr)
-    """
-    if yerr_mode == "q95" and not (0.0 < q_level < 1.0):
-        raise ValueError("q_level must be in (0, 1).")
-
-    # --- numpy arrays ---
-    t_dec = np.asarray(decoded_pos.t, dtype=np.float64)
-    x_hat = np.asarray(decoded_pos.d, dtype=np.float64)
-
-    t_true = np.asarray(true_pos.t, dtype=np.float64)
-    x_true = np.asarray(true_pos.d, dtype=np.float64)
-
-    # --- interpolate true position at decoded times (NaN outside range) ---
-    ok_true = np.isfinite(t_true) & np.isfinite(x_true)
-    if ok_true.sum() < 2:
-        raise ValueError("true_pos has <2 finite samples; cannot interpolate.")
-
-    tt = t_true[ok_true]
-    xx = x_true[ok_true]
-
-    order = np.argsort(tt)
-    tt = tt[order]
-    xx = xx[order]
-
-    # remove duplicate timestamps (keep first occurrence)
-    uniq = np.concatenate(([True], np.diff(tt) > 0))
-    tt = tt[uniq]
-    xx = xx[uniq]
-
-    x_true_at_dec = np.interp(t_dec, tt, xx, left=np.nan, right=np.nan)
-
-    # --- per-sample error ---
-    if error_mode == "abs":
-        err = np.abs(x_hat - x_true_at_dec)
-        ylab = "Decoding error |x̂ − x|"
-    elif error_mode == "sq":
-        err = (x_hat - x_true_at_dec) ** 2
-        ylab = "Decoding error (x̂ − x)²"
-    else:  # signed
-        err = x_hat - x_true_at_dec
-        ylab = "Signed error (x̂ − x)"
-
-    pos = x_true_at_dec
-
-    # --- drop NaNs ---
-    good = np.isfinite(pos) & np.isfinite(err)
-    pos = pos[good]
-    err = err[good]
-    if pos.size == 0:
-        raise ValueError("No finite aligned samples after NaN handling.")
-
-    # --- choose bin range ---
-    if clip_quantiles is not None:
-        lo, hi = np.quantile(pos, clip_quantiles)
-    else:
-        lo, hi = float(np.min(pos)), float(np.max(pos))
-    if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
-        lo, hi = float(np.min(pos)), float(np.max(pos))
-
-    edges = np.linspace(lo, hi, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-
-    # --- assign bins ---
-    b = np.digitize(pos, edges) - 1
-    in_range = (b >= 0) & (b < n_bins)
-    b = b[in_range]
-    err = err[in_range]
-
-    # --- summarize each bin ---
-    y = np.full(n_bins, np.nan, dtype=np.float64)
-    yerr_sym = np.full(n_bins, np.nan, dtype=np.float64)  # sem/sd
-    yerr_asym = np.full((2, n_bins), np.nan, dtype=np.float64)  # q95
-
-    alpha = (1.0 - q_level) / 2.0
-    q_lo = alpha
-    q_hi = 1.0 - alpha
-
-    for i in range(n_bins):
-        e = err[b == i]
-        n = e.size
-        if n < min_count:
+    for fold in range(n_folds):
+        train_fold = train_folds[fold].intersect(movement_interval)
+        test_fold = test_folds[fold].intersect(movement_interval)
+        if float(train_fold.tot_length()) <= 0.0 or float(test_fold.tot_length()) <= 0.0:
             continue
 
-        if yerr_mode in ("sem", "sd"):
-            center = float(np.mean(e))
-            y[i] = center
-            sd = float(np.std(e, ddof=1)) if n > 1 else np.nan
-            if yerr_mode == "sem":
-                yerr_sym[i] = sd / np.sqrt(n) if np.isfinite(sd) else np.nan
-            else:
-                yerr_sym[i] = sd
-        else:
-            # Quantile interval: center at median so distances are nonnegative
-            center = float(np.median(e))
-            y[i] = center
-            lo_q, hi_q = np.quantile(e, [q_lo, q_hi])
-            yerr_asym[0, i] = center - lo_q
-            yerr_asym[1, i] = hi_q - center
-
-    # --- plot ---
-    if ax is None:
-        _, ax = plt.subplots(figsize=(7, 4))
-
-    if yerr_mode in ("sem", "sd"):
-        m = np.isfinite(y) & np.isfinite(yerr_sym)
-        ax.errorbar(
-            centers[m],
-            y[m],
-            yerr=yerr_sym[m],
-            fmt="o-",
-            capsize=2,
-            lw=1,
-            ms=4,
-            color=color,
-            label=label,
+        tuning_curves = nap.compute_tuning_curves(
+            data=spikes,
+            features=feature_by_epoch[epoch],
+            bins=[bins],
+            epochs=train_fold,
         )
-    else:
-        m = np.isfinite(y) & np.isfinite(yerr_asym[0]) & np.isfinite(yerr_asym[1])
-        ax.errorbar(
-            centers[m],
-            y[m],
-            yerr=yerr_asym[:, m],
-            fmt="o-",
-            capsize=2,
-            lw=1,
-            ms=4,
-            color=color,
-            label=label,
+        decoded, _ = nap.decode_bayes(
+            tuning_curves=tuning_curves,
+            data=spikes,
+            epochs=test_fold,
+            sliding_window_size=sliding_window_size_bins,
+            bin_size=bin_size_s,
         )
+        decoded_chunks.append(decoded)
+        true_chunks.append(feature_by_epoch[epoch].restrict(test_fold))
 
-    ax.set_xlabel("Position (true)")
-    ax.set_ylabel(ylab)
-    ax.grid(True, alpha=0.2)
+    return (
+        _concatenate_tsds(true_chunks, movement_interval),
+        _concatenate_tsds(decoded_chunks, movement_interval),
+    )
 
+
+def decode_task_cross_trajectory(
+    spikes: Any,
+    task_progression_by_trajectory: dict[str, Any],
+    trajectory_intervals: dict[str, Any],
+    movement_interval: Any,
+    epoch: str,
+    bins: np.ndarray,
+    active_unit_ids: list[Any],
+    bin_size_s: float,
+    sliding_window_size_bins: int,
+) -> tuple[dict[tuple[str, str], Any], dict[tuple[str, str], Any]]:
+    """Decode one trajectory using task-progression tuning from the paired turn."""
+    import pynapple as nap
+
+    true_by_pair: dict[tuple[str, str], Any] = {}
+    decoded_by_pair: dict[tuple[str, str], Any] = {}
+    if not active_unit_ids:
+        for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+            key = (encoding_trajectory, decoding_trajectory)
+            empty = _make_empty_tsd()
+            true_by_pair[key] = empty
+            decoded_by_pair[key] = empty
+        return true_by_pair, decoded_by_pair
+
+    selected_spikes = _subset_spikes(spikes, active_unit_ids)
+    for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+        key = (encoding_trajectory, decoding_trajectory)
+        train_epoch = trajectory_intervals[encoding_trajectory].intersect(movement_interval)
+        test_epoch = trajectory_intervals[decoding_trajectory].intersect(movement_interval)
+        if float(train_epoch.tot_length()) <= 0.0 or float(test_epoch.tot_length()) <= 0.0:
+            true_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
+            decoded_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
+            continue
+
+        tuning_curves = nap.compute_tuning_curves(
+            data=selected_spikes,
+            features=task_progression_by_trajectory[epoch][encoding_trajectory],
+            bins=[bins],
+            epochs=train_epoch,
+        )
+        decoded, _ = nap.decode_bayes(
+            tuning_curves=tuning_curves,
+            data=selected_spikes,
+            epochs=test_epoch,
+            sliding_window_size=sliding_window_size_bins,
+            bin_size=bin_size_s,
+        )
+        true_by_pair[key] = task_progression_by_trajectory[epoch][decoding_trajectory].restrict(test_epoch)
+        decoded_by_pair[key] = decoded
+
+    return true_by_pair, decoded_by_pair
+
+
+def align_true_to_decoded(true_tsd: Any, decoded_tsd: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return aligned true and decoded values on decoded timestamps."""
+    if len(np.asarray(decoded_tsd.t)) == 0 or len(np.asarray(true_tsd.t)) == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    ep = true_tsd.time_support.intersect(decoded_tsd.time_support)
+    true_restricted = true_tsd.restrict(ep)
+    decoded_restricted = decoded_tsd.restrict(ep)
+    true_at_decoded = true_restricted.interpolate(
+        decoded_restricted,
+        ep=ep,
+        left=np.nan,
+        right=np.nan,
+    )
+    true_values = np.asarray(true_at_decoded.d, dtype=float)
+    decoded_values = np.asarray(decoded_restricted.d, dtype=float)
+    valid = np.isfinite(true_values) & np.isfinite(decoded_values)
+    return true_values[valid], decoded_values[valid]
+
+
+def get_error_ylabel(error_mode: str, summary: str) -> str:
+    """Return the y-axis label for one decoding-error summary plot."""
     if error_mode == "signed":
-        ax.axhline(0.0, lw=1, alpha=0.6, color="black")
-
-    return ax
-
-
-SummaryMode = Literal["mean_std", "median_iqr"]
-ErrorMode = Literal["signed", "unsigned"]
-AlignTo = Literal["decoded", "true"]
-
-
-def plot_decoding_error_vs_position(
-    true_pos: nap.Tsd,
-    decoded_pos: nap.Tsd,
-    *,
-    # binning
-    n_bins: int = 40,
-    bin_edges: Optional[np.ndarray] = None,
-    pos_range: Optional[Tuple[float, float]] = None,
-    clip_quantiles: Optional[Tuple[float, float]] = None,  # e.g. (0.01, 0.99)
-    min_count: int = 20,
-    # error + summary
-    error_mode: ErrorMode = "unsigned",
-    summary: SummaryMode = "mean_std",
-    # alignment/interpolation
-    align_to: AlignTo = "decoded",
-    ep: Optional[nap.IntervalSet] = None,
-    left: Optional[float] = np.nan,
-    right: Optional[float] = np.nan,
-    # plotting
-    ax: Optional[plt.Axes] = None,
-    color: str = "black",
-    label: Optional[str] = None,
-    show_scatter: bool = False,
-    scatter_kws: Optional[Dict[str, Any]] = None,
-    line_kws: Optional[Dict[str, Any]] = None,
-    # outputs
-    return_stats: bool = False,
-) -> Union[plt.Axes, Tuple[plt.Axes, Dict[str, np.ndarray]]]:
-    """
-    Plot decoding error (decoded - true) as a function of position.
-
-    Steps:
-      1) Restrict both series to a common epoch (intersection by default)
-      2) Use nap.Tsd.interpolate to align one series onto the other's timestamps
-      3) Compute per-sample error
-      4) Bin by position and summarize within each bin
-
-    Parameters
-    ----------
-    true_pos, decoded_pos : nap.Tsd
-        True and decoded position time series.
-    n_bins : int
-        Number of position bins (ignored if bin_edges is provided).
-    bin_edges : np.ndarray | None
-        Explicit bin edges. Use this when overlaying conditions so bins match.
-    pos_range : (float, float) | None
-        Force bin range; overrides clip_quantiles if provided.
-    clip_quantiles : (float, float) | None
-        If provided and pos_range is None, compute bin range from position quantiles.
-    min_count : int
-        Minimum number of samples required to keep a bin.
-    error_mode : {"signed","unsigned"}
-        Signed: (decoded - true). Unsigned: abs(decoded - true).
-    summary : {"mean_std","median_iqr"}
-        mean_std: center=mean, errorbar=std (symmetric)
-        median_iqr: center=median, errorbar spans Q1..Q3 (asymmetric)
-    align_to : {"decoded","true"}
-        "decoded" (default): interpolate true onto decoded timestamps (typical for decoder output).
-        "true": interpolate decoded onto true timestamps (if you want error at each true sample).
-    ep : nap.IntervalSet | None
-        Epoch to use. If None, uses intersection of time_supports (when available).
-    left, right : float | None
-        Passed to nap.Tsd.interpolate. Using np.nan avoids edge extrapolation artifacts.
-    show_scatter : bool
-        If True, plot per-sample (pos, error) scatter behind binned summary.
-
-    Returns
-    -------
-    ax : matplotlib Axes
-        The axis with the plot.
-    (ax, stats) if return_stats=True
-        stats contains bin centers, counts, and summarized values.
-    """
-    if ax is None:
-        _, ax = plt.subplots(figsize=(7, 4))
-
-    # ---- choose an epoch (intersection by default) ----
-    if ep is None:
-        if hasattr(true_pos, "time_support") and hasattr(decoded_pos, "time_support"):
-            ep = true_pos.time_support.intersect(decoded_pos.time_support)
-        else:
-            # fallback: intersect the min/max time ranges
-            t0 = max(float(true_pos.t[0]), float(decoded_pos.t[0]))
-            t1 = min(float(true_pos.t[-1]), float(decoded_pos.t[-1]))
-            ep = nap.IntervalSet(start=t0, end=t1)
-
-    # ---- restrict ----
-    true_r = true_pos.restrict(ep)
-    dec_r = decoded_pos.restrict(ep)
-
-    # ---- align using nap.Tsd.interpolate ----
-    if align_to == "decoded":
-        # evaluate true position at decoded timestamps
-        true_at_dec = true_r.interpolate(dec_r, ep=ep, left=left, right=right)
-        pos = np.asarray(true_at_dec.d, dtype=np.float64)
-        dec = np.asarray(dec_r.d, dtype=np.float64)
-    else:  # align_to == "true"
-        # evaluate decoded position at true timestamps
-        dec_at_true = dec_r.interpolate(true_r, ep=ep, left=left, right=right)
-        pos = np.asarray(true_r.d, dtype=np.float64)
-        dec = np.asarray(dec_at_true.d, dtype=np.float64)
-
-    # ---- compute error per sample ----
-    err = dec - pos
-    if error_mode == "unsigned":
-        err = np.abs(err)
-
-    # ---- drop non-finite ----
-    good = np.isfinite(pos) & np.isfinite(err)
-    pos = pos[good]
-    err = err[good]
-    if pos.size == 0:
-        raise ValueError("No finite aligned samples after interpolation/restriction.")
-
-    # ---- decide bin edges ----
-    if bin_edges is None:
-        if pos_range is not None:
-            lo, hi = map(float, pos_range)
-        elif clip_quantiles is not None:
-            qlo, qhi = clip_quantiles
-            if not (0.0 <= qlo < qhi <= 1.0):
-                raise ValueError("clip_quantiles must satisfy 0 <= lo < hi <= 1.")
-            lo, hi = np.quantile(pos, [qlo, qhi]).astype(float)
-        else:
-            lo, hi = float(np.min(pos)), float(np.max(pos))
-
-        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
-            lo, hi = float(np.min(pos)), float(np.max(pos))
-
-        bin_edges = np.linspace(lo, hi, n_bins + 1, dtype=np.float64)
+        ylabel = "Decoded - true"
     else:
-        bin_edges = np.asarray(bin_edges, dtype=np.float64)
-        if bin_edges.ndim != 1 or bin_edges.size < 2:
-            raise ValueError("bin_edges must be a 1D array with length >= 2.")
-        if not np.all(np.diff(bin_edges) > 0):
-            raise ValueError("bin_edges must be strictly increasing.")
+        ylabel = "|Decoded - true|"
 
+    if summary == "mean_std":
+        return f"{ylabel} (mean +/- std)"
+    return f"{ylabel} (median, IQR)"
+
+
+def summarize_decoding_metrics(true_tsd: Any, decoded_tsd: Any) -> dict[str, float | int]:
+    """Return global decoding error metrics for one decoded trajectory."""
+    true_values, decoded_values = align_true_to_decoded(true_tsd, decoded_tsd)
+    if true_values.size == 0:
+        return {
+            "mae": np.nan,
+            "rmse": np.nan,
+            "mean_signed_error": np.nan,
+            "median_abs_error": np.nan,
+            "n_samples": 0,
+        }
+
+    signed_error = decoded_values - true_values
+    abs_error = np.abs(signed_error)
+    return {
+        "mae": float(np.mean(abs_error)),
+        "rmse": float(np.sqrt(np.mean(signed_error**2))),
+        "mean_signed_error": float(np.mean(signed_error)),
+        "median_abs_error": float(np.median(abs_error)),
+        "n_samples": int(signed_error.size),
+    }
+
+
+def summarize_decoding_error_by_position(
+    true_tsd: Any,
+    decoded_tsd: Any,
+    *,
+    bin_edges: np.ndarray,
+    error_mode: str = "signed",
+    summary: str = "median_iqr",
+    min_count: int = DEFAULT_MIN_BIN_COUNT,
+) -> pd.DataFrame:
+    """Return a binned decoding-error summary along true position."""
+    if error_mode not in ERROR_MODES:
+        raise ValueError(f"Unsupported error mode {error_mode!r}. Expected one of {ERROR_MODES!r}.")
+    if summary not in SUMMARY_MODES:
+        raise ValueError(f"Unsupported summary mode {summary!r}. Expected one of {SUMMARY_MODES!r}.")
+
+    true_values, decoded_values = align_true_to_decoded(true_tsd, decoded_tsd)
+    bin_edges = np.asarray(bin_edges, dtype=float)
     centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    n_bins_eff = centers.size
+    rows: list[dict[str, Any]] = []
 
-    # ---- assign bins ----
-    b = np.digitize(pos, bin_edges) - 1
-    in_range = (b >= 0) & (b < n_bins_eff)
-    b = b[in_range]
-    pos_in = pos[in_range]
-    err_in = err[in_range]
+    if true_values.size == 0:
+        for bin_left, bin_right, center in zip(bin_edges[:-1], bin_edges[1:], centers, strict=False):
+            rows.append(
+                {
+                    "bin_left": float(bin_left),
+                    "bin_right": float(bin_right),
+                    "bin_center": float(center),
+                    "n": 0,
+                    "center": np.nan,
+                    "yerr_low": np.nan,
+                    "yerr_high": np.nan,
+                }
+            )
+        return pd.DataFrame(rows)
 
-    # ---- optional scatter for debugging ----
-    if show_scatter:
-        sk = dict(s=6, alpha=0.15, linewidths=0)
-        if scatter_kws:
-            sk.update(scatter_kws)
-        ax.scatter(pos_in, err_in, color=color, **sk)
+    error = decoded_values - true_values
+    if error_mode == "absolute":
+        error = np.abs(error)
 
-    # ---- summarize within bins ----
-    y = np.full(n_bins_eff, np.nan, dtype=np.float64)
-    yerr_low = np.full(n_bins_eff, np.nan, dtype=np.float64)
-    yerr_high = np.full(n_bins_eff, np.nan, dtype=np.float64)
-    counts = np.zeros(n_bins_eff, dtype=int)
+    bin_indices = np.digitize(true_values, bin_edges) - 1
+    in_range = (bin_indices >= 0) & (bin_indices < centers.size)
+    true_values = true_values[in_range]
+    error = error[in_range]
+    bin_indices = bin_indices[in_range]
 
-    for i in range(n_bins_eff):
-        e = err_in[b == i]
-        n = e.size
-        counts[i] = n
-        if n < min_count:
+    for index, (bin_left, bin_right, center) in enumerate(
+        zip(bin_edges[:-1], bin_edges[1:], centers, strict=False)
+    ):
+        bin_error = error[bin_indices == index]
+        count = int(bin_error.size)
+        if count < min_count:
+            rows.append(
+                {
+                    "bin_left": float(bin_left),
+                    "bin_right": float(bin_right),
+                    "bin_center": float(center),
+                    "n": count,
+                    "center": np.nan,
+                    "yerr_low": np.nan,
+                    "yerr_high": np.nan,
+                }
+            )
             continue
 
         if summary == "mean_std":
-            center = float(np.mean(e))
-            spread = float(np.std(e, ddof=1)) if n > 1 else np.nan
-            y[i] = center
-            yerr_low[i] = spread
-            yerr_high[i] = spread
-        else:  # "median_iqr"
-            center = float(np.median(e))
-            q1, q3 = np.quantile(e, [0.25, 0.75]).astype(float)
-            y[i] = center
-            yerr_low[i] = center - q1
-            yerr_high[i] = q3 - center
+            center_value = float(np.mean(bin_error))
+            spread = float(np.std(bin_error, ddof=1)) if count > 1 else np.nan
+            yerr_low = spread
+            yerr_high = spread
+        else:
+            center_value = float(np.median(bin_error))
+            q1, q3 = np.quantile(bin_error, [0.25, 0.75]).astype(float)
+            yerr_low = center_value - q1
+            yerr_high = q3 - center_value
 
-    valid = np.isfinite(y) & np.isfinite(yerr_low) & np.isfinite(yerr_high)
-    if not np.any(valid):
-        raise ValueError(
-            "No bins had enough samples. Try lowering min_count or reducing n_bins."
+        rows.append(
+            {
+                "bin_left": float(bin_left),
+                "bin_right": float(bin_right),
+                "bin_center": float(center),
+                "n": count,
+                "center": center_value,
+                "yerr_low": yerr_low,
+                "yerr_high": yerr_high,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_metric_comparison_table(
+    light_metrics: pd.DataFrame,
+    dark_metrics: pd.DataFrame,
+    *,
+    light_epoch: str,
+    dark_epoch: str,
+    join_columns: list[str],
+) -> pd.DataFrame:
+    """Join light and dark metric tables and add metric deltas."""
+    comparison = light_metrics.merge(
+        dark_metrics,
+        on=join_columns,
+        suffixes=("_light", "_dark"),
+        how="inner",
+    )
+    comparison.insert(0, "dark_epoch", dark_epoch)
+    comparison.insert(0, "light_epoch", light_epoch)
+    for metric in ("mae", "rmse", "mean_signed_error", "median_abs_error", "n_samples"):
+        comparison[f"{metric}_change"] = (
+            comparison[f"{metric}_dark"] - comparison[f"{metric}_light"]
+        )
+    return comparison
+
+
+def build_binned_error_comparison_table(
+    light_summary: pd.DataFrame,
+    dark_summary: pd.DataFrame,
+    *,
+    light_epoch: str,
+    dark_epoch: str,
+) -> pd.DataFrame:
+    """Join light and dark binned decoding-error summaries."""
+    comparison = light_summary.merge(
+        dark_summary,
+        on=["bin_left", "bin_right", "bin_center"],
+        suffixes=("_light", "_dark"),
+        how="outer",
+    ).sort_values("bin_center")
+    comparison.insert(0, "dark_epoch", dark_epoch)
+    comparison.insert(0, "light_epoch", light_epoch)
+    return comparison
+
+
+def plot_binned_error_comparison(
+    comparison_table: pd.DataFrame,
+    *,
+    title: str,
+    xlabel: str,
+    error_mode: str,
+    summary: str,
+    light_epoch: str,
+    dark_epoch: str,
+    save_path: Path,
+) -> None:
+    """Plot light and dark binned decoding error on the same axes."""
+    figure, axis = plt.subplots(figsize=(12, 3))
+    for prefix, color, label in (
+        ("light", "tab:orange", light_epoch),
+        ("dark", "tab:gray", dark_epoch),
+    ):
+        valid = (
+            np.isfinite(comparison_table[f"center_{prefix}"])
+            & np.isfinite(comparison_table[f"yerr_low_{prefix}"])
+            & np.isfinite(comparison_table[f"yerr_high_{prefix}"])
+        )
+        axis.errorbar(
+            comparison_table.loc[valid, "bin_center"],
+            comparison_table.loc[valid, f"center_{prefix}"],
+            yerr=np.vstack(
+                [
+                    comparison_table.loc[valid, f"yerr_low_{prefix}"],
+                    comparison_table.loc[valid, f"yerr_high_{prefix}"],
+                ]
+            ),
+            fmt="o-",
+            lw=1.0,
+            ms=4,
+            capsize=2,
+            color=color,
+            label=label,
         )
 
-    # ---- plot binned summary ----
-    lk = dict(fmt="o-", lw=1.0, ms=4, capsize=2)
-    if line_kws:
-        lk.update(line_kws)
+    if error_mode == "signed":
+        axis.axhline(0.0, color="black", linewidth=1, alpha=0.5)
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel(get_error_ylabel(error_mode, summary))
+    axis.set_title(title)
+    axis.legend(frameon=False)
+    axis.grid(True, alpha=0.2)
 
-    ax.errorbar(
-        centers[valid],
-        y[valid],
-        yerr=np.vstack([yerr_low[valid], yerr_high[valid]]),
-        color=color,
-        label=label,
-        **lk,
+    figure.tight_layout()
+    figure.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_epoch_error_profiles(
+    summaries_by_epoch: dict[str, pd.DataFrame],
+    *,
+    epoch_order: list[str],
+    title: str,
+    xlabel: str,
+    error_mode: str,
+    summary: str,
+    save_path: Path,
+) -> None:
+    """Plot one binned decoding-error profile for each epoch on shared axes."""
+    figure, axis = plt.subplots(figsize=(12, 3))
+    colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(len(epoch_order), 1)))
+
+    for color, epoch in zip(colors, epoch_order, strict=False):
+        table = summaries_by_epoch[epoch]
+        valid = (
+            np.isfinite(table["center"])
+            & np.isfinite(table["yerr_low"])
+            & np.isfinite(table["yerr_high"])
+        )
+        axis.errorbar(
+            table.loc[valid, "bin_center"],
+            table.loc[valid, "center"],
+            yerr=np.vstack(
+                [
+                    table.loc[valid, "yerr_low"],
+                    table.loc[valid, "yerr_high"],
+                ]
+            ),
+            fmt="o-",
+            lw=1.0,
+            ms=4,
+            capsize=2,
+            color=color,
+            label=epoch,
+        )
+
+    if error_mode == "signed":
+        axis.axhline(0.0, color="black", linewidth=1, alpha=0.5)
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel(get_error_ylabel(error_mode, summary))
+    axis.set_title(title)
+    axis.legend(frameon=False, ncols=min(4, max(len(epoch_order), 1)))
+    axis.grid(True, alpha=0.2)
+
+    figure.tight_layout()
+    figure.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_cross_trajectory_epoch_error_profiles(
+    summaries_by_epoch: dict[str, dict[tuple[str, str], pd.DataFrame]],
+    *,
+    epoch_order: list[str],
+    encoding_trajectory: str,
+    decoding_trajectory: str,
+    title: str,
+    xlabel: str,
+    error_mode: str,
+    summary: str,
+    save_path: Path,
+) -> None:
+    """Plot epoch-wise cross-trajectory decoding-error profiles for one trajectory pair."""
+    key = (encoding_trajectory, decoding_trajectory)
+    plot_epoch_error_profiles(
+        {epoch: summaries_by_epoch[epoch][key] for epoch in epoch_order},
+        epoch_order=epoch_order,
+        title=title,
+        xlabel=xlabel,
+        error_mode=error_mode,
+        summary=summary,
+        save_path=save_path,
     )
 
-    # ---- labels ----
-    ax.set_xlabel("Position (true)")
-    if error_mode == "signed":
-        ylab = "Decoded − true"
-        ax.axhline(0.0, lw=1, alpha=0.5, color="black")
-    else:
-        ylab = "|Decoded − true|"
 
-    if summary == "mean_std":
-        ylab += " (mean ± std)"
-    else:
-        ylab += " (median, IQR)"
+def save_within_epoch_tsds(
+    true_by_region: dict[str, dict[str, Any]],
+    decoded_by_region: dict[str, dict[str, Any]],
+    *,
+    model_name: str,
+    save_dir: Path,
+) -> list[Path]:
+    """Save within-epoch decoded and true Tsds as `.npz` files."""
+    saved_paths: list[Path] = []
+    for region, values_by_epoch in true_by_region.items():
+        for epoch, true_tsd in values_by_epoch.items():
+            true_path = save_dir / f"{region}_{epoch}_true_{model_name}.npz"
+            true_tsd.save(true_path)
+            saved_paths.append(true_path)
 
-    ax.set_ylabel(ylab)
-    ax.grid(True, alpha=0.2)
-
-    # ---- return stats if requested ----
-    if return_stats:
-        stats = dict(
-            bin_edges=bin_edges,
-            bin_centers=centers,
-            n=counts,
-            center=y,
-            yerr_low=yerr_low,
-            yerr_high=yerr_high,
-            valid=valid,
-        )
-        return ax, stats
-
-    return ax
+            decoded_path = save_dir / f"{region}_{epoch}_decoded_{model_name}.npz"
+            decoded_by_region[region][epoch].save(decoded_path)
+            saved_paths.append(decoded_path)
+    return saved_paths
 
 
-def main():
+def save_cross_trajectory_tsds(
+    true_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
+    decoded_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
+    save_dir: Path,
+) -> list[Path]:
+    """Save cross-trajectory decoded and true task-progression Tsds as `.npz` files."""
+    saved_paths: list[Path] = []
+    for region, values_by_epoch in true_by_region.items():
+        for epoch, values_by_pair in values_by_epoch.items():
+            for (encoding_trajectory, decoding_trajectory), true_tsd in values_by_pair.items():
+                suffix = f"{encoding_trajectory}_to_{decoding_trajectory}"
+                true_path = save_dir / f"{region}_{epoch}_{suffix}_true_tp_cross_traj.npz"
+                true_tsd.save(true_path)
+                saved_paths.append(true_path)
+
+                decoded_path = (
+                    save_dir / f"{region}_{epoch}_{suffix}_decoded_tp_cross_traj.npz"
+                )
+                decoded_by_region[region][epoch][
+                    (encoding_trajectory, decoding_trajectory)
+                ].save(decoded_path)
+                saved_paths.append(decoded_path)
+    return saved_paths
+
+
+def save_epoch_metric_tables(
+    metric_tables: dict[str, dict[str, pd.DataFrame]],
+    save_dir: Path,
+    suffix: str,
+) -> list[Path]:
+    """Save one parquet metric table per region and epoch."""
+    saved_paths: list[Path] = []
+    for region, tables_by_epoch in metric_tables.items():
+        for epoch, table in tables_by_epoch.items():
+            path = save_dir / f"{region}_{epoch}_{suffix}.parquet"
+            table.to_parquet(path)
+            saved_paths.append(path)
+    return saved_paths
+
+
+def save_comparison_tables(
+    comparison_tables: dict[str, dict[str, pd.DataFrame]],
+    save_dir: Path,
+    suffix: str,
+) -> list[Path]:
+    """Save one parquet light-vs-dark comparison table per region and light epoch."""
+    saved_paths: list[Path] = []
+    for region, tables_by_light_epoch in comparison_tables.items():
+        for light_epoch, table in tables_by_light_epoch.items():
+            dark_epoch = str(table["dark_epoch"].iloc[0]) if not table.empty else DEFAULT_DARK_EPOCH
+            path = save_dir / f"{region}_{light_epoch}_{dark_epoch}_{suffix}.parquet"
+            table.to_parquet(path)
+            saved_paths.append(path)
+    return saved_paths
+
+
+def save_legacy_pickles(
+    true_place_by_region: dict[str, dict[str, Any]],
+    decoded_place_by_region: dict[str, dict[str, Any]],
+    true_tp_by_region: dict[str, dict[str, Any]],
+    decoded_tp_by_region: dict[str, dict[str, Any]],
+    true_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
+    decoded_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
+    save_dir: Path,
+) -> list[Path]:
+    """Write legacy nested pickle outputs for compatibility."""
+    saved_paths: list[Path] = []
+    outputs = {
+        "true_place.pkl": true_place_by_region,
+        "decoded_place.pkl": decoded_place_by_region,
+        "true_tp.pkl": true_tp_by_region,
+        "decoded_tp.pkl": decoded_tp_by_region,
+        "true_tp_cross_traj.pkl": true_tp_cross_by_region,
+        "decoded_tp_cross_traj.pkl": decoded_tp_cross_by_region,
+    }
+    for filename, payload in outputs.items():
+        path = save_dir / filename
+        with open(path, "wb") as file:
+            pickle.dump(payload, file)
+        saved_paths.append(path)
+    return saved_paths
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the decoding workflow."""
+    parser = argparse.ArgumentParser(
+        description="Compare place and task-progression decoding with lap-wise cross-validation"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Number of leading position samples to ignore per epoch. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define movement intervals. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--n-folds",
+        type=int,
+        default=DEFAULT_N_FOLDS,
+        help=f"Number of lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"Time bin size in seconds for Bayesian decoding. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--sliding-window-size-bins",
+        type=int,
+        default=DEFAULT_SLIDING_WINDOW_SIZE_BINS,
+        help=(
+            "Sliding window size, in decode bins, passed to `nap.decode_bayes`. "
+            f"Default: {DEFAULT_SLIDING_WINDOW_SIZE_BINS}"
+        ),
+    )
+    parser.add_argument(
+        "--cross-traj-fr-threshold-hz",
+        type=float,
+        default=DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ,
+        help=(
+            "Movement firing-rate threshold used to select units for cross-trajectory decoding. "
+            f"Default: {DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ}"
+        ),
+    )
+    parser.add_argument(
+        "--save-legacy-pickle",
+        action="store_true",
+        help="Also write the legacy nested pickle outputs for compatibility.",
+    )
+    parser.add_argument(
+        "--error-mode",
+        choices=ERROR_MODES,
+        default="signed",
+        help="How to summarize decoding error in the binned error plots. Default: signed",
+    )
+    parser.add_argument(
+        "--error-summary",
+        choices=SUMMARY_MODES,
+        default="median_iqr",
+        help="How to summarize per-bin decoding error bars in the plots. Default: median_iqr",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run the task-progression decoding workflow for one dataset."""
+    args = parse_arguments()
+    session = prepare_task_progression_session(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        position_offset=args.position_offset,
+        speed_threshold_cm_s=args.speed_threshold_cm_s,
+    )
+    light_epochs, dark_epoch = get_light_dark_epochs(session["run_epochs"])
+
+    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     save_dir = analysis_path / "task_progression_decoding"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
     fig_dir = analysis_path / "figs" / "task_progression_decoding"
+    save_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    n_folds = 5
-
-    true_tp = {"v1": {}, "ca1": {}}
-    true_place = {"v1": {}, "ca1": {}}
-    decoded_tp = {"v1": {}, "ca1": {}}
-    decoded_place = {"v1": {}, "ca1": {}}
-
-    true_tp_cross_traj = {"v1": {}, "ca1": {}}
-    decoded_tp_cross_traj = {"v1": {}, "ca1": {}}
-
-    place_bin_size = 4  # cm
-    place_gap = 0  # cm
-
-    task_progression_bin_size = place_bin_size / total_length_per_trajectory
-    task_progression_gap = place_gap / total_length_per_trajectory
-
-    linear_position, position_bins = get_linear_position(
-        place_bin_size=place_bin_size, gap=place_gap
+    min_lap_counts = validate_fold_count(
+        session["trajectory_intervals"],
+        n_folds=args.n_folds,
     )
-    task_progression, task_progression_bins = get_task_progression(
-        task_progression_bin_size=task_progression_bin_size,
-        gap=task_progression_gap,
+    linear_position_bins = build_linear_position_bins(args.animal_name)
+    task_progression_bins = build_combined_task_progression_bins(args.animal_name)
+    task_progression_by_trajectory_bins = build_task_progression_bins(args.animal_name)
+    movement_firing_rates = compute_movement_firing_rates(
+        session["spikes_by_region"],
+        session["movement_by_run"],
+        session["run_epochs"],
     )
-    task_progression_by_trajectory, task_progression_by_trajectory_bins = (
-        get_task_progression_by_trajectory(
-            task_progression_bin_size=task_progression_bin_size
+
+    true_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
+    decoded_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
+    true_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
+    decoded_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
+    true_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]] = {
+        region: {} for region in REGIONS
+    }
+    decoded_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]] = {
+        region: {} for region in REGIONS
+    }
+    epoch_metric_tables: dict[str, dict[str, pd.DataFrame]] = {region: {} for region in REGIONS}
+    epoch_cross_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in REGIONS
+    }
+    epoch_binned_tables: dict[str, dict[str, dict[str, pd.DataFrame]]] = {
+        region: {} for region in REGIONS
+    }
+    epoch_cross_binned_tables: dict[str, dict[str, dict[tuple[str, str], pd.DataFrame]]] = {
+        region: {} for region in REGIONS
+    }
+
+    for region in REGIONS:
+        active_unit_ids = _get_active_unit_ids(
+            session["spikes_by_region"][region],
+            movement_firing_rates[region][dark_epoch],
+            threshold_hz=args.cross_traj_fr_threshold_hz,
         )
-    )
-
-    for region in regions:
-        for epoch in run_epoch_list:
-            true_place[region][epoch], decoded_place[region][epoch] = decode_cv(
-                region,
-                epoch,
-                feature=linear_position,
-                bins=position_bins,
-                n_folds=n_folds,
+        for epoch in session["run_epochs"]:
+            true_place, decoded_place = decode_cv(
+                spikes=session["spikes_by_region"][region],
+                feature_by_epoch=session["linear_position_by_run"],
+                trajectory_intervals=session["trajectory_intervals"][epoch],
+                movement_interval=session["movement_by_run"][epoch],
+                epoch=epoch,
+                bins=linear_position_bins,
+                n_folds=args.n_folds,
+                bin_size_s=args.bin_size_s,
+                sliding_window_size_bins=args.sliding_window_size_bins,
+                random_state=DEFAULT_RANDOM_STATE,
             )
-            true_tp[region][epoch], decoded_tp[region][epoch] = decode_cv(
-                region,
-                epoch,
-                feature=task_progression,
+            true_tp, decoded_tp = decode_cv(
+                spikes=session["spikes_by_region"][region],
+                feature_by_epoch=session["task_progression_by_run"],
+                trajectory_intervals=session["trajectory_intervals"][epoch],
+                movement_interval=session["movement_by_run"][epoch],
+                epoch=epoch,
                 bins=task_progression_bins,
-                n_folds=n_folds,
+                n_folds=args.n_folds,
+                bin_size_s=args.bin_size_s,
+                sliding_window_size_bins=args.sliding_window_size_bins,
+                random_state=DEFAULT_RANDOM_STATE,
             )
+            true_place_by_region[region][epoch] = true_place
+            decoded_place_by_region[region][epoch] = decoded_place
+            true_tp_by_region[region][epoch] = true_tp
+            decoded_tp_by_region[region][epoch] = decoded_tp
 
-            plot_decode(
-                true_place[region][epoch],
-                decoded_place[region][epoch],
-                true_tp[region][epoch],
-                decoded_tp[region][epoch],
-                fig_path=fig_dir / f"{region}_{epoch}_place_tp_decoding.png",
+            true_tp_cross, decoded_tp_cross = decode_task_cross_trajectory(
+                spikes=session["spikes_by_region"][region],
+                task_progression_by_trajectory=session["task_progression_by_trajectory"],
+                trajectory_intervals=session["trajectory_intervals"][epoch],
+                movement_interval=session["movement_by_run"][epoch],
+                epoch=epoch,
+                bins=task_progression_by_trajectory_bins,
+                active_unit_ids=active_unit_ids,
+                bin_size_s=args.bin_size_s,
+                sliding_window_size_bins=args.sliding_window_size_bins,
             )
-
-            true_tp_cross_traj[region][epoch], decoded_tp_cross_traj[region][epoch] = (
-                decode_task_cross_trajectory(
-                    region,
-                    epoch,
-                    task_progression_by_trajectory,
-                    task_progression_by_trajectory_bins,
-                    fr_threshold=0.5,
+            true_tp_cross_by_region[region][epoch] = true_tp_cross
+            decoded_tp_cross_by_region[region][epoch] = decoded_tp_cross
+            epoch_binned_tables[region][epoch] = {
+                "place": summarize_decoding_error_by_position(
+                    true_place,
+                    decoded_place,
+                    bin_edges=linear_position_bins,
+                    error_mode=args.error_mode,
+                    summary=args.error_summary,
+                    min_count=DEFAULT_MIN_BIN_COUNT,
+                ),
+                "task_progression": summarize_decoding_error_by_position(
+                    true_tp,
+                    decoded_tp,
+                    bin_edges=task_progression_bins,
+                    error_mode=args.error_mode,
+                    summary=args.error_summary,
+                    min_count=DEFAULT_MIN_BIN_COUNT,
+                ),
+            }
+            epoch_cross_binned_tables[region][epoch] = {
+                key: summarize_decoding_error_by_position(
+                    true_tp_cross[key],
+                    decoded_tp_cross[key],
+                    bin_edges=task_progression_by_trajectory_bins,
+                    error_mode=args.error_mode,
+                    summary=args.error_summary,
+                    min_count=DEFAULT_MIN_BIN_COUNT,
                 )
+                for key in true_tp_cross
+            }
+
+            epoch_metric_tables[region][epoch] = pd.DataFrame(
+                [
+                    {
+                        "model": "place",
+                        "n_units": len(list(session["spikes_by_region"][region].keys())),
+                        **summarize_decoding_metrics(true_place, decoded_place),
+                    },
+                    {
+                        "model": "task_progression",
+                        "n_units": len(list(session["spikes_by_region"][region].keys())),
+                        **summarize_decoding_metrics(true_tp, decoded_tp),
+                    },
+                ]
             )
+            cross_rows: list[dict[str, Any]] = []
+            for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+                key = (encoding_trajectory, decoding_trajectory)
+                cross_rows.append(
+                    {
+                        "encoding_trajectory": encoding_trajectory,
+                        "decoding_trajectory": decoding_trajectory,
+                        "n_units": len(active_unit_ids),
+                        **summarize_decoding_metrics(
+                            true_tp_cross[key],
+                            decoded_tp_cross[key],
+                        ),
+                    }
+                )
+            epoch_cross_metric_tables[region][epoch] = pd.DataFrame(cross_rows)
 
-    with open(save_dir / f"true_place.pkl", "wb") as f:
-        pickle.dump(true_place, f)
-    with open(save_dir / f"true_tp.pkl", "wb") as f:
-        pickle.dump(true_tp, f)
-    with open(save_dir / f"decoded_place.pkl", "wb") as f:
-        pickle.dump(decoded_place, f)
-    with open(save_dir / f"decoded_tp.pkl", "wb") as f:
-        pickle.dump(decoded_tp, f)
-    with open(save_dir / f"true_tp_cross_traj.pkl", "wb") as f:
-        pickle.dump(true_tp_cross_traj, f)
-    with open(save_dir / f"decoded_tp_cross_traj.pkl", "wb") as f:
-        pickle.dump(decoded_tp_cross_traj, f)
+    light_dark_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in REGIONS
+    }
+    light_dark_cross_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in REGIONS
+    }
+    binned_comparison_tables: dict[str, dict[str, dict[str, pd.DataFrame]]] = {
+        region: {} for region in REGIONS
+    }
+    cross_binned_comparison_tables: dict[str, dict[str, dict[tuple[str, str], pd.DataFrame]]] = {
+        region: {} for region in REGIONS
+    }
+    saved_epoch_error_figures: list[Path] = []
+    saved_light_dark_figures: list[Path] = []
 
-    # plot comparison (decoding error by position)
-
-    epoch1 = run_epoch_list[0]
-    epoch2 = run_epoch_list[3]
-
-    for region in regions:
-        fig, ax = plt.subplots(figsize=(24, 3))
-        plot_error_vs_position(
-            decoded_place[region][epoch1],
-            true_place[region][epoch1],
-            n_bins=int(total_length_per_trajectory / place_bin_size) * 4,
-            min_count=5,
-            error_mode="signed",
-            yerr_mode="sd",
-            q_level=0.5,
-            ax=ax,
-            label="light",
-            color="orange",
-        )
-        plot_error_vs_position(
-            decoded_place[region][epoch2],
-            true_place[region][epoch2],
-            n_bins=int(total_length_per_trajectory / place_bin_size) * 4,
-            min_count=5,
-            error_mode="signed",
-            yerr_mode="sd",
-            q_level=0.5,
-            ax=ax,
-            label="dark",
-            color="gray",
-        )
-        ax.axvline(total_length_per_trajectory + place_gap / 2, color="black")
-        ax.axvline(
-            total_length_per_trajectory * 2 + place_gap + place_gap / 2, color="black"
-        )
-        ax.axvline(
-            total_length_per_trajectory * 3 + 2 * place_gap + place_gap / 2,
-            color="black",
-        )
-        ax.set_ylim(
-            [
-                -total_length_per_trajectory - place_gap / 2,
-                total_length_per_trajectory + place_gap / 2,
-            ]
-        )
-        ax.set_xlim([0, 4 * total_length_per_trajectory + 3 * place_gap])
-
-        ax.set_xlabel("Position (cm)")
-
-        plt.tight_layout()
-        fig.savefig(fig_dir / f"{region}_{epoch1}_{epoch2}_de_by_position.png", dpi=300)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(12, 3))
-        plot_error_vs_position(
-            decoded_tp[region][epoch1],
-            true_tp[region][epoch1],
-            n_bins=int(1 / task_progression_bin_size) * 2,
-            min_count=5,
-            error_mode="signed",
-            yerr_mode="sd",
-            q_level=0.5,
-            ax=ax,
-            label="light",
-            color="orange",
-        )
-        plot_error_vs_position(
-            decoded_tp[region][epoch2],
-            true_tp[region][epoch2],
-            n_bins=int(1 / task_progression_bin_size) * 2,
-            min_count=5,
-            error_mode="signed",
-            yerr_mode="sd",
-            q_level=0.5,
-            ax=ax,
-            label="dark",
-            color="gray",
-        )
-        ax.axvline(1, color="black")
-
-        ax.set_xlim([0, 2 + task_progression_gap / total_length_per_trajectory])
-        ax.set_ylim(
-            [
-                -1 - task_progression_gap / total_length_per_trajectory / 2,
-                1 + task_progression_gap / total_length_per_trajectory / 2,
-            ]
-        )
-
-        ax.set_xlabel("Task progression")
-        plt.tight_layout()
-        fig.savefig(fig_dir / f"{region}_{epoch1}_{epoch2}_de_by_tp.png", dpi=300)
-        plt.close(fig)
-
-    for region in regions:
-        for encoding_trajectory, decoding_trajectory in encoding_decoding.items():
-            fig, ax = plt.subplots(figsize=(12, 3))
-            plot_error_vs_position(
-                decoded_tp_cross_traj[region][epoch1][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                true_tp_cross_traj[region][epoch1][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                n_bins=int(1 / task_progression_bin_size),
-                min_count=5,
-                error_mode="signed",
-                yerr_mode="sd",
-                q_level=0.5,
-                ax=ax,
-                label="light",
-                color="orange",
+    for region in REGIONS:
+        for model_name, xlabel in (
+            ("place", "Linear position"),
+            ("task_progression", "Task progression"),
+        ):
+            figure_path = fig_dir / f"{region}_{model_name}_decoding_error_by_epoch.png"
+            plot_epoch_error_profiles(
+                {
+                    epoch: epoch_binned_tables[region][epoch][model_name]
+                    for epoch in session["run_epochs"]
+                },
+                epoch_order=session["run_epochs"],
+                title=f"{region.upper()} {model_name} decoding error by epoch",
+                xlabel=xlabel,
+                error_mode=args.error_mode,
+                summary=args.error_summary,
+                save_path=figure_path,
             )
-            plot_error_vs_position(
-                decoded_tp_cross_traj[region][epoch2][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                true_tp_cross_traj[region][epoch2][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                n_bins=int(1 / task_progression_bin_size),
-                min_count=5,
-                error_mode="signed",
-                yerr_mode="sd",
-                q_level=0.5,
-                ax=ax,
-                label="dark",
-                color="gray",
-            )
+            saved_epoch_error_figures.append(figure_path)
 
-            ax.set_xlim([0, 1])
-            ax.set_ylim([-1, 1])
-
-            ax.set_xlabel("Task progression")
-
-            plt.tight_layout()
-            fig.savefig(
+        for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+            figure_path = (
                 fig_dir
-                / f"{region}_{epoch1}_{epoch2}_{encoding_trajectory}_{decoding_trajectory}_de.png",
-                dpi=300,
+                / f"{region}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_epoch.png"
             )
-            plt.close(fig)
-
-    # new function
-    for region in regions:
-        # place
-        fig, ax = plt.subplots(figsize=(24, 3))
-
-        # light
-        plot_decoding_error_vs_position(
-            true_place[region][epoch1],
-            decoded_place[region][epoch1],
-            bin_edges=np.linspace(
-                0,
-                4 * total_length_per_trajectory + 3 * place_gap,
-                int(total_length_per_trajectory / place_bin_size) * 4 + 1,
-            ),
-            error_mode="signed",
-            summary="median_iqr",
-            min_count=5,
-            ax=ax,
-            color="orange",
-            label="light",
-        )
-
-        # dark
-        plot_decoding_error_vs_position(
-            true_place[region][epoch2],
-            decoded_place[region][epoch2],
-            bin_edges=np.linspace(
-                0,
-                4 * total_length_per_trajectory + 3 * place_gap,
-                int(total_length_per_trajectory / place_bin_size) * 4 + 1,
-            ),
-            error_mode="signed",
-            summary="median_iqr",
-            min_count=5,
-            ax=ax,
-            color="gray",
-            label="dark",
-        )
-
-        ax.legend(frameon=False)
-
-        ax.axvline(total_length_per_trajectory + place_gap / 2, color="black")
-        ax.axvline(
-            total_length_per_trajectory * 2 + place_gap + place_gap / 2, color="black"
-        )
-        ax.axvline(
-            total_length_per_trajectory * 3 + 2 * place_gap + place_gap / 2,
-            color="black",
-        )
-        ax.set_ylim(
-            [
-                -total_length_per_trajectory - place_gap / 2,
-                total_length_per_trajectory + place_gap / 2,
-            ]
-        )
-        ax.set_xlim([0, 4 * total_length_per_trajectory + 3 * place_gap])
-
-        ax.set_xlabel("Position (cm)")
-
-        plt.tight_layout()
-        fig.savefig(
-            fig_dir / f"{region}_{epoch1}_{epoch2}_de_by_position_new.png", dpi=300
-        )
-        plt.close(fig)
-
-        # TP
-        fig, ax = plt.subplots(figsize=(12, 3))
-        plot_decoding_error_vs_position(
-            true_tp[region][epoch1],
-            decoded_tp[region][epoch1],
-            bin_edges=np.linspace(
-                0,
-                2 * total_length_per_trajectory + 1 * place_gap,
-                int(total_length_per_trajectory / place_bin_size) * 2 + 1,
+            plot_cross_trajectory_epoch_error_profiles(
+                epoch_cross_binned_tables[region],
+                epoch_order=session["run_epochs"],
+                encoding_trajectory=encoding_trajectory,
+                decoding_trajectory=decoding_trajectory,
+                title=(
+                    f"{region.upper()} tp cross-traj error by epoch: "
+                    f"{encoding_trajectory} -> {decoding_trajectory}"
+                ),
+                xlabel="Task progression",
+                error_mode=args.error_mode,
+                summary=args.error_summary,
+                save_path=figure_path,
             )
-            / total_length_per_trajectory,
-            error_mode="signed",
-            summary="median_iqr",
-            min_count=5,
-            ax=ax,
-            color="orange",
-            label="light",
-        )
-        plot_decoding_error_vs_position(
-            true_tp[region][epoch2],
-            decoded_tp[region][epoch2],
-            bin_edges=np.linspace(
-                0,
-                2 * total_length_per_trajectory + 1 * place_gap,
-                int(total_length_per_trajectory / place_bin_size) * 2 + 1,
+            saved_epoch_error_figures.append(figure_path)
+
+        dark_metrics = epoch_metric_tables[region][dark_epoch]
+        dark_cross_metrics = epoch_cross_metric_tables[region][dark_epoch]
+        binned_comparison_tables[region] = {}
+        cross_binned_comparison_tables[region] = {}
+        for light_epoch in light_epochs:
+            light_dark_metric_tables[region][light_epoch] = build_metric_comparison_table(
+                epoch_metric_tables[region][light_epoch],
+                dark_metrics,
+                light_epoch=light_epoch,
+                dark_epoch=dark_epoch,
+                join_columns=["model"],
             )
-            / total_length_per_trajectory,
-            error_mode="signed",
-            summary="median_iqr",
-            min_count=5,
-            ax=ax,
-            color="gray",
-            label="dark",
-        )
+            light_dark_cross_metric_tables[region][light_epoch] = build_metric_comparison_table(
+                epoch_cross_metric_tables[region][light_epoch],
+                dark_cross_metrics,
+                light_epoch=light_epoch,
+                dark_epoch=dark_epoch,
+                join_columns=["encoding_trajectory", "decoding_trajectory"],
+            )
 
-        ax.axvline(1, color="black")
-
-        ax.set_xlim([0, 2])
-        ax.set_ylim(
-            [
-                -1 - task_progression_gap / total_length_per_trajectory / 2,
-                1 + task_progression_gap / total_length_per_trajectory / 2,
-            ]
-        )
-
-        ax.set_xlabel("Task progression")
-        plt.tight_layout()
-        fig.savefig(fig_dir / f"{region}_{epoch1}_{epoch2}_de_by_tp_new.png", dpi=300)
-        plt.close(fig)
-
-    # new function cross traj
-    for region in regions:
-        for encoding_trajectory, decoding_trajectory in encoding_decoding.items():
-            fig, ax = plt.subplots(figsize=(12, 3))
-            plot_decoding_error_vs_position(
-                true_tp_cross_traj[region][epoch1][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                decoded_tp_cross_traj[region][epoch1][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                bin_edges=np.linspace(
-                    0,
-                    1 * total_length_per_trajectory + 0 * place_gap,
-                    int(total_length_per_trajectory / place_bin_size) * 1 + 1,
+            binned_comparison_tables[region][light_epoch] = {}
+            for model_name, xlabel in (
+                (
+                    "place",
+                    "Linear position",
+                ),
+                (
+                    "task_progression",
+                    "Task progression",
+                ),
+            ):
+                light_summary = epoch_binned_tables[region][light_epoch][model_name]
+                dark_summary = epoch_binned_tables[region][dark_epoch][model_name]
+                comparison = build_binned_error_comparison_table(
+                    light_summary,
+                    dark_summary,
+                    light_epoch=light_epoch,
+                    dark_epoch=dark_epoch,
                 )
-                / total_length_per_trajectory,
-                error_mode="signed",
-                summary="median_iqr",
-                min_count=5,
-                ax=ax,
-                color="orange",
-                label="light",
-            )
-            plot_decoding_error_vs_position(
-                true_tp_cross_traj[region][epoch2][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                decoded_tp_cross_traj[region][epoch2][
-                    (encoding_trajectory, decoding_trajectory)
-                ],
-                bin_edges=np.linspace(
-                    0,
-                    1 * total_length_per_trajectory + 0 * place_gap,
-                    int(total_length_per_trajectory / place_bin_size) * 1 + 1,
+                binned_comparison_tables[region][light_epoch][model_name] = comparison
+                figure_path = (
+                    fig_dir / f"{region}_{light_epoch}_{dark_epoch}_{model_name}_de_by_position.png"
                 )
-                / total_length_per_trajectory,
-                error_mode="signed",
-                summary="median_iqr",
-                min_count=5,
-                ax=ax,
-                color="gray",
-                label="dark",
-            )
+                plot_binned_error_comparison(
+                    comparison,
+                    title=f"{region.upper()} {model_name} decoding error",
+                    xlabel=xlabel,
+                    error_mode=args.error_mode,
+                    summary=args.error_summary,
+                    light_epoch=light_epoch,
+                    dark_epoch=dark_epoch,
+                    save_path=figure_path,
+                )
+                saved_light_dark_figures.append(figure_path)
 
-            ax.set_xlim([0, 1])
-            ax.set_ylim([-1, 1])
+            cross_binned_comparison_tables[region][light_epoch] = {}
+            for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+                key = (encoding_trajectory, decoding_trajectory)
+                light_summary = epoch_cross_binned_tables[region][light_epoch][key]
+                dark_summary = epoch_cross_binned_tables[region][dark_epoch][key]
+                comparison = build_binned_error_comparison_table(
+                    light_summary,
+                    dark_summary,
+                    light_epoch=light_epoch,
+                    dark_epoch=dark_epoch,
+                )
+                cross_binned_comparison_tables[region][light_epoch][key] = comparison
+                figure_path = (
+                    fig_dir
+                    / f"{region}_{light_epoch}_{dark_epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_de.png"
+                )
+                plot_binned_error_comparison(
+                    comparison,
+                    title=(
+                        f"{region.upper()} tp cross-traj error: "
+                        f"{encoding_trajectory} -> {decoding_trajectory}"
+                    ),
+                    xlabel="Task progression",
+                    error_mode=args.error_mode,
+                    summary=args.error_summary,
+                    light_epoch=light_epoch,
+                    dark_epoch=dark_epoch,
+                    save_path=figure_path,
+                )
+                saved_light_dark_figures.append(figure_path)
 
-            ax.set_xlabel("Task progression")
+    saved_npz_paths: list[Path] = []
+    saved_npz_paths.extend(
+        save_within_epoch_tsds(
+            true_place_by_region,
+            decoded_place_by_region,
+            model_name="place",
+            save_dir=save_dir,
+        )
+    )
+    saved_npz_paths.extend(
+        save_within_epoch_tsds(
+            true_tp_by_region,
+            decoded_tp_by_region,
+            model_name="tp",
+            save_dir=save_dir,
+        )
+    )
+    saved_npz_paths.extend(
+        save_cross_trajectory_tsds(
+            true_tp_cross_by_region,
+            decoded_tp_cross_by_region,
+            save_dir=save_dir,
+        )
+    )
 
-            plt.tight_layout()
-            fig.savefig(
-                fig_dir
-                / f"{region}_{epoch1}_{epoch2}_{encoding_trajectory}_{decoding_trajectory}_de_new.png",
-                dpi=300,
-            )
-            plt.close(fig)
+    saved_epoch_metric_tables = save_epoch_metric_tables(
+        epoch_metric_tables,
+        save_dir=save_dir,
+        suffix="decoding_summary",
+    )
+    saved_epoch_cross_metric_tables = save_epoch_metric_tables(
+        epoch_cross_metric_tables,
+        save_dir=save_dir,
+        suffix="cross_trajectory_decoding_summary",
+    )
+    saved_epoch_binned_tables: list[Path] = []
+    for region, tables_by_epoch in epoch_binned_tables.items():
+        for epoch, tables_by_model in tables_by_epoch.items():
+            for model_name, table in tables_by_model.items():
+                path = save_dir / f"{region}_{epoch}_{model_name}_decoding_error_by_position.parquet"
+                table.to_parquet(path)
+                saved_epoch_binned_tables.append(path)
+    for region, tables_by_epoch in epoch_cross_binned_tables.items():
+        for epoch, tables_by_pair in tables_by_epoch.items():
+            for (encoding_trajectory, decoding_trajectory), table in tables_by_pair.items():
+                path = (
+                    save_dir
+                    / f"{region}_{epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_position.parquet"
+                )
+                table.to_parquet(path)
+                saved_epoch_binned_tables.append(path)
+    saved_light_dark_metric_tables = save_comparison_tables(
+        light_dark_metric_tables,
+        save_dir=save_dir,
+        suffix="decoding_comparison",
+    )
+    saved_light_dark_cross_metric_tables = save_comparison_tables(
+        light_dark_cross_metric_tables,
+        save_dir=save_dir,
+        suffix="cross_trajectory_decoding_comparison",
+    )
+
+    saved_binned_tables: list[Path] = []
+    for region, tables_by_light_epoch in binned_comparison_tables.items():
+        for light_epoch, tables_by_model in tables_by_light_epoch.items():
+            for model_name, table in tables_by_model.items():
+                path = (
+                    save_dir
+                    / f"{region}_{light_epoch}_{dark_epoch}_{model_name}_decoding_error_by_position.parquet"
+                )
+                table.to_parquet(path)
+                saved_binned_tables.append(path)
+    for region, tables_by_light_epoch in cross_binned_comparison_tables.items():
+        for light_epoch, tables_by_pair in tables_by_light_epoch.items():
+            for (encoding_trajectory, decoding_trajectory), table in tables_by_pair.items():
+                path = (
+                    save_dir
+                    / f"{region}_{light_epoch}_{dark_epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_position.parquet"
+                )
+                table.to_parquet(path)
+                saved_binned_tables.append(path)
+
+    saved_legacy_pickles: list[Path] = []
+    if args.save_legacy_pickle:
+        saved_legacy_pickles = save_legacy_pickles(
+            true_place_by_region,
+            decoded_place_by_region,
+            true_tp_by_region,
+            decoded_tp_by_region,
+            true_tp_cross_by_region,
+            decoded_tp_cross_by_region,
+            save_dir=save_dir,
+        )
+
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.task_progression.task_progression_decoding",
+        parameters={
+            "animal_name": args.animal_name,
+            "date": args.date,
+            "data_root": args.data_root,
+            "position_offset": args.position_offset,
+            "speed_threshold_cm_s": args.speed_threshold_cm_s,
+            "n_folds": args.n_folds,
+            "bin_size_s": args.bin_size_s,
+            "sliding_window_size_bins": args.sliding_window_size_bins,
+            "cross_traj_fr_threshold_hz": args.cross_traj_fr_threshold_hz,
+            "light_epochs": list(light_epochs),
+            "dark_epoch": dark_epoch,
+            "error_mode": args.error_mode,
+            "error_summary": args.error_summary,
+            "save_legacy_pickle": args.save_legacy_pickle,
+            "random_state": DEFAULT_RANDOM_STATE,
+        },
+        outputs={
+            "sources": session["sources"],
+            "run_epochs": session["run_epochs"],
+            "min_lap_counts": min_lap_counts,
+            "saved_npz_paths": saved_npz_paths,
+            "saved_epoch_metric_tables": saved_epoch_metric_tables,
+            "saved_epoch_cross_metric_tables": saved_epoch_cross_metric_tables,
+            "saved_epoch_binned_tables": saved_epoch_binned_tables,
+            "saved_light_dark_metric_tables": saved_light_dark_metric_tables,
+            "saved_light_dark_cross_metric_tables": saved_light_dark_cross_metric_tables,
+            "saved_binned_tables": saved_binned_tables,
+            "saved_epoch_error_figures": saved_epoch_error_figures,
+            "saved_light_dark_figures": saved_light_dark_figures,
+            "saved_legacy_pickles": saved_legacy_pickles,
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-"""Compare task-progression tuning similarity between one light and one dark epoch.
+"""Compare same-turn task-progression tuning similarity across trajectories.
 
 This script loads one session's spike trains, per-epoch position timestamps,
 XY position samples, and trajectory intervals; rebuilds movement intervals and
 trajectory-specific task-progression coordinates; computes within-epoch tuning
-curve similarity for the left-turn and right-turn trajectory pairs; and plots
-light-vs-dark scatter comparisons for left, right, and pooled similarity.
+curve similarity for the same-turn trajectory pairs; and then compares those
+similarity scores across one light epoch and one dark epoch for left, right,
+and pooled similarity.
 
 The similarity metric is configurable at the command line and can be one of:
 
@@ -15,7 +16,12 @@ The similarity metric is configurable at the command line and can be one of:
 - `shape_overlap`
 
 Outputs are written under the analysis directory in metric-specific parquet
-tables and scatter plots. Run metadata is also recorded under
+tables and scatter plots. The saved tables are per-unit summary outputs rather
+than time series, so parquet is the preferred format here: rows are units,
+columns hold summary values such as within-epoch similarity or light-vs-dark
+comparison scores. In this repository, pynapple-backed `.npz` outputs are a
+better fit for time-domain artifacts such as timestamps, intervals, spikes, or
+continuous time series. Run metadata is also recorded under
 `analysis_path / "v1ca1_log"`.
 """
 
@@ -299,7 +305,12 @@ def save_similarity_tables(
     dark_epoch: str,
     similarity_metric: str,
 ) -> list[Path]:
-    """Write metric-specific similarity parquet outputs and return their paths."""
+    """Write metric-specific per-unit similarity tables as parquet files.
+
+    These outputs are indexed by unit and store summary columns, not time-based
+    signals, so parquet is more appropriate than pynapple for this artifact
+    type.
+    """
     saved_paths: list[Path] = []
     for region, region_outputs in similarity_outputs.items():
         for key, table in region_outputs.items():

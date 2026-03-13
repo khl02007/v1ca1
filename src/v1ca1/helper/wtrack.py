@@ -10,8 +10,11 @@ around two lower-level concepts:
 - direction: `from_center` or `to_center`
 
 Trajectory names such as `center_to_left` and `right_to_center` can be mapped
-onto those two concepts with dedicated helpers, which lets downstream code
-represent both:
+onto those two concepts with dedicated helpers. For example,
+`center_to_left -> (branch_side="left", direction="from_center")` and
+`left_to_center -> (branch_side="left", direction="to_center")`.
+
+This lets downstream code represent both:
 
 - natural trajectory-direction linearization
 - branch-only linearization with a caller-chosen direction
@@ -178,6 +181,18 @@ def get_wtrack_branch_graph(
 
     This is the lower-level graph helper used by analyses that want to control
     branch choice and linearization direction independently.
+
+    Parameters
+    ----------
+    animal_name : str
+        Animal identifier with registered W-track geometry, for example `L14`.
+    branch_side : str
+        Which side branch to use: `left` or `right`.
+    direction : str
+        Which way to traverse that branch: `from_center` or `to_center`.
+        For example, the natural `center_to_left` trajectory uses
+        `branch_side="left"` with `direction="from_center"`, while
+        `left_to_center` uses `branch_side="left"` with `direction="to_center"`.
     """
     import track_linearization as tl
 
