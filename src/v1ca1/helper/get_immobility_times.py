@@ -1,515 +1,477 @@
 from __future__ import annotations
 
-from numpy.typing import NDArray
-from typing import Tuple, Union
-from pathlib import Path
-import pandas as pd
-import kyutils
-import pickle
-import scipy.signal
-import scipy.stats
-import numpy as np
-import position_tools as pt
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
+"""Compute movement and immobility intervals for one session.
+
+This script loads per-epoch position arrays and position timestamps from the
+analysis folder, computes speed for each epoch, uses pynapple thresholding to
+define movement periods, and defines immobility as the complement of movement
+within the full epoch interval.
+
+By default it writes both legacy root-level pickle artifacts (`run_times.pkl`
+and `immobility_times.pkl`) and matching root-level pynapple `IntervalSet`
+files (`run_times.npz` and `immobility_times.npz`). The pynapple files store
+the full epoch label as metadata on each interval row. The script prefers
+`timestamps_position.npz` when available and readable, and otherwise falls back
+to `timestamps_position.pkl`.
+"""
 
 import argparse
+import pickle
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-animal_name = "L14"
-date = "20240611"
-analysis_path = Path("/stelmo/kyu/analysis") / animal_name / date
+import numpy as np
+import pandas as pd
+import position_tools as pt
 
-num_sleep_epochs = 5
-num_run_epochs = 4
+from v1ca1.helper.run_logging import write_run_log
 
-nwb_file_base_path = Path("/stelmo/nwb/raw")
-
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
-)
-sleep_epoch_list = [epoch for epoch in epoch_list if epoch not in run_epoch_list]
-
-regions = ["v1", "ca1"]
-
-position_offset = 10
-
-trajectory_types = [
-    "center_to_left",
-    "center_to_right",
-    "left_to_center",
-    "right_to_center",
-]
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
-
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position_dict = pickle.load(f)
-
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
-
-with open(analysis_path / "position.pkl", "rb") as f:
-    position_dict = pickle.load(f)
-
-with open(analysis_path / "trajectory_times.pkl", "rb") as f:
-    trajectory_times = pickle.load(f)
-
-position_offset = 10
-
-time_bin_size = 2e-3
-sampling_rate = int(1 / time_bin_size)
+if TYPE_CHECKING:
+    import pynapple as nap
 
 
-def find_joint_threshold_intervals(
-    t: NDArray[np.generic],
-    x2: NDArray[np.floating],
-    thr2: float,
-    min_duration: float | None = None,
-) -> NDArray[np.int64]:
-    """
-    Identify contiguous index intervals where both time series exceed thresholds.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Monotonic timestamps.
-    x2 : ndarray of shape (n_time,)
-        Second time series.
-    thr2 : float
-        Threshold for x2.
-    min_duration : float or None
-        Minimum interval duration in same units as t. If None, no filtering.
-
-    Returns
-    -------
-    intervals : ndarray of shape (n_intervals, 2)
-        Each row = [start_idx, end_idx) in index coordinates.
-    """
-    if t.shape != x2.shape:
-        raise ValueError("Shapes of t, x2 must match.")
-
-    mask = x2 < thr2
-
-    if not np.any(mask):
-        return np.empty((0, 2), dtype=np.int64)
-
-    mask_int = mask.astype(np.int8)
-    diff = np.diff(mask_int)
-
-    starts = np.where(diff == 1)[0] + 1
-    ends = np.where(diff == -1)[0] + 1
-
-    if mask[0]:
-        starts = np.concatenate(([0], starts))
-
-    if mask[-1]:
-        ends = np.concatenate((ends, [len(mask)]))
-
-    intervals = np.column_stack((starts, ends))
-
-    if min_duration is not None:
-        durations = t[intervals[:, 1] - 1] - t[intervals[:, 0]]
-        intervals = intervals[durations >= min_duration]
-
-    return intervals.astype(np.int64)
+DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
+DEFAULT_POSITION_OFFSET = 10
+DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
+DEFAULT_SPEED_SIGMA_S = 0.1
 
 
-def find_joint_threshold_intervals_greater(
-    t: NDArray[np.generic],
-    x2: NDArray[np.floating],
-    thr2: float,
-    min_duration: float | None = None,
-) -> NDArray[np.int64]:
-    """
-    Identify contiguous index intervals where both time series exceed thresholds.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Monotonic timestamps.
-    x2 : ndarray of shape (n_time,)
-        Second time series.
-    thr2 : float
-        Threshold for x2.
-    min_duration : float or None
-        Minimum interval duration in same units as t. If None, no filtering.
-
-    Returns
-    -------
-    intervals : ndarray of shape (n_intervals, 2)
-        Each row = [start_idx, end_idx) in index coordinates.
-    """
-    if t.shape != x2.shape:
-        raise ValueError("Shapes of t, x2 must match.")
-
-    mask = x2 > thr2
-
-    if not np.any(mask):
-        return np.empty((0, 2), dtype=np.int64)
-
-    mask_int = mask.astype(np.int8)
-    diff = np.diff(mask_int)
-
-    starts = np.where(diff == 1)[0] + 1
-    ends = np.where(diff == -1)[0] + 1
-
-    if mask[0]:
-        starts = np.concatenate(([0], starts))
-
-    if mask[-1]:
-        ends = np.concatenate((ends, [len(mask)]))
-
-    intervals = np.column_stack((starts, ends))
-
-    if min_duration is not None:
-        durations = t[intervals[:, 1] - 1] - t[intervals[:, 0]]
-        intervals = intervals[durations >= min_duration]
-
-    return intervals.astype(np.int64)
+def get_analysis_path(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+) -> Path:
+    """Return the analysis directory for one animal/date session."""
+    return data_root / animal_name / date
 
 
-def intervals_to_times(
-    t: NDArray[np.generic],
-    intervals: NDArray[np.int64],
-) -> NDArray[np.generic]:
-    """
-    Convert index intervals to timestamp intervals.
+def _extract_epoch_tags_from_position_group(position_group: "nap.TsGroup") -> list[str]:
+    """Extract saved epoch labels from a pynapple TsGroup."""
+    try:
+        epoch_info = position_group["epoch"]
+    except Exception:
+        epoch_info = None
 
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Timestamps corresponding to the time axis.
-    intervals : ndarray of shape (n_intervals, 2)
-        Index intervals [start_idx, end_idx), as returned by
-        `find_joint_threshold_intervals`.
+    if epoch_info is None:
+        raise ValueError(
+            "timestamps_position.npz does not contain the saved epoch labels needed "
+            "to align timestamps with position.pkl."
+        )
 
-    Returns
-    -------
-    time_intervals : ndarray of shape (n_intervals, 2)
-        Each row is [start_time, end_time], where:
-        - start_time = t[start_idx]
-        - end_time   = t[end_idx - 1]
-    """
-    if intervals.size == 0:
-        return np.empty((0, 2), dtype=t.dtype)
+    epoch_array = np.asarray(epoch_info)
+    if epoch_array.size == 0:
+        raise ValueError("timestamps_position.npz does not contain any saved epoch labels.")
 
-    starts = t[intervals[:, 0]]
-    ends = t[intervals[:, 1] - 1]  # end index is exclusive
-    time_intervals = np.column_stack((starts, ends))
-    return time_intervals
+    return [str(epoch) for epoch in epoch_array.tolist()]
 
 
-def build_mask_from_intervals(
-    n_time: int,
-    intervals: NDArray[np.int64],
-) -> NDArray[np.bool_]:
-    """
-    Build a Boolean mask of length `n_time` that is True inside given intervals.
+def load_position_timestamps(
+    analysis_path: Path,
+) -> tuple[list[str], dict[str, np.ndarray], str]:
+    """Load per-epoch position timestamps, preferring pynapple outputs."""
+    position_npz_path = analysis_path / "timestamps_position.npz"
+    npz_error: Exception | None = None
+    if position_npz_path.exists():
+        try:
+            import pynapple as nap
+        except ModuleNotFoundError:
+            pass
+        else:
+            try:
+                position_group = nap.load_file(position_npz_path)
+                epoch_tags = _extract_epoch_tags_from_position_group(position_group)
+                if len(epoch_tags) != len(position_group):
+                    raise ValueError(
+                        "Mismatch between epoch labels and time series count in "
+                        f"{position_npz_path}."
+                    )
+                timestamps_position = {
+                    epoch: np.asarray(position_group[index].t, dtype=float)
+                    for index, epoch in enumerate(epoch_tags)
+                }
+                return epoch_tags, timestamps_position, "pynapple"
+            except Exception as exc:
+                npz_error = exc
 
-    Parameters
-    ----------
-    n_time : int
-        Length of the time axis.
-    intervals : ndarray of shape (n_intervals, 2)
-        Index intervals [start_idx, end_idx).
+    position_pickle_path = analysis_path / "timestamps_position.pkl"
+    if not position_pickle_path.exists():
+        if npz_error is not None:
+            raise ValueError(
+                f"Failed to load {position_npz_path} and no pickle fallback was found."
+            ) from npz_error
+        raise FileNotFoundError(
+            f"Could not find timestamps_position.npz or timestamps_position.pkl under {analysis_path}."
+        )
 
-    Returns
-    -------
-    mask : ndarray of shape (n_time,)
-        Boolean mask with True inside intervals and False outside.
-    """
-    mask = np.zeros(n_time, dtype=bool)
-    for start, end in intervals:
-        mask[start:end] = True
-    return mask
+    if npz_error is not None:
+        print(
+            "Falling back to timestamps_position.pkl because timestamps_position.npz "
+            f"could not be loaded: {npz_error}"
+        )
 
+    with open(position_pickle_path, "rb") as f:
+        timestamps_position = pickle.load(f)
 
-def plot_time_series_with_intervals(
-    t: NDArray[np.generic],
-    x1: NDArray[np.floating],
-    x2: NDArray[np.floating],
-    thr1: float,
-    thr2: float,
-    min_duration: float | None = None,
-    figsize: Tuple[float, float] = (10.0, 5.0),
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot two time series, thresholds, and highlight joint-exceedance intervals.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Timestamps.
-    x1 : ndarray of shape (n_time,)
-        First time series.
-    x2 : ndarray of shape (n_time,)
-        Second time series.
-    thr1 : float
-        Threshold for `x1`.
-    thr2 : float
-        Threshold for `x2`.
-    min_duration : float or None, optional
-        Minimum duration of intervals to highlight (same units as `t`).
-        If None, all joint-exceedance intervals are highlighted.
-    figsize : tuple of float, optional
-        Size of the figure (width, height).
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        Figure object.
-    ax : matplotlib.axes.Axes
-        Axes with the plot.
-    """
-    # Get filtered intervals (duration constraint applied here)
-    intervals = find_joint_threshold_intervals(t, x1, x2, thr1, thr2, min_duration)
-
-    # Build a mask that is True only on the kept intervals
-    mask = build_mask_from_intervals(t.shape[0], intervals)
-
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Plot time series
-    ax.plot(t, x1, label="x1", linewidth=1.5)
-    ax.plot(t, x2, label="x2", linewidth=1.5)
-
-    # Plot thresholds
-    ax.axhline(thr1, linestyle="--", linewidth=1.0, label=f"thr1 = {thr1}")
-    ax.axhline(thr2, linestyle="--", linewidth=1.0, label=f"thr2 = {thr2}")
-
-    # Highlight only the intervals that satisfy the duration constraint
-    ymin, ymax = ax.get_ylim()
-    ax.fill_between(t, ymin, ymax, where=mask, alpha=0.15)
-
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Value")
-    ax.set_title(
-        "Time series with joint threshold-exceedance intervals "
-        f"(min_duration={min_duration})"
+    epoch_tags = [str(epoch) for epoch in timestamps_position.keys()]
+    return (
+        epoch_tags,
+        {
+            str(epoch): np.asarray(timestamps, dtype=float)
+            for epoch, timestamps in timestamps_position.items()
+        },
+        "pickle",
     )
-    ax.legend(loc="best")
-    ax.grid(True, linestyle=":")
-
-    fig.tight_layout()
-    return fig, ax
 
 
-def intervals_to_dataframe(
-    t: NDArray[np.generic], intervals: NDArray[np.int64]
-) -> pd.DataFrame:
-    """
-    Convert index intervals to a pandas DataFrame.
+def load_position_data(
+    analysis_path: Path,
+    epoch_tags: list[str],
+) -> dict[str, np.ndarray]:
+    """Load per-epoch position samples aligned to the saved epoch labels."""
+    position_path = analysis_path / "position.pkl"
+    if not position_path.exists():
+        raise FileNotFoundError(f"Position file not found: {position_path}")
 
-    Parameters
-    ----------
-    t : ndarray (n_time,)
-        Timestamps.
-    intervals : ndarray (n_intervals, 2)
-        Index intervals [start_idx, end_idx).
+    with open(position_path, "rb") as f:
+        position_dict = pickle.load(f)
 
-    Returns
-    -------
-    df : pandas.DataFrame
-        Columns:
-        - start_time
-        - end_time
-        - duration
-    """
+    normalized_position_dict = {
+        str(epoch): value for epoch, value in position_dict.items()
+    }
+    position_keys = set(normalized_position_dict.keys())
+    missing_epochs = [epoch for epoch in epoch_tags if epoch not in position_keys]
+    extra_epochs = sorted(position_keys - set(epoch_tags))
+    if missing_epochs or extra_epochs:
+        raise ValueError(
+            "Position epochs do not match saved position timestamp epochs. "
+            f"Missing position epochs: {missing_epochs!r}; extra position epochs: {extra_epochs!r}"
+        )
 
-    if intervals.size == 0:
-        return pd.DataFrame(columns=["start_time", "end_time", "duration"])
+    return {
+        epoch: coerce_position_array(normalized_position_dict[epoch])
+        for epoch in epoch_tags
+    }
 
-    starts = t[intervals[:, 0]]
-    ends = t[intervals[:, 1] - 1]
-    durations = ends - starts
 
+def coerce_position_array(position: Any) -> np.ndarray:
+    """Coerce a position-like object to a `(n_time, 2)` NumPy array."""
+    position_array = np.asarray(position)
+    if position_array.ndim != 2:
+        raise ValueError(
+            f"Expected a 2D position array, got shape {position_array.shape}."
+        )
+    if position_array.shape[1] >= 2:
+        return position_array[:, :2]
+    if position_array.shape[0] >= 2:
+        return position_array[:2, :].T
+    raise ValueError(
+        f"Could not interpret position array of shape {position_array.shape} as XY samples."
+    )
+
+
+def get_position_sampling_rate(timestamps_position: np.ndarray) -> float:
+    """Return the position sampling rate inferred from epoch timestamps."""
+    if timestamps_position.ndim != 1 or timestamps_position.size < 2:
+        raise ValueError("Position timestamps must be a 1D array with at least two samples.")
+    duration = float(timestamps_position[-1] - timestamps_position[0])
+    if duration <= 0:
+        raise ValueError("Position timestamps must span a positive duration.")
+    return (len(timestamps_position) - 1) / duration
+
+
+def build_speed_tsd(
+    position: np.ndarray,
+    timestamps_position: np.ndarray,
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+    speed_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
+):
+    """Compute a pynapple Tsd of speed for one epoch."""
+    import pynapple as nap
+
+    if position_offset < 0:
+        raise ValueError("--position-offset must be non-negative.")
+    if position.shape[0] <= position_offset or timestamps_position.size <= position_offset:
+        raise ValueError(
+            "Position offset removes all samples for one epoch. "
+            f"position samples: {position.shape[0]}, timestamp samples: {timestamps_position.size}, "
+            f"position_offset: {position_offset}"
+        )
+    if position.shape[0] != timestamps_position.size:
+        raise ValueError(
+            "Position samples and position timestamps must have the same length. "
+            f"Got {position.shape[0]} samples and {timestamps_position.size} timestamps."
+        )
+
+    epoch_position = position[position_offset:]
+    epoch_timestamps = np.asarray(timestamps_position[position_offset:], dtype=float)
+    sampling_rate = get_position_sampling_rate(epoch_timestamps)
+    speed = np.asarray(
+        pt.get_speed(
+            position=epoch_position,
+            time=epoch_timestamps,
+            sampling_frequency=sampling_rate,
+            sigma=speed_sigma_s,
+        ),
+        dtype=float,
+    )
+
+    if speed.shape[0] != epoch_timestamps.shape[0]:
+        raise ValueError(
+            "Speed computation returned a different number of samples than the "
+            "trimmed position timestamps."
+        )
+
+    return nap.Tsd(t=epoch_timestamps, d=speed, time_units="s")
+
+
+def get_epoch_interval(speed_tsd: "nap.Tsd") -> "nap.IntervalSet":
+    """Return the full epoch interval covered by one speed Tsd."""
+    import pynapple as nap
+
+    return nap.IntervalSet(
+        start=float(speed_tsd.t[0]),
+        end=float(speed_tsd.t[-1]),
+        time_units="s",
+    )
+
+
+def compute_movement_and_immobility_intervals(
+    speed_tsd: "nap.Tsd",
+    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
+) -> tuple["nap.IntervalSet", "nap.IntervalSet"]:
+    """Return movement and immobility IntervalSets for one epoch."""
+    if speed_threshold_cm_s < 0:
+        raise ValueError("--speed-threshold-cm-s must be non-negative.")
+
+    epoch_interval = get_epoch_interval(speed_tsd)
+    movement_ep = speed_tsd.threshold(speed_threshold_cm_s, method="above").time_support
+    movement_ep = movement_ep.intersect(epoch_interval)
+    immobility_ep = epoch_interval.set_diff(movement_ep)
+    return movement_ep, immobility_ep
+
+
+def intervalset_to_dataframe(intervals: "nap.IntervalSet") -> pd.DataFrame:
+    """Convert a pynapple IntervalSet to the legacy dataframe layout."""
+    start = np.asarray(intervals.start, dtype=float)
+    end = np.asarray(intervals.end, dtype=float)
     return pd.DataFrame(
         {
-            "start_time": starts,
-            "end_time": ends,
-            "duration": durations,
+            "start_time": start,
+            "end_time": end,
+            "duration": end - start,
         }
     )
 
 
-def merge_close_intervals(
-    df: pd.DataFrame,
-    max_gap: Union[float, np.timedelta64, pd.Timedelta],
-) -> pd.DataFrame:
-    """
-    Merge consecutive intervals if the gap between them is less than or equal
-    to a given threshold.
+def save_legacy_interval_pickle_output(
+    analysis_path: Path,
+    state_name: str,
+    intervals_by_epoch: dict[str, "nap.IntervalSet"],
+) -> Path:
+    """Write one root-level pickle mapping each epoch to its legacy dataframe."""
+    output_path = analysis_path / f"{state_name}.pkl"
+    serializable = {
+        epoch: intervalset_to_dataframe(intervals)
+        for epoch, intervals in intervals_by_epoch.items()
+    }
+    with open(output_path, "wb") as f:
+        pickle.dump(serializable, f)
+    return output_path
 
-    Intervals are assumed to be half-open [start_time, end_time], and the gap
-    between interval i and i+1 is defined as:
 
-        gap_i = start_time_{i+1} - end_time_i
+def save_pynapple_interval_output(
+    analysis_path: Path,
+    state_name: str,
+    intervals_by_epoch: dict[str, "nap.IntervalSet"],
+) -> Path:
+    """Write one root-level IntervalSet with epoch metadata for one state."""
+    import pynapple as nap
 
-    Consecutive intervals with gap_i <= max_gap are merged into a single
-    interval spanning from the first start_time to the last end_time.
+    starts: list[np.ndarray] = []
+    ends: list[np.ndarray] = []
+    epochs: list[str] = []
 
-    Parameters
-    ----------
-    df : pandas.DataFrame, shape (n_intervals, 3)
-        DataFrame with columns:
-        - "start_time"
-        - "end_time"
-        - "duration"
-        Typically produced by `intervals_to_dataframe`.
-    max_gap : float or numpy.timedelta64 or pandas.Timedelta
-        Maximum allowed gap between consecutive intervals for them to be
-        merged. Must be compatible with the dtype of `start_time` / `end_time`.
-        For numeric time, use a float; for datetime-like time, use a Timedelta.
+    for epoch, intervals in intervals_by_epoch.items():
+        start_array = np.asarray(intervals.start, dtype=float)
+        end_array = np.asarray(intervals.end, dtype=float)
+        if start_array.size == 0:
+            continue
+        if start_array.shape != end_array.shape:
+            raise ValueError(
+                f"Mismatched start/end interval arrays for {state_name!r} in epoch {epoch!r}."
+            )
 
-    Returns
-    -------
-    merged_df : pandas.DataFrame, shape (n_merged_intervals, 3)
-        DataFrame with merged intervals, with columns:
-        - "start_time"
-        - "end_time"
-        - "duration"
-    """
-    if df.empty:
-        return df.copy()
+        starts.append(start_array)
+        ends.append(end_array)
+        epochs.extend([str(epoch)] * start_array.shape[0])
 
-    # Ensure sorted by start_time
-    df_sorted = df.sort_values("start_time").reset_index(drop=True)
+    if starts:
+        all_starts = np.concatenate(starts).astype(float, copy=False)
+        all_ends = np.concatenate(ends).astype(float, copy=False)
+    else:
+        all_starts = np.array([], dtype=float)
+        all_ends = np.array([], dtype=float)
 
-    start_vals = df_sorted["start_time"].to_numpy()
-    end_vals = df_sorted["end_time"].to_numpy()
+    interval_set = nap.IntervalSet(start=all_starts, end=all_ends, time_units="s")
+    interval_set.set_info(epoch=epochs)
 
-    n_intervals = len(df_sorted)
-    if n_intervals == 1:
-        # Nothing to merge; just recompute duration to be safe
-        out = df_sorted[["start_time", "end_time"]].copy()
-        out["duration"] = out["end_time"] - out["start_time"]
-        return out
+    output_path = analysis_path / f"{state_name}.npz"
+    interval_set.save(output_path)
+    return output_path
 
-    # Compute gaps between consecutive intervals: start_{i+1} - end_i
-    gaps = start_vals[1:] - end_vals[:-1]
 
-    # Start a new group where gap > max_gap; keep same group where gap <= max_gap
-    new_group = np.empty(n_intervals, dtype=bool)
-    new_group[0] = True
-    new_group[1:] = gaps > max_gap
+def get_immobility_times(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
+    speed_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
+    output_format: str = "both",
+) -> None:
+    """Compute and save movement and immobility intervals for one session."""
+    analysis_path = get_analysis_path(
+        animal_name=animal_name,
+        date=date,
+        data_root=data_root,
+    )
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
-    group_ids = np.cumsum(new_group.astype(int)) - 1  # 0-based group IDs
+    epoch_tags, timestamps_position, timestamp_source = load_position_timestamps(analysis_path)
+    position_dict = load_position_data(analysis_path, epoch_tags)
 
-    df_sorted = df_sorted.assign(_group=group_ids)
+    print(f"Processing {animal_name} {date}.")
 
-    merged = (
-        df_sorted.groupby("_group", sort=False)
-        .agg(
-            start_time=("start_time", "min"),
-            end_time=("end_time", "max"),
+    run_intervals: dict[str, "nap.IntervalSet"] = {}
+    immobility_intervals: dict[str, "nap.IntervalSet"] = {}
+    epoch_summaries: dict[str, dict[str, float]] = {}
+
+    for epoch in epoch_tags:
+        speed_tsd = build_speed_tsd(
+            position=position_dict[epoch],
+            timestamps_position=timestamps_position[epoch],
+            position_offset=position_offset,
+            speed_sigma_s=speed_sigma_s,
         )
-        .reset_index(drop=True)
+        movement_ep, immobility_ep = compute_movement_and_immobility_intervals(
+            speed_tsd=speed_tsd,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+        )
+
+        run_intervals[epoch] = movement_ep
+        immobility_intervals[epoch] = immobility_ep
+        epoch_summaries[epoch] = {
+            "speed_sample_count": float(len(speed_tsd.t)),
+            "movement_interval_count": float(len(movement_ep)),
+            "movement_total_duration_s": float(movement_ep.tot_length()),
+            "immobility_interval_count": float(len(immobility_ep)),
+            "immobility_total_duration_s": float(immobility_ep.tot_length()),
+        }
+
+    outputs: dict[str, Any] = {
+        "timestamps_position_source": timestamp_source,
+        "epochs": epoch_tags,
+        "epoch_summaries": epoch_summaries,
+    }
+    if output_format in {"pickle", "both"}:
+        outputs["run_times_pickle_path"] = save_legacy_interval_pickle_output(
+            analysis_path=analysis_path,
+            state_name="run_times",
+            intervals_by_epoch=run_intervals,
+        )
+        outputs["immobility_times_pickle_path"] = save_legacy_interval_pickle_output(
+            analysis_path=analysis_path,
+            state_name="immobility_times",
+            intervals_by_epoch=immobility_intervals,
+        )
+    if output_format in {"pynapple", "both"}:
+        outputs["run_times_pynapple_path"] = save_pynapple_interval_output(
+            analysis_path=analysis_path,
+            state_name="run_times",
+            intervals_by_epoch=run_intervals,
+        )
+        outputs["immobility_times_pynapple_path"] = save_pynapple_interval_output(
+            analysis_path=analysis_path,
+            state_name="immobility_times",
+            intervals_by_epoch=immobility_intervals,
+        )
+
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.helper.get_immobility_times",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "data_root": data_root,
+            "position_offset": position_offset,
+            "speed_threshold_cm_s": speed_threshold_cm_s,
+            "speed_sigma_s": speed_sigma_s,
+            "output_format": output_format,
+        },
+        outputs=outputs,
     )
-
-    merged["duration"] = merged["end_time"] - merged["start_time"]
-
-    return merged
+    print(f"Saved run metadata to {log_path}")
 
 
-def get_immobility_times(epoch, speed_threshold=4.0, min_duration=0.1, max_gap=0.1):
-    save_dir = analysis_path / "immobility_times"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # get speed
-    position = position_dict[epoch][position_offset:]
-    t_position = timestamps_position_dict[epoch][position_offset:]
-    position_sampling_rate = len(position) / (t_position[-1] - t_position[0])
-
-    speed = pt.get_speed(
-        position,
-        time=t_position,
-        sampling_frequency=position_sampling_rate,
-        sigma=0.1,
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the movement-state export CLI."""
+    parser = argparse.ArgumentParser(description="Save run and immobility intervals")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
     )
-
-    # interpolate to have same timestamps
-    start_time = t_position[0]
-    end_time = t_position[-1]
-
-    n_samples = int(np.ceil((end_time - start_time) * sampling_rate)) + 1
-
-    time = np.linspace(start_time, end_time, n_samples)
-
-    f_speed = scipy.interpolate.interp1d(
-        t_position, speed, axis=0, bounds_error=False, kind="linear"
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
     )
-
-    speed_interp = f_speed(time)
-
-    # detect threshold crossing
-    intervals = find_joint_threshold_intervals(
-        t=time,
-        x2=speed_interp,
-        thr2=speed_threshold,
-        min_duration=min_duration,
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
     )
-
-    df = intervals_to_dataframe(time, intervals)
-    df = merge_close_intervals(df, max_gap=max_gap)
-
-    with open(save_dir / f"{epoch}.pkl", "wb") as f:
-        pickle.dump(df, f)
-
-    return df
-
-
-def get_run_times(epoch, speed_threshold=4.0, min_duration=0.1, max_gap=0.1):
-    save_dir = analysis_path / "run_times"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # get speed
-    position = position_dict[epoch][position_offset:]
-    t_position = timestamps_position_dict[epoch][position_offset:]
-    position_sampling_rate = len(position) / (t_position[-1] - t_position[0])
-
-    speed = pt.get_speed(
-        position,
-        time=t_position,
-        sampling_frequency=position_sampling_rate,
-        sigma=0.1,
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Number of initial position samples to discard per epoch. Default: {DEFAULT_POSITION_OFFSET}",
     )
-
-    # interpolate to have same timestamps
-    start_time = t_position[0]
-    end_time = t_position[-1]
-
-    n_samples = int(np.ceil((end_time - start_time) * sampling_rate)) + 1
-
-    time = np.linspace(start_time, end_time, n_samples)
-
-    f_speed = scipy.interpolate.interp1d(
-        t_position, speed, axis=0, bounds_error=False, kind="linear"
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=f"Speed threshold in cm/s used to define movement. Default: {DEFAULT_SPEED_THRESHOLD_CM_S}",
     )
-
-    speed_interp = f_speed(time)
-
-    # detect threshold crossing
-    intervals = find_joint_threshold_intervals_greater(
-        t=time,
-        x2=speed_interp,
-        thr2=speed_threshold,
-        min_duration=min_duration,
+    parser.add_argument(
+        "--speed-sigma-s",
+        type=float,
+        default=DEFAULT_SPEED_SIGMA_S,
+        help=f"Smoothing sigma passed to position_tools.get_speed. Default: {DEFAULT_SPEED_SIGMA_S}",
     )
+    parser.add_argument(
+        "--output-format",
+        choices=["both", "pickle", "pynapple"],
+        default="both",
+        help="Output format for saved intervals. Default: both",
+    )
+    return parser.parse_args()
 
-    df = intervals_to_dataframe(time, intervals)
-    df = merge_close_intervals(df, max_gap=max_gap)
 
-    with open(save_dir / f"{epoch}.pkl", "wb") as f:
-        pickle.dump(df, f)
-
-    return df
-
-
-def main():
-    # args = parse_arguments()
-    for epoch in epoch_list:
-        get_immobility_times(epoch)
-        get_run_times(epoch)
+def main() -> None:
+    """Run the movement-state export CLI."""
+    args = parse_arguments()
+    get_immobility_times(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        position_offset=args.position_offset,
+        speed_threshold_cm_s=args.speed_threshold_cm_s,
+        speed_sigma_s=args.speed_sigma_s,
+        output_format=args.output_format,
+    )
 
 
 if __name__ == "__main__":

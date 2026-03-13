@@ -4,17 +4,26 @@ from __future__ import annotations
 
 This script reads per-epoch ephys timestamp bounds from the analysis folder,
 loads left/center/right poke events from the NWB file, infers which epochs are
-run epochs from the saved epoch labels, and writes one `trajectory_times.pkl`
-artifact containing poke-to-poke intervals for the four supported trajectory
-types:
+run epochs from the saved epoch labels, and writes poke-to-poke intervals for
+the four supported trajectory types:
 
 - `left_to_center`
 - `center_to_left`
 - `right_to_center`
 - `center_to_right`
 
+By default it writes both a legacy `trajectory_times.pkl` artifact and a single
+`trajectory_times.npz` pynapple `IntervalSet` whose metadata stores the full
+epoch label (for example `02_r1`) and trajectory type for each interval row.
+
 The script prefers the pynapple-backed `timestamps_ephys.npz` export when it is
 available and readable, and otherwise falls back to `timestamps_ephys.pkl`.
+
+It assumes the NWB file has a `processing["behavior"]` module with a
+`behavioral_events` interface containing the event series `Poke Left`,
+`Poke Center`, and `Poke Right`. If any of those fields are missing, the script
+raises a descriptive error listing the missing event and the available event
+series found in the NWB file.
 """
 
 import argparse
@@ -188,13 +197,40 @@ def get_run_epochs(epoch_tags: list[str]) -> list[str]:
     return run_epochs
 
 
+def get_behavioral_events_interface(nwbfile: "pynwb.NWBFile"):
+    """Return the NWB behavioral_events interface with a descriptive error if missing."""
+    processing_module = nwbfile.processing.get("behavior")
+    if processing_module is None:
+        available_modules = sorted(nwbfile.processing.keys())
+        raise ValueError(
+            "NWB file is missing processing['behavior'], which is required to load "
+            "trajectory poke events. "
+            f"Available processing modules: {available_modules!r}"
+        )
+
+    behavioral_events = processing_module.data_interfaces.get("behavioral_events")
+    if behavioral_events is None:
+        available_interfaces = sorted(processing_module.data_interfaces.keys())
+        raise ValueError(
+            "NWB file is missing processing['behavior'].data_interfaces['behavioral_events'], "
+            "which is required to load trajectory poke events. "
+            f"Available behavior interfaces: {available_interfaces!r}"
+        )
+    return behavioral_events
+
+
 def load_poke_times(nwbfile: "pynwb.NWBFile", event_name: str) -> np.ndarray:
     """Return poke-on timestamps for one behavioral event series."""
-    time_series = (
-        nwbfile.processing["behavior"]
-        .data_interfaces["behavioral_events"]
-        .time_series[event_name]
-    )
+    behavioral_events = get_behavioral_events_interface(nwbfile)
+    if event_name not in behavioral_events.time_series:
+        available_event_names = sorted(behavioral_events.time_series.keys())
+        raise ValueError(
+            f"NWB file is missing behavioral event series {event_name!r}, which is "
+            "required by get_trajectory_times.py. "
+            f"Available behavioral event series: {available_event_names!r}"
+        )
+
+    time_series = behavioral_events.time_series[event_name]
     data = np.asarray(time_series.data[:])
     timestamps = np.asarray(time_series.timestamps[:], dtype=float)
     return timestamps[data == 1]
@@ -203,6 +239,60 @@ def load_poke_times(nwbfile: "pynwb.NWBFile", event_name: str) -> np.ndarray:
 def to_interval_array(intervals: list[list[float]]) -> np.ndarray:
     """Convert `[start, stop]` pairs to a NumPy array with shape `(n, 2)`."""
     return np.asarray(intervals, dtype=float).reshape((-1, 2))
+
+
+def save_legacy_trajectory_pickle_output(
+    analysis_path: Path,
+    trajectory_times: dict[str, dict[str, np.ndarray]],
+) -> Path:
+    """Write the legacy nested trajectory pickle used by downstream scripts."""
+    output_path = analysis_path / "trajectory_times.pkl"
+    with open(output_path, "wb") as f:
+        pickle.dump(trajectory_times, f)
+    return output_path
+
+
+def save_pynapple_trajectory_output(
+    analysis_path: Path,
+    trajectory_times: dict[str, dict[str, np.ndarray]],
+) -> Path:
+    """Write one pynapple IntervalSet with epoch and trajectory metadata."""
+    import pynapple as nap
+
+    starts: list[np.ndarray] = []
+    ends: list[np.ndarray] = []
+    epochs: list[str] = []
+    trajectory_types: list[str] = []
+
+    for epoch, trajectory_times_by_type in trajectory_times.items():
+        for trajectory_type, intervals in trajectory_times_by_type.items():
+            interval_array = np.asarray(intervals, dtype=float)
+            if interval_array.size == 0:
+                continue
+            if interval_array.ndim != 2 or interval_array.shape[1] != 2:
+                raise ValueError(
+                    "Expected trajectory intervals with shape (n, 2) for "
+                    f"{epoch!r} / {trajectory_type!r}, got {interval_array.shape}."
+                )
+
+            starts.append(interval_array[:, 0])
+            ends.append(interval_array[:, 1])
+            epochs.extend([str(epoch)] * interval_array.shape[0])
+            trajectory_types.extend([str(trajectory_type)] * interval_array.shape[0])
+
+    if starts:
+        start_array = np.concatenate(starts).astype(float, copy=False)
+        end_array = np.concatenate(ends).astype(float, copy=False)
+    else:
+        start_array = np.array([], dtype=float)
+        end_array = np.array([], dtype=float)
+
+    interval_set = nap.IntervalSet(start=start_array, end=end_array, time_units="s")
+    interval_set.set_info(epoch=epochs, trajectory_type=trajectory_types)
+
+    output_path = analysis_path / "trajectory_times.npz"
+    interval_set.save(output_path)
+    return output_path
 
 
 def get_trajectory_times_for_epoch(
@@ -252,6 +342,7 @@ def get_trajectory_times(
     date: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
+    trajectory_format: str = "both",
 ) -> None:
     """Compute and save poke-defined trajectory intervals for one session."""
     import pynwb
@@ -288,9 +379,22 @@ def get_trajectory_times(
             poke_times_by_well=poke_times_by_well,
         )
 
-    output_path = analysis_path / "trajectory_times.pkl"
-    with open(output_path, "wb") as f:
-        pickle.dump(trajectory_times, f)
+    outputs = {
+        "timestamp_source": timestamp_source,
+        "epoch_tags": epoch_tags,
+        "run_epochs": run_epoch_list,
+        "trajectory_types": list(TRAJECTORY_TYPES.values()),
+    }
+    if trajectory_format in {"pickle", "both"}:
+        outputs["trajectory_times_pickle_path"] = save_legacy_trajectory_pickle_output(
+            analysis_path=analysis_path,
+            trajectory_times=trajectory_times,
+        )
+    if trajectory_format in {"pynapple", "both"}:
+        outputs["trajectory_times_pynapple_path"] = save_pynapple_trajectory_output(
+            analysis_path=analysis_path,
+            trajectory_times=trajectory_times,
+        )
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -300,14 +404,9 @@ def get_trajectory_times(
             "date": date,
             "data_root": data_root,
             "nwb_root": nwb_root,
+            "trajectory_format": trajectory_format,
         },
-        outputs={
-            "trajectory_times_pickle_path": output_path,
-            "timestamp_source": timestamp_source,
-            "epoch_tags": epoch_tags,
-            "run_epochs": run_epoch_list,
-            "trajectory_types": list(TRAJECTORY_TYPES.values()),
-        },
+        outputs=outputs,
     )
     print(f"Saved run metadata to {log_path}")
 
@@ -337,6 +436,15 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_NWB_ROOT,
         help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
     )
+    parser.add_argument(
+        "--trajectory-format",
+        choices=["both", "pickle", "pynapple"],
+        default="both",
+        help=(
+            "Output format for trajectory intervals. "
+            "Default: both"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -348,6 +456,7 @@ def main() -> None:
         date=args.date,
         data_root=args.data_root,
         nwb_root=args.nwb_root,
+        trajectory_format=args.trajectory_format,
     )
 
 
