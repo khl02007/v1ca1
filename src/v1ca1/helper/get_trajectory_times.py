@@ -1,171 +1,354 @@
-import numpy as np
-import kyutils
+from __future__ import annotations
+
+"""Build poke-defined trajectory intervals for one session.
+
+This script reads per-epoch ephys timestamp bounds from the analysis folder,
+loads left/center/right poke events from the NWB file, infers which epochs are
+run epochs from the saved epoch labels, and writes one `trajectory_times.pkl`
+artifact containing poke-to-poke intervals for the four supported trajectory
+types:
+
+- `left_to_center`
+- `center_to_left`
+- `right_to_center`
+- `center_to_right`
+
+The script prefers the pynapple-backed `timestamps_ephys.npz` export when it is
+available and readable, and otherwise falls back to `timestamps_ephys.pkl`.
+"""
+
+import argparse
 import pickle
-import pynwb
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-animal_name = "L14"
-date = "20240611"
-data_path = Path("/nimbus/kyu") / animal_name
-analysis_path = data_path / "singleday_sort" / "20240611"
+import numpy as np
 
-num_sleep_epochs = 5
-num_run_epochs = 4
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
-)
+from v1ca1.helper.run_logging import write_run_log
 
-nwb_file_base_path = Path("/stelmo/nwb/raw")
+if TYPE_CHECKING:
+    import pandas as pd
+    import pynapple as nap
+    import pynwb
 
 
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
+DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
+DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position = pickle.load(f)
+POKE_EVENT_NAMES = {
+    "left": "Poke Left",
+    "center": "Poke Center",
+    "right": "Poke Right",
+}
+TRAJECTORY_TYPES = {
+    ("left", "center"): "left_to_center",
+    ("center", "left"): "center_to_left",
+    ("right", "center"): "right_to_center",
+    ("center", "right"): "center_to_right",
+}
 
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
+
+def get_analysis_path(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+) -> Path:
+    """Return the analysis directory for one animal/date session."""
+    return data_root / animal_name / date
 
 
-def get_first_and_last_lick_times(run_epoch, time, din):
-    t_epoch = timestamps_ephys_all_ptp[
-        (timestamps_ephys_all_ptp >= timestamps_ephys[run_epoch][0])
-        & (timestamps_ephys_all_ptp < timestamps_ephys[run_epoch][-1])
-    ]
-    left_lick_times = t_epoch[
-        np.searchsorted(
-            time["data"]["time"], din["data"]["time"][din["data"]["state"] == 1]
+def _extract_interval_dataframe(epoch_intervals: "nap.IntervalSet") -> "pd.DataFrame":
+    """Return a dataframe-like view of a pynapple IntervalSet."""
+    if hasattr(epoch_intervals, "as_dataframe"):
+        interval_df = epoch_intervals.as_dataframe()
+    elif hasattr(epoch_intervals, "_metadata"):
+        interval_df = epoch_intervals._metadata.copy()  # type: ignore[attr-defined]
+    else:
+        raise ValueError(
+            "Could not read timestamps_ephys.npz metadata from the pynapple IntervalSet."
         )
-    ]
+    return interval_df
 
-    first_lick_mask = np.concatenate(([True], np.diff(left_lick_times) > 13))
-    first_lick_ind = np.where(first_lick_mask)[0]
 
-    first_lick_times = left_lick_times[first_lick_mask]
-    last_lick_times = np.concatenate(
-        (left_lick_times[first_lick_ind[1:] - 1], [left_lick_times[-1]])
+def _extract_interval_bounds(epoch_intervals: "nap.IntervalSet") -> np.ndarray:
+    """Extract epoch start/stop bounds from a pynapple IntervalSet."""
+    interval_df = _extract_interval_dataframe(epoch_intervals)
+    if {"start", "end"}.issubset(interval_df.columns):
+        return interval_df.loc[:, ["start", "end"]].to_numpy(dtype=float)
+
+    starts = getattr(epoch_intervals, "start", None)
+    ends = getattr(epoch_intervals, "end", None)
+    if starts is not None and ends is not None:
+        return np.column_stack((np.asarray(starts, dtype=float), np.asarray(ends, dtype=float)))
+
+    values = np.asarray(epoch_intervals, dtype=float)
+    if values.ndim == 2 and values.shape[1] >= 2:
+        return values[:, :2]
+
+    raise ValueError("Could not extract interval bounds from timestamps_ephys.npz.")
+
+
+def _extract_epoch_tags(epoch_intervals: "nap.IntervalSet") -> list[str]:
+    """Extract saved epoch labels from a pynapple IntervalSet."""
+    try:
+        epoch_info = epoch_intervals.get_info("epoch")
+    except Exception:
+        epoch_info = None
+
+    if epoch_info is not None:
+        epoch_array = np.asarray(epoch_info)
+        if epoch_array.size:
+            return [str(epoch) for epoch in epoch_array.tolist()]
+
+    interval_df = _extract_interval_dataframe(epoch_intervals)
+    if "epoch" in interval_df.columns:
+        return [str(epoch) for epoch in interval_df["epoch"].tolist()]
+
+    raise ValueError(
+        "timestamps_ephys.npz does not contain the saved epoch labels needed "
+        "to identify run epochs."
     )
 
-    return np.sort(first_lick_times), np.sort(last_lick_times)
+
+def load_epoch_time_bounds(
+    analysis_path: Path,
+) -> tuple[list[str], dict[str, tuple[float, float]], str]:
+    """Load per-epoch ephys start/stop bounds, preferring pynapple outputs.
+
+    Returns the saved epoch labels, a mapping from epoch label to `(start, stop)`
+    time bounds, and the source used (`"pynapple"` or `"pickle"`).
+    """
+    ephys_npz_path = analysis_path / "timestamps_ephys.npz"
+    npz_error: Exception | None = None
+    if ephys_npz_path.exists():
+        try:
+            import pynapple as nap
+        except ModuleNotFoundError:
+            pass
+        else:
+            try:
+                epoch_intervals = nap.load_file(ephys_npz_path)
+                epoch_tags = _extract_epoch_tags(epoch_intervals)
+                epoch_bounds = _extract_interval_bounds(epoch_intervals)
+                if epoch_bounds.shape[0] != len(epoch_tags):
+                    raise ValueError(
+                        "Mismatch between epoch labels and interval bounds in "
+                        f"{ephys_npz_path}."
+                    )
+                return (
+                    epoch_tags,
+                    {
+                        epoch: (float(bounds[0]), float(bounds[1]))
+                        for epoch, bounds in zip(epoch_tags, epoch_bounds, strict=True)
+                    },
+                    "pynapple",
+                )
+            except Exception as exc:
+                npz_error = exc
+
+    ephys_pickle_path = analysis_path / "timestamps_ephys.pkl"
+    if not ephys_pickle_path.exists():
+        if npz_error is not None:
+            raise ValueError(
+                f"Failed to load {ephys_npz_path} and no pickle fallback was found."
+            ) from npz_error
+        raise FileNotFoundError(
+            "Could not find timestamps_ephys.npz or timestamps_ephys.pkl under "
+            f"{analysis_path}."
+        )
+
+    if npz_error is not None:
+        print(
+            "Falling back to timestamps_ephys.pkl because timestamps_ephys.npz "
+            f"could not be loaded: {npz_error}"
+        )
+
+    with open(ephys_pickle_path, "rb") as f:
+        timestamps_ephys = pickle.load(f)
+
+    epoch_tags = [str(epoch) for epoch in timestamps_ephys.keys()]
+    epoch_bounds: dict[str, tuple[float, float]] = {}
+    for epoch, timestamps in timestamps_ephys.items():
+        timestamps_array = np.asarray(timestamps, dtype=float)
+        if timestamps_array.ndim != 1 or timestamps_array.size == 0:
+            raise ValueError(f"Expected non-empty 1D timestamps for epoch {epoch!r}.")
+        epoch_bounds[str(epoch)] = (float(timestamps_array[0]), float(timestamps_array[-1]))
+
+    return epoch_tags, epoch_bounds, "pickle"
 
 
-def get_trajectory_times():
-    "based on poke times"
-    trajectory_times = {}
+def get_run_epochs(epoch_tags: list[str]) -> list[str]:
+    """Infer run epochs from saved epoch labels using the lab's `r*` convention."""
+    run_epochs = [epoch for epoch in epoch_tags if "r" in epoch.lower()]
+    if not run_epochs:
+        raise ValueError(
+            "Could not infer run epochs from timestamp labels. "
+            f"Available epochs: {epoch_tags!r}"
+        )
+    return run_epochs
 
-    nwb_file_path = nwb_file_base_path / f"{animal_name}{date}.nwb"
-    with pynwb.NWBHDF5IO(path=nwb_file_path, mode="r") as io:
-        nwbf = io.read()
-        poke_left_data = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Left"]
-            .data[:]
-        )
-        poke_left_timestamps = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Left"]
-            .timestamps[:]
-        )
-        poke_right_data = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Right"]
-            .data[:]
-        )
-        poke_right_timestamps = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Right"]
-            .timestamps[:]
-        )
-        poke_center_data = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Center"]
-            .data[:]
-        )
-        poke_center_timestamps = (
-            nwbf.processing["behavior"]
-            .data_interfaces["behavioral_events"]
-            .time_series["Poke Center"]
-            .timestamps[:]
-        )
-        poke_left_times = poke_left_timestamps[poke_left_data == 1]
-        poke_right_times = poke_right_timestamps[poke_right_data == 1]
-        poke_center_times = poke_center_timestamps[poke_center_data == 1]
 
+def load_poke_times(nwbfile: "pynwb.NWBFile", event_name: str) -> np.ndarray:
+    """Return poke-on timestamps for one behavioral event series."""
+    time_series = (
+        nwbfile.processing["behavior"]
+        .data_interfaces["behavioral_events"]
+        .time_series[event_name]
+    )
+    data = np.asarray(time_series.data[:])
+    timestamps = np.asarray(time_series.timestamps[:], dtype=float)
+    return timestamps[data == 1]
+
+
+def to_interval_array(intervals: list[list[float]]) -> np.ndarray:
+    """Convert `[start, stop]` pairs to a NumPy array with shape `(n, 2)`."""
+    return np.asarray(intervals, dtype=float).reshape((-1, 2))
+
+
+def get_trajectory_times_for_epoch(
+    epoch_start: float,
+    epoch_stop: float,
+    poke_times_by_well: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Build poke-to-poke trajectory intervals for one run epoch.
+
+    Pokes are filtered to the epoch bounds, merged into one time-ordered event
+    list, and adjacent poke pairs are converted into the supported trajectory
+    types when they match one of the allowed transitions.
+    """
+    poke_times: list[np.ndarray] = []
+    poke_labels: list[np.ndarray] = []
+    for well_name, well_poke_times in poke_times_by_well.items():
+        epoch_poke_times = well_poke_times[
+            (well_poke_times >= epoch_start) & (well_poke_times < epoch_stop)
+        ]
+        poke_times.append(epoch_poke_times)
+        poke_labels.append(np.full(epoch_poke_times.shape, well_name, dtype=object))
+
+    all_poke_times = np.concatenate(poke_times)
+    all_poke_labels = np.concatenate(poke_labels)
+    poke_order = np.argsort(all_poke_times)
+    all_poke_times = all_poke_times[poke_order]
+    all_poke_labels = all_poke_labels[poke_order]
+
+    trajectory_times = {trajectory_type: [] for trajectory_type in TRAJECTORY_TYPES.values()}
+    for i in range(len(all_poke_times) - 1):
+        transition = (str(all_poke_labels[i]), str(all_poke_labels[i + 1]))
+        trajectory_type = TRAJECTORY_TYPES.get(transition)
+        if trajectory_type is None:
+            continue
+        trajectory_times[trajectory_type].append(
+            [float(all_poke_times[i]), float(all_poke_times[i + 1])]
+        )
+
+    return {
+        trajectory_type: to_interval_array(intervals)
+        for trajectory_type, intervals in trajectory_times.items()
+    }
+
+
+def get_trajectory_times(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
+) -> None:
+    """Compute and save poke-defined trajectory intervals for one session."""
+    import pynwb
+
+    analysis_path = get_analysis_path(
+        animal_name=animal_name,
+        date=date,
+        data_root=data_root,
+    )
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
+    if not nwb_path.exists():
+        raise FileNotFoundError(f"NWB file not found: {nwb_path}")
+
+    epoch_tags, epoch_bounds, timestamp_source = load_epoch_time_bounds(analysis_path)
+    run_epoch_list = get_run_epochs(epoch_tags)
+
+    print(f"Processing {animal_name} {date}.")
+    with pynwb.NWBHDF5IO(path=nwb_path, mode="r") as io:
+        nwbfile = io.read()
+        poke_times_by_well = {
+            well_name: load_poke_times(nwbfile, event_name)
+            for well_name, event_name in POKE_EVENT_NAMES.items()
+        }
+
+    trajectory_times: dict[str, dict[str, np.ndarray]] = {}
     for run_epoch in run_epoch_list:
-        trajectory_times[run_epoch] = {}
-
-        poke_left_times_epoch = poke_left_times[
-            (poke_left_times >= timestamps_ephys[run_epoch][0])
-            & (poke_left_times < timestamps_ephys[run_epoch][-1])
-        ]
-        poke_right_times_epoch = poke_right_times[
-            (poke_right_times >= timestamps_ephys[run_epoch][0])
-            & (poke_right_times < timestamps_ephys[run_epoch][-1])
-        ]
-        poke_center_times_epoch = poke_center_times[
-            (poke_center_times >= timestamps_ephys[run_epoch][0])
-            & (poke_center_times < timestamps_ephys[run_epoch][-1])
-        ]
-
-        poke_times = np.concatenate(
-            (poke_left_times_epoch, poke_center_times_epoch, poke_right_times_epoch)
+        epoch_start, epoch_stop = epoch_bounds[run_epoch]
+        trajectory_times[run_epoch] = get_trajectory_times_for_epoch(
+            epoch_start=epoch_start,
+            epoch_stop=epoch_stop,
+            poke_times_by_well=poke_times_by_well,
         )
 
-        # 0=left, 1=center, 2=right
-        well_type = np.concatenate(
-            (
-                0 * np.ones(poke_left_times_epoch.shape),
-                1 * np.ones(poke_center_times_epoch.shape),
-                2 * np.ones(poke_right_times_epoch.shape),
-            )
-        )
-
-        poke_time_order_idx = np.argsort(poke_times)
-
-        poke_times = poke_times[poke_time_order_idx]
-        well_type = well_type[poke_time_order_idx]
-
-        # trajectory times
-        left_to_center_traj_times = []
-        center_to_left_traj_times = []
-        right_to_center_traj_times = []
-        center_to_right_traj_times = []
-        for i in range(len(poke_times) - 1):
-            if (well_type[i] == 0) and (well_type[i + 1] == 1):
-                left_to_center_traj_times.append([poke_times[i], poke_times[i + 1]])
-            elif (well_type[i] == 1) and (well_type[i + 1] == 0):
-                center_to_left_traj_times.append([poke_times[i], poke_times[i + 1]])
-            elif (well_type[i] == 2) and (well_type[i + 1] == 1):
-                right_to_center_traj_times.append([poke_times[i], poke_times[i + 1]])
-            elif (well_type[i] == 1) and (well_type[i + 1] == 2):
-                center_to_right_traj_times.append([poke_times[i], poke_times[i + 1]])
-
-        trajectory_times[run_epoch]["left_to_center"] = np.asarray(
-            left_to_center_traj_times
-        )
-        trajectory_times[run_epoch]["center_to_left"] = np.asarray(
-            center_to_left_traj_times
-        )
-        trajectory_times[run_epoch]["right_to_center"] = np.asarray(
-            right_to_center_traj_times
-        )
-        trajectory_times[run_epoch]["center_to_right"] = np.asarray(
-            center_to_right_traj_times
-        )
-
-    with open(analysis_path / "trajectory_times.pkl", "wb") as f:
+    output_path = analysis_path / "trajectory_times.pkl"
+    with open(output_path, "wb") as f:
         pickle.dump(trajectory_times, f)
-    return None
+
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.helper.get_trajectory_times",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "data_root": data_root,
+            "nwb_root": nwb_root,
+        },
+        outputs={
+            "trajectory_times_pickle_path": output_path,
+            "timestamp_source": timestamp_source,
+            "epoch_tags": epoch_tags,
+            "run_epochs": run_epoch_list,
+            "trajectory_types": list(TRAJECTORY_TYPES.values()),
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
 
 
-def main():
-    get_trajectory_times()
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the trajectory time export CLI."""
+    parser = argparse.ArgumentParser(description="Save trajectory times")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run the trajectory time export CLI."""
+    args = parse_arguments()
+    get_trajectory_times(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        nwb_root=args.nwb_root,
+    )
 
 
 if __name__ == "__main__":

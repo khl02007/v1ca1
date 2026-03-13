@@ -34,6 +34,7 @@ That style means:
 - Keep path-building logic explicit with small functions like `get_analysis_path(...)` or `get_sorting_path(...)`.
 - Put script-specific configuration close to `main()` when that makes the workflow easier to read.
 - Use CLI flags for dataset identifiers and root paths when practical, especially `--animal-name` and `--date`.
+- Add a short module-level docstring at the top of refactored scripts describing what the script produces and how it does it.
 - Add short docstrings to top-level helper functions.
 
 ## Working Assumptions
@@ -52,7 +53,8 @@ That style means:
   - a human assigns labels in the browser
   - `consolidate_sorting.py` loads the local `sorting-curations` checkout and applies those labels with SpikeInterface
 - Probe-to-region assignment is not universal. `consolidate_sorting.py` defaults to one known layout, but callers should override `--v1-probes` and `--ca1-probes` when a session uses a different implant mapping.
-- Refactored spikesorting scripts now write one JSON run record per execution under `analysis_root / animal_name / date / v1ca1_log/`.
+- Refactored helper and spikesorting scripts now write one new JSON run record each time they are executed under `analysis_root / animal_name / date / v1ca1_log/`.
+- Those run logs record the script name, package version, git state, parameters, and key output paths. `get_timestamps.py` also stores its ephys gap-segmentation summary there.
 
 ## Safe Editing Guidance
 
