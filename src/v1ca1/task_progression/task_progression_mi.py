@@ -9,16 +9,20 @@ mutual information and shuffle-corrected mutual information; computes
 log-likelihood bits-per-spike scores; and plots place-vs-task-progression MI
 for one selected light epoch and one selected dark epoch.
 
-Outputs are written under the analysis directory in pickle artifacts and MI
-comparison figures. Run metadata is also recorded under
+Primary outputs are per-unit parquet summary tables for all run epochs. The
+selected light-vs-dark comparison tables that drive the scatter plots are also
+saved as parquet. Optional legacy pickle outputs preserve the previous nested
+artifact structure for downstream compatibility. Run metadata is recorded under
 `analysis_path / "v1ca1_log"`.
 """
 
 import argparse
 import pickle
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
@@ -36,6 +40,12 @@ from v1ca1.task_progression._session import (
 
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
+DEFAULT_SIGMA_BINS = 1.0
+
+TuningCurvesByRegion = dict[str, dict[str, Any]]
+MetricsByRegion = dict[str, dict[str, pd.DataFrame]]
+BitsBySpikeByRegion = dict[str, dict[str, dict[Any, float]]]
+SummaryTablesByRegion = dict[str, dict[str, pd.DataFrame]]
 
 
 def get_light_and_dark_epochs(
@@ -62,31 +72,44 @@ def get_light_and_dark_epochs(
 
 
 def smooth_tuning_curve_along_position(
-    tuning_curve,
+    tuning_curve: Any,
     position_dim: str,
     sigma_bins: float,
-):
-    """Apply Gaussian smoothing along the position axis of one tuning curve."""
+    *,
+    eps: float = 1e-12,
+    mode: str = "nearest",
+) -> Any:
+    """Apply NaN-aware Gaussian smoothing along one tuning-curve position axis."""
     from scipy.ndimage import gaussian_filter1d
 
-    tuning_curve = tuning_curve.fillna(0)
+    if sigma_bins <= 0:
+        return tuning_curve.copy()
+
     axis = tuning_curve.get_axis_num(position_dim)
-    smoothed = gaussian_filter1d(
-        tuning_curve.values,
+    values = np.asarray(tuning_curve.values, dtype=np.float64)
+    mask = np.isfinite(values)
+    filled = np.where(mask, values, 0.0)
+
+    numerator = gaussian_filter1d(filled, sigma=sigma_bins, axis=axis, mode=mode)
+    denominator = gaussian_filter1d(
+        mask.astype(np.float64),
         sigma=sigma_bins,
         axis=axis,
-        mode="nearest",
+        mode=mode,
     )
+    smoothed = numerator / np.maximum(denominator, eps)
+    smoothed = np.where(denominator > eps, smoothed, np.nan)
     return tuning_curve.copy(data=smoothed)
 
 
 def calculate_bits_per_spike_pynapple(
-    unit_spikes,
-    position,
+    unit_spikes: Any,
+    position: Any,
     tuning_curve: np.ndarray,
     bin_edges: np.ndarray,
-    epoch,
+    epoch: Any,
     bin_size_s: float = 0.002,
+    epsilon: float = 1e-10,
 ) -> float:
     """Compute log-likelihood bits/spike for one unit and one tuning curve."""
     position_epoch = position.restrict(epoch)
@@ -94,26 +117,31 @@ def calculate_bits_per_spike_pynapple(
     binned_spikes = spikes_epoch.count(bin_size_s, epoch)
     position_at_bins = position_epoch.interpolate(binned_spikes, ep=epoch)
 
-    spike_counts = np.minimum(np.asarray(binned_spikes.d, dtype=float).flatten(), 1)
-    positions = np.asarray(position_at_bins.d, dtype=float).flatten()
+    spike_counts = np.minimum(np.asarray(binned_spikes.d, dtype=float).ravel(), 1.0)
+    positions = np.asarray(position_at_bins.d, dtype=float).ravel()
+    valid = np.isfinite(positions)
+    if not np.all(valid):
+        spike_counts = spike_counts[valid]
+        positions = positions[valid]
 
     if spike_counts.size == 0:
         return 0.0
 
-    spatial_indices = np.digitize(positions, bin_edges) - 1
-    spatial_indices = np.clip(spatial_indices, 0, len(tuning_curve) - 1)
-
-    predicted_rates = np.asarray(tuning_curve, dtype=float)[spatial_indices]
-    predicted_rates = np.maximum(predicted_rates, 1e-10)
-
-    log_likelihood_model = np.sum(
-        spike_counts * np.log(predicted_rates * bin_size_s) - predicted_rates * bin_size_s
-    )
     total_spikes = float(np.sum(spike_counts))
     if total_spikes == 0:
         return 0.0
 
-    mean_rate = total_spikes / (len(spike_counts) * bin_size_s)
+    mean_rate = max(total_spikes / (len(spike_counts) * bin_size_s), epsilon)
+    spatial_indices = np.digitize(positions, bin_edges) - 1
+    spatial_indices = np.clip(spatial_indices, 0, len(tuning_curve) - 1)
+
+    predicted_rates = np.asarray(tuning_curve, dtype=float)[spatial_indices]
+    predicted_rates = np.where(np.isfinite(predicted_rates), predicted_rates, mean_rate)
+    predicted_rates = np.maximum(predicted_rates, epsilon)
+
+    log_likelihood_model = np.sum(
+        spike_counts * np.log(predicted_rates * bin_size_s) - predicted_rates * bin_size_s
+    )
     log_likelihood_null = np.sum(
         spike_counts * np.log(mean_rate * bin_size_s) - mean_rate * bin_size_s
     )
@@ -121,16 +149,15 @@ def calculate_bits_per_spike_pynapple(
 
 
 def compute_shuffled_si(
-    spikes,
-    epoch,
-    movement_epoch,
-    feature,
+    spikes: Any,
+    epoch: Any,
+    movement_epoch: Any,
+    feature: Any,
     bins: np.ndarray,
     n_shuffles: int = 50,
     min_shift_s: float = 20.0,
-):
+) -> pd.DataFrame:
     """Estimate chance-level mutual information via circular timestamp shifts."""
-    import pandas as pd
     import pynapple as nap
 
     shuffled_accumulator = pd.DataFrame(
@@ -163,31 +190,377 @@ def compute_shuffled_si(
     return shuffled_accumulator / n_shuffles
 
 
+def compute_raw_tuning_and_mi(
+    session: dict[str, Any],
+    linear_position_bins: np.ndarray,
+    task_progression_bins: np.ndarray,
+) -> tuple[TuningCurvesByRegion, TuningCurvesByRegion, MetricsByRegion, MetricsByRegion]:
+    """Compute unsmoothed tuning curves and raw MI for all regions and epochs."""
+    import pynapple as nap
+
+    place_tuning_curves: TuningCurvesByRegion = {region: {} for region in REGIONS}
+    task_progression_tuning_curves: TuningCurvesByRegion = {region: {} for region in REGIONS}
+    place_si: MetricsByRegion = {region: {} for region in REGIONS}
+    task_progression_si: MetricsByRegion = {region: {} for region in REGIONS}
+
+    for region in REGIONS:
+        spikes = session["spikes_by_region"][region]
+        for epoch in session["run_epochs"]:
+            movement_epoch = session["movement_by_run"][epoch]
+            place_tuning_curve = nap.compute_tuning_curves(
+                data=spikes,
+                features=session["linear_position_by_run"][epoch],
+                bins=[linear_position_bins],
+                epochs=movement_epoch,
+                feature_names=["linpos"],
+            )
+            task_progression_tuning_curve = nap.compute_tuning_curves(
+                data=spikes,
+                features=session["task_progression_by_run"][epoch],
+                bins=[task_progression_bins],
+                epochs=movement_epoch,
+                feature_names=["tp"],
+            )
+
+            place_tuning_curves[region][epoch] = place_tuning_curve
+            task_progression_tuning_curves[region][epoch] = task_progression_tuning_curve
+            place_si[region][epoch] = nap.compute_mutual_information(place_tuning_curve)
+            task_progression_si[region][epoch] = nap.compute_mutual_information(
+                task_progression_tuning_curve
+            )
+
+    return place_tuning_curves, task_progression_tuning_curves, place_si, task_progression_si
+
+
+def compute_smoothed_tuning_and_ll(
+    session: dict[str, Any],
+    place_tuning_curves: TuningCurvesByRegion,
+    task_progression_tuning_curves: TuningCurvesByRegion,
+    *,
+    sigma_bins: float,
+    ll_bin_size_s: float,
+) -> tuple[TuningCurvesByRegion, TuningCurvesByRegion, BitsBySpikeByRegion, BitsBySpikeByRegion]:
+    """Compute smoothed tuning curves and LL bits/spike for all regions and epochs."""
+    smoothed_place_tuning_curves: TuningCurvesByRegion = {region: {} for region in REGIONS}
+    smoothed_task_progression_tuning_curves: TuningCurvesByRegion = {
+        region: {} for region in REGIONS
+    }
+    ll_bits_per_spike_place: BitsBySpikeByRegion = {region: {} for region in REGIONS}
+    ll_bits_per_spike_task_progression: BitsBySpikeByRegion = {
+        region: {} for region in REGIONS
+    }
+
+    for region in REGIONS:
+        spikes = session["spikes_by_region"][region]
+        for epoch in session["run_epochs"]:
+            movement_epoch = session["movement_by_run"][epoch]
+            smoothed_place_tuning_curve = smooth_tuning_curve_along_position(
+                place_tuning_curves[region][epoch],
+                position_dim="linpos",
+                sigma_bins=sigma_bins,
+            )
+            smoothed_task_progression_tuning_curve = smooth_tuning_curve_along_position(
+                task_progression_tuning_curves[region][epoch],
+                position_dim="tp",
+                sigma_bins=sigma_bins,
+            )
+            smoothed_place_tuning_curves[region][epoch] = smoothed_place_tuning_curve
+            smoothed_task_progression_tuning_curves[region][epoch] = (
+                smoothed_task_progression_tuning_curve
+            )
+
+            place_bin_edges = np.asarray(smoothed_place_tuning_curve.bin_edges[0], dtype=float)
+            task_progression_bin_edges = np.asarray(
+                smoothed_task_progression_tuning_curve.bin_edges[0],
+                dtype=float,
+            )
+
+            ll_bits_per_spike_place[region][epoch] = {}
+            ll_bits_per_spike_task_progression[region][epoch] = {}
+            for unit_id in spikes.keys():
+                ll_bits_per_spike_place[region][epoch][unit_id] = (
+                    calculate_bits_per_spike_pynapple(
+                        unit_spikes=spikes[unit_id],
+                        position=session["linear_position_by_run"][epoch],
+                        tuning_curve=smoothed_place_tuning_curve.sel(unit=unit_id).to_numpy(),
+                        bin_edges=place_bin_edges,
+                        epoch=movement_epoch,
+                        bin_size_s=ll_bin_size_s,
+                    )
+                )
+                ll_bits_per_spike_task_progression[region][epoch][unit_id] = (
+                    calculate_bits_per_spike_pynapple(
+                        unit_spikes=spikes[unit_id],
+                        position=session["task_progression_by_run"][epoch],
+                        tuning_curve=smoothed_task_progression_tuning_curve.sel(
+                            unit=unit_id
+                        ).to_numpy(),
+                        bin_edges=task_progression_bin_edges,
+                        epoch=movement_epoch,
+                        bin_size_s=ll_bin_size_s,
+                    )
+                )
+
+    return (
+        smoothed_place_tuning_curves,
+        smoothed_task_progression_tuning_curves,
+        ll_bits_per_spike_place,
+        ll_bits_per_spike_task_progression,
+    )
+
+
+def compute_corrected_mi(
+    session: dict[str, Any],
+    place_si: MetricsByRegion,
+    task_progression_si: MetricsByRegion,
+    linear_position_bins: np.ndarray,
+    task_progression_bins: np.ndarray,
+    *,
+    n_shuffles: int,
+    min_shift_s: float,
+) -> tuple[MetricsByRegion, MetricsByRegion]:
+    """Compute shuffle-corrected MI for all regions and epochs."""
+    place_si_corrected: MetricsByRegion = {region: {} for region in REGIONS}
+    task_progression_si_corrected: MetricsByRegion = {region: {} for region in REGIONS}
+
+    for region in REGIONS:
+        spikes = session["spikes_by_region"][region]
+        for epoch in session["run_epochs"]:
+            place_shuffle = compute_shuffled_si(
+                spikes,
+                epoch=session["all_epoch_by_run"][epoch],
+                movement_epoch=session["movement_by_run"][epoch],
+                feature=session["linear_position_by_run"][epoch],
+                bins=linear_position_bins,
+                n_shuffles=n_shuffles,
+                min_shift_s=min_shift_s,
+            )
+            task_progression_shuffle = compute_shuffled_si(
+                spikes,
+                epoch=session["all_epoch_by_run"][epoch],
+                movement_epoch=session["movement_by_run"][epoch],
+                feature=session["task_progression_by_run"][epoch],
+                bins=task_progression_bins,
+                n_shuffles=n_shuffles,
+                min_shift_s=min_shift_s,
+            )
+            place_si_corrected[region][epoch] = place_si[region][epoch] - place_shuffle
+            task_progression_si_corrected[region][epoch] = (
+                task_progression_si[region][epoch] - task_progression_shuffle
+            )
+
+    return place_si_corrected, task_progression_si_corrected
+
+
+def build_epoch_summary_tables(
+    session: dict[str, Any],
+    movement_firing_rates: dict[str, dict[str, np.ndarray]],
+    place_si: MetricsByRegion,
+    task_progression_si: MetricsByRegion,
+    place_si_corrected: MetricsByRegion,
+    task_progression_si_corrected: MetricsByRegion,
+    ll_bits_per_spike_place: BitsBySpikeByRegion,
+    ll_bits_per_spike_task_progression: BitsBySpikeByRegion,
+) -> SummaryTablesByRegion:
+    """Build one per-unit summary table for each region and run epoch."""
+    summary_tables: SummaryTablesByRegion = {region: {} for region in REGIONS}
+
+    for region in REGIONS:
+        unit_index = pd.Index(list(session["spikes_by_region"][region].keys()), name="unit")
+        for epoch in session["run_epochs"]:
+            movement_rate_series = pd.Series(
+                movement_firing_rates[region][epoch],
+                index=unit_index,
+                dtype=float,
+            )
+            place_epoch = place_si[region][epoch].reindex(unit_index)
+            task_progression_epoch = task_progression_si[region][epoch].reindex(unit_index)
+            place_corrected_epoch = place_si_corrected[region][epoch].reindex(unit_index)
+            task_progression_corrected_epoch = task_progression_si_corrected[region][epoch].reindex(
+                unit_index
+            )
+            ll_place_epoch = pd.Series(
+                ll_bits_per_spike_place[region][epoch],
+                dtype=float,
+            ).reindex(unit_index)
+            ll_task_progression_epoch = pd.Series(
+                ll_bits_per_spike_task_progression[region][epoch],
+                dtype=float,
+            ).reindex(unit_index)
+
+            summary_table = pd.DataFrame(index=unit_index)
+            summary_table["region"] = region
+            summary_table["epoch"] = epoch
+            summary_table["movement_firing_rate_hz"] = movement_rate_series
+            summary_table["place_mi_bits_per_sec"] = place_epoch["bits/sec"]
+            summary_table["place_mi_bits_per_spike"] = place_epoch["bits/spike"]
+            summary_table["task_progression_mi_bits_per_sec"] = task_progression_epoch["bits/sec"]
+            summary_table["task_progression_mi_bits_per_spike"] = task_progression_epoch[
+                "bits/spike"
+            ]
+            summary_table["place_mi_corrected_bits_per_sec"] = place_corrected_epoch["bits/sec"]
+            summary_table["place_mi_corrected_bits_per_spike"] = place_corrected_epoch[
+                "bits/spike"
+            ]
+            summary_table["task_progression_mi_corrected_bits_per_sec"] = (
+                task_progression_corrected_epoch["bits/sec"]
+            )
+            summary_table["task_progression_mi_corrected_bits_per_spike"] = (
+                task_progression_corrected_epoch["bits/spike"]
+            )
+            summary_table["place_ll_bits_per_spike"] = ll_place_epoch
+            summary_table["task_progression_ll_bits_per_spike"] = ll_task_progression_epoch
+            summary_tables[region][epoch] = summary_table.reset_index()
+
+    return summary_tables
+
+
+def build_light_dark_comparison_tables(
+    summary_tables: SummaryTablesByRegion,
+    *,
+    light_epoch: str,
+    dark_epoch: str,
+) -> dict[str, pd.DataFrame]:
+    """Build selected light-vs-dark comparison tables for plotting."""
+    comparison_tables: dict[str, pd.DataFrame] = {}
+
+    for region in REGIONS:
+        light_table = summary_tables[region][light_epoch].set_index("unit")
+        dark_table = summary_tables[region][dark_epoch].set_index("unit")
+        common_units = light_table.index.intersection(dark_table.index)
+
+        comparison_table = pd.DataFrame(index=common_units)
+        comparison_table["region"] = region
+        comparison_table["light_epoch"] = light_epoch
+        comparison_table["dark_epoch"] = dark_epoch
+        comparison_table["dark_movement_firing_rate_hz"] = dark_table.loc[
+            common_units, "movement_firing_rate_hz"
+        ]
+        comparison_table["dark_active"] = (
+            comparison_table["dark_movement_firing_rate_hz"]
+            > DEFAULT_REGION_FR_THRESHOLDS[region]
+        )
+        comparison_table["light_place_mi_corrected_bits_per_spike"] = light_table.loc[
+            common_units, "place_mi_corrected_bits_per_spike"
+        ]
+        comparison_table["light_task_progression_mi_corrected_bits_per_spike"] = (
+            light_table.loc[common_units, "task_progression_mi_corrected_bits_per_spike"]
+        )
+        comparison_table["dark_place_mi_corrected_bits_per_spike"] = dark_table.loc[
+            common_units, "place_mi_corrected_bits_per_spike"
+        ]
+        comparison_table["dark_task_progression_mi_corrected_bits_per_spike"] = (
+            dark_table.loc[common_units, "task_progression_mi_corrected_bits_per_spike"]
+        )
+        comparison_tables[region] = comparison_table.reset_index()
+
+    return comparison_tables
+
+
+def save_summary_tables(
+    summary_tables: SummaryTablesByRegion,
+    data_dir: Path,
+) -> list[Path]:
+    """Write one parquet summary table per region and run epoch."""
+    saved_paths: list[Path] = []
+    for region, region_tables in summary_tables.items():
+        for epoch, table in region_tables.items():
+            path = data_dir / f"{region}_{epoch}_mi_summary.parquet"
+            table.to_parquet(path, index=False)
+            saved_paths.append(path)
+    return saved_paths
+
+
+def save_comparison_tables(
+    comparison_tables: dict[str, pd.DataFrame],
+    data_dir: Path,
+    *,
+    light_epoch: str,
+    dark_epoch: str,
+) -> list[Path]:
+    """Write selected light-vs-dark MI comparison tables as parquet."""
+    saved_paths: list[Path] = []
+    for region, table in comparison_tables.items():
+        path = data_dir / f"{region}_{light_epoch}_{dark_epoch}_mi_comparison.parquet"
+        table.to_parquet(path, index=False)
+        saved_paths.append(path)
+    return saved_paths
+
+
+def save_legacy_pickles(
+    data_dir: Path,
+    *,
+    place_tuning_curves: TuningCurvesByRegion,
+    task_progression_tuning_curves: TuningCurvesByRegion,
+    place_si: MetricsByRegion,
+    task_progression_si: MetricsByRegion,
+    place_si_corrected: MetricsByRegion,
+    task_progression_si_corrected: MetricsByRegion,
+    ll_bits_per_spike_place: BitsBySpikeByRegion,
+    ll_bits_per_spike_task_progression: BitsBySpikeByRegion,
+) -> dict[str, Path]:
+    """Write the legacy nested pickle artifacts for compatibility."""
+    saved_paths = {
+        "place_tuning_curves_pickle": data_dir / "place_tuning_curves.pkl",
+        "task_progression_tuning_curves_pickle": data_dir / "task_progression_tuning_curves.pkl",
+        "place_si_pickle": data_dir / "place_si.pkl",
+        "task_progression_si_pickle": data_dir / "task_progression_si.pkl",
+        "place_si_corrected_pickle": data_dir / "place_si_corrected.pkl",
+        "task_progression_si_corrected_pickle": data_dir / "task_progression_si_corrected.pkl",
+        "ll_bits_per_spike_place_pickle": data_dir / "ll_bits_per_spike_place.pkl",
+        "ll_bits_per_spike_task_progression_pickle": data_dir
+        / "ll_bits_per_spike_task_progression.pkl",
+    }
+    for path, payload in (
+        (saved_paths["place_tuning_curves_pickle"], place_tuning_curves),
+        (
+            saved_paths["task_progression_tuning_curves_pickle"],
+            task_progression_tuning_curves,
+        ),
+        (saved_paths["place_si_pickle"], place_si),
+        (saved_paths["task_progression_si_pickle"], task_progression_si),
+        (saved_paths["place_si_corrected_pickle"], place_si_corrected),
+        (
+            saved_paths["task_progression_si_corrected_pickle"],
+            task_progression_si_corrected,
+        ),
+        (saved_paths["ll_bits_per_spike_place_pickle"], ll_bits_per_spike_place),
+        (
+            saved_paths["ll_bits_per_spike_task_progression_pickle"],
+            ll_bits_per_spike_task_progression,
+        ),
+    ):
+        with open(path, "wb") as file_pointer:
+            pickle.dump(payload, file_pointer)
+    return saved_paths
+
+
 def plot_mi_comparison(
-    place_si_corrected,
-    task_progression_si_corrected,
-    movement_firing_rates,
+    comparison_table: pd.DataFrame,
+    *,
     region: str,
     light_epoch: str,
     dark_epoch: str,
     fig_path: Path,
-    mode: str = "bits/spike",
 ) -> None:
     """Save a place-MI versus task-progression-MI comparison scatter plot."""
     import matplotlib.pyplot as plt
 
-    dark_active_mask = (
-        movement_firing_rates[region][dark_epoch] > DEFAULT_REGION_FR_THRESHOLDS[region]
-    )
+    active_table = comparison_table.loc[comparison_table["dark_active"]].copy()
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    for epoch in (light_epoch, dark_epoch):
-        ax.scatter(
-            place_si_corrected[region][epoch][mode][dark_active_mask],
-            task_progression_si_corrected[region][epoch][mode][dark_active_mask],
-            alpha=0.25,
-            label=epoch,
-        )
+    ax.scatter(
+        active_table["light_place_mi_corrected_bits_per_spike"],
+        active_table["light_task_progression_mi_corrected_bits_per_spike"],
+        alpha=0.25,
+        label=light_epoch,
+    )
+    ax.scatter(
+        active_table["dark_place_mi_corrected_bits_per_spike"],
+        active_table["dark_task_progression_mi_corrected_bits_per_spike"],
+        alpha=0.25,
+        label=dark_epoch,
+    )
 
     ax.plot([-0.5, 3], [-0.5, 3], "k--", linewidth=1)
     ax.axhline(0, color="gray", linestyle=":", linewidth=1)
@@ -202,6 +575,28 @@ def plot_mi_comparison(
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close(fig)
+
+
+def save_mi_figures(
+    comparison_tables: dict[str, pd.DataFrame],
+    fig_dir: Path,
+    *,
+    light_epoch: str,
+    dark_epoch: str,
+) -> list[Path]:
+    """Write place-vs-task-progression MI comparison figures."""
+    saved_paths: list[Path] = []
+    for region, comparison_table in comparison_tables.items():
+        fig_path = fig_dir / f"{region}_{light_epoch}_{dark_epoch}_mi_comparison.png"
+        plot_mi_comparison(
+            comparison_table,
+            region=region,
+            light_epoch=light_epoch,
+            dark_epoch=dark_epoch,
+            fig_path=fig_path,
+        )
+        saved_paths.append(fig_path)
+    return saved_paths
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -264,13 +659,22 @@ def parse_arguments() -> argparse.Namespace:
         default=0.002,
         help="Time bin size in seconds used for log-likelihood bits/spike calculations.",
     )
+    parser.add_argument(
+        "--sigma-bins",
+        type=float,
+        default=DEFAULT_SIGMA_BINS,
+        help=f"Gaussian smoothing width in tuning-curve bins. Default: {DEFAULT_SIGMA_BINS}",
+    )
+    parser.add_argument(
+        "--save-legacy-pickle",
+        action="store_true",
+        help="Also write the legacy nested pickle outputs for compatibility.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the task-progression MI workflow for one session."""
-    import pynapple as nap
-
     args = parse_arguments()
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
@@ -284,6 +688,7 @@ def main() -> None:
         args.light_epoch,
         args.dark_epoch,
     )
+
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     data_dir = analysis_path / "task_progression_mi"
     fig_dir = analysis_path / "figs" / "task_progression_mi"
@@ -299,167 +704,87 @@ def main() -> None:
         args.place_bin_size_cm,
     )
 
-    place_tuning_curves = {}
-    task_progression_tuning_curves = {}
-    place_si = {}
-    task_progression_si = {}
-    smoothed_place_tuning_curves = {}
-    smoothed_task_progression_tuning_curves = {}
-    ll_bits_per_spike_place = {}
-    ll_bits_per_spike_task_progression = {}
-
-    for region in REGIONS:
-        place_tuning_curves[region] = {}
-        task_progression_tuning_curves[region] = {}
-        place_si[region] = {}
-        task_progression_si[region] = {}
-        smoothed_place_tuning_curves[region] = {}
-        smoothed_task_progression_tuning_curves[region] = {}
-        ll_bits_per_spike_place[region] = {}
-        ll_bits_per_spike_task_progression[region] = {}
-
-        for epoch in session["run_epochs"]:
-            place_tuning_curves[region][epoch] = nap.compute_tuning_curves(
-                data=session["spikes_by_region"][region],
-                features=session["linear_position_by_run"][epoch],
-                bins=[linear_position_bins],
-                epochs=session["movement_by_run"][epoch],
-                feature_names=["linpos"],
-            )
-            task_progression_tuning_curves[region][epoch] = nap.compute_tuning_curves(
-                data=session["spikes_by_region"][region],
-                features=session["task_progression_by_run"][epoch],
-                bins=[task_progression_bins],
-                epochs=session["movement_by_run"][epoch],
-                feature_names=["tp"],
-            )
-            smoothed_place_tuning_curves[region][epoch] = smooth_tuning_curve_along_position(
-                place_tuning_curves[region][epoch],
-                position_dim="linpos",
-                sigma_bins=1.0,
-            )
-            smoothed_task_progression_tuning_curves[region][epoch] = (
-                smooth_tuning_curve_along_position(
-                    task_progression_tuning_curves[region][epoch],
-                    position_dim="tp",
-                    sigma_bins=1.0,
-                )
-            )
-            place_si[region][epoch] = nap.compute_mutual_information(
-                place_tuning_curves[region][epoch]
-            )
-            task_progression_si[region][epoch] = nap.compute_mutual_information(
-                task_progression_tuning_curves[region][epoch]
-            )
-
-            ll_bits_per_spike_place[region][epoch] = {}
-            ll_bits_per_spike_task_progression[region][epoch] = {}
-            for unit_id in session["spikes_by_region"][region].keys():
-                ll_bits_per_spike_place[region][epoch][unit_id] = (
-                    calculate_bits_per_spike_pynapple(
-                        unit_spikes=session["spikes_by_region"][region][unit_id],
-                        position=session["linear_position_by_run"][epoch],
-                        tuning_curve=smoothed_place_tuning_curves[region][epoch]
-                        .sel(unit=unit_id)
-                        .to_numpy(),
-                        bin_edges=smoothed_place_tuning_curves[region][epoch].bin_edges[0],
-                        epoch=session["movement_by_run"][epoch],
-                        bin_size_s=args.ll_bin_size_s,
-                    )
-                )
-                ll_bits_per_spike_task_progression[region][epoch][unit_id] = (
-                    calculate_bits_per_spike_pynapple(
-                        unit_spikes=session["spikes_by_region"][region][unit_id],
-                        position=session["task_progression_by_run"][epoch],
-                        tuning_curve=smoothed_task_progression_tuning_curves[region][epoch]
-                        .sel(unit=unit_id)
-                        .to_numpy(),
-                        bin_edges=smoothed_task_progression_tuning_curves[region][epoch].bin_edges[
-                            0
-                        ],
-                        epoch=session["movement_by_run"][epoch],
-                        bin_size_s=args.ll_bin_size_s,
-                    )
-                )
+    (
+        place_tuning_curves,
+        task_progression_tuning_curves,
+        place_si,
+        task_progression_si,
+    ) = compute_raw_tuning_and_mi(
+        session,
+        linear_position_bins,
+        task_progression_bins,
+    )
+    (
+        _smoothed_place_tuning_curves,
+        _smoothed_task_progression_tuning_curves,
+        ll_bits_per_spike_place,
+        ll_bits_per_spike_task_progression,
+    ) = compute_smoothed_tuning_and_ll(
+        session,
+        place_tuning_curves,
+        task_progression_tuning_curves,
+        sigma_bins=args.sigma_bins,
+        ll_bin_size_s=args.ll_bin_size_s,
+    )
 
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
         session["run_epochs"],
     )
-    place_si_corrected = {}
-    task_progression_si_corrected = {}
-    for region in REGIONS:
-        place_si_corrected[region] = {}
-        task_progression_si_corrected[region] = {}
-        for epoch in session["run_epochs"]:
-            place_si_corrected[region][epoch] = place_si[region][epoch] - compute_shuffled_si(
-                session["spikes_by_region"][region],
-                epoch=session["all_epoch_by_run"][epoch],
-                movement_epoch=session["movement_by_run"][epoch],
-                feature=session["linear_position_by_run"][epoch],
-                bins=linear_position_bins,
-                n_shuffles=args.num_shuffles,
-                min_shift_s=args.shuffle_min_shift_s,
-            )
-            task_progression_si_corrected[region][epoch] = task_progression_si[region][
-                epoch
-            ] - compute_shuffled_si(
-                session["spikes_by_region"][region],
-                epoch=session["all_epoch_by_run"][epoch],
-                movement_epoch=session["movement_by_run"][epoch],
-                feature=session["task_progression_by_run"][epoch],
-                bins=task_progression_bins,
-                n_shuffles=args.num_shuffles,
-                min_shift_s=args.shuffle_min_shift_s,
-            )
+    place_si_corrected, task_progression_si_corrected = compute_corrected_mi(
+        session,
+        place_si,
+        task_progression_si,
+        linear_position_bins,
+        task_progression_bins,
+        n_shuffles=args.num_shuffles,
+        min_shift_s=args.shuffle_min_shift_s,
+    )
 
-    saved_artifacts = {
-        "place_tuning_curves_pickle": data_dir / "place_tuning_curves.pkl",
-        "task_progression_tuning_curves_pickle": data_dir / "task_progression_tuning_curves.pkl",
-        "place_si_pickle": data_dir / "place_si.pkl",
-        "task_progression_si_pickle": data_dir / "task_progression_si.pkl",
-        "place_si_corrected_pickle": data_dir / "place_si_corrected.pkl",
-        "task_progression_si_corrected_pickle": data_dir / "task_progression_si_corrected.pkl",
-        "ll_bits_per_spike_place_pickle": data_dir / "ll_bits_per_spike_place.pkl",
-        "ll_bits_per_spike_task_progression_pickle": data_dir
-        / "ll_bits_per_spike_task_progression.pkl",
-    }
-    for path, payload in (
-        (saved_artifacts["place_tuning_curves_pickle"], place_tuning_curves),
-        (
-            saved_artifacts["task_progression_tuning_curves_pickle"],
-            task_progression_tuning_curves,
-        ),
-        (saved_artifacts["place_si_pickle"], place_si),
-        (saved_artifacts["task_progression_si_pickle"], task_progression_si),
-        (saved_artifacts["place_si_corrected_pickle"], place_si_corrected),
-        (
-            saved_artifacts["task_progression_si_corrected_pickle"],
-            task_progression_si_corrected,
-        ),
-        (saved_artifacts["ll_bits_per_spike_place_pickle"], ll_bits_per_spike_place),
-        (
-            saved_artifacts["ll_bits_per_spike_task_progression_pickle"],
-            ll_bits_per_spike_task_progression,
-        ),
-    ):
-        with open(path, "wb") as f:
-            pickle.dump(payload, f)
+    summary_tables = build_epoch_summary_tables(
+        session,
+        movement_firing_rates,
+        place_si,
+        task_progression_si,
+        place_si_corrected,
+        task_progression_si_corrected,
+        ll_bits_per_spike_place,
+        ll_bits_per_spike_task_progression,
+    )
+    comparison_tables = build_light_dark_comparison_tables(
+        summary_tables,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+    )
 
-    saved_figures: list[Path] = []
-    for region in REGIONS:
-        fig_path = fig_dir / f"{region}_{light_epoch}_{dark_epoch}_mi_comparison.png"
-        plot_mi_comparison(
-            place_si_corrected,
-            task_progression_si_corrected,
-            movement_firing_rates,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-            fig_path=fig_path,
+    saved_epoch_tables = save_summary_tables(summary_tables, data_dir=data_dir)
+    saved_comparison_tables = save_comparison_tables(
+        comparison_tables,
+        data_dir=data_dir,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+    )
+    saved_figures = save_mi_figures(
+        comparison_tables,
+        fig_dir=fig_dir,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+    )
+
+    saved_legacy_pickles: dict[str, Path] = {}
+    if args.save_legacy_pickle:
+        saved_legacy_pickles = save_legacy_pickles(
+            data_dir,
+            place_tuning_curves=place_tuning_curves,
+            task_progression_tuning_curves=task_progression_tuning_curves,
+            place_si=place_si,
+            task_progression_si=task_progression_si,
+            place_si_corrected=place_si_corrected,
+            task_progression_si_corrected=task_progression_si_corrected,
+            ll_bits_per_spike_place=ll_bits_per_spike_place,
+            ll_bits_per_spike_task_progression=ll_bits_per_spike_task_progression,
         )
-        saved_figures.append(fig_path)
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -476,12 +801,16 @@ def main() -> None:
             "num_shuffles": args.num_shuffles,
             "shuffle_min_shift_s": args.shuffle_min_shift_s,
             "ll_bin_size_s": args.ll_bin_size_s,
+            "sigma_bins": args.sigma_bins,
+            "save_legacy_pickle": args.save_legacy_pickle,
         },
         outputs={
             "sources": session["sources"],
             "run_epochs": session["run_epochs"],
-            "saved_artifacts": saved_artifacts,
+            "saved_epoch_tables": saved_epoch_tables,
+            "saved_comparison_tables": saved_comparison_tables,
             "saved_figures": saved_figures,
+            "saved_legacy_pickles": saved_legacy_pickles,
         },
     )
     print(f"Saved run metadata to {log_path}")
