@@ -1,132 +1,241 @@
 from __future__ import annotations
-import os
 
+"""Estimate MEME-based signal dimensionality from spatial tuning curves.
+
+This module adapts the MEME framework of Pospisil and Pillow (2025) from
+repeated neural responses to visual stimuli to repeated estimates of spatial
+tuning over linearized position. In the paper, each condition is a stimulus and
+each repeat is another presentation of that stimulus. Here, each condition is a
+retained spatial bin within a trajectory class, and each repeat is a tuning
+curve estimated from a disjoint group of laps.
+
+The goal of these changes is to construct the closest spatial analog of the
+paper's repeat-by-condition matrix. Single laps are often too sparse and noisy
+to serve as stable repeats, so laps are pooled into disjoint groups before
+tuning curves are computed. Using multiple groups also provides multiple
+cross-group pairings, which helps stabilize the moment estimates. Trajectories
+are linearized and occupancy-filtered separately, and only then are valid bins
+concatenated into the condition axis so that all repeats are compared on the
+same set of well-sampled spatial conditions.
+
+Mean removal follows the paper's disjoint-differencing idea rather than
+subtracting the empirical mean across bins. Because spatial bins have a
+meaningful order and neighboring bins are correlated, this implementation uses
+random disjoint bin pairings instead of a fixed odd/even split. The aim is to
+remove the global mean without turning preprocessing into a local spatial
+difference operator.
+
+This is therefore a spatial analog of MEME, not a literal reproduction of the
+paper's visual-stimulus design. Uncertainty is estimated by resampling laps and
+rebuilding grouped tuning curves, so reported intervals reflect variability in
+lap sampling and repeat construction in this navigation setting.
+"""
+
+import argparse
+import math
+import pickle
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple, Dict, List, Iterable
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
 import pynapple as nap
-import matplotlib.pyplot as plt
-import pickle
-from pathlib import Path
-import position_tools as pt
-import spikeinterface.full as si
 import track_linearization as tl
-import math
 
-animal_name = "L14"
-date = "20240611"
-analysis_path = Path("/stelmo/kyu/analysis") / animal_name / date
+from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import (
+    build_movement_interval,
+    build_speed_tsd,
+    compute_movement_firing_rates,
+    get_analysis_path,
+    get_run_epochs,
+    load_ephys_timestamps_all,
+    load_epoch_tags,
+    load_position_data,
+    load_position_timestamps,
+    load_spikes_by_region,
+)
+from v1ca1.helper.wtrack import (
+    get_wtrack_branch_graph,
+    get_wtrack_branch_side,
+    get_wtrack_total_length,
+)
 
-regions = ["v1", "ca1"]
 
-time_bin_size = 2e-3
-sampling_rate = int(1 / time_bin_size)
-speed_threshold = 4  # cm/s
-position_offset = 10
-
-trajectory_types = [
+DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
+DEFAULT_REGIONS = ("v1", "ca1")
+DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
+DEFAULT_POSITION_OFFSET = 10
+DEFAULT_RUN_EPOCH_LIMIT = 4
+DEFAULT_DARK_EPOCH = "08_r4"
+TRAJECTORY_TYPES = (
     "center_to_left",
     "center_to_right",
     "left_to_center",
     "right_to_center",
-]
+)
+DEFAULT_BIN_SIZE_CM = 4.0
+DEFAULT_N_GROUPS = 4
+DEFAULT_MIN_OCCUPANCY_S = 0.01
+DEFAULT_BOOTSTRAP_LAP_FRACTION = 0.7
+DEFAULT_N_BOOTSTRAPS = 200
+DEFAULT_BOOTSTRAP_CI = 95.0
+DEFAULT_FULL_N_PAIRINGS = 1000
+DEFAULT_FULL_N_BIN_PERMS = 5
+DEFAULT_BOOTSTRAP_N_PAIRINGS = 200
+DEFAULT_BOOTSTRAP_N_BIN_PERMS = 5
+DEFAULT_RANDOM_SEED = 47
+DEFAULT_GROUPMEAN_N_DRAWS = 5000
+DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
 
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
-
-epoch_list = list(timestamps_ephys.keys())
-run_epoch_list = epoch_list[1::2]
-run_epoch_list = run_epoch_list[:4]
-sleep_epoch_list = epoch_list[::2]
-
-
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position_dict = pickle.load(f)
-
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
-
-with open(analysis_path / "position.pkl", "rb") as f:
-    position_dict = pickle.load(f)
-
-with open(analysis_path / "body_position.pkl", "rb") as f:
-    body_position_dict = pickle.load(f)
-
-with open(analysis_path / "trajectory_times.pkl", "rb") as f:
-    trajectory_times = pickle.load(f)
-
-sorting = {}
-for region in regions:
-    sorting[region] = si.load(analysis_path / f"sorting_{region}")
+# Shape notation used throughout this module:
+#   R = number of disjoint repeat groups of laps
+#   C = number of retained spatial conditions after concatenating trajectory bins
+#   N = number of neurons
+#   F[r, c, n] = tuning-curve value for neuron n in condition c for repeat group r
+# This mirrors the paper's repeat-by-stimulus formulation, but here conditions are
+# spatial bins and repeats are grouped laps rather than repeated image presentations.
 
 
-def get_tsgroup(sorting):
-    data = {}
-    for unit_id in sorting.get_unit_ids():
-        data[unit_id] = nap.Ts(
-            t=timestamps_ephys_all_ptp[sorting.get_unit_spike_train(unit_id)]
+def _load_pickle(path: Path) -> Any:
+    """Load one pickle artifact from disk."""
+    with open(path, "rb") as file_pointer:
+        return pickle.load(file_pointer)
+
+
+def _get_default_run_epochs(run_epochs: list[str]) -> list[str]:
+    """Return the current default subset of run epochs used by the legacy script."""
+    return list(run_epochs[:DEFAULT_RUN_EPOCH_LIMIT])
+
+
+def select_run_epochs(
+    run_epochs: list[str],
+    requested_epochs: list[str] | None,
+) -> list[str]:
+    """Return selected run epochs, defaulting to the legacy first-four subset."""
+    if requested_epochs is None:
+        return _get_default_run_epochs(run_epochs)
+
+    missing_run_epochs = [epoch for epoch in requested_epochs if epoch not in run_epochs]
+    if missing_run_epochs:
+        raise ValueError(
+            "Selected run epochs were not found among available run epochs "
+            f"{run_epochs!r}: {missing_run_epochs!r}"
         )
-    tsgroup = nap.TsGroup(data, time_units="s")
-    return tsgroup
+    return list(requested_epochs)
 
 
-def _sampling_rate(t_position: np.ndarray) -> float:
-    return (len(t_position) - 1) / (t_position[-1] - t_position[0])
+def get_light_and_dark_epochs(
+    run_epochs: list[str],
+    light_epoch: str | None,
+    dark_epoch: str | None,
+) -> tuple[str, str]:
+    """Return validated light and dark epoch labels for one session."""
+    if not run_epochs:
+        raise ValueError("No run epochs were selected.")
+
+    selected_light_epoch = light_epoch or run_epochs[0]
+    selected_dark_epoch = dark_epoch or run_epochs[-1]
+    missing = [
+        epoch
+        for epoch in (selected_light_epoch, selected_dark_epoch)
+        if epoch not in run_epochs
+    ]
+    if missing:
+        raise ValueError(
+            f"Requested epochs were not found in run epochs {run_epochs!r}: {missing!r}"
+        )
+    if selected_light_epoch == selected_dark_epoch:
+        raise ValueError("Light and dark epochs must be different.")
+    return selected_light_epoch, selected_dark_epoch
 
 
-spikes = {}
-for region in regions:
-    spikes[region] = get_tsgroup(sorting[region])
+def load_meme_session(
+    *,
+    animal_name: str,
+    date: str,
+    data_root: Path,
+    regions: list[str],
+    position_offset: int,
+    speed_threshold_cm_s: float,
+) -> dict[str, Any]:
+    """Load one session and derive reusable state for MEME analysis.
 
+    The returned session dict collects the raw artifacts needed to rebuild
+    grouped spatial tuning curves on demand. It intentionally keeps the
+    trajectory metadata, linearization helpers, and movement masks separate
+    from the MEME estimation itself so readers can trace the workflow from:
+    raw behavior + spikes -> spatial tuning curves -> MEME inputs.
+    """
+    analysis_path = get_analysis_path(animal_name, date, data_root)
+    epoch_list, _ = load_epoch_tags(analysis_path)
+    position_epoch_tags, timestamps_position_dict, _ = load_position_timestamps(analysis_path)
+    if position_epoch_tags != epoch_list:
+        raise ValueError(
+            "Saved position timestamp epochs do not match saved ephys epochs. "
+            f"Ephys epochs: {epoch_list!r}; position epochs: {position_epoch_tags!r}"
+        )
+    timestamps_ephys_all_ptp, _ = load_ephys_timestamps_all(analysis_path)
+    position_dict = load_position_data(analysis_path, epoch_list)
+    trajectory_times = _load_pickle(analysis_path / "trajectory_times.pkl")
 
-ep = {}
-for epoch in epoch_list[:-2]:
-    ep[epoch] = nap.IntervalSet(
-        start=timestamps_ephys[epoch][0],
-        end=timestamps_ephys[epoch][-1],
+    run_epochs = get_run_epochs(epoch_list)
+    epoch_names = list(epoch_list[:-2])
+    spikes_by_region = load_spikes_by_region(
+        analysis_path,
+        timestamps_ephys_all_ptp,
+        regions=tuple(regions),
     )
-
-speed = {}
-movement = {}
-for epoch in epoch_list[:-2]:
-    speed[epoch] = nap.Tsd(
-        t=timestamps_position_dict[epoch][position_offset:],
-        d=pt.get_speed(
-            position=position_dict[epoch][position_offset:],
-            time=timestamps_position_dict[epoch][position_offset:],
-            sampling_frequency=(
-                len(timestamps_position_dict[epoch][position_offset:]) - 1
-            )
-            / (
-                timestamps_position_dict[epoch][position_offset:][-1]
-                - timestamps_position_dict[epoch][position_offset:][0]
-            ),
-            sigma=0.1,
-        ),
+    speed_by_epoch = {
+        epoch: build_speed_tsd(
+            position_dict[epoch],
+            timestamps_position_dict[epoch],
+            position_offset=position_offset,
+        )
+        for epoch in epoch_names
+    }
+    movement_by_epoch = {
+        epoch: build_movement_interval(
+            speed_by_epoch[epoch],
+            speed_threshold_cm_s=speed_threshold_cm_s,
+        )
+        for epoch in epoch_names
+    }
+    movement_firing_rates_by_region = compute_movement_firing_rates(
+        spikes_by_region,
+        movement_by_epoch,
+        epoch_names,
     )
-    movement[epoch] = speed[epoch].threshold(speed_threshold, method="above")
+    track_graphs_by_side: dict[str, Any] = {}
+    edge_orders_by_side: dict[str, list[tuple[int, int]]] = {}
+    for side in ("left", "right"):
+        track_graph, edge_order = get_wtrack_branch_graph(
+            animal_name,
+            branch_side=side,
+            direction="from_center",
+        )
+        track_graphs_by_side[side] = track_graph
+        edge_orders_by_side[side] = edge_order
 
-total_fr = {}
-for region in regions:
-    total_fr[region] = {}
-    for epoch in epoch_list[:-2]:
-        total_fr[region][epoch] = (
-            spikes[region].count(ep=ep[epoch]).to_numpy() / ep[epoch].tot_length()
-        ).ravel()
-
-fr_during_movement = {}
-for region in regions:
-    fr_during_movement[region] = {}
-    for epoch in epoch_list[:-2]:
-        fr_during_movement[region][epoch] = (
-            np.sum(
-                spikes[region].count(ep=movement[epoch].time_support).to_numpy()
-                / movement[epoch].time_support.tot_length(),
-                axis=0,
-            )
-        ).ravel()
+    return {
+        "analysis_path": analysis_path,
+        "epoch_list": epoch_list,
+        "run_epochs": run_epochs,
+        "timestamps_position_dict": timestamps_position_dict,
+        "position_dict": position_dict,
+        "trajectory_times": trajectory_times,
+        "spikes_by_region": spikes_by_region,
+        "movement_by_epoch": movement_by_epoch,
+        "movement_firing_rates_by_region": movement_firing_rates_by_region,
+        "track_total_length": get_wtrack_total_length(animal_name),
+        "track_graphs_by_side": track_graphs_by_side,
+        "edge_orders_by_side": edge_orders_by_side,
+        "linear_edge_spacing": 0,
+        "position_offset": position_offset,
+    }
 
 
 ArrayF = npt.NDArray[np.floating]
@@ -184,31 +293,6 @@ def summarize_mc_pr(
         center=center,
         ci=float(ci),
     )
-
-
-def _split_indices_into_groups(
-    n: int, n_groups: int, rng: np.random.Generator
-) -> List[np.ndarray]:
-    """
-    Randomly assign indices 0..n-1 into n_groups disjoint groups (as equal as possible).
-    Returns list of arrays of indices (length n_groups).
-    """
-    if n_groups < 2:
-        raise ValueError("n_groups must be >= 2.")
-    if n < n_groups:
-        raise ValueError(
-            f"Need at least n_groups laps. Got n={n}, n_groups={n_groups}."
-        )
-
-    perm = rng.permutation(n)
-    groups = np.array_split(perm, n_groups)
-    # Sanity: no empty groups
-    groups = [g for g in groups if len(g) > 0]
-    if len(groups) < 2:
-        raise ValueError(
-            "Grouping produced <2 non-empty groups; increase laps or reduce n_groups."
-        )
-    return groups
 
 
 def _sample_lap_indices(
@@ -299,37 +383,69 @@ def _occupancy_mask_1d(
 
 
 def prepare_F(
+    session: dict[str, Any],
     epoch: str,
     region: str,
     *,
+    dark_epoch: str = DEFAULT_DARK_EPOCH,
     fr_dark_threshold: Optional[float] = None,
-    bin_size: float = 4.0,
-    n_groups: int = 4,
+    bin_size: float = DEFAULT_BIN_SIZE_CM,
+    n_groups: int = DEFAULT_N_GROUPS,
     group_seed: int = 0,
-    min_occupancy_s: float = 0.05,
+    min_occupancy_s: float = DEFAULT_MIN_OCCUPANCY_S,
     lap_fraction: float = 1.0,
 ) -> ArrayF:
-    """
-    Build F with shape (R, C, N) where:
-      - R = n_groups repeat-groups made from disjoint subsets of laps
-      - C = concatenated spatial bins across trajectory types (after dropping low-occupancy bins)
-      - N = neurons
+    """Build the MEME input tensor ``F`` for one region and epoch.
 
-    Key differences from your old prepare_F:
-      - repeats are *groups of laps*, not single laps
-      - no interpolation / ffill / bfill
-      - bins with insufficient occupancy are dropped consistently across repeats
-      - if lap_fraction < 1, each trajectory first subsamples laps without replacement
+    ``F`` has shape ``(R, C, N)``:
+    - ``R`` is the number of disjoint repeat groups of laps
+    - ``C`` is the number of retained spatial conditions after concatenating bins
+      from all trajectory types
+    - ``N`` is the number of neurons
+
+    This is the main place where the paper's repeated-stimulus setting is
+    adapted to navigation. In the paper, one observes repeated responses to the
+    same external stimuli. Here, we instead estimate repeated spatial tuning
+    curves from repeated laps. Each repeat is not a single lap, but a disjoint
+    group of laps. Each group average acts as a more reliable repeat estimate
+    than any individual lap would, because single-lap occupancy and spike-count
+    fluctuations are often too noisy for stable high-dimensional covariance
+    estimation. Each condition is not an image identity, but a linearized
+    spatial bin within a trajectory class.
+
+    Implementation details that matter scientifically:
+    - tuning curves are computed only during movement
+    - trajectory types are linearized separately before concatenation
+    - bins with insufficient occupancy are removed using the intersection across
+      repeat groups, so all repeats share the same retained condition axis
+    - repeat groups are formed from disjoint laps so the resulting repeats are
+      less noisy but still approximately independent
+    - optional neuron filtering is based on dark-epoch movement firing rate,
+      which keeps the cell inclusion rule fixed across compared epochs
+    - if ``lap_fraction < 1``, each bootstrap draw first subsamples laps before
+      constructing repeat groups
+
+    The returned tensor therefore contains grouped estimates of noise-reduced
+    spatial tuning, not raw spike counts or single-lap responses.
     """
     rng = np.random.default_rng(group_seed)
+    position_offset = int(session["position_offset"])
+    trajectory_times = session["trajectory_times"]
+    position_dict = session["position_dict"]
+    timestamps_position_dict = session["timestamps_position_dict"]
+    spikes = session["spikes_by_region"]
+    movement_epoch = session["movement_by_epoch"][epoch]
+    fr_dark = session["movement_firing_rates_by_region"][region][dark_epoch]
+    track_total_length = float(session["track_total_length"])
+    track_graphs_by_side = session["track_graphs_by_side"]
+    edge_orders_by_side = session["edge_orders_by_side"]
+    linear_edge_spacing = session["linear_edge_spacing"]
 
-    fr_dark = fr_during_movement[region]["08_r4"]  # (N,)
-
-    # ----- Build trajectory IntervalSets from trajectory_times -----
+    # Convert saved trajectory start/stop times into per-trajectory lap intervals.
     traj_starts: Dict[str, np.ndarray] = {}
     traj_ends: Dict[str, np.ndarray] = {}
     n_trials: Dict[str, int] = {}
-    for traj in trajectory_types:
+    for traj in TRAJECTORY_TYPES:
         starts = np.asarray(trajectory_times[epoch][traj][:, 0], dtype=np.float64)
         ends = np.asarray(trajectory_times[epoch][traj][:, -1], dtype=np.float64)
         traj_starts[traj] = starts
@@ -343,73 +459,17 @@ def prepare_F(
                 f"n_available={n_available}."
             )
 
-    # ----- Track geometry (same as your code; kept here) -----
-    dx = 9.5
-    dy = 9.0
-    diagonal_segment_length = np.sqrt(dx**2 + dy**2)
-
-    long_segment_length = 81 - 17 - 2
-    short_segment_length = 13.5
-
-    total_length_per_trajectory = (
-        long_segment_length * 2 + short_segment_length + 2 * diagonal_segment_length
-    )
-
-    node_positions_right = np.array(
-        [
-            (55.5, 81),
-            (55.5, 81 - long_segment_length),
-            (55.5 - dx, 81 - long_segment_length - dy),
-            (55.5 - dx - short_segment_length, 81 - long_segment_length - dy),
-            (55.5 - 2 * dx - short_segment_length, 81 - long_segment_length),
-            (55.5 - 2 * dx - short_segment_length, 81),
-        ]
-    )
-
-    node_positions_left = np.array(
-        [
-            (55.5, 81),
-            (55.5, 81 - long_segment_length),
-            (55.5 + dx, 81 - long_segment_length - dy),
-            (55.5 + dx + short_segment_length, 81 - long_segment_length - dy),
-            (55.5 + 2 * dx + short_segment_length, 81 - long_segment_length),
-            (55.5 + 2 * dx + short_segment_length, 81),
-        ]
-    )
-
-    edges = np.array([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)])
-    linear_edge_order = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
-    linear_edge_spacing = 0
-
-    track_graph_left = tl.make_track_graph(node_positions_left, edges)
-    track_graph_right = tl.make_track_graph(node_positions_right, edges)
-
-    # ----- Movement epoch -----
-    speed_arr = pt.get_speed(
-        position=position_dict[epoch][position_offset:],
-        time=timestamps_position_dict[epoch][position_offset:],
-        sampling_frequency=_sampling_rate(
-            timestamps_position_dict[epoch][position_offset:]
-        ),
-        sigma=0.1,
-    )
-    speed_tsd = nap.Tsd(
-        t=timestamps_position_dict[epoch][position_offset:], d=speed_arr
-    )
-    movement = speed_tsd.threshold(speed_threshold, method="above")
-
-    # ----- Linearized position per trajectory -----
+    # Linearize each trajectory class separately so left/right branches retain the
+    # intended spatial ordering before their bins are later concatenated.
     linear_position: Dict[str, nap.Tsd] = {}
-    for traj in trajectory_types:
-        if "right" in traj:
-            tg = track_graph_right
-        else:
-            tg = track_graph_left
+    for traj in TRAJECTORY_TYPES:
+        branch_side = get_wtrack_branch_side(traj)
+        track_graph = track_graphs_by_side[branch_side]
 
         position_df = tl.get_linearized_position(
             position=position_dict[epoch][position_offset:],
-            track_graph=tg,
-            edge_order=linear_edge_order,
+            track_graph=track_graph,
+            edge_order=edge_orders_by_side[branch_side],
             edge_spacing=linear_edge_spacing,
         )
 
@@ -421,20 +481,25 @@ def prepare_F(
             time_support=traj_ep,
         )
 
-    # ----- Bin edges -----
+    # Spatial conditions are linearized bins spanning one branch traversal.
     bin_edges = np.arange(
-        0, total_length_per_trajectory + bin_size, bin_size, dtype=np.float64
+        0,
+        track_total_length + bin_size,
+        bin_size,
+        dtype=np.float64,
     )
     n_bins = len(bin_edges) - 1
     if n_bins < 2:
         raise ValueError("binning produced <2 bins; decrease bin_size?")
 
-    # ----- Build grouped epochs and compute tuning curves -----
-    # Store per-trajectory per-group tuning curves and occupancy masks
-    tc_store: Dict[str, List[np.ndarray]] = {traj: [] for traj in trajectory_types}
-    occ_masks: Dict[str, List[np.ndarray]] = {traj: [] for traj in trajectory_types}
+    # For each trajectory, build repeat groups from disjoint laps and estimate
+    # one tuning curve per group. Averaging within a group makes each repeat
+    # less noisy than a single lap, which is important because the estimator is
+    # trying to recover signal geometry rather than single-traversal variability.
+    tc_store: Dict[str, List[np.ndarray]] = {traj: [] for traj in TRAJECTORY_TYPES}
+    occ_masks: Dict[str, List[np.ndarray]] = {traj: [] for traj in TRAJECTORY_TYPES}
 
-    for traj in trajectory_types:
+    for traj in TRAJECTORY_TYPES:
         selected_laps = _sample_lap_indices(
             n_trials[traj],
             lap_fraction=lap_fraction,
@@ -448,10 +513,11 @@ def prepare_F(
             g_ends = traj_ends[traj][g_inds]
             g_ep = nap.IntervalSet(start=g_starts, end=g_ends)
 
-            # only keep moving time
-            use_ep = g_ep.intersect(movement.time_support)
+            # Restrict to movement so occupancy and firing rates reflect active
+            # traversal of the track rather than immobility periods.
+            use_ep = g_ep.intersect(movement_epoch.time_support)
 
-            # tuning curve: (units, bins)
+            # Tuning curve for one repeat group, shape (neurons, bins).
             tc = nap.compute_tuning_curves(
                 data=spikes[region],
                 features=linear_position[traj],
@@ -461,7 +527,7 @@ def prepare_F(
             )
             tc_np = np.asarray(tc.to_numpy(), dtype=np.float64)  # (N, n_bins)
 
-            # occupancy mask for this group
+            # Keep track of which bins were sufficiently sampled in this group.
             mask = _occupancy_mask_1d(
                 linear_position[traj],
                 use_ep,
@@ -479,9 +545,10 @@ def prepare_F(
         if len(tc_store[traj]) != n_groups:
             raise RuntimeError("Unexpected number of groups; check grouping logic.")
 
-    # ----- Choose bins to keep: intersection across groups (per trajectory) -----
+    # Keep only bins that are reliable in every repeat group so the condition
+    # axis is aligned across repeats before running MEME.
     keep_masks: Dict[str, np.ndarray] = {}
-    for traj in trajectory_types:
+    for traj in TRAJECTORY_TYPES:
         keep = np.logical_and.reduce(occ_masks[traj])
         if keep.sum() < 2:
             raise ValueError(
@@ -491,11 +558,12 @@ def prepare_F(
             )
         keep_masks[traj] = keep
 
-    # ----- Stack into F: (R=n_groups, C=sum kept bins across trajs, N) -----
+    # Concatenate trajectory-specific tuning curves into one shared condition
+    # axis. This is the spatial analog of stacking all stimulus conditions.
     F_list: List[np.ndarray] = []
     for g in range(n_groups):
         pieces = []
-        for traj in trajectory_types:
+        for traj in TRAJECTORY_TYPES:
             tc_np = tc_store[traj][g]  # (N, n_bins)
             tc_np = np.nan_to_num(tc_np, nan=0.0)  # should be rare after filtering
             kept = keep_masks[traj]
@@ -506,7 +574,8 @@ def prepare_F(
 
     F = np.stack(F_list, axis=0)  # (R, C, N)
 
-    # ----- Optional neuron filtering -----
+    # Apply a fixed inclusion rule based on dark-epoch movement firing rate so
+    # light/dark comparisons are not driven by epoch-specific cell selection.
     if fr_dark_threshold is not None:
         keep_neurons = np.asarray(fr_dark > fr_dark_threshold)
         F = F[:, :, keep_neurons]
@@ -551,9 +620,17 @@ def _random_disjoint_pairs(
 
 
 def _disjoint_difference(F: ArrayF, rng: np.random.Generator) -> ArrayF:
-    """
-    Apply (even - odd)/sqrt(2) but with random disjoint pairing.
-    Uses the *same* pairing for all repeats in F (important).
+    """Apply disjoint differencing across conditions.
+
+    This is the spatial-bin analog of the paper's mean-removal strategy for
+    unbiased eigenmoment estimation. Instead of subtracting the empirical mean
+    across conditions, we randomly pair conditions and replace them with
+    pairwise differences divided by ``sqrt(2)``. This removes the shared mean
+    contribution without relying on a noisy sample mean estimate, which is more
+    faithful to the eigenmoment derivation used in the paper.
+
+    The same random pairing is used across all repeats so repeat-to-repeat
+    comparisons stay aligned.
     """
     R, C, N = F.shape
     a, b = _random_disjoint_pairs(C, rng)
@@ -571,21 +648,29 @@ def meme_eigenmoments_and_pr_mc(
     random_seed: int = 0,
     use_n_choose_p: bool = True,
 ) -> MemeMCResult:
-    """
-    Monte Carlo MEME moments for spatial tuning curves:
+    """Estimate MEME eigenmoments and participation ratio from spatial tuning curves.
 
-    For each of n_pairings:
-      - form disjoint-difference mean removal (random pairing)  -> reduces C to floor(C/2)
-      For each of n_bin_perms:
-        - randomly permute condition (bin) order
-        - compute Kong–Valiant moments using all (or subsampled) repeat pairs
-    Average moments across all MC draws, then PR = N * m1^2 / m2.
+    This function is the core estimator adapted from the paper. It applies the
+    Kong-Valiant-style eigenmoment calculation to ``F``, where ``F`` is built
+    from grouped spatial tuning curves instead of repeated responses to visual
+    stimuli.
 
-    This implements:
-      - Eq. 5 eigenmoment estimator (Kong–Valiant style)
-      - disjoint-difference mean removal (instead of subtracting sample mean)
-      - variance reduction by averaging over many disjoint differences
-    See paper Materials & Methods. :contentReference[oaicite:1]{index=1}
+    The workflow is:
+    1. optionally apply disjoint differencing across conditions to remove the
+       mean in a way that preserves unbiased moment estimation more closely than
+       naive sample-mean subtraction
+    2. randomly permute the condition order to average over order-specific
+       variance in the estimator
+    3. compute eigenmoments from all repeat pairs, then average across Monte
+       Carlo draws
+    4. convert the first two estimated moments to participation ratio
+
+    The borrowed assumption from the paper is that repeat-to-repeat noise is
+    independent given the underlying signal. In this script, that assumption is
+    approximated by using disjoint groups of laps as repeats of the same
+    spatially organized tuning function. Grouping multiple laps into each
+    repeat is deliberate: it trades temporal granularity for more reliable
+    repeat estimates of the underlying spatial tuning curve.
     """
     F = np.asarray(F, dtype=np.float64)
     if F.ndim != 3:
@@ -651,31 +736,43 @@ def meme_eigenmoments_and_pr_mc(
 
 
 def bootstrap_meme_pr(
+    session: dict[str, Any],
     epoch: str,
     region: str,
     *,
-    n_bootstraps: int = 200,
-    lap_fraction: float = 0.7,
+    dark_epoch: str = DEFAULT_DARK_EPOCH,
+    n_bootstraps: int = DEFAULT_N_BOOTSTRAPS,
+    lap_fraction: float = DEFAULT_BOOTSTRAP_LAP_FRACTION,
     fr_dark_threshold: Optional[float] = None,
-    bin_size: float = 4.0,
-    n_groups: int = 4,
-    min_occupancy_s: float = 0.01,
+    bin_size: float = DEFAULT_BIN_SIZE_CM,
+    n_groups: int = DEFAULT_N_GROUPS,
+    min_occupancy_s: float = DEFAULT_MIN_OCCUPANCY_S,
     k_moms: int = 6,
     remove_mean: bool = True,
-    n_pairings: int = 200,
-    n_bin_perms: int = 5,
+    n_pairings: int = DEFAULT_BOOTSTRAP_N_PAIRINGS,
+    n_bin_perms: int = DEFAULT_BOOTSTRAP_N_BIN_PERMS,
     max_repeat_pairs: Optional[int] = None,
     random_seed: int = 0,
-    ci: float = 95.0,
+    ci: float = DEFAULT_BOOTSTRAP_CI,
     center: Literal["mean", "median"] = "mean",
 ) -> BootstrapPRResult:
-    """
-    Estimate PR uncertainty by resampling laps, then rebuilding grouped repeats.
+    """Estimate uncertainty in spatial MEME PR by resampling laps.
 
-    For each bootstrap draw:
-      1. sample lap_fraction of laps per trajectory without replacement
-      2. split sampled laps into n_groups disjoint groups
-      3. build F and compute PR with MEME
+    The bootstrap unit here is the lap, because laps are the natural repeated
+    observations available in this dataset. Each bootstrap draw resamples laps,
+    rebuilds the grouped tuning-curve tensor ``F``, and reruns the full MEME
+    estimator. This quantifies uncertainty in the adapted spatial pipeline,
+    rather than uncertainty for the paper's original repeated-stimulus design.
+
+    Concretely, for each trajectory in each bootstrap draw, the code:
+    1. samples a fraction of laps without replacement
+    2. repartitions those sampled laps into disjoint repeat groups
+    3. recomputes grouped tuning curves and occupancy filtering
+    4. reruns MEME and stores the resulting PR
+
+    The resulting bootstrap distribution therefore reflects uncertainty from
+    finite lap sampling and from the repeat-construction procedure itself, not
+    just from the final Monte Carlo eigenmoment calculation.
     """
     rng = np.random.default_rng(random_seed)
     pr_samples = np.full((n_bootstraps,), np.nan, dtype=np.float64)
@@ -686,8 +783,10 @@ def bootstrap_meme_pr(
 
         try:
             F_b = prepare_F(
+                session,
                 epoch=epoch,
                 region=region,
+                dark_epoch=dark_epoch,
                 fr_dark_threshold=fr_dark_threshold,
                 bin_size=bin_size,
                 n_groups=n_groups,
@@ -789,306 +888,6 @@ def _meme_moments_from_pair(
     return moms
 
 
-def _demean_via_disjoint_differences_per_repeat(
-    F: ArrayF,
-    *,
-    pairing: Literal["adjacent", "random"] = "adjacent",
-    random_seed: int = 0,
-    block_size: Optional[int] = None,
-    return_pairs: bool = False,
-) -> ArrayF | Tuple[ArrayF, np.ndarray, np.ndarray]:
-    """
-    Apply disjoint differences along C:
-        (F[:, a, :] - F[:, b, :]) / sqrt(2)
-
-    Returns optionally the index arrays (a, b) used.
-    """
-    if F.ndim != 3:
-        raise ValueError(f"F must have shape (R, C, N). Got {F.shape}.")
-    R, C, N = F.shape
-    if C < 2:
-        raise ValueError("Need at least 2 conditions.")
-
-    rng = np.random.default_rng(random_seed)
-
-    def _pairs(idxs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if pairing == "adjacent":
-            m = (len(idxs) // 2) * 2
-            idxs = idxs[:m]
-            return idxs[0::2], idxs[1::2]
-        if pairing == "random":
-            perm = rng.permutation(idxs)
-            m = (len(perm) // 2) * 2
-            perm = perm[:m]
-            return perm[0::2], perm[1::2]
-        raise ValueError(f"Unknown pairing={pairing!r}.")
-
-    if block_size is None:
-        a, b = _pairs(np.arange(C))
-        D = (F[:, a, :] - F[:, b, :]) / np.sqrt(2.0)
-        return (D, a, b) if return_pairs else D
-
-    if block_size <= 0 or C % block_size != 0:
-        raise ValueError("block_size must be positive and divide C.")
-
-    diffs = []
-    a_all = []
-    b_all = []
-    for start in range(0, C, block_size):
-        idxs = np.arange(start, start + block_size)
-        a, b = _pairs(idxs)
-        diffs.append((F[:, a, :] - F[:, b, :]) / np.sqrt(2.0))
-        a_all.append(a)
-        b_all.append(b)
-
-    D = np.concatenate(diffs, axis=1)
-    if return_pairs:
-        return D, np.concatenate(a_all), np.concatenate(b_all)
-    return D
-
-
-def _demean_via_disjoint_differences_per_repeat2(
-    F: ArrayF,
-    *,
-    pairing: Literal["adjacent", "random"] = "adjacent",
-    random_seed: int = 0,
-    return_pairs: bool = False,
-) -> ArrayF | Tuple[ArrayF, np.ndarray, np.ndarray]:
-    """
-    Apply disjoint differences along C (trials):
-        (F[:, a, :] - F[:, b, :]) / sqrt(2)
-
-    Returns optionally the index arrays (a, b) used.
-    """
-    if F.ndim != 3:
-        raise ValueError(f"F must have shape (R, C, N). Got {F.shape}.")
-    R, C, N = F.shape  # R: repeats (or trials), C: conditions (or spatial bins)
-    if C < 2:
-        raise ValueError("Need at least 2 conditions (C >= 2).")
-
-    rng = np.random.default_rng(random_seed)
-
-    # Create pairs of single trials
-    def _pairs(idxs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if pairing == "adjacent":
-            m = (len(idxs) // 2) * 2  # Ensure even number of trials
-            idxs = idxs[:m]  # Adjust for odd length
-            return idxs[0::2], idxs[1::2]  # Pair adjacent trials
-        if pairing == "random":
-            perm = rng.permutation(idxs)
-            m = (len(perm) // 2) * 2
-            perm = perm[:m]
-            return perm[0::2], perm[1::2]  # Random trial pairing
-        raise ValueError(f"Unknown pairing={pairing!r}.")
-
-    # For each pair of trials, calculate disjoint differences
-    a, b = _pairs(np.arange(C))  # Pair trials (conditions) from C
-    D = (F[:, a, :] - F[:, b, :]) / np.sqrt(2.0)
-
-    return (D, a, b) if return_pairs else D
-
-
-@dataclass(frozen=True)
-class EigenmomentResult:
-    moments: ArrayF  # (k_moms,)
-    pr: float  # participation ratio
-    pair_moments: ArrayF  # (n_pairs, k_moms)
-
-
-def eigenmoments_and_pr_single_trial_pairwise(
-    F: ArrayF,
-    *,
-    k_moms: int = 6,
-    remove_mean: bool = True,
-    max_pairs: Optional[int] = None,
-    pairing="random",  # Pairing can be adjacent or random
-    random_seed: int = 0,
-) -> EigenmomentResult:
-    """
-    Computes eigenmoments and participation ratio using single trial pairwise moments.
-    """
-    if F.ndim != 3:
-        raise ValueError(f"Expected F to be 3D (R, C, N). Got {F.shape}.")
-
-    if F.shape[1] < 2:
-        raise ValueError(f"Expected at least 2 conditions. Got C={F.shape[1]}.")
-
-    # Get number of repeats (R), conditions (C), and neurons (N)
-    R, C, N = F.shape
-    if R < 2:
-        raise ValueError("Need at least 2 repeats/groups.")
-    if k_moms < 2:
-        raise ValueError("Use k_moms>=2 to compute participation ratio.")
-
-    # X = (
-    #     _demean_via_disjoint_differences_per_repeat(
-    #         F, pairing=pairing, random_seed=random_seed
-    #     )
-    #     if remove_mean
-    #     else F
-    # )
-
-    X = (
-        _demean_via_disjoint_differences_per_repeat2(
-            F, pairing=pairing, random_seed=random_seed
-        )
-        if remove_mean
-        else F
-    )
-    # X = np.nan_to_num(X, nan=0.0).astype(np.float64, copy=False)
-
-    # Continue with pairwise calculations as before
-    pairs = [(i, j) for i in range(R) for j in range(i + 1, R)]
-    if max_pairs is not None and max_pairs < len(pairs):
-        rng = np.random.default_rng(random_seed)
-        keep = rng.choice(len(pairs), size=max_pairs, replace=False)
-        pairs = [pairs[i] for i in keep]
-
-    pair_moms = np.empty((len(pairs), k_moms), dtype=np.float64)
-    for t, (i, j) in enumerate(pairs):
-        pair_moms[t] = _meme_moments_from_pair(X[i], X[j], k_moms=k_moms)
-
-    moms = pair_moms.mean(axis=0)
-    m1, m2 = float(moms[0]), float(moms[1])
-
-    # Participation ratio
-    pr = float("nan") if m2 <= 0 else float(N) * (m1 * m1) / m2
-
-    return EigenmomentResult(moments=moms, pr=pr, pair_moments=pair_moms)
-
-
-def eigenmoments_and_pr(
-    F: ArrayF,
-    *,
-    k_moms: int = 6,
-    remove_mean: bool = True,
-    max_pairs: Optional[int] = None,
-    pairing="random",
-    random_seed: int = 0,
-) -> EigenmomentResult:
-    """
-    Compute eigenmoments and participation ratio from (R, C, N) repeats.
-
-    Parameters
-    ----------
-    F
-        Shape: (R, C, N) = (groups, position_bins, neurons).
-        Entries: firing rates (recommended) or counts.
-    k_moms
-        Number of eigenmoments to estimate (need >=2 for PR).
-    remove_mean
-        If True, uses disjoint differencing along the position-bin axis.
-        Leave True unless you know your tuning curves already have zero-mean across bins.
-    max_pairs
-        If set, randomly subsample repeat pairs for speed.
-    random_seed
-        RNG seed for pair subsampling.
-
-    Returns
-    -------
-    result
-        moments: (k_moms,) with m_p = (1/N) * sum lambda_i^p
-        pr: m1^2 / m2
-        pair_moments: per-pair estimates for uncertainty/bootstrapping
-    """
-    if F.ndim != 3:
-        raise ValueError(f"Expected F to be 3D (R, C, N). Got {F.shape}.")
-
-    R, C, N = F.shape
-    if R < 2:
-        raise ValueError("Need at least 2 repeats/groups.")
-    if k_moms < 2:
-        raise ValueError("Use k_moms>=2 to compute participation ratio.")
-
-    X = (
-        _demean_via_disjoint_differences_per_repeat(
-            F, pairing=pairing, random_seed=random_seed
-        )
-        if remove_mean
-        else F
-    )
-    X = np.nan_to_num(X, nan=0.0).astype(np.float64, copy=False)
-
-    pairs = [(i, j) for i in range(R) for j in range(i + 1, R)]
-    if max_pairs is not None and max_pairs < len(pairs):
-        rng = np.random.default_rng(random_seed)
-        keep = rng.choice(len(pairs), size=max_pairs, replace=False)
-        pairs = [pairs[i] for i in keep]
-
-    pair_moms = np.empty((len(pairs), k_moms), dtype=np.float64)
-    for t, (i, j) in enumerate(pairs):
-        pair_moms[t] = _meme_moments_from_pair(X[i], X[j], k_moms=k_moms)
-
-    moms = pair_moms.mean(axis=0)
-    m1, m2 = float(moms[0]), float(moms[1])
-
-    # Participation ratio
-    # pr = float("nan") if m2 <= 0 else (m1 * m1) / m2
-    pr = float("nan") if m2 <= 0 else float(N) * (m1 * m1) / m2
-
-    return EigenmomentResult(moments=moms, pr=pr, pair_moments=pair_moms)
-
-
-# ----------------------------
-# Optional: reconstruct a discrete eigenspectrum by moment-matching
-# ----------------------------
-def estimate_eigenspectrum_discrete(
-    moments: ArrayF,
-    *,
-    n_grid: int = 200,
-    lam_min: Optional[float] = None,
-    lam_max: Optional[float] = None,
-    ridge: float = 1e-6,
-) -> Tuple[ArrayF, ArrayF]:
-    """
-    Rough eigenspectrum estimate by fitting a nonnegative discrete distribution
-    over eigenvalues that matches the first K moments.
-
-    We solve a ridge-stabilized least-squares:
-        V w ≈ m,  w>=0, sum(w)=1
-
-    where V[p, j] = lam_j^(p+1),  m[p] = moment_{p+1}.
-
-    Returns
-    -------
-    lam_grid
-        Eigenvalue grid (log-spaced), shape (n_grid,)
-    weights
-        Nonnegative weights, shape (n_grid,), sum to ~1
-    """
-    K = moments.shape[0]
-    if K < 2:
-        raise ValueError("Need at least 2 moments for a stable spectrum fit.")
-
-    m1, m2 = float(moments[0]), float(moments[1])
-    if lam_max is None:
-        lam_max = max(10.0 * m1, 1e-8)
-    if lam_min is None:
-        # crude scale using m2 and m1
-        lam_min = max(min(m1 * 1e-3, m2 / (m1 + 1e-12) * 1e-3), 1e-12)
-
-    lam_grid = np.exp(np.linspace(np.log(lam_min), np.log(lam_max), n_grid)).astype(
-        np.float64
-    )
-
-    # Vandermonde-like matrix for moments (K x n_grid)
-    p = np.arange(1, K + 1, dtype=np.float64)[:, None]
-    V = lam_grid[None, :] ** p  # moment p is E[lambda^p]
-
-    # Ridge-stabilized solve for unconstrained weights
-    # Then project to simplex (nonnegative, sum=1) via clipping + renorm.
-    A = V.T @ V + ridge * np.eye(n_grid)
-    b = V.T @ moments
-    w = np.linalg.solve(A, b)
-
-    w = np.clip(w, 0.0, np.inf)
-    s = float(w.sum())
-    if s > 0:
-        w /= s
-
-    return lam_grid, w
-
-
 @dataclass(frozen=True)
 class NaiveSpectrumResult:
     """
@@ -1157,7 +956,9 @@ def naive_cov_eigs_and_pr(
 
     Notes
     -----
-    - This is a *sample* covariance method; it is generally noise-biased compared to MEME.
+    - This is a direct sample-covariance baseline, included for comparison with
+      MEME. As in the paper's discussion of naive covariance-style estimators,
+      it is generally expected to be more noise-biased than MEME.
     - PR computed from eigenvalues is:
         $$
         \\mathrm{PR} = \\frac{(\\sum_i \\lambda_i)^2}{\\sum_i \\lambda_i^2}.
@@ -1359,137 +1160,6 @@ def fit_power_law_from_meme_moments(
     )
 
 
-def fit_broken_power_law_from_meme_moments(
-    moments: ArrayF,
-    *,
-    n_neurons: int,
-    alpha_bounds: Tuple[float, float] = (1e-3, 5.0),
-    grid_size_alpha: int = 120,
-    k0_candidates: Optional[npt.NDArray[np.integer]] = None,
-    weights: Optional[ArrayF] = None,
-    use_log_moments: bool = True,
-) -> PowerLawFit:
-    """
-    Fit a continuous broken power-law eigenspectrum to MEME moments.
-
-    Uses a grid search over (k0, alpha1, alpha2) and eliminates c using m1:
-        c = m1 / mean_i base_i
-
-    Parameters
-    ----------
-    moments
-        MEME averaged eigenmoments (K,)
-    n_neurons
-        N
-    alpha_bounds
-        Range for alpha1 and alpha2
-    grid_size_alpha
-        Grid points for each alpha dimension
-    k0_candidates
-        Candidate breakpoints; if None uses a reasonable default set
-    weights
-        Optional weights for p=2..K (shape K-1); if None uses 1/p^2
-    use_log_moments
-        Fit in log-space
-
-    Returns
-    -------
-    fit
-        PowerLawFit with alpha1, alpha2, k0, c
-    """
-    moments = np.asarray(moments, dtype=np.float64)
-    if moments.ndim != 1 or moments.size < 3:
-        raise ValueError("moments must be shape (K,) with K>=3 for broken power-law.")
-    if n_neurons < 3:
-        raise ValueError("n_neurons must be >= 3.")
-
-    K = int(moments.size)
-    m1_hat = float(moments[0])
-    target = moments[1:]  # p=2..K
-
-    p_orders = np.arange(2, K + 1, dtype=np.float64)
-    if weights is None:
-        w = 1.0 / (p_orders**2)
-    else:
-        w = np.asarray(weights, dtype=np.float64)
-        if w.shape != target.shape:
-            raise ValueError(f"weights must have shape {(K-1,)}.")
-
-    if k0_candidates is None:
-        # log-spaced + a few small values; avoids huge search
-        log_k = np.unique(np.round(np.logspace(0, np.log10(n_neurons), 40)).astype(int))
-        small_k = np.array([2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 40, 60], dtype=int)
-        k0_candidates = np.unique(
-            np.clip(np.concatenate([small_k, log_k]), 1, n_neurons)
-        )
-    else:
-        k0_candidates = np.unique(np.asarray(k0_candidates, dtype=int))
-        k0_candidates = k0_candidates[
-            (k0_candidates >= 1) & (k0_candidates <= n_neurons)
-        ]
-        if k0_candidates.size == 0:
-            raise ValueError("k0_candidates must include values in [1, n_neurons].")
-
-    i = np.arange(1, n_neurons + 1, dtype=np.float64)
-    alphas = np.linspace(
-        alpha_bounds[0], alpha_bounds[1], grid_size_alpha, dtype=np.float64
-    )
-
-    best_obj = np.inf
-    best = None  # (alpha1, alpha2, k0, c)
-
-    for k0 in k0_candidates:
-        left = i <= k0
-        i_left = i[left]
-        i_right = i[~left]
-
-        left_pow = i_left[None, :] ** (-alphas[:, None])  # (A, n_left)
-        right_pow = i_right[None, :] ** (-alphas[:, None])  # (A, n_right)
-
-        for a1_idx, alpha1 in enumerate(alphas):
-            base_left = left_pow[a1_idx]
-
-            for a2_idx, alpha2 in enumerate(alphas):
-                cont = float(k0 ** (alpha2 - alpha1))
-                base_right = cont * right_pow[a2_idx]
-
-                base = np.empty(n_neurons, dtype=np.float64)
-                base[left] = base_left
-                base[~left] = base_right
-
-                mean_base = float(base.mean())
-                if mean_base <= 0:
-                    continue
-
-                c = m1_hat / mean_base
-                lam = c * base
-                model = _moments_from_lambda(lam, K)[1:]  # p=2..K
-
-                if use_log_moments and np.all(model > 0) and np.all(target > 0):
-                    resid = np.log(model) - np.log(target)
-                else:
-                    resid = (model - target) / np.maximum(np.abs(target), 1e-12)
-
-                obj = float(np.sum(w * (resid**2)))
-                if obj < best_obj:
-                    best_obj = obj
-                    best = (float(alpha1), float(alpha2), int(k0), float(c))
-
-    if best is None:
-        raise RuntimeError("Broken power-law fit failed.")
-
-    alpha1, alpha2, k0, c = best
-    return PowerLawFit(
-        kind="broken_power_law",
-        n_neurons=n_neurons,
-        alpha1=alpha1,
-        alpha2=alpha2,
-        k0=k0,
-        c=c,
-        objective=best_obj,
-    )
-
-
 from scipy.optimize import minimize
 
 
@@ -1654,16 +1324,14 @@ def plot_eigenspectrum_comparison(
     n_neurons: int,
     save_path: Path,
     metric: Literal["eigenvalue", "variance_explained"] = "variance_explained",
-    max_rank: int = 100,  # <--- NEW PARAMETER
-):
-    """
-    Plot the eigenspectrum focused on the top ranks.
+    max_rank: int = 100,
+) -> Path:
+    """Plot MEME and naive eigenspectra for visual comparison.
 
-    Parameters
-    ----------
-    max_rank : int
-        Number of eigenvalues to plot (e.g., 100).
-        The y-axis will auto-scale to fit these specific values.
+    These figures are intended as a geometry check: the MEME panel shows the
+    fitted signal eigenspectrum inferred from eigenmoments, while the naive
+    panel shows the direct sample eigenspectrum from the same grouped spatial
+    tuning data.
     """
 
     # Setup y-label
@@ -1738,10 +1406,11 @@ def plot_eigenspectrum_comparison(
     plt.tight_layout()
 
     filename = f"{region}_eigenspectrum_{metric}_top{limit}.png"
-    plt.savefig(save_path / filename, dpi=300)
+    output_path = save_path / filename
+    plt.savefig(output_path, dpi=300)
     plt.close(fig)
 
-    return None
+    return output_path
 
 
 def plot_broken_power_law_comparison(
@@ -1752,10 +1421,13 @@ def plot_broken_power_law_comparison(
     save_path: Path,
     metric: Literal["eigenvalue", "variance_explained"] = "variance_explained",
     max_rank: int = 1000,
-):
-    """
-    Plot the eigenspectrum with BROKEN Power Law fits focused on the top ranks.
-    Uses the optimized fitting function.
+) -> Path:
+    """Plot broken-power-law fits for the inferred eigenspectra.
+
+    These plots are qualitative fit diagnostics. They let the reader inspect
+    whether the spatial tuning eigenspectrum is better captured by a broken
+    power law than by a single-slope fit, mirroring the paper's emphasis on
+    broken-power-law structure.
     """
 
     # Setup y-label
@@ -1834,13 +1506,15 @@ def plot_broken_power_law_comparison(
     plt.tight_layout()
 
     filename = f"{region}_broken_power_law_{metric}_top{limit}.png"
-    plt.savefig(save_path / filename, dpi=300)
+    output_path = save_path / filename
+    plt.savefig(output_path, dpi=300)
     plt.close(fig)
 
-    return None
+    return output_path
 
 
-def plot_pr(region, meme_pr, naive_pr, save_path):
+def plot_pr(region, meme_pr, naive_pr, save_path) -> Path:
+    """Plot epoch-wise participation ratio summaries for one region."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
     epochs = list(meme_pr.keys())
@@ -1852,13 +1526,10 @@ def plot_pr(region, meme_pr, naive_pr, save_path):
     ax.set_ylabel("Participation Ratio")
     ax.set_title(f"Region: {region}")
     ax.legend()
-    plt.savefig(save_path / f"{region}_pr.png", dpi=300)
+    output_path = save_path / f"{region}_pr.png"
+    plt.savefig(output_path, dpi=300)
     plt.close(fig)
-    return None
-
-
-import matplotlib.pyplot as plt
-from pathlib import Path
+    return output_path
 
 
 def plot_pr_light_dark_epochwise(
@@ -1874,11 +1545,10 @@ def plot_pr_light_dark_epochwise(
     random_seed: int = 0,
     title_suffix: str = "",
 ):
-    """
-    Plot per-epoch PR estimates with CI error bars, grouped by condition (light/dark).
+    """Plot per-epoch PR estimates with bootstrap uncertainty by condition.
 
-    epoch_to_mc_pr: epoch -> 1D array of MC PR draws
-    epoch_to_condition: epoch -> "light" or "dark"
+    This summarizes the adapted MEME output at the epoch level rather than the
+    eigenspectrum level, separating the selected light and dark epochs.
     """
     rng = np.random.default_rng(random_seed)
 
@@ -1975,34 +1645,44 @@ def plot_pr_light_dark_groupmeans(
     random_seed: int = 0,
     title_suffix: str = "",
 ):
-    """
-    Plot condition-level mean PR (averaged across epochs) with CI derived from mc_pr.
-    Also returns the MC distributions for dark, light, and (light - dark).
+    """Plot condition-level PR means and return the draw distributions.
+
+    The returned dark, light, and delta draws are also written to summary
+    parquet tables so downstream analysis can use the same light-vs-dark
+    summaries that fed the figure.
     """
     rng = np.random.default_rng(random_seed)
 
     # Partition epochs by condition
-    dark_epochs = [
+    dark_condition_epochs = [
         e
         for e, c in epoch_to_condition.items()
         if str(c).lower() == "dark" and e in epoch_to_mc_pr
     ]
-    light_epochs = [
+    light_condition_epochs = [
         e
         for e, c in epoch_to_condition.items()
         if str(c).lower() == "light" and e in epoch_to_mc_pr
     ]
 
-    if len(dark_epochs) == 0 or len(light_epochs) == 0:
+    if len(dark_condition_epochs) == 0 or len(light_condition_epochs) == 0:
         raise ValueError(
-            f"Need >=1 epoch in each condition. Found dark={len(dark_epochs)}, light={len(light_epochs)}."
+            "Need >=1 epoch in each condition. Found "
+            f"dark={len(dark_condition_epochs)}, "
+            f"light={len(light_condition_epochs)}."
         )
 
     dark_draws = _mc_mean_across_epochs(
-        epoch_to_mc_pr, dark_epochs, n_draws=n_draws, rng=rng
+        epoch_to_mc_pr,
+        dark_condition_epochs,
+        n_draws=n_draws,
+        rng=rng,
     )
     light_draws = _mc_mean_across_epochs(
-        epoch_to_mc_pr, light_epochs, n_draws=n_draws, rng=rng
+        epoch_to_mc_pr,
+        light_condition_epochs,
+        n_draws=n_draws,
+        rng=rng,
     )
     delta_draws = light_draws - dark_draws
 
@@ -2055,205 +1735,587 @@ def plot_pr_light_dark_groupmeans(
     return out, dark_draws, light_draws, delta_draws
 
 
-def main():
-    out_dir = analysis_path / "meme3"
-    fig_dir = analysis_path / "figs" / "meme3"
+def get_region_dark_rate_threshold(region: str) -> float | None:
+    """Return the dark-epoch firing-rate threshold used for neuron filtering."""
+    if region not in DEFAULT_REGIONS:
+        raise ValueError(f"Unsupported region: {region!r}")
+    return None
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir.mkdir(parents=True, exist_ok=True)
 
-    bootstrap_lap_fraction = 0.7
-    n_bootstraps = 200
-    bootstrap_ci = 95.0
-    full_n_pairings = 1000
-    full_n_bin_perms = 5
-    bootstrap_n_pairings = 200
-    bootstrap_n_bin_perms = 5
+def _stable_region_neuron_count(region_counts: dict[str, int], region: str) -> int:
+    """Return one validated neuron count for a region across selected epochs."""
+    unique_counts = set(region_counts.values())
+    if len(unique_counts) != 1:
+        raise ValueError(
+            f"Expected a stable neuron count across epochs for region {region!r}, "
+            f"got {sorted(unique_counts)!r}."
+        )
+    return next(iter(unique_counts))
 
-    # Initialize storage
-    meme_moments = {region: {} for region in regions}
-    naive_eigenvalues = {region: {} for region in regions}
-    meme_pr = {region: {} for region in regions}
-    naive_pr = {region: {} for region in regions}
-    meme_boot_pr = {region: {} for region in regions}
-    meme_boot_summary = {region: {} for region in regions}
 
-    epoch_to_condition = {
-        run_epoch_list[0]: "light",
-        run_epoch_list[1]: "light",
-        run_epoch_list[2]: "light",
-        run_epoch_list[3]: "dark",
-    }
+def save_epoch_summary_tables(
+    out_dir: Path,
+    *,
+    regions: list[str],
+    run_epochs: list[str],
+    epoch_to_condition: dict[str, str],
+    n_neurons_by_region: dict[str, dict[str, int]],
+    meme_pr: dict[str, dict[str, float]],
+    naive_pr: dict[str, dict[str, float]],
+    meme_boot_summary: dict[str, dict[str, PRSummary]],
+    fr_dark_threshold_by_region: dict[str, float | None],
+    settings: dict[str, Any],
+) -> list[Path]:
+    """Write one parquet summary row per region and epoch.
 
-    # Track N per region to pass to plotting later
-    n_neurons_per_region = {}
-
+    These parquet tables are compact analysis summaries. They record scalar
+    outputs of the MEME workflow for each region/epoch pair, not the full
+    vector-valued MEME objects such as all eigenmoments or full eigenspectra.
+    """
+    saved_paths: list[Path] = []
     for region in regions:
-        if region == "v1":
-            # fr_dark_threshold = 0.5
-            fr_dark_threshold = None
-        else:
-            fr_dark_threshold = None
-
-        print(f"\n=== Processing Region: {region} ===")
-
-        # 1. Process all epochs for this region
-        for epoch in run_epoch_list:
-            print(f"  -- Epoch: {epoch}")
-
-            F = prepare_F(
-                epoch=epoch,
-                region=region,
-                fr_dark_threshold=fr_dark_threshold,
-                bin_size=4,
-                n_groups=4,
-                min_occupancy_s=0.01,
+        fr_threshold = fr_dark_threshold_by_region[region]
+        for epoch in run_epochs:
+            summary = meme_boot_summary[region][epoch]
+            table = pd.DataFrame(
+                [
+                    {
+                        "region": region,
+                        "epoch": epoch,
+                        "condition": epoch_to_condition[epoch],
+                        "n_neurons": n_neurons_by_region[region][epoch],
+                        "meme_pr": meme_pr[region][epoch],
+                        "naive_pr": naive_pr[region][epoch],
+                        "bootstrap_pr_center": summary.pr_center,
+                        "bootstrap_pr_ci_low": summary.ci_low,
+                        "bootstrap_pr_ci_high": summary.ci_high,
+                        "bootstrap_pr_n_eff": summary.n_eff,
+                        "fr_dark_threshold_hz": (
+                            np.nan if fr_threshold is None else float(fr_threshold)
+                        ),
+                        "bin_size_cm": settings["bin_size_cm"],
+                        "n_groups": settings["n_groups"],
+                        "lap_fraction": settings["bootstrap_lap_fraction"],
+                        "n_bootstraps": settings["n_bootstraps"],
+                        "n_pairings_full": settings["full_n_pairings"],
+                        "n_bin_perms_full": settings["full_n_bin_perms"],
+                        "n_pairings_bootstrap": settings["bootstrap_n_pairings"],
+                        "n_bin_perms_bootstrap": settings["bootstrap_n_bin_perms"],
+                    }
+                ]
             )
+            path = out_dir / f"{region}_{epoch}_meme_summary.parquet"
+            table.to_parquet(path, index=False)
+            saved_paths.append(path)
+    return saved_paths
 
-            # Store N for this region (it should be constant across epochs for one sorting)
-            # We overwrite it each time, which is fine, or check consistency if desired.
-            n_neurons_per_region[region] = F.shape[-1]
 
-            # MEME Estimation
-            # res = eigenmoments_and_pr(
-            #     F, k_moms=6, remove_mean=True, pairing="random", random_seed=1
-            # )
+def save_light_dark_comparison_tables(
+    out_dir: Path,
+    *,
+    regions: list[str],
+    light_epoch: str,
+    dark_epoch: str,
+    comparison_draws_by_region: dict[str, dict[str, ArrayF]],
+    ci: float,
+    center: Literal["mean", "median"],
+    n_draws: int,
+) -> list[Path]:
+    """Write one light-vs-dark comparison parquet per region.
 
-            res = meme_eigenmoments_and_pr_mc(
-                F,
-                k_moms=6,
-                remove_mean=True,
-                n_pairings=full_n_pairings,
-                n_bin_perms=full_n_bin_perms,
-                max_repeat_pairs=None,  # or an int if you want speed
-                random_seed=47,
-            )
-            meme_moments[region][epoch] = res.moments
-            meme_pr[region][epoch] = res.pr
+    Each table stores scalar summaries of the grouped bootstrap draw
+    distributions used for the light/dark PR figures. The goal is to preserve
+    the comparison results in a tabular, downstream-friendly format while
+    leaving high-dimensional intermediate arrays in the optional legacy pickles.
+    """
+    saved_paths: list[Path] = []
+    for region in regions:
+        dark_draws = comparison_draws_by_region[region]["dark_draws"]
+        light_draws = comparison_draws_by_region[region]["light_draws"]
+        delta_draws = comparison_draws_by_region[region]["delta_draws"]
+        dark_summary = summarize_mc_pr(dark_draws, ci=ci, center=center)
+        light_summary = summarize_mc_pr(light_draws, ci=ci, center=center)
+        delta_summary = summarize_mc_pr(delta_draws, ci=ci, center=center)
 
-            boot = bootstrap_meme_pr(
-                epoch=epoch,
-                region=region,
-                n_bootstraps=n_bootstraps,
-                lap_fraction=bootstrap_lap_fraction,
-                fr_dark_threshold=fr_dark_threshold,
-                bin_size=4,
-                n_groups=4,
-                min_occupancy_s=0.01,
-                k_moms=6,
-                remove_mean=True,
-                n_pairings=bootstrap_n_pairings,
-                n_bin_perms=bootstrap_n_bin_perms,
-                max_repeat_pairs=None,
-                random_seed=1047,
-                ci=bootstrap_ci,
-                center="mean",
-            )
-            meme_boot_pr[region][epoch] = boot.pr_samples
-            meme_boot_summary[region][epoch] = boot.summary
-
-            # Naive Estimation
-            naive_pca = naive_cov_eigs_and_pr(F, mode="mean_repeat", center=True)
-            naive_eigenvalues[region][epoch] = naive_pca.eigenvalues
-            naive_pr[region][epoch] = naive_pca.pr
-
-        # 2. Plotting for this region immediately (or you can do it after all regions)
-        # Now we retrieve N specifically for this region
-        N = n_neurons_per_region[region]
-
-        print(f"  Plotting for {region} (N={N})...")
-
-        # Plot Eigenspectrum (Variance Explained)
-        plot_eigenspectrum_comparison(
-            region=region,
-            all_moments=meme_moments[region],
-            naive_eigenvalues=naive_eigenvalues[region],
-            n_neurons=N,
-            save_path=fig_dir,
-            metric="variance_explained",
+        table = pd.DataFrame(
+            [
+                {
+                    "region": region,
+                    "summary_kind": "dark",
+                    "dark_epoch": dark_epoch,
+                    "light_epoch": light_epoch,
+                    "pr_center": dark_summary.pr_center,
+                    "pr_ci_low": dark_summary.ci_low,
+                    "pr_ci_high": dark_summary.ci_high,
+                    "n_eff": dark_summary.n_eff,
+                    "n_draws": n_draws,
+                },
+                {
+                    "region": region,
+                    "summary_kind": "light",
+                    "dark_epoch": dark_epoch,
+                    "light_epoch": light_epoch,
+                    "pr_center": light_summary.pr_center,
+                    "pr_ci_low": light_summary.ci_low,
+                    "pr_ci_high": light_summary.ci_high,
+                    "n_eff": light_summary.n_eff,
+                    "n_draws": n_draws,
+                },
+                {
+                    "region": region,
+                    "summary_kind": "light_minus_dark",
+                    "dark_epoch": dark_epoch,
+                    "light_epoch": light_epoch,
+                    "pr_center": delta_summary.pr_center,
+                    "pr_ci_low": delta_summary.ci_low,
+                    "pr_ci_high": delta_summary.ci_high,
+                    "n_eff": delta_summary.n_eff,
+                    "n_draws": n_draws,
+                },
+            ]
         )
-        plot_eigenspectrum_comparison(
-            region=region,
-            all_moments=meme_moments[region],
-            naive_eigenvalues=naive_eigenvalues[region],
-            n_neurons=N,
-            save_path=fig_dir,
-            metric="eigenvalue",
-        )
-        plot_broken_power_law_comparison(
-            region=region,
-            all_moments=meme_moments[region],
-            naive_eigenvalues=naive_eigenvalues[region],
-            n_neurons=N,
-            save_path=fig_dir,
-            metric="variance_explained",
-            max_rank=1000,
-        )
-        plot_broken_power_law_comparison(
-            region=region,
-            all_moments=meme_moments[region],
-            naive_eigenvalues=naive_eigenvalues[region],
-            n_neurons=N,
-            save_path=fig_dir,
-            metric="eigenvalue",
-            max_rank=1000,
-        )
-        # Plot Participation Ratio
-        plot_pr(
-            region=region,
-            meme_pr=meme_pr[region],
-            naive_pr=naive_pr[region],
-            save_path=fig_dir,
-        )
+        path = out_dir / f"{region}_{dark_epoch}_light_dark_comparison.parquet"
+        table.to_parquet(path, index=False)
+        saved_paths.append(path)
+    return saved_paths
 
-        # PR plots using mc_pr distributions
-        plot_pr_light_dark_epochwise(
-            region=region,
-            epoch_to_mc_pr=meme_boot_pr[region],
-            epoch_to_condition=epoch_to_condition,
-            save_path=fig_dir,
-            ci=bootstrap_ci,
-            center="mean",
-            annotate=True,
-            random_seed=0,
-            title_suffix=" (bootstrap over laps)",
-        )
 
-        plot_pr_light_dark_groupmeans(
-            region=region,
-            epoch_to_mc_pr=meme_boot_pr[region],
-            epoch_to_condition=epoch_to_condition,
-            save_path=fig_dir,
-            ci=bootstrap_ci,
-            center="mean",
-            n_draws=5000,
-            random_seed=0,
-            title_suffix=" (bootstrap over laps)",
-        )
-
-    # Save final results
-    with open(out_dir / "meme_results.pkl", "wb") as f:
+def save_legacy_pickles(
+    out_dir: Path,
+    *,
+    meme_pr: dict[str, dict[str, float]],
+    meme_moments: dict[str, dict[str, ArrayF]],
+    meme_boot_pr: dict[str, dict[str, ArrayF]],
+    meme_boot_summary: dict[str, dict[str, PRSummary]],
+    naive_pr: dict[str, dict[str, float]],
+    naive_eigenvalues: dict[str, dict[str, ArrayF]],
+    settings: dict[str, Any],
+) -> dict[str, Path]:
+    """Write compatibility pickles that match the legacy artifact families."""
+    saved_paths = {
+        "meme_results_pickle": out_dir / "meme_results.pkl",
+        "naive_results_pickle": out_dir / "naive_results.pkl",
+    }
+    with open(saved_paths["meme_results_pickle"], "wb") as file_pointer:
         pickle.dump(
             {
                 "pr": meme_pr,
                 "moments": meme_moments,
                 "bootstrap_pr": meme_boot_pr,
                 "bootstrap_summary": meme_boot_summary,
-                "settings": {
-                    "bootstrap_lap_fraction": bootstrap_lap_fraction,
-                    "n_bootstraps": n_bootstraps,
-                    "bootstrap_ci": bootstrap_ci,
-                    "full_n_pairings": full_n_pairings,
-                    "full_n_bin_perms": full_n_bin_perms,
-                    "bootstrap_n_pairings": bootstrap_n_pairings,
-                    "bootstrap_n_bin_perms": bootstrap_n_bin_perms,
-                },
+                "settings": settings,
             },
-            f,
+            file_pointer,
+        )
+    with open(saved_paths["naive_results_pickle"], "wb") as file_pointer:
+        pickle.dump(
+            {"pca_pr": naive_pr, "eigenvalues": naive_eigenvalues},
+            file_pointer,
+        )
+    return saved_paths
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the MEME signal-dimension workflow."""
+    parser = argparse.ArgumentParser(description="Estimate MEME signal dimensionality")
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--run-epochs",
+        nargs="*",
+        help="Optional run epoch labels to analyze. Defaults to the first four run epochs.",
+    )
+    parser.add_argument(
+        "--dark-epoch",
+        default=DEFAULT_DARK_EPOCH,
+        help=f"Epoch label to treat as dark. Default: {DEFAULT_DARK_EPOCH}",
+    )
+    parser.add_argument(
+        "--light-epoch",
+        help="Optional run epoch label to treat as light. Defaults to the first selected run epoch.",
+    )
+    parser.add_argument(
+        "--regions",
+        nargs="+",
+        default=list(DEFAULT_REGIONS),
+        help=f"Regions to analyze. Default: {' '.join(DEFAULT_REGIONS)}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=f"Speed threshold in cm/s used to define movement. Default: {DEFAULT_SPEED_THRESHOLD_CM_S}",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Number of leading position samples to ignore. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--bin-size-cm",
+        type=float,
+        default=DEFAULT_BIN_SIZE_CM,
+        help=f"Spatial bin size in cm for tuning curves. Default: {DEFAULT_BIN_SIZE_CM}",
+    )
+    parser.add_argument(
+        "--n-groups",
+        type=int,
+        default=DEFAULT_N_GROUPS,
+        help=f"Number of disjoint lap groups. Default: {DEFAULT_N_GROUPS}",
+    )
+    parser.add_argument(
+        "--min-occupancy-s",
+        type=float,
+        default=DEFAULT_MIN_OCCUPANCY_S,
+        help=f"Minimum occupancy in seconds per kept bin. Default: {DEFAULT_MIN_OCCUPANCY_S}",
+    )
+    parser.add_argument(
+        "--bootstrap-lap-fraction",
+        type=float,
+        default=DEFAULT_BOOTSTRAP_LAP_FRACTION,
+        help=f"Fraction of laps sampled in each bootstrap draw. Default: {DEFAULT_BOOTSTRAP_LAP_FRACTION}",
+    )
+    parser.add_argument(
+        "--n-bootstraps",
+        type=int,
+        default=DEFAULT_N_BOOTSTRAPS,
+        help=f"Number of bootstrap resamples. Default: {DEFAULT_N_BOOTSTRAPS}",
+    )
+    parser.add_argument(
+        "--bootstrap-ci",
+        type=float,
+        default=DEFAULT_BOOTSTRAP_CI,
+        help=f"Bootstrap confidence interval width in percent. Default: {DEFAULT_BOOTSTRAP_CI}",
+    )
+    parser.add_argument(
+        "--full-n-pairings",
+        type=int,
+        default=DEFAULT_FULL_N_PAIRINGS,
+        help=f"Number of Monte Carlo pairing draws for full MEME estimation. Default: {DEFAULT_FULL_N_PAIRINGS}",
+    )
+    parser.add_argument(
+        "--full-n-bin-perms",
+        type=int,
+        default=DEFAULT_FULL_N_BIN_PERMS,
+        help=f"Number of bin permutations for full MEME estimation. Default: {DEFAULT_FULL_N_BIN_PERMS}",
+    )
+    parser.add_argument(
+        "--bootstrap-n-pairings",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_N_PAIRINGS,
+        help=f"Number of Monte Carlo pairing draws inside bootstrap estimation. Default: {DEFAULT_BOOTSTRAP_N_PAIRINGS}",
+    )
+    parser.add_argument(
+        "--bootstrap-n-bin-perms",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_N_BIN_PERMS,
+        help=f"Number of bin permutations inside bootstrap estimation. Default: {DEFAULT_BOOTSTRAP_N_BIN_PERMS}",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help=f"Base random seed for MEME estimation. Default: {DEFAULT_RANDOM_SEED}",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=f"Directory for saved parquet tables and optional pickles. Default: analysis_path / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
+    )
+    parser.add_argument(
+        "--fig-dir",
+        type=Path,
+        help=f"Directory for saved figures. Default: analysis_path / 'figs' / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
+    )
+    parser.add_argument(
+        "--save-legacy-pickle",
+        action="store_true",
+        help="Also write the legacy MEME and naive pickle outputs.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run the MEME signal-dimension workflow for one session.
+
+    High-level workflow:
+    1. load one session and derive movement- and trajectory-aware state
+    2. choose run epochs plus one light/dark comparison pair
+    3. build grouped spatial tuning tensors ``F`` for each region and epoch
+    4. estimate MEME and naive participation ratios
+    5. bootstrap lap-level uncertainty
+    6. save figures, parquet summaries, optional legacy pickles, and a run log
+    """
+    args = parse_arguments()
+    session = load_meme_session(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        regions=list(args.regions),
+        position_offset=args.position_offset,
+        speed_threshold_cm_s=args.speed_threshold_cm_s,
+    )
+    run_epochs = select_run_epochs(
+        session["run_epochs"],
+        args.run_epochs,
+    )
+    light_epoch, dark_epoch = get_light_and_dark_epochs(
+        run_epochs,
+        args.light_epoch,
+        args.dark_epoch,
+    )
+    epoch_to_condition = {light_epoch: "light", dark_epoch: "dark"}
+
+    analysis_path = session["analysis_path"]
+    out_dir = args.output_dir or (analysis_path / DEFAULT_MEME_OUTPUT_DIRNAME)
+    fig_dir = args.fig_dir or (analysis_path / "figs" / DEFAULT_MEME_OUTPUT_DIRNAME)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    bootstrap_random_seed = args.random_seed + 1000
+    settings = {
+        "animal_name": args.animal_name,
+        "date": args.date,
+        "data_root": args.data_root,
+        "regions": list(args.regions),
+        "run_epochs": run_epochs,
+        "light_epoch": light_epoch,
+        "dark_epoch": dark_epoch,
+        "speed_threshold_cm_s": args.speed_threshold_cm_s,
+        "position_offset": args.position_offset,
+        "bin_size_cm": args.bin_size_cm,
+        "n_groups": args.n_groups,
+        "min_occupancy_s": args.min_occupancy_s,
+        "bootstrap_lap_fraction": args.bootstrap_lap_fraction,
+        "n_bootstraps": args.n_bootstraps,
+        "bootstrap_ci": args.bootstrap_ci,
+        "full_n_pairings": args.full_n_pairings,
+        "full_n_bin_perms": args.full_n_bin_perms,
+        "bootstrap_n_pairings": args.bootstrap_n_pairings,
+        "bootstrap_n_bin_perms": args.bootstrap_n_bin_perms,
+        "random_seed": args.random_seed,
+        "bootstrap_random_seed": bootstrap_random_seed,
+        "save_legacy_pickle": args.save_legacy_pickle,
+        "output_dir": out_dir,
+        "fig_dir": fig_dir,
+    }
+
+    meme_moments = {region: {} for region in args.regions}
+    naive_eigenvalues = {region: {} for region in args.regions}
+    meme_pr = {region: {} for region in args.regions}
+    naive_pr = {region: {} for region in args.regions}
+    meme_boot_pr = {region: {} for region in args.regions}
+    meme_boot_summary = {region: {} for region in args.regions}
+    n_neurons_by_region = {region: {} for region in args.regions}
+    comparison_draws_by_region: dict[str, dict[str, ArrayF]] = {}
+    fr_dark_threshold_by_region = {
+        region: get_region_dark_rate_threshold(region) for region in args.regions
+    }
+
+    # Figure families:
+    # - eigenspectrum comparison: MEME vs naive geometry
+    # - broken power law: qualitative inspection of spectrum shape
+    # - PR figures: scalar dimensionality summaries across epochs and conditions
+    saved_figures: list[Path] = []
+    for region in args.regions:
+        fr_dark_threshold = fr_dark_threshold_by_region[region]
+        print(f"\n=== Processing Region: {region} ===")
+
+        for epoch in run_epochs:
+            print(f"  -- Epoch: {epoch}")
+            F = prepare_F(
+                session,
+                epoch=epoch,
+                region=region,
+                dark_epoch=dark_epoch,
+                fr_dark_threshold=fr_dark_threshold,
+                bin_size=args.bin_size_cm,
+                n_groups=args.n_groups,
+                min_occupancy_s=args.min_occupancy_s,
+            )
+            n_neurons_by_region[region][epoch] = F.shape[-1]
+
+            res = meme_eigenmoments_and_pr_mc(
+                F,
+                k_moms=6,
+                remove_mean=True,
+                n_pairings=args.full_n_pairings,
+                n_bin_perms=args.full_n_bin_perms,
+                max_repeat_pairs=None,
+                random_seed=args.random_seed,
+            )
+            meme_moments[region][epoch] = res.moments
+            meme_pr[region][epoch] = res.pr
+
+            boot = bootstrap_meme_pr(
+                session,
+                epoch=epoch,
+                region=region,
+                dark_epoch=dark_epoch,
+                n_bootstraps=args.n_bootstraps,
+                lap_fraction=args.bootstrap_lap_fraction,
+                fr_dark_threshold=fr_dark_threshold,
+                bin_size=args.bin_size_cm,
+                n_groups=args.n_groups,
+                min_occupancy_s=args.min_occupancy_s,
+                k_moms=6,
+                remove_mean=True,
+                n_pairings=args.bootstrap_n_pairings,
+                n_bin_perms=args.bootstrap_n_bin_perms,
+                max_repeat_pairs=None,
+                random_seed=bootstrap_random_seed,
+                ci=args.bootstrap_ci,
+                center="mean",
+            )
+            meme_boot_pr[region][epoch] = boot.pr_samples
+            meme_boot_summary[region][epoch] = boot.summary
+
+            naive_pca = naive_cov_eigs_and_pr(F, mode="mean_repeat", center=True)
+            naive_eigenvalues[region][epoch] = naive_pca.eigenvalues
+            naive_pr[region][epoch] = naive_pca.pr
+
+        n_neurons = _stable_region_neuron_count(n_neurons_by_region[region], region)
+        print(f"  Plotting for {region} (N={n_neurons})...")
+
+        saved_figures.append(
+            plot_eigenspectrum_comparison(
+                region=region,
+                all_moments=meme_moments[region],
+                naive_eigenvalues=naive_eigenvalues[region],
+                n_neurons=n_neurons,
+                save_path=fig_dir,
+                metric="variance_explained",
+            )
+        )
+        saved_figures.append(
+            plot_eigenspectrum_comparison(
+                region=region,
+                all_moments=meme_moments[region],
+                naive_eigenvalues=naive_eigenvalues[region],
+                n_neurons=n_neurons,
+                save_path=fig_dir,
+                metric="eigenvalue",
+            )
+        )
+        saved_figures.append(
+            plot_broken_power_law_comparison(
+                region=region,
+                all_moments=meme_moments[region],
+                naive_eigenvalues=naive_eigenvalues[region],
+                n_neurons=n_neurons,
+                save_path=fig_dir,
+                metric="variance_explained",
+                max_rank=1000,
+            )
+        )
+        saved_figures.append(
+            plot_broken_power_law_comparison(
+                region=region,
+                all_moments=meme_moments[region],
+                naive_eigenvalues=naive_eigenvalues[region],
+                n_neurons=n_neurons,
+                save_path=fig_dir,
+                metric="eigenvalue",
+                max_rank=1000,
+            )
+        )
+        saved_figures.append(
+            plot_pr(
+                region=region,
+                meme_pr=meme_pr[region],
+                naive_pr=naive_pr[region],
+                save_path=fig_dir,
+            )
+        )
+        saved_figures.append(
+            plot_pr_light_dark_epochwise(
+                region=region,
+                epoch_to_mc_pr=meme_boot_pr[region],
+                epoch_to_condition=epoch_to_condition,
+                save_path=fig_dir,
+                ci=args.bootstrap_ci,
+                center="mean",
+                annotate=True,
+                random_seed=0,
+                title_suffix=" (bootstrap over laps)",
+            )
+        )
+        groupmean_path, dark_draws, light_draws, delta_draws = plot_pr_light_dark_groupmeans(
+            region=region,
+            epoch_to_mc_pr=meme_boot_pr[region],
+            epoch_to_condition=epoch_to_condition,
+            save_path=fig_dir,
+            ci=args.bootstrap_ci,
+            center="mean",
+            n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
+            random_seed=0,
+            title_suffix=" (bootstrap over laps)",
+        )
+        saved_figures.append(groupmean_path)
+        comparison_draws_by_region[region] = {
+            "dark_draws": dark_draws,
+            "light_draws": light_draws,
+            "delta_draws": delta_draws,
+        }
+
+    saved_epoch_tables = save_epoch_summary_tables(
+        out_dir,
+        regions=list(args.regions),
+        run_epochs=run_epochs,
+        epoch_to_condition=epoch_to_condition,
+        n_neurons_by_region=n_neurons_by_region,
+        meme_pr=meme_pr,
+        naive_pr=naive_pr,
+        meme_boot_summary=meme_boot_summary,
+        fr_dark_threshold_by_region=fr_dark_threshold_by_region,
+        settings=settings,
+    )
+    saved_comparison_tables = save_light_dark_comparison_tables(
+        out_dir,
+        regions=list(args.regions),
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+        comparison_draws_by_region=comparison_draws_by_region,
+        ci=args.bootstrap_ci,
+        center="mean",
+        n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
+    )
+
+    saved_legacy_pickles: dict[str, Path] = {}
+    if args.save_legacy_pickle:
+        saved_legacy_pickles = save_legacy_pickles(
+            out_dir,
+            meme_pr=meme_pr,
+            meme_moments=meme_moments,
+            meme_boot_pr=meme_boot_pr,
+            meme_boot_summary=meme_boot_summary,
+            naive_pr=naive_pr,
+            naive_eigenvalues=naive_eigenvalues,
+            settings=settings,
         )
 
-    with open(out_dir / "naive_results.pkl", "wb") as f:
-        pickle.dump({"pca_pr": naive_pr, "eigenvalues": naive_eigenvalues}, f)
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.signal_dim.meme",
+        parameters=settings,
+        outputs={
+            "run_epochs": run_epochs,
+            "light_epoch": light_epoch,
+            "dark_epoch": dark_epoch,
+            "saved_epoch_tables": saved_epoch_tables,
+            "saved_comparison_tables": saved_comparison_tables,
+            "saved_figures": saved_figures,
+            "saved_legacy_pickles": saved_legacy_pickles,
+        },
+    )
+    print(f"Saved run metadata to {log_path}")
 
 
 if __name__ == "__main__":
