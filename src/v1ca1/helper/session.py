@@ -305,10 +305,12 @@ def coerce_position_array(position: Any) -> np.ndarray:
         raise ValueError(
             f"Expected a 2D position array, got shape {position_array.shape}."
         )
-    if position_array.shape[1] >= 2:
-        return position_array[:, :2]
-    if position_array.shape[0] >= 2:
+    if position_array.shape[1] == 2:
+        return position_array
+    if position_array.shape[0] == 2:
         return position_array[:2, :].T
+    if position_array.shape[1] > 2:
+        return position_array[:, :2]
     raise ValueError(
         f"Could not interpret position array of shape {position_array.shape} as XY samples."
     )

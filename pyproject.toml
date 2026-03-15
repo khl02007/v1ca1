@@ -33,6 +33,9 @@ glm = [
     "jax>=0.4",
     "nemos",
 ]
+test = [
+    "pytest>=8.0",
+]
 dev = [
     "pytest>=8.0",
 ]

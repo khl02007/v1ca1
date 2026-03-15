@@ -41,6 +41,23 @@ def test_coerce_position_array_transposes_xy_by_time() -> None:
     )
 
 
+def test_coerce_position_array_preserves_first_two_columns_for_extra_features() -> None:
+    position = np.array(
+        [
+            [1.0, 2.0, 9.0],
+            [3.0, 4.0, 8.0],
+            [5.0, 6.0, 7.0],
+        ]
+    )
+
+    result = coerce_position_array(position)
+
+    assert np.array_equal(
+        result,
+        np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+    )
+
+
 def test_get_position_sampling_rate_uses_time_span() -> None:
     timestamps_position = np.array([10.0, 10.5, 11.0, 11.5, 12.0])
 

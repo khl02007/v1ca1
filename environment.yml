@@ -12,11 +12,9 @@ dependencies:
   - seaborn
   - xarray
   - pynwb
+  - pytest>=8
   - pip:
-      - -e .
-      - spikeinterface>=0.100
-      - pynapple>=0.7
-      - probeinterface>=0.2
+      - "-e .[analysis,test]"
 
 # Additional packages used by some analyses may need to be installed manually,
 # depending on which workflows you run and how your lab environment is managed:
@@ -32,5 +30,6 @@ dependencies:
 # - sortingview
 # - kachery-cloud
 #
-# If you want figurl generation support, install the optional extra:
-#   pip install -e ".[figurl]"
+# If you want figurl or GLM workflow support, install the optional extras:
+#   pip install -e ".[analysis,test,figurl]"
+#   pip install -e ".[analysis,test,glm]"

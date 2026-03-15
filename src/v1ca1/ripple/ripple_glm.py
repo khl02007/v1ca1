@@ -2,14 +2,34 @@ from __future__ import annotations
 
 """Fit ripple-triggered population GLMs for one session.
 
-This modernized CLI replaces the legacy ripple population GLM lab script with
-validated session loading, explicit command-line arguments, per-epoch parquet
-summaries, optional legacy `.npz` outputs, and run logging under the session
-analysis directory.
+This CLI fits the legacy CA1-to-V1 ripple population GLM workflow for one
+session, one epoch at a time. Each ripple window is converted into one sample
+whose predictors are CA1 unit spike counts and whose targets are V1 unit spike
+counts. The model is a ridge-regularized Poisson population GLM trained on
+ripple windows, evaluated on held-out ripple windows with contiguous
+cross-validation folds, and then applied to paired pre-ripple windows from the
+same epoch.
+
+Performance is summarized per V1 unit with pseudo-R^2, mean absolute error
+(MAE), deviance explained, and bits/spike. Ripple metrics also include an
+empirical shuffle null built by refitting after independently shuffling each
+V1 unit's ripple responses, which yields per-unit shuffle means, shuffle
+standard deviations, and one-sided p-values.
+
+Successful epochs are saved under the session analysis directory as one
+NetCDF-backed xarray dataset per epoch in `ripple_glm/`. Each dataset stores
+the raw ripple fold arrays, ripple shuffle arrays, pre-ripple metrics,
+per-unit ripple summary variables, unit IDs, and fit metadata. The script also
+writes four summary figures per epoch in `figs/ripple_glm/`, one each for
+pseudo-R^2, MAE, deviance explained, and bits/spike. Each figure has a left
+panel with overlaid ripple and pre-ripple unit distributions plus compact
+boxplots, and a right panel with ripple effect size versus `-log10(shuffle
+p)`. A JSON run log is written under `v1ca1_log/`.
 """
 
 import argparse
 import gc
+import json
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,6 +50,7 @@ from v1ca1.helper.session import (
 
 if TYPE_CHECKING:
     import pynapple as nap
+    import xarray as xr
 
 
 TARGET_REGION = "v1"
@@ -49,8 +70,15 @@ DEFAULT_TOL = 1e-7
 HIGHER_IS_BETTER_BY_METRIC = {
     "pseudo_r2": True,
     "mae": False,
+    "devexp": True,
     "bits_per_spike": True,
 }
+
+EMPIRICAL_P_VALUE_RTOL = 1e-12
+EMPIRICAL_P_VALUE_ATOL = 1e-12
+
+RIPPLE_FIGURE_COLOR = "#1f77b4"
+PRE_FIGURE_COLOR = "#d95f02"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -156,11 +184,6 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_TOL,
         help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
-    )
-    parser.add_argument(
-        "--save-legacy-npz",
-        action="store_true",
-        help="Also save the detailed legacy-style raw `.npz` result files.",
     )
     return parser.parse_args()
 
@@ -440,22 +463,6 @@ def build_epoch_intervals(
     return epoch_intervals
 
 
-def save_results_npz(out_path: Path, results: dict[str, Any]) -> Path:
-    """Save one raw legacy-style result payload as a compressed `.npz`."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    to_save: dict[str, Any] = {}
-    for key, value in results.items():
-        if key == "fold_info":
-            to_save[key] = np.array(value, dtype=object)
-        elif value is None:
-            to_save[key] = np.array(None, dtype=object)
-        else:
-            to_save[key] = value
-    np.savez_compressed(out_path, **to_save)
-    return out_path
-
-
 def make_preripple_ep(
     ripple_ep: "nap.IntervalSet",
     epoch_ep: "nap.IntervalSet",
@@ -666,7 +673,6 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
     maxiter: int = DEFAULT_MAXITER,
     tol: float = DEFAULT_TOL,
-    store_ripple_shuffle_preds: bool = False,
 ) -> dict[str, Any]:
     """Fit the legacy ripple GLM workflow for one epoch."""
     import nemos as nmo
@@ -728,23 +734,11 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
 
     kfold = KFold(n_splits=n_splits, shuffle=False, random_state=None)
 
-    y_r_test_full = np.full((n_ripples, n_cells), np.nan, dtype=np.float32)
-    y_r_hat_full = np.full((n_ripples, n_cells), np.nan, dtype=np.float32)
-
-    y_r_hat_shuff: np.ndarray | None = None
-    if store_ripple_shuffle_preds and n_shuffles_ripple > 0:
-        y_r_hat_shuff = np.full(
-            (n_shuffles_ripple, n_ripples, n_cells),
-            np.nan,
-            dtype=np.float32,
-        )
-
     def _alloc_metric_array() -> np.ndarray:
         return np.full((n_splits, n_cells), np.nan, dtype=np.float32)
 
     pseudo_r2_ripple = _alloc_metric_array()
     mae_ripple = _alloc_metric_array()
-    ll_ripple = _alloc_metric_array()
     devexp_ripple = _alloc_metric_array()
     bits_per_spike_ripple = _alloc_metric_array()
 
@@ -754,11 +748,6 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         dtype=np.float32,
     )
     mae_ripple_shuff = np.full(
-        (n_splits, n_shuffles_ripple, n_cells),
-        np.nan,
-        dtype=np.float32,
-    )
-    ll_ripple_shuff = np.full(
         (n_splits, n_shuffles_ripple, n_cells),
         np.nan,
         dtype=np.float32,
@@ -773,15 +762,13 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         np.nan,
         dtype=np.float32,
     )
-
-    fold_info: list[dict[str, Any]] = []
     for fold_index, (train_idx, test_idx) in enumerate(kfold.split(X_r)):
         X_train_r = X_r[train_idx]
         X_test_r = X_r[test_idx]
         y_train_r = y_r[train_idx]
         y_test_r = y_r[test_idx]
 
-        X_train_pp, X_test_r_pp, keep_x, mean, std = _preprocess_X_fit_apply(
+        X_train_pp, X_test_r_pp, _keep_x, _mean, _std = _preprocess_X_fit_apply(
             X_train=X_train_r,
             X_test=X_test_r,
         )
@@ -799,16 +786,12 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         glm.fit(X_train_pp, y_train_r)
         lam_r = np.asarray(glm.predict(X_test_r_pp), dtype=np.float64)
 
-        y_r_hat_full[test_idx] = lam_r.astype(np.float32)
-        y_r_test_full[test_idx] = y_test_r.astype(np.float32)
-
         pseudo_r2_ripple[fold_index] = mcfadden_pseudo_r2_per_neuron(
             y_test_r,
             lam_r,
             y_train_r,
         ).astype(np.float32)
         mae_ripple[fold_index] = mae_per_neuron(y_test_r, lam_r).astype(np.float32)
-        ll_ripple[fold_index] = poisson_ll_per_neuron(y_test_r, lam_r).astype(np.float32)
         devexp_ripple[fold_index] = deviance_explained_per_neuron(
             y_test=y_test_r,
             lam_test=lam_r,
@@ -831,19 +814,12 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
             glm_shuffle.fit(X_train_pp, y_train_shuffled)
             lam_r_shuffled = np.asarray(glm_shuffle.predict(X_test_r_pp), dtype=np.float64)
 
-            if y_r_hat_shuff is not None:
-                y_r_hat_shuff[shuffle_index, test_idx] = lam_r_shuffled.astype(np.float32)
-
             pseudo_r2_ripple_shuff[fold_index, shuffle_index] = mcfadden_pseudo_r2_per_neuron(
                 y_test_r,
                 lam_r_shuffled,
                 y_train_r,
             ).astype(np.float32)
             mae_ripple_shuff[fold_index, shuffle_index] = mae_per_neuron(
-                y_test_r,
-                lam_r_shuffled,
-            ).astype(np.float32)
-            ll_ripple_shuff[fold_index, shuffle_index] = poisson_ll_per_neuron(
                 y_test_r,
                 lam_r_shuffled,
             ).astype(np.float32)
@@ -863,34 +839,9 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
                 _clear_jax_caches()
                 gc.collect()
 
-        fold_info.append(
-            {
-                "fold": int(fold_index),
-                "train_idx": np.asarray(train_idx, dtype=int),
-                "test_idx": np.asarray(test_idx, dtype=int),
-                "keep_x": np.asarray(keep_x, dtype=bool),
-                "x_mean": np.asarray(mean, dtype=float),
-                "x_std": np.asarray(std, dtype=float),
-                "n_ripples": n_ripples,
-                "n_pre": n_pre,
-            }
-        )
-
         del glm, lam_r
         _clear_jax_caches()
         gc.collect()
-
-    for name, values in (
-        ("y_r_test_full", y_r_test_full),
-        ("y_r_hat_full", y_r_hat_full),
-    ):
-        if np.isnan(values).any():
-            raise ValueError(f"{name} has NaNs: some ripple rows were never assigned to a test fold.")
-
-    if y_r_hat_shuff is not None and np.isnan(y_r_hat_shuff).any():
-        raise ValueError(
-            "y_r_hat_shuff has NaNs: some ripple rows were never assigned to a test fold."
-        )
 
     X_r_all_pp, _, keep_x_all, mean_all, std_all = _preprocess_X_fit_apply(X_r, X_r)
     if X_r_all_pp.shape[1] == 0:
@@ -898,10 +849,8 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
 
     pre_pseudo_r2 = np.full(n_cells, np.nan, dtype=np.float32)
     pre_mae = np.full(n_cells, np.nan, dtype=np.float32)
-    pre_ll = np.full(n_cells, np.nan, dtype=np.float32)
     pre_devexp = np.full(n_cells, np.nan, dtype=np.float32)
     pre_bits_per_spike = np.full(n_cells, np.nan, dtype=np.float32)
-    yhat_pre = np.empty((n_pre, n_cells), dtype=np.float32)
 
     if n_pre > 0:
         X_p_kept = X_p[:, keep_x_all]
@@ -917,11 +866,9 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         )
         glm_all.fit(X_r_all_pp, y_r)
         lam_pre = np.asarray(glm_all.predict(X_p_pp), dtype=np.float64)
-        yhat_pre = lam_pre.astype(np.float32)
 
         pre_pseudo_r2 = mcfadden_pseudo_r2_per_neuron(y_p, lam_pre, y_p).astype(np.float32)
         pre_mae = mae_per_neuron(y_p, lam_pre).astype(np.float32)
-        pre_ll = poisson_ll_per_neuron(y_p, lam_pre).astype(np.float32)
         pre_devexp = deviance_explained_per_neuron(
             y_test=y_p,
             lam_test=lam_pre,
@@ -953,30 +900,18 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         "n_cells": n_cells,
         "v1_unit_ids": kept_v1_unit_ids,
         "ca1_unit_ids": ca1_unit_ids,
-        "fold_info": fold_info,
         "pseudo_r2_ripple_folds": pseudo_r2_ripple,
         "mae_ripple_folds": mae_ripple,
-        "ll_ripple_folds": ll_ripple,
         "devexp_ripple_folds": devexp_ripple,
         "bits_per_spike_ripple_folds": bits_per_spike_ripple,
         "pseudo_r2_ripple_shuff_folds": pseudo_r2_ripple_shuff,
         "mae_ripple_shuff_folds": mae_ripple_shuff,
-        "ll_ripple_shuff_folds": ll_ripple_shuff,
         "devexp_ripple_shuff_folds": devexp_ripple_shuff,
         "bits_per_spike_ripple_shuff_folds": bits_per_spike_ripple_shuff,
-        "y_ripple_test": y_r_test_full,
-        "yhat_ripple": y_r_hat_full,
-        "yhat_ripple_shuff": y_r_hat_shuff,
-        "y_pre_test": y_p.astype(np.float32),
-        "yhat_pre": yhat_pre,
         "pseudo_r2_pre": pre_pseudo_r2,
         "mae_pre": pre_mae,
-        "ll_pre": pre_ll,
         "devexp_pre": pre_devexp,
         "bits_per_spike_pre": pre_bits_per_spike,
-        "keep_x_all": np.asarray(keep_x_all, dtype=bool),
-        "x_mean_all": np.asarray(mean_all, dtype=float),
-        "x_std_all": np.asarray(std_all, dtype=float),
     }
     return results
 
@@ -1019,40 +954,27 @@ def empirical_p_values(
     *,
     higher_is_better: bool,
 ) -> np.ndarray:
-    """Return one-sided empirical p-values per unit."""
+    """Return one-sided empirical p-values per unit with inclusive ties."""
     observed = np.asarray(observed, dtype=float)
     null_samples = np.asarray(null_samples, dtype=float)
     if null_samples.size == 0:
         return np.full(observed.shape, np.nan, dtype=float)
 
     valid = np.isfinite(null_samples) & np.isfinite(observed[None, :])
+    equal_with_tolerance = np.isclose(
+        null_samples,
+        observed[None, :],
+        rtol=EMPIRICAL_P_VALUE_RTOL,
+        atol=EMPIRICAL_P_VALUE_ATOL,
+    )
     if higher_is_better:
-        extreme = null_samples >= observed[None, :]
+        extreme = (null_samples > observed[None, :]) | equal_with_tolerance
     else:
-        extreme = null_samples <= observed[None, :]
+        extreme = (null_samples < observed[None, :]) | equal_with_tolerance
 
     counts = np.sum(extreme & valid, axis=0)
     totals = np.sum(valid, axis=0)
     return np.where(totals > 0, (counts + 1) / (totals + 1), np.nan)
-
-
-def empirical_population_p_value(
-    observed: float,
-    null_samples: np.ndarray,
-    *,
-    higher_is_better: bool,
-) -> float:
-    """Return a one-sided empirical p-value for one population summary."""
-    null_samples = np.asarray(null_samples, dtype=float)
-    valid = null_samples[np.isfinite(null_samples)]
-    if valid.size == 0 or not np.isfinite(observed):
-        return float("nan")
-
-    if higher_is_better:
-        count = int(np.sum(valid >= observed))
-    else:
-        count = int(np.sum(valid <= observed))
-    return float((count + 1) / (valid.size + 1))
 
 
 def summarize_ripple_metric_against_shuffle(
@@ -1061,7 +983,7 @@ def summarize_ripple_metric_against_shuffle(
     *,
     higher_is_better: bool,
 ) -> dict[str, Any]:
-    """Summarize one ripple metric and its shuffle null at unit and population levels."""
+    """Summarize one ripple metric and its shuffle null at the unit level."""
     real_folds_array = _as_2d_float(real_folds)
     shuffle_folds_array = _as_3d_float(shuffle_folds)
 
@@ -1073,8 +995,6 @@ def summarize_ripple_metric_against_shuffle(
         shuffle_mean = np.full(real_mean.shape, np.nan, dtype=float)
         shuffle_sd = np.full(real_mean.shape, np.nan, dtype=float)
         unit_p_value = np.full(real_mean.shape, np.nan, dtype=float)
-        population_null_samples = np.empty(0, dtype=float)
-        population_p_value = float("nan")
     else:
         unit_null_samples = np.nanmean(shuffle_folds_array, axis=0)
         shuffle_mean = np.nanmean(unit_null_samples, axis=0)
@@ -1084,12 +1004,6 @@ def summarize_ripple_metric_against_shuffle(
             unit_null_samples,
             higher_is_better=higher_is_better,
         )
-        population_null_samples = np.nanmean(unit_null_samples, axis=1)
-        population_p_value = empirical_population_p_value(
-            float(np.nanmean(real_mean)),
-            population_null_samples,
-            higher_is_better=higher_is_better,
-        )
 
     return {
         "real_mean": real_mean,
@@ -1097,97 +1011,116 @@ def summarize_ripple_metric_against_shuffle(
         "shuffle_mean": shuffle_mean,
         "shuffle_sd": shuffle_sd,
         "unit_p_value": unit_p_value,
-        "population_real_mean": float(np.nanmean(real_mean)),
-        "population_null_samples": population_null_samples,
-        "population_p_value": population_p_value,
     }
 
 
-def build_unit_summary_table(
+def build_metric_figure_data(
     results: dict[str, Any],
     *,
-    animal_name: str,
-    date: str,
-    epoch: str,
-) -> pd.DataFrame:
-    """Build the per-unit ripple GLM summary table for one epoch."""
-    unit_ids = np.asarray(results["v1_unit_ids"])
-    unit_summary = pd.DataFrame(
-        {
-            "animal_name": animal_name,
-            "date": date,
-            "epoch": epoch,
-            "v1_unit_id": unit_ids,
-            "n_ripples": int(results["n_ripples"]),
-            "n_pre_windows": int(results["n_pre"]),
-            "n_ca1_units": int(len(np.asarray(results["ca1_unit_ids"]))),
-        }
+    metric_name: str,
+) -> dict[str, np.ndarray]:
+    """Return the per-unit arrays needed for one metric-centric figure."""
+    summary = summarize_ripple_metric_against_shuffle(
+        results[f"{metric_name}_ripple_folds"],
+        results[f"{metric_name}_ripple_shuff_folds"],
+        higher_is_better=HIGHER_IS_BETTER_BY_METRIC[metric_name],
     )
-
-    for metric_name in ("pseudo_r2", "mae", "ll", "devexp", "bits_per_spike"):
-        real_folds = _as_2d_float(results[f"{metric_name}_ripple_folds"])
-        unit_summary[f"ripple_{metric_name}_mean"] = np.nanmean(real_folds, axis=0)
-        unit_summary[f"ripple_{metric_name}_sem"] = nansem(real_folds, axis=0)
-
-    for metric_name in ("pseudo_r2", "mae", "bits_per_spike"):
-        summary = summarize_ripple_metric_against_shuffle(
-            results[f"{metric_name}_ripple_folds"],
-            results[f"{metric_name}_ripple_shuff_folds"],
-            higher_is_better=HIGHER_IS_BETTER_BY_METRIC[metric_name],
-        )
-        unit_summary[f"ripple_{metric_name}_shuffle_mean"] = summary["shuffle_mean"]
-        unit_summary[f"ripple_{metric_name}_shuffle_sd"] = summary["shuffle_sd"]
-        unit_summary[f"ripple_{metric_name}_p_value"] = summary["unit_p_value"]
-
-    unit_summary["pre_pseudo_r2"] = _as_1d_float(results["pseudo_r2_pre"])
-    unit_summary["pre_mae"] = _as_1d_float(results["mae_pre"])
-    unit_summary["pre_ll"] = _as_1d_float(results["ll_pre"])
-    unit_summary["pre_devexp"] = _as_1d_float(results["devexp_pre"])
-    unit_summary["pre_bits_per_spike"] = _as_1d_float(results["bits_per_spike_pre"])
-    return unit_summary
+    return {
+        "ripple_values": np.asarray(summary["real_mean"], dtype=float),
+        "pre_values": _as_1d_float(results[f"{metric_name}_pre"]),
+        "ripple_p_value": np.asarray(summary["unit_p_value"], dtype=float),
+    }
 
 
-def build_population_summary_table(
+def build_epoch_fit_dataset(
     results: dict[str, Any],
     *,
     animal_name: str,
     date: str,
     epoch: str,
-) -> pd.DataFrame:
-    """Build the one-row epoch-level ripple GLM population summary."""
-    row: dict[str, Any] = {
+    sources: dict[str, Any],
+    fit_parameters: dict[str, Any],
+) -> "xr.Dataset":
+    """Build one epoch-level ripple GLM fit dataset for NetCDF export."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "xarray is required to save ripple GLM fits as NetCDF."
+        ) from exc
+
+    metric_names = ("pseudo_r2", "mae", "devexp", "bits_per_spike")
+    unit_ids = np.asarray(results["v1_unit_ids"])
+    ca1_unit_ids = np.asarray(results["ca1_unit_ids"])
+    n_folds = int(_as_2d_float(results["pseudo_r2_ripple_folds"]).shape[0])
+    n_shuffles = int(_as_3d_float(results["pseudo_r2_ripple_shuff_folds"]).shape[1])
+
+    attrs = {
+        "schema_version": "1",
         "animal_name": animal_name,
         "date": date,
         "epoch": epoch,
+        "source_region": SOURCE_REGION,
+        "target_region": TARGET_REGION,
+        "model_direction": f"{SOURCE_REGION}_to_{TARGET_REGION}",
         "n_ripples": int(results["n_ripples"]),
         "n_pre_windows": int(results["n_pre"]),
-        "n_v1_units": int(len(np.asarray(results["v1_unit_ids"]))),
-        "n_ca1_units": int(len(np.asarray(results["ca1_unit_ids"]))),
+        "n_units": int(len(unit_ids)),
+        "n_ca1_units": int(len(ca1_unit_ids)),
+        "sources_json": json.dumps(sources, sort_keys=True),
+        "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
     }
 
-    for metric_name in ("pseudo_r2", "mae", "ll", "devexp", "bits_per_spike"):
-        real_folds = _as_2d_float(results[f"{metric_name}_ripple_folds"])
-        row[f"ripple_{metric_name}_mean"] = float(np.nanmean(np.nanmean(real_folds, axis=0)))
-
-    row["pre_pseudo_r2_mean"] = float(np.nanmean(_as_1d_float(results["pseudo_r2_pre"])))
-    row["pre_mae_mean"] = float(np.nanmean(_as_1d_float(results["mae_pre"])))
-    row["pre_ll_mean"] = float(np.nanmean(_as_1d_float(results["ll_pre"])))
-    row["pre_devexp_mean"] = float(np.nanmean(_as_1d_float(results["devexp_pre"])))
-    row["pre_bits_per_spike_mean"] = float(
-        np.nanmean(_as_1d_float(results["bits_per_spike_pre"]))
-    )
-
-    for metric_name in ("pseudo_r2", "mae", "bits_per_spike"):
-        summary = summarize_ripple_metric_against_shuffle(
-            results[f"{metric_name}_ripple_folds"],
-            results[f"{metric_name}_ripple_shuff_folds"],
+    data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
+        "ca1_unit_id": (("source_unit",), ca1_unit_ids),
+    }
+    for metric_name in metric_names:
+        ripple_folds = _as_2d_float(results[f"{metric_name}_ripple_folds"])
+        ripple_shuffle_folds = _as_3d_float(results[f"{metric_name}_ripple_shuff_folds"])
+        pre_values = _as_1d_float(results[f"{metric_name}_pre"])
+        ripple_summary = summarize_ripple_metric_against_shuffle(
+            ripple_folds,
+            ripple_shuffle_folds,
             higher_is_better=HIGHER_IS_BETTER_BY_METRIC[metric_name],
         )
-        row[f"ripple_{metric_name}_shuffle_mean"] = float(np.nanmean(summary["shuffle_mean"]))
-        row[f"ripple_{metric_name}_shuffle_sd"] = float(np.nanmean(summary["shuffle_sd"]))
-        row[f"ripple_{metric_name}_population_p_value"] = summary["population_p_value"]
 
-    return pd.DataFrame([row])
+        data_vars[f"{metric_name}_ripple_folds"] = (("fold", "unit"), ripple_folds)
+        data_vars[f"{metric_name}_ripple_shuff_folds"] = (
+            ("fold", "shuffle", "unit"),
+            ripple_shuffle_folds,
+        )
+        data_vars[f"{metric_name}_pre"] = (("unit",), pre_values)
+        data_vars[f"ripple_{metric_name}_mean"] = (
+            ("unit",),
+            np.asarray(ripple_summary["real_mean"], dtype=float),
+        )
+        data_vars[f"ripple_{metric_name}_sem"] = (
+            ("unit",),
+            np.asarray(ripple_summary["real_sem"], dtype=float),
+        )
+        data_vars[f"ripple_{metric_name}_shuffle_mean"] = (
+            ("unit",),
+            np.asarray(ripple_summary["shuffle_mean"], dtype=float),
+        )
+        data_vars[f"ripple_{metric_name}_shuffle_sd"] = (
+            ("unit",),
+            np.asarray(ripple_summary["shuffle_sd"], dtype=float),
+        )
+        data_vars[f"ripple_{metric_name}_p_value"] = (
+            ("unit",),
+            np.asarray(ripple_summary["unit_p_value"], dtype=float),
+        )
+
+    return xr.Dataset(
+        data_vars=data_vars,
+        coords={
+            "fold": np.arange(n_folds, dtype=int),
+            "shuffle": np.arange(n_shuffles, dtype=int),
+            "unit": unit_ids,
+            "source_unit": np.arange(len(ca1_unit_ids), dtype=int),
+        },
+        attrs=attrs,
+    )
 
 
 def _get_pyplot():
@@ -1200,204 +1133,165 @@ def _get_pyplot():
     return plt
 
 
-def _ecdf(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return ECDF coordinates after dropping NaNs."""
-    valid = np.asarray(values, dtype=float)
-    valid = valid[np.isfinite(valid)]
-    if valid.size == 0:
-        return valid, valid
-    x_values = np.sort(valid)
-    y_values = np.arange(1, x_values.size + 1) / x_values.size
-    return x_values, y_values
+def _finite_values(values: Any) -> np.ndarray:
+    """Return only the finite values from an array-like input."""
+    array = np.asarray(values, dtype=float).ravel()
+    return array[np.isfinite(array)]
 
 
-def plot_ripple_metric_summary(
+def _metric_histogram_bins(ripple_values: np.ndarray, pre_values: np.ndarray) -> np.ndarray:
+    """Return shared histogram bins derived from ripple and pre values."""
+    finite_combined = np.concatenate([_finite_values(ripple_values), _finite_values(pre_values)])
+    if finite_combined.size == 0:
+        return np.linspace(0.0, 1.0, 31)
+
+    x_min = float(np.min(finite_combined))
+    x_max = float(np.max(finite_combined))
+    if x_min == x_max:
+        pad = max(abs(x_min) * 0.05, 0.5)
+        x_min -= pad
+        x_max += pad
+    return np.linspace(x_min, x_max, 31)
+
+
+def plot_metric_summary(
     *,
-    real_folds: Any,
-    shuffle_folds: Any,
-    animal_name: str,
-    date: str,
-    epoch: str,
-    metric_label: str,
-    out_path: Path,
-    higher_is_better: bool,
-) -> Path:
-    """Plot one ripple metric against its shuffle null."""
-    plt = _get_pyplot()
-
-    real_folds_array = _as_2d_float(real_folds)
-    real_unit_values = np.nanmean(real_folds_array, axis=0)
-    summary = summarize_ripple_metric_against_shuffle(
-        real_folds,
-        shuffle_folds,
-        higher_is_better=higher_is_better,
-    )
-    null_unit_samples = np.asarray(
-        np.nanmean(_as_3d_float(shuffle_folds), axis=0)
-        if _as_3d_float(shuffle_folds).shape[1] > 0
-        else np.empty((0, real_unit_values.size), dtype=float)
-    )
-    null_flat = null_unit_samples.ravel() if null_unit_samples.size else np.array([], dtype=float)
-    pop_null = np.asarray(summary["population_null_samples"], dtype=float)
-    p_values = np.asarray(summary["unit_p_value"], dtype=float)
-
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8.5), constrained_layout=True)
-    axes = axes.ravel()
-
-    ax = axes[0]
-    finite_real = real_unit_values[np.isfinite(real_unit_values)]
-    if finite_real.size:
-        ax.hist(finite_real, bins=30, alpha=0.8)
-    ax.set_xlabel(f"Per-unit ripple {metric_label}")
-    ax.set_ylabel("Count")
-    ax.set_title("Per-unit distribution")
-    ax.text(
-        0.02,
-        0.98,
-        (
-            f"mean={np.nanmean(real_unit_values):.4f}\n"
-            f"median={np.nanmedian(real_unit_values):.4f}\n"
-            f"units={real_unit_values.size}"
-        ),
-        transform=ax.transAxes,
-        va="top",
-        ha="left",
-        fontsize=10,
-        family="monospace",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
-    )
-
-    ax = axes[1]
-    if pop_null.size:
-        ax.hist(pop_null, bins=30, alpha=0.75, label="shuffle")
-        ax.axvline(summary["population_real_mean"], color="black", linewidth=2, label="observed")
-        ax.legend(loc="best")
-    else:
-        ax.text(0.5, 0.5, "No shuffle data", ha="center", va="center")
-    ax.set_xlabel(f"Population mean ripple {metric_label}")
-    ax.set_ylabel("Count")
-    ax.set_title("Population null")
-
-    ax = axes[2]
-    real_x, real_y = _ecdf(real_unit_values)
-    if real_x.size:
-        ax.plot(real_x, real_y, label="observed", linewidth=2)
-    if null_flat.size:
-        null_x, null_y = _ecdf(null_flat)
-        ax.plot(null_x, null_y, label="shuffle", linewidth=2)
-        ax.legend(loc="best")
-    ax.set_xlabel(metric_label)
-    ax.set_ylabel("ECDF")
-    ax.set_title("Observed vs shuffle ECDF")
-
-    ax = axes[3]
-    finite_p = p_values[np.isfinite(p_values)]
-    if finite_p.size:
-        ax.hist(-np.log10(np.clip(finite_p, 1e-12, 1.0)), bins=30, alpha=0.8)
-    else:
-        ax.text(0.5, 0.5, "No shuffle p-values", ha="center", va="center")
-    ax.set_xlabel("-log10(p)")
-    ax.set_ylabel("Count")
-    ax.set_title("Per-unit shuffle comparison")
-
-    fig.suptitle(f"{animal_name} {date} {epoch} ripple {metric_label}", fontsize=14)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-    return out_path
-
-
-def plot_pre_metric_summary(
-    *,
-    values: Any,
-    spike_counts: Any,
+    ripple_values: Any,
+    pre_values: Any,
+    ripple_p_value: Any,
     animal_name: str,
     date: str,
     epoch: str,
     metric_label: str,
     out_path: Path,
 ) -> Path:
-    """Plot one pre-ripple metric summary."""
+    """Plot one metric-centric summary figure with distribution and significance panels."""
     plt = _get_pyplot()
 
-    metric_values = _as_1d_float(values)
-    spike_counts_array = _as_1d_float(spike_counts)
+    ripple_array = _as_1d_float(ripple_values)
+    pre_array = _as_1d_float(pre_values)
+    p_value_array = _as_1d_float(ripple_p_value)
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8.5), constrained_layout=True)
-    axes = axes.ravel()
+    ripple_finite = _finite_values(ripple_array)
+    pre_finite = _finite_values(pre_array)
+    bins = _metric_histogram_bins(ripple_finite, pre_finite)
+    x_limits = (float(bins[0]), float(bins[-1]))
 
-    ax = axes[0]
-    finite_values = metric_values[np.isfinite(metric_values)]
-    if finite_values.size:
-        ax.hist(finite_values, bins=30, alpha=0.8)
-    ax.set_xlabel(f"Per-unit pre {metric_label}")
-    ax.set_ylabel("Count")
-    ax.set_title("Per-unit distribution")
-    ax.text(
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), constrained_layout=True)
+    hist_ax, sig_ax = axes
+
+    if ripple_finite.size:
+        hist_ax.hist(
+            ripple_finite,
+            bins=bins,
+            weights=np.full(ripple_finite.size, 1.0 / ripple_finite.size),
+            alpha=0.55,
+            color=RIPPLE_FIGURE_COLOR,
+            label="Ripple",
+            edgecolor="none",
+        )
+    if pre_finite.size:
+        hist_ax.hist(
+            pre_finite,
+            bins=bins,
+            weights=np.full(pre_finite.size, 1.0 / pre_finite.size),
+            alpha=0.55,
+            color=PRE_FIGURE_COLOR,
+            label="Pre",
+            edgecolor="none",
+        )
+    hist_ax.set_xlim(*x_limits)
+    hist_ax.set_xlabel(metric_label)
+    hist_ax.set_ylabel("Fraction of units")
+    hist_ax.set_title("Ripple vs pre distributions")
+    if ripple_finite.size or pre_finite.size:
+        hist_ax.legend(loc="upper right")
+
+    stats_text = (
+        f"Ripple n={ripple_finite.size}, mean={np.nanmean(ripple_array):.4f}\n"
+        f"Pre n={pre_finite.size}, mean={np.nanmean(pre_array):.4f}"
+    )
+    hist_ax.text(
         0.02,
         0.98,
-        (
-            f"mean={np.nanmean(metric_values):.4f}\n"
-            f"median={np.nanmedian(metric_values):.4f}\n"
-            f"units={metric_values.size}"
-        ),
-        transform=ax.transAxes,
+        stats_text,
+        transform=hist_ax.transAxes,
         va="top",
         ha="left",
-        fontsize=10,
+        fontsize=9,
         family="monospace",
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
     )
 
-    ax = axes[1]
-    ecdf_x, ecdf_y = _ecdf(metric_values)
-    if ecdf_x.size:
-        ax.plot(ecdf_x, ecdf_y, linewidth=2)
-    ax.set_xlabel(metric_label)
-    ax.set_ylabel("ECDF")
-    ax.set_title("ECDF")
-
-    ax = axes[2]
-    valid = np.isfinite(metric_values) & np.isfinite(spike_counts_array)
-    if np.any(valid):
-        ax.scatter(spike_counts_array[valid], metric_values[valid], alpha=0.7)
-    ax.set_xlabel("Pre spikes per unit")
-    ax.set_ylabel(metric_label)
-    ax.set_title("Metric vs pre spikes")
-
-    ax = axes[3]
-    if np.any(valid):
-        ax.scatter(np.arange(valid.sum()), np.sort(metric_values[valid]), alpha=0.7)
+    box_ax = hist_ax.inset_axes([0.0, 0.82, 1.0, 0.18])
+    box_data: list[np.ndarray] = []
+    positions: list[int] = []
+    labels: list[str] = []
+    colors: list[str] = []
+    if ripple_finite.size:
+        box_data.append(ripple_finite)
+        positions.append(2)
+        labels.append("Ripple")
+        colors.append(RIPPLE_FIGURE_COLOR)
+    if pre_finite.size:
+        box_data.append(pre_finite)
+        positions.append(1)
+        labels.append("Pre")
+        colors.append(PRE_FIGURE_COLOR)
+    if box_data:
+        boxplot = box_ax.boxplot(
+            box_data,
+            vert=False,
+            positions=positions,
+            widths=0.5,
+            patch_artist=True,
+            manage_ticks=False,
+            showfliers=False,
+        )
+        for patch, color in zip(boxplot["boxes"], colors, strict=False):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.55)
+        for median in boxplot["medians"]:
+            median.set_color("black")
+            median.set_linewidth(1.3)
+        box_ax.set_yticks(positions, labels)
+        box_ax.set_xlim(*x_limits)
     else:
-        ax.text(0.5, 0.5, "No finite values", ha="center", va="center")
-    ax.set_xlabel("Sorted unit rank")
-    ax.set_ylabel(metric_label)
-    ax.set_title("Sorted values")
+        box_ax.set_yticks([])
+    box_ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+    for spine_name in ("top", "right", "bottom"):
+        box_ax.spines[spine_name].set_visible(False)
+    box_ax.set_facecolor("none")
 
-    fig.suptitle(f"{animal_name} {date} {epoch} pre {metric_label}", fontsize=14)
+    valid = np.isfinite(ripple_array) & np.isfinite(p_value_array)
+    if np.any(valid):
+        effect_sizes = ripple_array[valid]
+        neglog10_p = -np.log10(np.clip(p_value_array[valid], 1e-12, 1.0))
+        sig_ax.scatter(effect_sizes, neglog10_p, s=18, alpha=0.7, color=RIPPLE_FIGURE_COLOR)
+        sig_ax.axhline(-np.log10(0.05), linestyle="--", linewidth=1, color="black")
+        frac_sig = float(np.mean(p_value_array[valid] < 0.05))
+        sig_ax.text(
+            0.98,
+            0.05,
+            f"frac p<0.05 = {frac_sig:.3f}",
+            transform=sig_ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8),
+        )
+    else:
+        sig_ax.text(0.5, 0.5, "No finite ripple p-values", ha="center", va="center")
+        sig_ax.axhline(-np.log10(0.05), linestyle="--", linewidth=1, color="black")
+    sig_ax.set_xlabel(f"Ripple {metric_label} (mean over folds)")
+    sig_ax.set_ylabel(r"$-\log_{10}(p)$ (shuffle)")
+    sig_ax.set_title("Ripple effect size vs significance")
+
+    fig.suptitle(f"{animal_name} {date} {epoch} {metric_label}", fontsize=14)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     return out_path
-
-
-def save_epoch_tables(
-    *,
-    unit_summary: pd.DataFrame,
-    population_summary: pd.DataFrame,
-    data_dir: Path,
-    epoch: str,
-) -> dict[str, Path]:
-    """Save the per-unit and per-epoch summary tables."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    unit_summary_path = data_dir / f"{epoch}_unit_summary.parquet"
-    population_summary_path = data_dir / f"{epoch}_population_summary.parquet"
-    unit_summary.to_parquet(unit_summary_path, index=False)
-    population_summary.to_parquet(population_summary_path, index=False)
-    return {
-        "unit_summary": unit_summary_path,
-        "population_summary": population_summary_path,
-    }
 
 
 def save_epoch_figures(
@@ -1408,69 +1302,30 @@ def save_epoch_figures(
     date: str,
     epoch: str,
 ) -> list[Path]:
-    """Save the six configured epoch summary figures."""
+    """Save the configured epoch summary figures."""
     fig_dir.mkdir(parents=True, exist_ok=True)
-    pre_spike_counts = np.sum(np.asarray(results["y_pre_test"], dtype=float), axis=0)
-
-    figure_paths = [
-        plot_ripple_metric_summary(
-            real_folds=results["pseudo_r2_ripple_folds"],
-            shuffle_folds=results["pseudo_r2_ripple_shuff_folds"],
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="Pseudo R^2",
-            out_path=fig_dir / f"{epoch}_ripple_pseudo_r2_summary.png",
-            higher_is_better=True,
-        ),
-        plot_ripple_metric_summary(
-            real_folds=results["mae_ripple_folds"],
-            shuffle_folds=results["mae_ripple_shuff_folds"],
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="MAE",
-            out_path=fig_dir / f"{epoch}_ripple_mae_summary.png",
-            higher_is_better=False,
-        ),
-        plot_ripple_metric_summary(
-            real_folds=results["bits_per_spike_ripple_folds"],
-            shuffle_folds=results["bits_per_spike_ripple_shuff_folds"],
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="Bits/spike",
-            out_path=fig_dir / f"{epoch}_ripple_bits_per_spike_summary.png",
-            higher_is_better=True,
-        ),
-        plot_pre_metric_summary(
-            values=results["pseudo_r2_pre"],
-            spike_counts=pre_spike_counts,
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="Pseudo R^2",
-            out_path=fig_dir / f"{epoch}_pre_pseudo_r2_summary.png",
-        ),
-        plot_pre_metric_summary(
-            values=results["mae_pre"],
-            spike_counts=pre_spike_counts,
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="MAE",
-            out_path=fig_dir / f"{epoch}_pre_mae_summary.png",
-        ),
-        plot_pre_metric_summary(
-            values=results["bits_per_spike_pre"],
-            spike_counts=pre_spike_counts,
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            metric_label="Bits/spike",
-            out_path=fig_dir / f"{epoch}_pre_bits_per_spike_summary.png",
-        ),
+    metric_specs = [
+        ("pseudo_r2", "Pseudo R^2"),
+        ("mae", "MAE"),
+        ("devexp", "Deviance explained"),
+        ("bits_per_spike", "Bits/spike"),
     ]
+
+    figure_paths: list[Path] = []
+    for metric_name, metric_label in metric_specs:
+        metric_data = build_metric_figure_data(results, metric_name=metric_name)
+        figure_paths.append(
+            plot_metric_summary(
+                ripple_values=metric_data["ripple_values"],
+                pre_values=metric_data["pre_values"],
+                ripple_p_value=metric_data["ripple_p_value"],
+                animal_name=animal_name,
+                date=date,
+                epoch=epoch,
+                metric_label=metric_label,
+                out_path=fig_dir / f"{epoch}_{metric_name}_summary.png",
+            )
+        )
     return figure_paths
 
 
@@ -1496,13 +1351,30 @@ def main() -> None:
 
     analysis_path = session["analysis_path"]
     data_dir = analysis_path / "ripple_glm"
+    data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir = analysis_path / "figs" / "ripple_glm"
     pre_window_s = args.pre_window_s if args.pre_window_s is not None else args.ripple_window_s
+    fit_parameters = {
+        "animal_name": args.animal_name,
+        "date": args.date,
+        "data_root": str(args.data_root),
+        "epochs": list(selected_epochs),
+        "ripple_window_s": float(args.ripple_window_s),
+        "pre_window_s": float(pre_window_s),
+        "pre_buffer_s": float(args.pre_buffer_s),
+        "exclude_ripples": bool(args.exclude_ripples),
+        "pre_exclude_guard_s": float(args.pre_exclude_guard_s),
+        "min_spikes_per_ripple": float(args.min_spikes_per_ripple),
+        "n_splits": int(args.n_splits),
+        "n_shuffles_ripple": int(args.n_shuffles_ripple),
+        "ridge_strength": float(args.ridge_strength),
+        "shuffle_seed": int(args.shuffle_seed),
+        "maxiter": int(args.maxiter),
+        "tol": float(args.tol),
+    }
 
-    saved_unit_tables: list[Path] = []
-    saved_population_tables: list[Path] = []
+    saved_datasets: list[Path] = []
     saved_figures: list[Path] = []
-    saved_legacy_npz: list[Path] = []
     skipped_epochs: list[dict[str, Any]] = []
 
     for epoch in selected_epochs:
@@ -1525,7 +1397,6 @@ def main() -> None:
                 ridge_strength=args.ridge_strength,
                 maxiter=args.maxiter,
                 tol=args.tol,
-                store_ripple_shuffle_preds=args.save_legacy_npz,
             )
         except ValueError as exc:
             skipped_epochs.append({"epoch": epoch, "reason": str(exc)})
@@ -1542,26 +1413,17 @@ def main() -> None:
             print(f"Skipping {args.animal_name} {args.date} {epoch}: fit failed: {exc}")
             continue
 
-        unit_summary = build_unit_summary_table(
+        fit_dataset = build_epoch_fit_dataset(
             results,
             animal_name=args.animal_name,
             date=args.date,
             epoch=epoch,
+            sources=session["sources"],
+            fit_parameters=fit_parameters,
         )
-        population_summary = build_population_summary_table(
-            results,
-            animal_name=args.animal_name,
-            date=args.date,
-            epoch=epoch,
-        )
-        saved_tables = save_epoch_tables(
-            unit_summary=unit_summary,
-            population_summary=population_summary,
-            data_dir=data_dir,
-            epoch=epoch,
-        )
-        saved_unit_tables.append(saved_tables["unit_summary"])
-        saved_population_tables.append(saved_tables["population_summary"])
+        result_path = data_dir / f"{epoch}_ripple_glm.nc"
+        fit_dataset.to_netcdf(result_path)
+        saved_datasets.append(result_path)
         saved_figures.extend(
             save_epoch_figures(
                 results=results,
@@ -1572,11 +1434,7 @@ def main() -> None:
             )
         )
 
-        if args.save_legacy_npz:
-            legacy_npz_path = save_results_npz(data_dir / f"{epoch}_legacy_results.npz", results)
-            saved_legacy_npz.append(legacy_npz_path)
-
-    if not saved_unit_tables:
+    if not saved_datasets:
         raise RuntimeError(
             "All selected epochs were skipped. "
             f"Epoch reasons: {skipped_epochs!r}"
@@ -1602,16 +1460,12 @@ def main() -> None:
             "shuffle_seed": args.shuffle_seed,
             "maxiter": args.maxiter,
             "tol": args.tol,
-            "save_legacy_npz": args.save_legacy_npz,
             "model_direction": f"{SOURCE_REGION}_to_{TARGET_REGION}",
         },
         outputs={
-            "sources": session["sources"],
             "selected_epochs": selected_epochs,
-            "saved_unit_tables": saved_unit_tables,
-            "saved_population_tables": saved_population_tables,
+            "saved_datasets": saved_datasets,
             "saved_figures": saved_figures,
-            "saved_legacy_npz": saved_legacy_npz,
             "skipped_epochs": skipped_epochs,
         },
     )

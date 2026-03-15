@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pickle
 
 import numpy as np
@@ -7,11 +8,15 @@ import pandas as pd
 import pytest
 
 from v1ca1.ripple.ripple_glm import (
-    build_unit_summary_table,
+    build_epoch_fit_dataset,
+    build_metric_figure_data,
+    empirical_p_values,
     get_epoch_skip_reason,
     load_ripple_tables_from_interval_output,
     load_ripple_tables_from_legacy_pickle,
     make_preripple_ep,
+    parse_arguments,
+    save_epoch_figures,
 )
 
 
@@ -93,7 +98,9 @@ def test_make_preripple_ep_excludes_nearby_ripples() -> None:
     assert np.allclose(pre_ep.end, [0.9])
 
 
-def test_build_unit_summary_table_aggregates_fold_metrics() -> None:
+def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
+    pytest.importorskip("xarray")
+
     results = {
         "v1_unit_ids": np.array([11, 12]),
         "ca1_unit_ids": np.array([101, 102, 103]),
@@ -101,7 +108,6 @@ def test_build_unit_summary_table_aggregates_fold_metrics() -> None:
         "n_pre": 6,
         "pseudo_r2_ripple_folds": np.array([[0.2, 0.4], [0.4, 0.6]], dtype=float),
         "mae_ripple_folds": np.array([[0.3, 0.7], [0.5, 0.9]], dtype=float),
-        "ll_ripple_folds": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=float),
         "devexp_ripple_folds": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
         "bits_per_spike_ripple_folds": np.array([[0.5, 0.7], [0.7, 0.9]], dtype=float),
         "pseudo_r2_ripple_shuff_folds": np.array(
@@ -118,8 +124,13 @@ def test_build_unit_summary_table_aggregates_fold_metrics() -> None:
             ],
             dtype=float,
         ),
-        "ll_ripple_shuff_folds": np.zeros((2, 2, 2), dtype=float),
-        "devexp_ripple_shuff_folds": np.zeros((2, 2, 2), dtype=float),
+        "devexp_ripple_shuff_folds": np.array(
+            [
+                [[0.0, 0.3], [0.2, 0.4]],
+                [[0.0, 0.3], [0.2, 0.4]],
+            ],
+            dtype=float,
+        ),
         "bits_per_spike_ripple_shuff_folds": np.array(
             [
                 [[0.1, 0.8], [0.2, 0.9]],
@@ -129,26 +140,150 @@ def test_build_unit_summary_table_aggregates_fold_metrics() -> None:
         ),
         "pseudo_r2_pre": np.array([0.05, 0.06], dtype=float),
         "mae_pre": np.array([0.4, 0.5], dtype=float),
-        "ll_pre": np.array([1.5, 2.5], dtype=float),
         "devexp_pre": np.array([0.02, 0.03], dtype=float),
         "bits_per_spike_pre": np.array([0.15, 0.25], dtype=float),
     }
 
-    summary = build_unit_summary_table(
+    dataset = build_epoch_fit_dataset(
         results,
+        animal_name="L14",
+        date="20240611",
+        epoch="01_s1",
+        sources={"ripple_events": "pynapple"},
+        fit_parameters={"n_splits": 2, "ridge_strength": 0.1},
+    )
+
+    assert dataset.sizes["fold"] == 2
+    assert dataset.sizes["shuffle"] == 2
+    assert dataset.sizes["unit"] == 2
+    assert np.array_equal(dataset.coords["unit"].values, [11, 12])
+    assert np.array_equal(dataset["ca1_unit_id"].values, [101, 102, 103])
+    assert dataset["pseudo_r2_ripple_folds"].dims == ("fold", "unit")
+    assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
+    assert dataset["pseudo_r2_pre"].dims == ("unit",)
+    assert np.allclose(dataset["ripple_pseudo_r2_mean"].values, [0.3, 0.5])
+    assert np.allclose(dataset["ripple_mae_mean"].values, [0.4, 0.8])
+    assert np.allclose(dataset["bits_per_spike_pre"].values, [0.15, 0.25])
+    assert np.allclose(dataset["ripple_pseudo_r2_p_value"].values, [1.0 / 3.0, 1.0])
+    assert np.allclose(dataset["ripple_mae_p_value"].values, [1.0 / 3.0, 1.0])
+    assert np.allclose(dataset["ripple_devexp_p_value"].values, [2.0 / 3.0, 1.0])
+    assert np.allclose(dataset["ripple_bits_per_spike_p_value"].values, [1.0 / 3.0, 1.0])
+    assert "ll_ripple_folds" not in dataset.data_vars
+    assert "ll_pre" not in dataset.data_vars
+    assert dataset.attrs["animal_name"] == "L14"
+    assert dataset.attrs["epoch"] == "01_s1"
+    assert dataset.attrs["model_direction"] == "ca1_to_v1"
+    assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
+    assert json.loads(dataset.attrs["fit_parameters_json"]) == {
+        "n_splits": 2,
+        "ridge_strength": 0.1,
+    }
+
+
+def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:
+    results = {
+        "devexp_ripple_folds": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
+        "devexp_ripple_shuff_folds": np.array(
+            [
+                [[0.0, 0.3], [0.2, 0.4]],
+                [[0.0, 0.3], [0.2, 0.4]],
+            ],
+            dtype=float,
+        ),
+        "devexp_pre": np.array([0.05, 0.06], dtype=float),
+    }
+
+    figure_data = build_metric_figure_data(results, metric_name="devexp")
+
+    assert np.allclose(figure_data["ripple_values"], [0.2, 0.3])
+    assert np.allclose(figure_data["pre_values"], [0.05, 0.06])
+    assert np.allclose(figure_data["ripple_p_value"], [2.0 / 3.0, 1.0])
+
+
+def test_empirical_p_values_treat_near_equal_shuffle_means_as_ties() -> None:
+    observed = np.array([0.30000000000000004, 0.4], dtype=float)
+    null_samples = np.array(
+        [
+            [0.3, 0.2],
+            [0.1, 0.4],
+        ],
+        dtype=float,
+    )
+
+    p_values = empirical_p_values(
+        observed=observed,
+        null_samples=null_samples,
+        higher_is_better=True,
+    )
+
+    assert np.allclose(p_values, [2.0 / 3.0, 2.0 / 3.0])
+
+
+def test_parse_arguments_rejects_removed_save_legacy_npz_flag(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--save-legacy-npz",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_arguments()
+
+
+def test_save_epoch_figures_returns_four_metric_paths(monkeypatch, tmp_path) -> None:
+    metric_calls: list[dict[str, object]] = []
+
+    def fake_plot_metric_summary(**kwargs):
+        out_path = kwargs["out_path"]
+        metric_calls.append(kwargs)
+        return out_path
+
+    monkeypatch.setattr(
+        "v1ca1.ripple.ripple_glm.plot_metric_summary",
+        fake_plot_metric_summary,
+    )
+
+    results = {
+        "pseudo_r2_ripple_folds": np.ones((2, 2), dtype=float),
+        "pseudo_r2_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
+        "mae_ripple_folds": np.ones((2, 2), dtype=float),
+        "mae_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
+        "devexp_ripple_folds": np.ones((2, 2), dtype=float),
+        "devexp_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
+        "bits_per_spike_ripple_folds": np.ones((2, 2), dtype=float),
+        "bits_per_spike_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
+        "pseudo_r2_pre": np.ones(2, dtype=float),
+        "mae_pre": np.ones(2, dtype=float),
+        "devexp_pre": np.ones(2, dtype=float),
+        "bits_per_spike_pre": np.ones(2, dtype=float),
+    }
+
+    figure_paths = save_epoch_figures(
+        results=results,
+        fig_dir=tmp_path,
         animal_name="L14",
         date="20240611",
         epoch="01_s1",
     )
 
-    assert list(summary["v1_unit_id"]) == [11, 12]
-    assert np.allclose(summary["ripple_pseudo_r2_mean"], [0.3, 0.5])
-    assert np.allclose(summary["ripple_mae_mean"], [0.4, 0.8])
-    assert np.allclose(summary["ripple_bits_per_spike_mean"], [0.6, 0.8])
-    assert np.allclose(summary["pre_bits_per_spike"], [0.15, 0.25])
-    assert np.allclose(summary["ripple_pseudo_r2_p_value"], [1.0 / 3.0, 1.0])
-    assert np.allclose(summary["ripple_mae_p_value"], [1.0 / 3.0, 1.0])
-    assert np.allclose(summary["ripple_bits_per_spike_p_value"], [1.0 / 3.0, 1.0])
+    assert len(figure_paths) == 4
+    assert len(metric_calls) == 4
+    assert all("ll" not in path.name for path in figure_paths)
+    assert any(path.name.endswith("devexp_summary.png") for path in figure_paths)
+    assert any(path.name.endswith("bits_per_spike_summary.png") for path in figure_paths)
+    pseudo_r2_call = next(call for call in metric_calls if call["metric_label"] == "Pseudo R^2")
+    assert np.allclose(pseudo_r2_call["ripple_values"], [1.0, 1.0])
+    assert np.allclose(pseudo_r2_call["pre_values"], [1.0, 1.0])
+    assert np.allclose(
+        pseudo_r2_call["ripple_p_value"],
+        np.array([1.0, 1.0], dtype=float),
+    )
 
 
 def test_get_epoch_skip_reason_handles_common_weak_epoch_cases() -> None:
