@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     import pynwb
 
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_NWB_ROOT
 
 
 DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 DEFAULT_GAP_THRESHOLD_S = 10.0
 
 

@@ -100,6 +100,7 @@ import pickle
 from pathlib import Path
 import spikeinterface.full as si
 import kyutils
+from v1ca1.helper.session import DEFAULT_SPEED_SIGMA_S
 
 
 # If these are in another module, import them accordingly:
@@ -432,7 +433,7 @@ def _compute_motor_covariates(
     body_xy: np.ndarray,  # (Tpos,2)
     pos_t: np.ndarray,  # (Tpos,)
     spike_counts: nap.TsdFrame,
-    speed_sigma_s: float = 0.1,
+    speed_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> Dict[str, np.ndarray]:
     """Compute motor covariates and interpolate to spike count bin times."""
 

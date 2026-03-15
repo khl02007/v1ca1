@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
+from v1ca1.helper import session
 from v1ca1.helper.get_immobility_times import (
+    DEFAULT_DATA_ROOT,
     coerce_position_array,
     get_position_sampling_rate,
     intervalset_to_dataframe,
+    parse_arguments,
     save_pynapple_interval_output,
 )
 
@@ -74,3 +79,47 @@ def test_save_pynapple_interval_output_round_trip(tmp_path) -> None:
     assert np.allclose(interval_set.start, [1.0, 3.0, 5.0])
     assert np.allclose(interval_set.end, [2.0, 4.0, 6.0])
     assert list(interval_set["epoch"]) == ["02_r1", "02_r1", "04_r2"]
+
+
+def test_parse_arguments_uses_shared_default_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_immobility_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.data_root == session.DEFAULT_DATA_ROOT
+    assert DEFAULT_DATA_ROOT == session.DEFAULT_DATA_ROOT
+    assert not hasattr(args, "position_offset")
+    assert not hasattr(args, "speed_threshold_cm_s")
+
+
+def test_parse_arguments_rejects_removed_threshold_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_immobility_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+            "--position-offset",
+            "5",
+            "--speed-threshold-cm-s",
+            "3.0",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        parse_arguments()

@@ -40,6 +40,7 @@ from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
     DEFAULT_POSITION_OFFSET,
+    DEFAULT_SPEED_SIGMA_S,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     TRAJECTORY_TYPES,
@@ -226,7 +227,6 @@ def compute_motor_covariates(
     body_xy: np.ndarray,
     position_timestamps: np.ndarray,
     spike_counts: Any,
-    speed_sigma_s: float = 0.1,
 ) -> dict[str, np.ndarray]:
     """Compute motor covariates and interpolate them onto spike-count bins."""
     import pynapple as nap
@@ -239,7 +239,7 @@ def compute_motor_covariates(
             position=position_xy,
             time=position_timestamps,
             sampling_frequency=float(sampling_rate),
-            sigma=float(speed_sigma_s),
+            sigma=DEFAULT_SPEED_SIGMA_S,
         ),
         dtype=float,
     )
@@ -1514,6 +1514,7 @@ def main() -> None:
                 fit_parameters={
                     "position_offset": args.position_offset,
                     "speed_threshold_cm_s": args.speed_threshold_cm_s,
+                    "speed_sigma_s": DEFAULT_SPEED_SIGMA_S,
                     "bin_size_s": args.bin_size_s,
                     "ridge": args.ridge,
                     "n_folds": args.n_folds,
@@ -1541,6 +1542,7 @@ def main() -> None:
             "epochs": selected_epochs,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
+            "speed_sigma_s": DEFAULT_SPEED_SIGMA_S,
             "region_thresholds_hz": region_thresholds,
             "bin_size_s": args.bin_size_s,
             "ridge": args.ridge,

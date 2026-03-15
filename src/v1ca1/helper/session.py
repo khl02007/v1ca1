@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
+DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 DEFAULT_POSITION_OFFSET = 10
 DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
 DEFAULT_SPEED_SIGMA_S = 0.1
@@ -81,6 +82,20 @@ def _extract_epoch_tags_from_intervalset(epoch_intervals: "nap.IntervalSet") -> 
         return [str(epoch) for epoch in interval_df["epoch"].tolist()]
 
     raise ValueError("The pynapple IntervalSet does not contain saved epoch labels.")
+
+
+def _extract_interval_bounds_from_intervalset(
+    intervals: "nap.IntervalSet",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract aligned start/end arrays from a pynapple IntervalSet."""
+    starts = np.asarray(intervals.start, dtype=float).ravel()
+    ends = np.asarray(intervals.end, dtype=float).ravel()
+    if starts.shape != ends.shape:
+        raise ValueError(
+            "The pynapple IntervalSet has mismatched start/end arrays: "
+            f"{starts.shape} vs {ends.shape}."
+        )
+    return starts, ends
 
 
 def _extract_epoch_tags_from_tsgroup(position_group: "nap.TsGroup") -> list[str]:
@@ -170,6 +185,69 @@ def load_ephys_timestamps_all(analysis_path: Path) -> tuple[np.ndarray, str]:
     with open(pickle_path, "rb") as f:
         timestamps_all = pickle.load(f)
     return np.asarray(timestamps_all, dtype=float), "pickle"
+
+
+def load_ephys_timestamps_by_epoch(
+    analysis_path: Path,
+) -> tuple[list[str], dict[str, np.ndarray], str]:
+    """Load per-epoch ephys timestamps, preferring `timestamps_ephys.npz`."""
+    npz_path = analysis_path / "timestamps_ephys.npz"
+    npz_error: Exception | None = None
+    if npz_path.exists():
+        try:
+            import pynapple as nap
+        except ModuleNotFoundError:
+            pass
+        else:
+            try:
+                epoch_intervals = nap.load_file(npz_path)
+                epoch_tags = _extract_epoch_tags_from_intervalset(epoch_intervals)
+                starts, ends = _extract_interval_bounds_from_intervalset(epoch_intervals)
+                if len(epoch_tags) != starts.size:
+                    raise ValueError(
+                        "Mismatch between epoch labels and saved epoch intervals in "
+                        f"{npz_path}."
+                    )
+
+                timestamps_all, _ = load_ephys_timestamps_all(analysis_path)
+                timestamps_by_epoch: dict[str, np.ndarray] = {}
+                for epoch, start, end in zip(epoch_tags, starts, ends):
+                    start_index = int(np.searchsorted(timestamps_all, float(start), side="left"))
+                    end_index = int(np.searchsorted(timestamps_all, float(end), side="right"))
+                    epoch_timestamps = np.asarray(
+                        timestamps_all[start_index:end_index],
+                        dtype=float,
+                    )
+                    if epoch_timestamps.size == 0:
+                        raise ValueError(
+                            "Could not reconstruct any ephys timestamps for epoch "
+                            f"{epoch!r} from {npz_path}."
+                        )
+                    timestamps_by_epoch[epoch] = epoch_timestamps
+                return epoch_tags, timestamps_by_epoch, "pynapple"
+            except Exception as exc:
+                npz_error = exc
+
+    pickle_path = analysis_path / "timestamps_ephys.pkl"
+    if not pickle_path.exists():
+        if npz_error is not None:
+            raise ValueError(
+                f"Failed to load {npz_path} and no pickle fallback was found."
+            ) from npz_error
+        raise FileNotFoundError(
+            f"Could not find timestamps_ephys.npz or timestamps_ephys.pkl under {analysis_path}."
+        )
+
+    with open(pickle_path, "rb") as f:
+        timestamps_ephys = pickle.load(f)
+    return (
+        [str(epoch) for epoch in timestamps_ephys.keys()],
+        {
+            str(epoch): np.asarray(timestamps, dtype=float)
+            for epoch, timestamps in timestamps_ephys.items()
+        },
+        "pickle",
+    )
 
 
 def load_position_timestamps(analysis_path: Path) -> tuple[list[str], dict[str, np.ndarray], str]:
@@ -435,7 +513,6 @@ def build_speed_tsd(
     position: np.ndarray,
     timestamps_position: np.ndarray,
     position_offset: int = DEFAULT_POSITION_OFFSET,
-    speed_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> "nap.Tsd":
     """Compute a speed Tsd for one epoch after trimming the leading position offset."""
     import position_tools as pt
@@ -459,7 +536,7 @@ def build_speed_tsd(
             position=epoch_position,
             time=epoch_timestamps,
             sampling_frequency=get_position_sampling_rate(epoch_timestamps),
-            sigma=speed_sigma_s,
+            sigma=DEFAULT_SPEED_SIGMA_S,
         ),
         dtype=float,
     )

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_NWB_ROOT
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
 
 
 DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 
 POKE_EVENT_NAMES = {
     "left": "Poke Left",

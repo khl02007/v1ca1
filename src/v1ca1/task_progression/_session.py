@@ -229,7 +229,6 @@ def prepare_task_progression_session(
     regions: tuple[str, ...] = REGIONS,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    speed_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> dict[str, Any]:
     """Load one session and build shared task-progression preprocessing outputs."""
     epoch_source = ""
@@ -268,7 +267,6 @@ def prepare_task_progression_session(
             position_by_epoch[epoch],
             timestamps_position[epoch],
             position_offset=position_offset,
-            speed_sigma_s=speed_sigma_s,
         )
         movement_by_run[epoch] = build_movement_interval(
             speed_by_run[epoch],

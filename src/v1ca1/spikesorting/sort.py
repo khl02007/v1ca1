@@ -17,9 +17,9 @@ from typing import Any
 import numpy as np
 
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_NWB_ROOT
 
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 _SPIKEINTERFACE = None
 
 

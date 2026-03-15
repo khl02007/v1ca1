@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_NWB_ROOT
 
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_NWB_ROOT = Path("/stelmo/nwb/raw")
 DEFAULT_CURATION_BASE_URI = (
     "gh://LorenFrankLab/sorting-curations/main/khl02007"
 )
