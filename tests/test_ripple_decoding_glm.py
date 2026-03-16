@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from v1ca1.ripple.ripple_decoding_glm import (
     build_expected_rate_matrix,
+    build_epoch_dataset,
+    build_epoch_dataset_name,
     build_metric_summary_table,
     build_output_stem,
     build_ripple_fold_masks,
@@ -221,6 +226,77 @@ def test_build_output_stem_includes_both_epochs() -> None:
     )
     assert "v1train-08_r4" in stem
     assert "ca1train-02_r1_decode-02_r1" in stem
+
+
+def test_epoch_dataset_name_includes_both_epochs() -> None:
+    dataset_name = build_epoch_dataset_name(
+        representation="place",
+        v1_tuning_epoch="08_r4",
+        decode_epoch="02_r1",
+    )
+
+    assert dataset_name.endswith("_glm_dataset.nc")
+    assert "v1train-08_r4" in dataset_name
+    assert "ca1train-02_r1_decode-02_r1" in dataset_name
+
+
+def test_build_epoch_dataset_contains_raw_fit_outputs_and_binwise_inputs() -> None:
+    xr = pytest.importorskip("xarray")
+    unit_mask_table = pd.DataFrame(
+        {
+            "unit_id": [11, 12, 13],
+            "movement_firing_rate_hz": [0.6, 0.4, 0.7],
+            "ripple_firing_rate_hz": [0.2, 0.2, 0.05],
+            "expected_rate_mean_hz": [1.0, 1.0, 0.0],
+            "expected_rate_max_hz": [2.0, 2.0, 0.0],
+            "passes_movement_firing_rate": [True, False, True],
+            "passes_ripple_firing_rate": [True, True, False],
+            "passes_expected_rate_predictor": [True, True, False],
+            "keep_unit": [True, True, False],
+        }
+    )
+    ripple_epoch_data = {
+        "response": np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=float),
+        "decoded_state": np.array([0.25, 0.75], dtype=float),
+        "bin_times_s": np.array([10.0, 10.002], dtype=float),
+        "ripple_ids": np.array([0, 0], dtype=int),
+        "n_ripples_kept": 1,
+        "n_bins": 2,
+        "ripple_source_indices": np.array([5], dtype=int),
+        "ripple_start_times_s": np.array([9.99], dtype=float),
+        "ripple_end_times_s": np.array([10.01], dtype=float),
+        "skipped_ripples": [{"ripple_index": 2, "reason": "CA1 decoding returned no time bins."}],
+    }
+    dataset = build_epoch_dataset(
+        fit_results=_make_fit_results(2),
+        unit_mask_table=unit_mask_table,
+        ripple_epoch_data=ripple_epoch_data,
+        expected_rate_hz=np.array([[2.0, 1.0, 0.0], [1.0, 2.0, 0.0]], dtype=float),
+        kept_unit_ids=np.array([11, 12]),
+        animal_name="L14",
+        date="20240611",
+        representation="place",
+        v1_tuning_epoch="08_r4",
+        decode_epoch="02_r1",
+        bin_size_s=0.002,
+        sources={"ripple_events": "table.parquet"},
+        fit_parameters={"bin_size_s": 0.002, "n_shuffles": 2},
+    )
+
+    assert isinstance(dataset, xr.Dataset)
+    assert dataset["pseudo_r2_folds"].shape == (2, 3)
+    assert dataset["pseudo_r2_shuff_folds"].shape == (2, 2, 3)
+    assert dataset["observed_count"].shape == (2, 3)
+    assert dataset["expected_rate_hz"].shape == (2, 3)
+    assert np.allclose(dataset["decoded_state"].to_numpy(), [0.25, 0.75])
+    assert dataset.coords["unit"].to_numpy().tolist() == [11, 12, 13]
+    assert np.isnan(dataset["pseudo_r2_folds"].to_numpy()[:, 2]).all()
+    assert dataset["keep_unit"].to_numpy().tolist() == [True, True, False]
+    assert dataset["ripple_source_index"].to_numpy().tolist() == [5]
+    assert dataset.attrs["decode_epoch"] == "02_r1"
+    assert json.loads(dataset.attrs["sources_json"])["ripple_events"] == "table.parquet"
+    skipped = json.loads(dataset.attrs["skipped_ripples_json"])
+    assert skipped[0]["ripple_index"] == 2
 
 
 def test_plot_metric_scatter_with_marginals_writes_file(tmp_path) -> None:

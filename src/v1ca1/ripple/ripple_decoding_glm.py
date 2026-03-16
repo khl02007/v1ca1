@@ -12,13 +12,16 @@ CA1 tuning and decoding always use the same run epoch. V1 tuning can come from
 another run epoch, which defaults to `08_r4`. Per-unit summaries include
 pseudo-R^2, deviance explained, bits/spike, and empirical shuffle p-values.
 Decoded CA1 trajectories are saved as pynapple-backed `.npz` files, per-unit
-metric summaries are saved as parquet tables, and metric figures are written to
-the session figure directory. A JSON run log is written under `v1ca1_log/`.
+metric summaries are saved as parquet tables, raw GLM fit outputs plus aligned
+ripple-bin model inputs are saved together in one NetCDF-backed xarray dataset
+per epoch, and metric figures are written to the session figure directory. A
+JSON run log is written under `v1ca1_log/`.
 """
 
 import argparse
 import gc
 import inspect
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -319,6 +322,29 @@ def make_empty_tsd(time_support: Any | None = None) -> Any:
     )
 
 
+def require_xarray():
+    """Return `xarray` and fail clearly when NetCDF outputs are requested."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "This script requires `xarray` to save raw GLM fit outputs and "
+            "aligned ripple-bin model inputs as NetCDF."
+        ) from exc
+    return xr
+
+
+def extract_time_values(tsd_like: Any) -> np.ndarray:
+    """Return time values from a pynapple time series or frame."""
+    if hasattr(tsd_like, "t"):
+        return np.asarray(tsd_like.t, dtype=float)
+    if hasattr(tsd_like, "index"):
+        index = getattr(tsd_like, "index")
+        if hasattr(index, "values"):
+            return np.asarray(index.values, dtype=float)
+    raise ValueError("Could not extract time values from the provided pynapple object.")
+
+
 def concatenate_tsds(tsds: list[Any], time_support: Any) -> Any:
     """Concatenate decoded Tsds into one sorted Tsd."""
     import pynapple as nap
@@ -431,8 +457,10 @@ def assemble_ripple_epoch_data(
     decoded_chunks: list[Any] = []
     ripple_starts: list[float] = []
     ripple_ends: list[float] = []
+    ripple_source_indices: list[int] = []
     response_chunks: list[np.ndarray] = []
     decoded_state_chunks: list[np.ndarray] = []
+    bin_time_chunks: list[np.ndarray] = []
     ripple_id_chunks: list[np.ndarray] = []
     skipped_ripples: list[dict[str, Any]] = []
     kept_ripple_count = 0
@@ -456,6 +484,11 @@ def assemble_ripple_epoch_data(
         response = np.asarray(counts.d, dtype=float)
         if response.ndim == 1:
             response = response[:, np.newaxis]
+        count_times = extract_time_values(counts).reshape(-1)
+        if count_times.size != response.shape[0]:
+            raise ValueError(
+                "Ripple-bin timestamps do not match the number of V1 spike-count rows."
+            )
         if response.shape[0] == 0:
             skipped_ripples.append(
                 {
@@ -500,11 +533,13 @@ def assemble_ripple_epoch_data(
         decoded_chunks.append(decoded)
         response_chunks.append(response)
         decoded_state_chunks.append(decoded_state)
+        bin_time_chunks.append(count_times)
         ripple_id_chunks.append(
             np.full(response.shape[0], kept_ripple_count, dtype=int)
         )
         ripple_starts.append(float(np.asarray(ripple_ep.start, dtype=float)[0]))
         ripple_ends.append(float(np.asarray(ripple_ep.end, dtype=float)[0]))
+        ripple_source_indices.append(int(ripple_row_index))
         kept_ripple_count += 1
 
     ripple_support = make_intervalset_from_bounds(
@@ -517,22 +552,31 @@ def assemble_ripple_epoch_data(
             "decoded_tsd": decoded_tsd,
             "response": np.zeros((0, v1_unit_ids.size), dtype=float),
             "decoded_state": np.array([], dtype=float),
+            "bin_times_s": np.array([], dtype=float),
             "ripple_ids": np.array([], dtype=int),
             "n_ripples_kept": 0,
             "n_bins": 0,
+            "ripple_start_times_s": np.array([], dtype=float),
+            "ripple_end_times_s": np.array([], dtype=float),
+            "ripple_source_indices": np.array([], dtype=int),
             "skipped_ripples": skipped_ripples,
         }
 
     response_matrix = np.concatenate(response_chunks, axis=0)
     decoded_state = np.concatenate(decoded_state_chunks).astype(float, copy=False)
+    bin_times_s = np.concatenate(bin_time_chunks).astype(float, copy=False)
     ripple_ids = np.concatenate(ripple_id_chunks).astype(int, copy=False)
     return {
         "decoded_tsd": decoded_tsd,
         "response": response_matrix,
         "decoded_state": decoded_state,
+        "bin_times_s": bin_times_s,
         "ripple_ids": ripple_ids,
         "n_ripples_kept": int(kept_ripple_count),
         "n_bins": int(response_matrix.shape[0]),
+        "ripple_start_times_s": np.asarray(ripple_starts, dtype=float),
+        "ripple_end_times_s": np.asarray(ripple_ends, dtype=float),
+        "ripple_source_indices": np.asarray(ripple_source_indices, dtype=int),
         "skipped_ripples": skipped_ripples,
     }
 
@@ -944,6 +988,199 @@ def build_metric_summary_table(
     return table
 
 
+def build_epoch_dataset_name(
+    *,
+    representation: str,
+    v1_tuning_epoch: str,
+    decode_epoch: str,
+) -> str:
+    """Return the combined epoch dataset filename for one decode epoch."""
+    return (
+        f"{build_output_stem(representation=representation, v1_tuning_epoch=v1_tuning_epoch, decode_epoch=decode_epoch)}"
+        "_glm_dataset.nc"
+    )
+
+
+def build_epoch_dataset(
+    *,
+    fit_results: dict[str, np.ndarray],
+    unit_mask_table: pd.DataFrame,
+    ripple_epoch_data: dict[str, Any],
+    expected_rate_hz: np.ndarray,
+    kept_unit_ids: np.ndarray,
+    animal_name: str,
+    date: str,
+    representation: str,
+    v1_tuning_epoch: str,
+    decode_epoch: str,
+    bin_size_s: float,
+    sources: dict[str, Any],
+    fit_parameters: dict[str, Any],
+) -> Any:
+    """Build one epoch-level xarray dataset with GLM inputs and raw fit outputs."""
+    xr = require_xarray()
+
+    unit_ids = unit_mask_table["unit_id"].to_numpy()
+    kept_lookup = {unit_id: index for index, unit_id in enumerate(kept_unit_ids.tolist())}
+    response = np.asarray(ripple_epoch_data["response"], dtype=np.float32)
+    decoded_state = np.asarray(ripple_epoch_data["decoded_state"], dtype=float)
+    bin_times_s = np.asarray(ripple_epoch_data["bin_times_s"], dtype=float)
+    ripple_ids = np.asarray(ripple_epoch_data["ripple_ids"], dtype=int)
+    expected_rate = np.asarray(expected_rate_hz, dtype=np.float32)
+    if response.shape != expected_rate.shape:
+        raise ValueError("Observed ripple counts and expected rates must have matching shapes.")
+    n_bins = int(response.shape[0])
+    if decoded_state.shape[0] != n_bins or bin_times_s.shape[0] != n_bins:
+        raise ValueError("Decoded state and ripple-bin timestamps must match the saved bins.")
+    if ripple_ids.shape[0] != n_bins:
+        raise ValueError("Ripple ids must match the saved bins.")
+    n_folds = int(np.asarray(fit_results["pseudo_r2_folds"]).shape[0])
+    n_shuffles = int(np.asarray(fit_results["pseudo_r2_shuff_folds"]).shape[1])
+    attrs = {
+        "schema_version": "1",
+        "animal_name": animal_name,
+        "date": date,
+        "representation": representation,
+        "v1_tuning_epoch": v1_tuning_epoch,
+        "decode_epoch": decode_epoch,
+        "model_direction": "decoded_ca1_state_to_v1",
+        "bin_size_s": float(bin_size_s),
+        "n_ripples": int(ripple_epoch_data["n_ripples_kept"]),
+        "n_ripple_bins": int(n_bins),
+        "n_units": int(unit_ids.size),
+        "n_kept_units": int(kept_unit_ids.size),
+        "sources_json": json.dumps(sources, sort_keys=True),
+        "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
+        "skipped_ripples_json": json.dumps(
+            ripple_epoch_data["skipped_ripples"], sort_keys=True
+        ),
+    }
+
+    data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
+        "bin_time_s": (("bin",), bin_times_s),
+        "decoded_state": (("bin",), decoded_state),
+        "ripple_id": (("bin",), ripple_ids),
+        "observed_count": (("bin", "unit"), response),
+        "expected_rate_hz": (("bin", "unit"), expected_rate),
+        "movement_firing_rate_hz": (
+            ("unit",),
+            unit_mask_table["movement_firing_rate_hz"].to_numpy(dtype=float),
+        ),
+        "ripple_firing_rate_hz": (
+            ("unit",),
+            unit_mask_table["ripple_firing_rate_hz"].to_numpy(dtype=float),
+        ),
+        "expected_rate_mean_hz": (
+            ("unit",),
+            unit_mask_table["expected_rate_mean_hz"].to_numpy(dtype=float),
+        ),
+        "expected_rate_max_hz": (
+            ("unit",),
+            unit_mask_table["expected_rate_max_hz"].to_numpy(dtype=float),
+        ),
+        "passes_movement_firing_rate": (
+            ("unit",),
+            unit_mask_table["passes_movement_firing_rate"].to_numpy(dtype=bool),
+        ),
+        "passes_ripple_firing_rate": (
+            ("unit",),
+            unit_mask_table["passes_ripple_firing_rate"].to_numpy(dtype=bool),
+        ),
+        "passes_expected_rate_predictor": (
+            ("unit",),
+            unit_mask_table["passes_expected_rate_predictor"].to_numpy(dtype=bool),
+        ),
+        "keep_unit": (("unit",), unit_mask_table["keep_unit"].to_numpy(dtype=bool)),
+        "ripple_source_index": (
+            ("ripple",),
+            np.asarray(ripple_epoch_data["ripple_source_indices"], dtype=int),
+        ),
+        "ripple_start_time_s": (
+            ("ripple",),
+            np.asarray(ripple_epoch_data["ripple_start_times_s"], dtype=float),
+        ),
+        "ripple_end_time_s": (
+            ("ripple",),
+            np.asarray(ripple_epoch_data["ripple_end_times_s"], dtype=float),
+        ),
+    }
+    for metric_name in METRIC_LABELS:
+        folds_kept = np.asarray(fit_results[f"{metric_name}_folds"], dtype=np.float32)
+        shuffle_folds_kept = np.asarray(
+            fit_results[f"{metric_name}_shuff_folds"], dtype=np.float32
+        )
+        folds = np.full((n_folds, unit_ids.size), np.nan, dtype=np.float32)
+        shuffle_folds = np.full(
+            (n_folds, n_shuffles, unit_ids.size), np.nan, dtype=np.float32
+        )
+        for unit_index, unit_id in enumerate(unit_ids.tolist()):
+            kept_index = kept_lookup.get(unit_id)
+            if kept_index is None:
+                continue
+            folds[:, unit_index] = folds_kept[:, kept_index]
+            shuffle_folds[:, :, unit_index] = shuffle_folds_kept[:, :, kept_index]
+        if kept_unit_ids.size == 0:
+            summary = {
+                "mean": np.full(unit_ids.size, np.nan, dtype=float),
+                "sem": np.full(unit_ids.size, np.nan, dtype=float),
+                "shuffle_mean": np.full(unit_ids.size, np.nan, dtype=float),
+                "shuffle_sd": np.full(unit_ids.size, np.nan, dtype=float),
+                "p_value": np.full(unit_ids.size, np.nan, dtype=float),
+            }
+        else:
+            summary_kept = summarize_metric_against_shuffle(
+                folds_kept,
+                shuffle_folds_kept,
+            )
+            summary = {
+                key: np.full(unit_ids.size, np.nan, dtype=float)
+                for key in ("mean", "sem", "shuffle_mean", "shuffle_sd", "p_value")
+            }
+            for unit_index, unit_id in enumerate(unit_ids.tolist()):
+                kept_index = kept_lookup.get(unit_id)
+                if kept_index is None:
+                    continue
+                for key in summary:
+                    summary[key][unit_index] = summary_kept[key][kept_index]
+        data_vars[f"{metric_name}_folds"] = (("fold", "unit"), folds)
+        data_vars[f"{metric_name}_shuff_folds"] = (
+            ("fold", "shuffle", "unit"),
+            shuffle_folds,
+        )
+        data_vars[f"{metric_name}_mean"] = (
+            ("unit",),
+            np.asarray(summary["mean"], dtype=float),
+        )
+        data_vars[f"{metric_name}_sem"] = (
+            ("unit",),
+            np.asarray(summary["sem"], dtype=float),
+        )
+        data_vars[f"{metric_name}_shuffle_mean"] = (
+            ("unit",),
+            np.asarray(summary["shuffle_mean"], dtype=float),
+        )
+        data_vars[f"{metric_name}_shuffle_sd"] = (
+            ("unit",),
+            np.asarray(summary["shuffle_sd"], dtype=float),
+        )
+        data_vars[f"{metric_name}_p_value"] = (
+            ("unit",),
+            np.asarray(summary["p_value"], dtype=float),
+        )
+
+    return xr.Dataset(
+        data_vars=data_vars,
+        coords={
+            "bin": np.arange(n_bins, dtype=int),
+            "fold": np.arange(n_folds, dtype=int),
+            "shuffle": np.arange(n_shuffles, dtype=int),
+            "unit": unit_ids,
+            "ripple": np.arange(int(ripple_epoch_data["n_ripples_kept"]), dtype=int),
+        },
+        attrs=attrs,
+    )
+
+
 def get_pyplot():
     """Return pyplot configured for headless script execution."""
     import matplotlib
@@ -1129,6 +1366,18 @@ def main() -> None:
     sources = dict(session["sources"])
     sources["timestamps_ephys"] = ephys_source
     sources["ripple_events"] = ripple_source
+    fit_parameters = {
+        "bin_size_s": args.bin_size_s,
+        "ridge_strength": args.ridge_strength,
+        "n_splits": args.n_splits,
+        "n_shuffles": args.n_shuffles,
+        "shuffle_seed": args.shuffle_seed,
+        "v1_min_movement_fr_hz": args.v1_min_movement_fr_hz,
+        "v1_min_ripple_fr_hz": args.v1_min_ripple_fr_hz,
+        "maxiter": args.maxiter,
+        "tol": args.tol,
+        "model_direction": "decoded_ca1_state_to_v1",
+    }
 
     v1_spikes = session["spikes_by_region"]["v1"]
     ca1_spikes = session["spikes_by_region"]["ca1"]
@@ -1149,6 +1398,7 @@ def main() -> None:
 
     saved_decoded_paths: list[Path] = []
     saved_table_paths: list[Path] = []
+    saved_dataset_paths: list[Path] = []
     saved_figure_paths: list[Path] = []
     skipped_epochs: list[dict[str, Any]] = []
 
@@ -1249,6 +1499,21 @@ def main() -> None:
             n_ripples=ripple_epoch_data["n_ripples_kept"],
             n_ripple_bins=ripple_epoch_data["n_bins"],
         )
+        epoch_dataset = build_epoch_dataset(
+            fit_results=fit_results,
+            unit_mask_table=unit_mask_table,
+            ripple_epoch_data=ripple_epoch_data,
+            expected_rate_hz=expected_rate_hz,
+            kept_unit_ids=kept_unit_ids,
+            animal_name=args.animal_name,
+            date=args.date,
+            representation=args.representation,
+            v1_tuning_epoch=v1_tuning_epoch,
+            decode_epoch=decode_epoch,
+            bin_size_s=args.bin_size_s,
+            sources=sources,
+            fit_parameters=fit_parameters,
+        )
 
         decoded_path = (
             data_dir
@@ -1263,6 +1528,14 @@ def main() -> None:
         )
         summary_table.to_parquet(table_path, index=False)
         saved_table_paths.append(table_path)
+
+        dataset_path = data_dir / build_epoch_dataset_name(
+            representation=args.representation,
+            v1_tuning_epoch=v1_tuning_epoch,
+            decode_epoch=decode_epoch,
+        )
+        epoch_dataset.to_netcdf(dataset_path)
+        saved_dataset_paths.append(dataset_path)
 
         saved_figure_paths.extend(
             save_metric_figures(
@@ -1309,6 +1582,7 @@ def main() -> None:
             "sources": sources,
             "saved_decoded_paths": saved_decoded_paths,
             "saved_table_paths": saved_table_paths,
+            "saved_dataset_paths": saved_dataset_paths,
             "saved_figure_paths": saved_figure_paths,
             "skipped_epochs": skipped_epochs,
         },
