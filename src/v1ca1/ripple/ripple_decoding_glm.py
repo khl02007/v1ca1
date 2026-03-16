@@ -35,6 +35,19 @@ from v1ca1.helper.session import (
     REGIONS,
     load_ephys_timestamps_by_epoch,
 )
+from v1ca1.ripple._decoding import (
+    REPRESENTATIONS,
+    compute_tuning_curves_for_epoch,
+    concatenate_tsds,
+    empty_ripple_table,
+    extract_time_values,
+    get_representation_inputs,
+    interpolate_nans_1d,
+    make_empty_tsd,
+    make_intervalset_from_bounds,
+    select_decode_epochs,
+    deranged_permutation,
+)
 from v1ca1.ripple.ripple_glm import (
     bits_per_spike_per_neuron,
     build_epoch_intervals,
@@ -45,8 +58,6 @@ from v1ca1.ripple.ripple_glm import (
     nansem,
 )
 from v1ca1.task_progression._session import (
-    build_combined_task_progression_bins,
-    build_linear_position_bins,
     compute_movement_firing_rates,
     get_analysis_path,
     prepare_task_progression_session,
@@ -55,12 +66,6 @@ from v1ca1.task_progression._session import (
 if TYPE_CHECKING:
     import pynapple as nap
 
-
-REPRESENTATIONS = ("place", "task_progression")
-FEATURE_NAME_BY_REPRESENTATION = {
-    "place": "linpos",
-    "task_progression": "tp",
-}
 METRIC_LABELS = {
     "pseudo_r2": "Pseudo R^2",
     "devexp": "Deviance Explained",
@@ -175,24 +180,6 @@ def validate_arguments(args: argparse.Namespace) -> None:
     if args.v1_min_ripple_fr_hz < 0:
         raise ValueError("--v1-min-ripple-fr-hz must be non-negative.")
 
-
-def select_decode_epochs(
-    run_epochs: list[str],
-    requested_epochs: list[str] | None,
-) -> list[str]:
-    """Return the run epochs to decode."""
-    if not requested_epochs:
-        return list(run_epochs)
-
-    missing_epochs = [epoch for epoch in requested_epochs if epoch not in run_epochs]
-    if missing_epochs:
-        raise ValueError(
-            "Decode epochs must be run epochs because CA1 tuning curves are built from the "
-            f"same epoch being decoded. Missing run epochs: {missing_epochs!r}"
-        )
-    return list(requested_epochs)
-
-
 def validate_v1_tuning_epoch(run_epochs: list[str], v1_tuning_epoch: str) -> str:
     """Return a validated V1 tuning epoch."""
     if v1_tuning_epoch not in run_epochs:
@@ -201,86 +188,6 @@ def validate_v1_tuning_epoch(run_epochs: list[str], v1_tuning_epoch: str) -> str
             f"Got {v1_tuning_epoch!r}."
         )
     return str(v1_tuning_epoch)
-
-
-def get_representation_inputs(
-    session: dict[str, Any],
-    *,
-    animal_name: str,
-    representation: str,
-) -> tuple[dict[str, Any], np.ndarray, str]:
-    """Return the requested feature Tsds, bins, and feature name."""
-    if representation == "place":
-        return (
-            session["linear_position_by_run"],
-            build_linear_position_bins(animal_name),
-            FEATURE_NAME_BY_REPRESENTATION[representation],
-        )
-    if representation == "task_progression":
-        return (
-            session["task_progression_by_run"],
-            build_combined_task_progression_bins(animal_name),
-            FEATURE_NAME_BY_REPRESENTATION[representation],
-        )
-    raise ValueError(f"Unsupported representation {representation!r}.")
-
-
-def empty_ripple_table() -> pd.DataFrame:
-    """Return an empty ripple table."""
-    return pd.DataFrame(
-        {
-            "start_time": pd.Series(dtype=float),
-            "end_time": pd.Series(dtype=float),
-        }
-    )
-
-
-def compute_tuning_curves_for_epoch(
-    *,
-    spikes: Any,
-    feature: Any,
-    movement_interval: Any,
-    bin_edges: np.ndarray,
-    feature_name: str,
-) -> Any:
-    """Compute one epoch's tuning curves with explicit feature naming."""
-    import pynapple as nap
-
-    return nap.compute_tuning_curves(
-        data=spikes,
-        features=feature,
-        bins=[np.asarray(bin_edges, dtype=float)],
-        epochs=movement_interval,
-        feature_names=[feature_name],
-    )
-
-
-def make_intervalset_from_bounds(
-    starts: np.ndarray,
-    ends: np.ndarray,
-) -> Any:
-    """Create one IntervalSet from aligned start and end arrays."""
-    import pynapple as nap
-
-    return nap.IntervalSet(
-        start=np.asarray(starts, dtype=float),
-        end=np.asarray(ends, dtype=float),
-        time_units="s",
-    )
-
-
-def make_empty_tsd(time_support: Any | None = None) -> Any:
-    """Return an empty second-based Tsd."""
-    import pynapple as nap
-
-    kwargs: dict[str, Any] = {"time_units": "s"}
-    if time_support is not None:
-        kwargs["time_support"] = time_support
-    return nap.Tsd(
-        t=np.array([], dtype=float),
-        d=np.array([], dtype=float),
-        **kwargs,
-    )
 
 
 def require_xarray():
@@ -293,58 +200,6 @@ def require_xarray():
             "aligned ripple-bin model inputs as NetCDF."
         ) from exc
     return xr
-
-
-def extract_time_values(tsd_like: Any) -> np.ndarray:
-    """Return time values from a pynapple time series or frame."""
-    if hasattr(tsd_like, "t"):
-        return np.asarray(tsd_like.t, dtype=float)
-    if hasattr(tsd_like, "index"):
-        index = getattr(tsd_like, "index")
-        if hasattr(index, "values"):
-            return np.asarray(index.values, dtype=float)
-    raise ValueError("Could not extract time values from the provided pynapple object.")
-
-
-def concatenate_tsds(tsds: list[Any], time_support: Any) -> Any:
-    """Concatenate decoded Tsds into one sorted Tsd."""
-    import pynapple as nap
-
-    if not tsds:
-        return make_empty_tsd(time_support=time_support)
-
-    times = [np.asarray(tsd.t, dtype=float) for tsd in tsds if len(np.asarray(tsd.t)) > 0]
-    values = [np.asarray(tsd.d, dtype=float) for tsd in tsds if len(np.asarray(tsd.t)) > 0]
-    if not times:
-        return make_empty_tsd(time_support=time_support)
-
-    all_times = np.concatenate(times)
-    all_values = np.concatenate(values)
-    order = np.argsort(all_times)
-    return nap.Tsd(
-        t=all_times[order],
-        d=all_values[order],
-        time_support=time_support,
-        time_units="s",
-    )
-
-
-def interpolate_nans_1d(values: np.ndarray) -> np.ndarray:
-    """Linearly interpolate NaNs in one 1D array."""
-    values = np.asarray(values, dtype=float).reshape(-1)
-    if values.size == 0:
-        return values.copy()
-
-    finite = np.isfinite(values)
-    if not np.any(finite):
-        return np.full(values.shape, np.nan, dtype=float)
-    if np.all(finite):
-        return values.copy()
-
-    indices = np.arange(values.size, dtype=float)
-    output = values.copy()
-    output[~finite] = np.interp(indices[~finite], indices[finite], values[finite])
-    return output
 
 
 def _ordered_tuning_curve_array(tuning_curves: Any, unit_ids: np.ndarray) -> np.ndarray:
@@ -635,17 +490,6 @@ def build_ripple_fold_masks(
         test_mask = np.isin(ripple_ids, test_ripples)
         folds.append((train_mask, test_mask))
     return folds
-
-
-def deranged_permutation(size: int, rng: np.random.Generator) -> np.ndarray:
-    """Return a deranged permutation when possible."""
-    if size <= 1:
-        return np.arange(size, dtype=int)
-    for _ in range(128):
-        permutation = rng.permutation(size)
-        if not np.any(permutation == np.arange(size, dtype=int)):
-            return permutation
-    return np.roll(np.arange(size, dtype=int), 1)
 
 
 def shuffle_response_by_ripple_blocks(
