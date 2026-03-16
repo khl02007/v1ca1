@@ -32,8 +32,6 @@ from sklearn.model_selection import KFold
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
-    DEFAULT_POSITION_OFFSET,
-    DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     load_ephys_timestamps_by_epoch,
 )
@@ -77,8 +75,6 @@ DEFAULT_N_SHUFFLES = 100
 DEFAULT_SHUFFLE_SEED = 45
 DEFAULT_V1_MIN_MOVEMENT_FR_HZ = 0.5
 DEFAULT_V1_MIN_RIPPLE_FR_HZ = 0.1
-DEFAULT_MAXITER = 6000
-DEFAULT_TOL = 1e-7
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -111,21 +107,6 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Run epoch used to build V1 tuning curves for the GLM covariates. "
             f"Default: {DEFAULT_V1_TUNING_EPOCH}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore per epoch. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
         ),
     )
     parser.add_argument(
@@ -176,27 +157,11 @@ def parse_arguments() -> argparse.Namespace:
             f"Default: {DEFAULT_V1_MIN_RIPPLE_FR_HZ}"
         ),
     )
-    parser.add_argument(
-        "--maxiter",
-        type=int,
-        default=DEFAULT_MAXITER,
-        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
-    )
-    parser.add_argument(
-        "--tol",
-        type=float,
-        default=DEFAULT_TOL,
-        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
-    )
     return parser.parse_args()
 
 
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI ranges."""
-    if args.position_offset < 0:
-        raise ValueError("--position-offset must be non-negative.")
-    if args.speed_threshold_cm_s < 0:
-        raise ValueError("--speed-threshold-cm-s must be non-negative.")
     if args.bin_size_s <= 0:
         raise ValueError("--bin-size-s must be positive.")
     if args.ridge_strength < 0:
@@ -209,10 +174,6 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--v1-min-movement-fr-hz must be non-negative.")
     if args.v1_min_ripple_fr_hz < 0:
         raise ValueError("--v1-min-ripple-fr-hz must be non-negative.")
-    if args.maxiter <= 0:
-        raise ValueError("--maxiter must be positive.")
-    if args.tol <= 0:
-        raise ValueError("--tol must be positive.")
 
 
 def select_decode_epochs(
@@ -774,8 +735,6 @@ def fit_expected_rate_glm(
     n_shuffles: int,
     shuffle_seed: int,
     ridge_strength: float,
-    maxiter: int,
-    tol: float,
 ) -> dict[str, np.ndarray]:
     """Fit the diagonal expected-rate ripple GLM with ripple-wise CV."""
     n_bins, n_units = y.shape
@@ -809,11 +768,9 @@ def fit_expected_rate_glm(
             X_test=X_test,
         )
         glm = population_glm(
-            solver_name="LBFGS",
             regularizer="Ridge",
             regularizer_strength=float(ridge_strength),
             feature_mask=feature_mask,
-            solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),
         )
         glm.fit(X_train_pp, y_train)
         lam_test = np.asarray(glm.predict(X_test_pp), dtype=np.float64)
@@ -842,11 +799,9 @@ def fit_expected_rate_glm(
                 rng,
             )
             glm_shuffle = population_glm(
-                solver_name="LBFGS",
                 regularizer="Ridge",
                 regularizer_strength=float(ridge_strength),
                 feature_mask=feature_mask,
-                solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),
             )
             glm_shuffle.fit(X_train_pp, shuffled_response)
             lam_shuffle = np.asarray(glm_shuffle.predict(X_test_pp), dtype=np.float64)
@@ -1331,8 +1286,6 @@ def main() -> None:
         date=args.date,
         data_root=args.data_root,
         regions=REGIONS,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
     decode_epochs = select_decode_epochs(session["run_epochs"], args.decode_epochs)
     v1_tuning_epoch = validate_v1_tuning_epoch(
@@ -1374,8 +1327,6 @@ def main() -> None:
         "shuffle_seed": args.shuffle_seed,
         "v1_min_movement_fr_hz": args.v1_min_movement_fr_hz,
         "v1_min_ripple_fr_hz": args.v1_min_ripple_fr_hz,
-        "maxiter": args.maxiter,
-        "tol": args.tol,
         "model_direction": "decoded_ca1_state_to_v1",
     }
 
@@ -1486,8 +1437,6 @@ def main() -> None:
             n_shuffles=args.n_shuffles,
             shuffle_seed=args.shuffle_seed,
             ridge_strength=args.ridge_strength,
-            maxiter=args.maxiter,
-            tol=args.tol,
         )
         summary_table = build_metric_summary_table(
             unit_mask_table=unit_mask_table,
@@ -1565,8 +1514,6 @@ def main() -> None:
             "data_root": args.data_root,
             "decode_epochs": decode_epochs,
             "v1_tuning_epoch": v1_tuning_epoch,
-            "position_offset": args.position_offset,
-            "speed_threshold_cm_s": args.speed_threshold_cm_s,
             "bin_size_s": args.bin_size_s,
             "ridge_strength": args.ridge_strength,
             "n_splits": args.n_splits,
@@ -1574,8 +1521,6 @@ def main() -> None:
             "shuffle_seed": args.shuffle_seed,
             "v1_min_movement_fr_hz": args.v1_min_movement_fr_hz,
             "v1_min_ripple_fr_hz": args.v1_min_ripple_fr_hz,
-            "maxiter": args.maxiter,
-            "tol": args.tol,
             "model_direction": "decoded_ca1_state_to_v1",
         },
         outputs={
