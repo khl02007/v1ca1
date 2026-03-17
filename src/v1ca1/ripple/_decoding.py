@@ -76,6 +76,41 @@ def get_representation_inputs(
     raise ValueError(f"Unsupported representation {representation!r}.")
 
 
+def get_tsgroup_unit_ids(tsgroup: Any) -> np.ndarray:
+    """Return unit ids from a pynapple TsGroup-like object."""
+    if hasattr(tsgroup, "get_unit_ids"):
+        return np.asarray(tsgroup.get_unit_ids())
+    if hasattr(tsgroup, "keys"):
+        return np.asarray(list(tsgroup.keys()))
+    raise ValueError("Could not extract unit ids from the provided TsGroup-like object.")
+
+
+def build_region_unit_mask_table(
+    *,
+    unit_ids: np.ndarray,
+    movement_firing_rates_hz: np.ndarray,
+    min_movement_fr_hz: float,
+    region: str,
+) -> pd.DataFrame:
+    """Return the movement-rate mask table for one region."""
+    unit_ids = np.asarray(unit_ids)
+    movement_firing_rates_hz = np.asarray(movement_firing_rates_hz, dtype=float)
+    if movement_firing_rates_hz.shape[0] != unit_ids.size:
+        raise ValueError(
+            f"{region} movement firing rates do not match the saved unit count."
+        )
+
+    keep_unit = movement_firing_rates_hz >= float(min_movement_fr_hz)
+    return pd.DataFrame(
+        {
+            "unit_id": unit_ids,
+            "movement_firing_rate_hz": movement_firing_rates_hz,
+            "passes_movement_firing_rate": keep_unit,
+            "keep_unit": keep_unit,
+        }
+    )
+
+
 def empty_ripple_table() -> pd.DataFrame:
     """Return an empty ripple table."""
     return pd.DataFrame(

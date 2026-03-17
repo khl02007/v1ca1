@@ -6,16 +6,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from v1ca1.ripple._decoding import (
+    build_region_unit_mask_table,
+    validate_train_epoch,
+)
 from v1ca1.ripple.ripple_decoding_comparison import (
     build_epoch_dataset,
     build_epoch_summary_table,
     build_per_ripple_metric_table,
-    build_region_unit_mask_table,
     compute_per_ripple_metrics,
+    parse_arguments,
     resolve_epoch_pairs,
-    resolve_train_epoch,
     shuffle_ripple_state_blocks_by_length,
-    validate_train_epoch,
 )
 
 
@@ -34,9 +36,9 @@ def _make_aligned_data() -> dict[str, np.ndarray | int]:
     }
 
 
-def test_resolve_train_epoch_defaults_to_decode_epoch() -> None:
-    assert resolve_train_epoch("04_r2", None) == "04_r2"
-    assert resolve_train_epoch("04_r2", "08_r4") == "08_r4"
+def test_validate_train_epoch_accepts_none_and_known_epoch() -> None:
+    assert validate_train_epoch(["02_r1", "04_r2"], None) is None
+    assert validate_train_epoch(["02_r1", "04_r2"], "04_r2") == "04_r2"
 
 
 def test_validate_train_epoch_rejects_unknown_epoch() -> None:
@@ -48,7 +50,6 @@ def test_resolve_epoch_pairs_defaults_to_matching_all_run_epochs() -> None:
     assert resolve_epoch_pairs(
         ["02_r1", "04_r2", "08_r4"],
         requested_decode_epoch=None,
-        requested_decode_epochs=None,
         requested_train_epoch=None,
     ) == [
         ("02_r1", "02_r1"),
@@ -61,27 +62,28 @@ def test_resolve_epoch_pairs_pairs_single_epoch_with_itself_when_only_one_side_i
     assert resolve_epoch_pairs(
         ["02_r1", "04_r2", "08_r4"],
         requested_decode_epoch="04_r2",
-        requested_decode_epochs=None,
         requested_train_epoch=None,
     ) == [("04_r2", "04_r2")]
     assert resolve_epoch_pairs(
         ["02_r1", "04_r2", "08_r4"],
         requested_decode_epoch=None,
-        requested_decode_epochs=None,
         requested_train_epoch="08_r4",
     ) == [("08_r4", "08_r4")]
 
 
-def test_resolve_epoch_pairs_supports_fixed_train_epoch_with_explicit_decode_epochs() -> None:
+def test_resolve_epoch_pairs_supports_distinct_decode_and_train_epochs() -> None:
     assert resolve_epoch_pairs(
         ["02_r1", "04_r2", "08_r4"],
-        requested_decode_epoch=None,
-        requested_decode_epochs=["02_r1", "04_r2"],
+        requested_decode_epoch="02_r1",
         requested_train_epoch="08_r4",
-    ) == [
-        ("02_r1", "08_r4"),
-        ("04_r2", "08_r4"),
-    ]
+    ) == [("02_r1", "08_r4")]
+
+
+def test_parse_arguments_requires_animal_name_and_date(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["ripple_decoding_comparison.py"])
+
+    with pytest.raises(SystemExit):
+        parse_arguments()
 
 
 def test_shuffle_ripple_state_blocks_by_length_preserves_within_block_order_and_lengths() -> None:
