@@ -6,6 +6,8 @@ src/v1ca1.egg-info/SOURCES.txt
 src/v1ca1.egg-info/dependency_links.txt
 src/v1ca1.egg-info/requires.txt
 src/v1ca1.egg-info/top_level.txt
+src/v1ca1/behavior/__init__.py
+src/v1ca1/behavior/plot_reward_timing.py
 src/v1ca1/communication_subspace/__init__.py
 src/v1ca1/communication_subspace/communication_subspace.py
 src/v1ca1/decoding/__init__.py
@@ -72,8 +74,13 @@ src/v1ca1/raster/plot_2d_place_raster_trajectory.py
 src/v1ca1/raster/plot_place_field_heatmap.py
 src/v1ca1/ripple/__init__.py
 src/v1ca1/ripple/_channels.py
+src/v1ca1/ripple/_decoding.py
 src/v1ca1/ripple/detect_ripples.py
+src/v1ca1/ripple/ripple_decoding_comparison.py
+src/v1ca1/ripple/ripple_decoding_glm.py
 src/v1ca1/ripple/ripple_glm.py
+src/v1ca1/ripple/ripple_glm_binned.py
+src/v1ca1/ripple/ripple_trajectory_identity.py
 src/v1ca1/ripple/legacy/__init__.py
 src/v1ca1/ripple/legacy/detect_ripples.py
 src/v1ca1/ripple/legacy/plot_ripple_modulation.py
@@ -117,4 +124,9 @@ src/v1ca1/xcorr/compute_xcorr.py
 tests/test_get_immobility_times.py
 tests/test_get_timestamps.py
 tests/test_get_trajectory_times.py
+tests/test_plot_reward_timing.py
+tests/test_ripple_decoding_comparison.py
+tests/test_ripple_decoding_glm.py
 tests/test_ripple_glm.py
+tests/test_ripple_glm_binned.py
+tests/test_ripple_trajectory_identity.py
