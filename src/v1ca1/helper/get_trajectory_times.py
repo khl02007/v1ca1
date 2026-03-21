@@ -12,8 +12,8 @@ the four supported trajectory types:
 - `right_to_center`
 - `center_to_right`
 
-By default it writes both a legacy `trajectory_times.pkl` artifact and a single
-`trajectory_times.npz` pynapple `IntervalSet` whose metadata stores the full
+By default it writes a single `trajectory_times.npz` pynapple `IntervalSet`
+whose metadata stores the full
 epoch label (for example `02_r1`) and trajectory type for each interval row.
 
 The script prefers the pynapple-backed `timestamps_ephys.npz` export when it is
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.helper.session import DEFAULT_NWB_ROOT
+from v1ca1.helper.session import DEFAULT_NWB_ROOT, save_pickle_output
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -247,9 +247,7 @@ def save_legacy_trajectory_pickle_output(
 ) -> Path:
     """Write the legacy nested trajectory pickle used by downstream scripts."""
     output_path = analysis_path / "trajectory_times.pkl"
-    with open(output_path, "wb") as f:
-        pickle.dump(trajectory_times, f)
-    return output_path
+    return save_pickle_output(output_path, trajectory_times)
 
 
 def save_pynapple_trajectory_output(
@@ -342,7 +340,7 @@ def get_trajectory_times(
     date: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
-    trajectory_format: str = "both",
+    save_pkl: bool = False,
 ) -> None:
     """Compute and save poke-defined trajectory intervals for one session."""
     import pynwb
@@ -384,14 +382,13 @@ def get_trajectory_times(
         "epoch_tags": epoch_tags,
         "run_epochs": run_epoch_list,
         "trajectory_types": list(TRAJECTORY_TYPES.values()),
-    }
-    if trajectory_format in {"pickle", "both"}:
-        outputs["trajectory_times_pickle_path"] = save_legacy_trajectory_pickle_output(
+        "trajectory_times_pynapple_path": save_pynapple_trajectory_output(
             analysis_path=analysis_path,
             trajectory_times=trajectory_times,
-        )
-    if trajectory_format in {"pynapple", "both"}:
-        outputs["trajectory_times_pynapple_path"] = save_pynapple_trajectory_output(
+        ),
+    }
+    if save_pkl:
+        outputs["trajectory_times_pickle_path"] = save_legacy_trajectory_pickle_output(
             analysis_path=analysis_path,
             trajectory_times=trajectory_times,
         )
@@ -404,7 +401,7 @@ def get_trajectory_times(
             "date": date,
             "data_root": data_root,
             "nwb_root": nwb_root,
-            "trajectory_format": trajectory_format,
+            "save_pkl": save_pkl,
         },
         outputs=outputs,
     )
@@ -437,13 +434,9 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
     )
     parser.add_argument(
-        "--trajectory-format",
-        choices=["both", "pickle", "pynapple"],
-        default="both",
-        help=(
-            "Output format for trajectory intervals. "
-            "Default: both"
-        ),
+        "--save-pkl",
+        action="store_true",
+        help="Also write the legacy trajectory_times.pkl export alongside trajectory_times.npz.",
     )
     return parser.parse_args()
 
@@ -456,7 +449,7 @@ def main() -> None:
         date=args.date,
         data_root=args.data_root,
         nwb_root=args.nwb_root,
-        trajectory_format=args.trajectory_format,
+        save_pkl=args.save_pkl,
     )
 
 

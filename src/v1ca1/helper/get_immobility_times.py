@@ -7,16 +7,14 @@ analysis folder, computes speed for each epoch, uses pynapple thresholding to
 define movement periods, and defines immobility as the complement of movement
 within the full epoch interval.
 
-By default it writes both legacy root-level pickle artifacts (`run_times.pkl`
-and `immobility_times.pkl`) and matching root-level pynapple `IntervalSet`
-files (`run_times.npz` and `immobility_times.npz`). The pynapple files store
+By default it writes root-level pynapple `IntervalSet` files
+(`run_times.npz` and `immobility_times.npz`). The pynapple files store
 the full epoch label as metadata on each interval row. The script prefers
 `timestamps_position.npz` when available and readable, and otherwise falls back
 to `timestamps_position.pkl`.
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +34,7 @@ from v1ca1.helper.session import (
     get_position_sampling_rate,
     load_position_data,
     load_position_timestamps,
+    save_pickle_output,
 )
 
 if TYPE_CHECKING:
@@ -91,9 +90,7 @@ def save_legacy_interval_pickle_output(
         epoch: intervalset_to_dataframe(intervals)
         for epoch, intervals in intervals_by_epoch.items()
     }
-    with open(output_path, "wb") as f:
-        pickle.dump(serializable, f)
-    return output_path
+    return save_pickle_output(output_path, serializable)
 
 
 def save_pynapple_interval_output(
@@ -143,7 +140,7 @@ def get_immobility_times(
     data_root: Path = DEFAULT_DATA_ROOT,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    output_format: str = "both",
+    save_pkl: bool = False,
 ) -> None:
     """Compute and save movement and immobility intervals for one session."""
     if position_offset < 0:
@@ -191,25 +188,24 @@ def get_immobility_times(
         "timestamps_position_source": timestamp_source,
         "epochs": epoch_tags,
         "epoch_summaries": epoch_summaries,
+        "run_times_pynapple_path": save_pynapple_interval_output(
+            analysis_path=analysis_path,
+            state_name="run_times",
+            intervals_by_epoch=run_intervals,
+        ),
+        "immobility_times_pynapple_path": save_pynapple_interval_output(
+            analysis_path=analysis_path,
+            state_name="immobility_times",
+            intervals_by_epoch=immobility_intervals,
+        ),
     }
-    if output_format in {"pickle", "both"}:
+    if save_pkl:
         outputs["run_times_pickle_path"] = save_legacy_interval_pickle_output(
             analysis_path=analysis_path,
             state_name="run_times",
             intervals_by_epoch=run_intervals,
         )
         outputs["immobility_times_pickle_path"] = save_legacy_interval_pickle_output(
-            analysis_path=analysis_path,
-            state_name="immobility_times",
-            intervals_by_epoch=immobility_intervals,
-        )
-    if output_format in {"pynapple", "both"}:
-        outputs["run_times_pynapple_path"] = save_pynapple_interval_output(
-            analysis_path=analysis_path,
-            state_name="run_times",
-            intervals_by_epoch=run_intervals,
-        )
-        outputs["immobility_times_pynapple_path"] = save_pynapple_interval_output(
             analysis_path=analysis_path,
             state_name="immobility_times",
             intervals_by_epoch=immobility_intervals,
@@ -225,7 +221,7 @@ def get_immobility_times(
             "position_offset": position_offset,
             "speed_threshold_cm_s": speed_threshold_cm_s,
             "speed_sigma_s": DEFAULT_SPEED_SIGMA_S,
-            "output_format": output_format,
+            "save_pkl": save_pkl,
         },
         outputs=outputs,
     )
@@ -252,10 +248,9 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
     )
     parser.add_argument(
-        "--output-format",
-        choices=["both", "pickle", "pynapple"],
-        default="both",
-        help="Output format for saved intervals. Default: both",
+        "--save-pkl",
+        action="store_true",
+        help="Also write compatibility pickle exports alongside the default .npz outputs.",
     )
     return parser.parse_args()
 
@@ -267,7 +262,7 @@ def main() -> None:
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
-        output_format=args.output_format,
+        save_pkl=args.save_pkl,
     )
 
 

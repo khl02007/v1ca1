@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
-from v1ca1.helper.get_trajectory_times import save_pynapple_trajectory_output
+from v1ca1.helper.get_trajectory_times import (
+    parse_arguments,
+    save_pynapple_trajectory_output,
+)
 
 
 def test_save_pynapple_trajectory_output_round_trip(tmp_path) -> None:
@@ -51,3 +56,40 @@ def test_save_pynapple_trajectory_output_round_trip(tmp_path) -> None:
         "center_to_right",
         "center_to_right",
     ]
+
+
+def test_parse_arguments_defaults_to_npz_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_trajectory_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.save_pkl is False
+
+
+def test_parse_arguments_accepts_save_pkl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_trajectory_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+            "--save-pkl",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.save_pkl is True

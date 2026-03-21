@@ -115,6 +115,7 @@ def test_parse_arguments_uses_shared_default_root(monkeypatch: pytest.MonkeyPatc
 
     assert args.data_root == session.DEFAULT_DATA_ROOT
     assert DEFAULT_DATA_ROOT == session.DEFAULT_DATA_ROOT
+    assert args.save_pkl is False
     assert not hasattr(args, "position_offset")
     assert not hasattr(args, "speed_threshold_cm_s")
 
@@ -140,3 +141,22 @@ def test_parse_arguments_rejects_removed_threshold_flags(
 
     with pytest.raises(SystemExit, match="2"):
         parse_arguments()
+
+
+def test_parse_arguments_accepts_save_pkl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_immobility_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+            "--save-pkl",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.save_pkl is True

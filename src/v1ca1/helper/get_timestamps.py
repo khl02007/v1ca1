@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +10,7 @@ if TYPE_CHECKING:
     import pynwb
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.helper.session import DEFAULT_NWB_ROOT
+from v1ca1.helper.session import DEFAULT_NWB_ROOT, save_pickle_output
 
 
 DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
@@ -197,22 +196,23 @@ def get_timestamps_position(
 def save_position_output(
     analysis_path: Path,
     timestamps_position: dict[str, np.ndarray],
-) -> None:
+) -> Path:
     """Write the legacy position timestamp pickle."""
-    with open(analysis_path / "timestamps_position.pkl", "wb") as f:
-        pickle.dump(timestamps_position, f)
+    return save_pickle_output(analysis_path / "timestamps_position.pkl", timestamps_position)
 
 
 def save_legacy_ephys_pickle_outputs(
     analysis_path: Path,
     timestamps_ephys: dict[str, np.ndarray],
     timestamps_ephys_all: np.ndarray,
-) -> None:
+) -> tuple[Path, Path]:
     """Write the legacy ephys pickle outputs used by downstream scripts."""
-    with open(analysis_path / "timestamps_ephys.pkl", "wb") as f:
-        pickle.dump(timestamps_ephys, f)
-    with open(analysis_path / "timestamps_ephys_all.pkl", "wb") as f:
-        pickle.dump(timestamps_ephys_all, f)
+    timestamps_ephys_path = save_pickle_output(analysis_path / "timestamps_ephys.pkl", timestamps_ephys)
+    timestamps_ephys_all_path = save_pickle_output(
+        analysis_path / "timestamps_ephys_all.pkl",
+        timestamps_ephys_all,
+    )
+    return timestamps_ephys_path, timestamps_ephys_all_path
 
 
 def save_pynapple_outputs(
@@ -252,7 +252,7 @@ def get_timestamps(
     data_root: Path = DEFAULT_DATA_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
     gap_threshold_s: float = DEFAULT_GAP_THRESHOLD_S,
-    ephys_format: str = "both",
+    save_pkl: bool = False,
 ) -> None:
     """Save timestamps for one session."""
     import pynwb
@@ -295,29 +295,18 @@ def get_timestamps(
         epoch: segment for epoch, segment in zip(epoch_tags, epoch_segments)
     }
 
-    save_position_output(
+    save_pynapple_outputs(
         analysis_path=analysis_path,
+        timestamps_ephys_all=timestamps_ephys_all,
         timestamps_position=timestamps_position,
+        epoch_tags=epoch_tags,
+        epoch_segments=epoch_segments,
     )
 
-    if ephys_format in {"pickle", "both"}:
-        save_legacy_ephys_pickle_outputs(
-            analysis_path=analysis_path,
-            timestamps_ephys=timestamps_ephys,
-            timestamps_ephys_all=timestamps_ephys_all,
-        )
-
-    if ephys_format in {"pynapple", "both"}:
-        save_pynapple_outputs(
-            analysis_path=analysis_path,
-            timestamps_ephys_all=timestamps_ephys_all,
-            timestamps_position=timestamps_position,
-            epoch_tags=epoch_tags,
-            epoch_segments=epoch_segments,
-        )
-
     outputs: dict[str, Any] = {
-        "timestamps_position_pickle_path": analysis_path / "timestamps_position.pkl",
+        "timestamps_ephys_all_pynapple_path": analysis_path / "timestamps_ephys_all.npz",
+        "timestamps_ephys_pynapple_path": analysis_path / "timestamps_ephys.npz",
+        "timestamps_position_pynapple_path": analysis_path / "timestamps_position.npz",
         "ephys_segmentation": {
             "epoch_tags": epoch_tags,
             "epoch_start_times_s": np.asarray(epoch_start_times, dtype=float).tolist(),
@@ -331,18 +320,18 @@ def get_timestamps(
             **split_metadata,
         },
     }
-    if ephys_format in {"pickle", "both"}:
-        outputs["timestamps_ephys_pickle_path"] = analysis_path / "timestamps_ephys.pkl"
-        outputs["timestamps_ephys_all_pickle_path"] = (
-            analysis_path / "timestamps_ephys_all.pkl"
+    if save_pkl:
+        outputs["timestamps_position_pickle_path"] = save_position_output(
+            analysis_path=analysis_path,
+            timestamps_position=timestamps_position,
         )
-    if ephys_format in {"pynapple", "both"}:
-        outputs["timestamps_ephys_all_pynapple_path"] = (
-            analysis_path / "timestamps_ephys_all.npz"
-        )
-        outputs["timestamps_ephys_pynapple_path"] = analysis_path / "timestamps_ephys.npz"
-        outputs["timestamps_position_pynapple_path"] = (
-            analysis_path / "timestamps_position.npz"
+        (
+            outputs["timestamps_ephys_pickle_path"],
+            outputs["timestamps_ephys_all_pickle_path"],
+        ) = save_legacy_ephys_pickle_outputs(
+            analysis_path=analysis_path,
+            timestamps_ephys=timestamps_ephys,
+            timestamps_ephys_all=timestamps_ephys_all,
         )
 
     log_path = write_run_log(
@@ -354,7 +343,7 @@ def get_timestamps(
             "data_root": data_root,
             "nwb_root": nwb_root,
             "gap_threshold_s": gap_threshold_s,
-            "ephys_format": ephys_format,
+            "save_pkl": save_pkl,
         },
         outputs=outputs,
     )
@@ -396,10 +385,9 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--ephys-format",
-        choices=["both", "pickle", "pynapple"],
-        default="both",
-        help="Which ephys timestamp formats to write. Default: both",
+        "--save-pkl",
+        action="store_true",
+        help="Also write compatibility pickle exports alongside the default .npz outputs.",
     )
     return parser.parse_args()
 
@@ -413,7 +401,7 @@ def main() -> None:
         data_root=args.data_root,
         nwb_root=args.nwb_root,
         gap_threshold_s=args.gap_threshold_s,
-        ephys_format=args.ephys_format,
+        save_pkl=args.save_pkl,
     )
 
 

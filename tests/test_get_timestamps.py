@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
 from v1ca1.helper.get_timestamps import (
+    parse_arguments,
     save_pynapple_outputs,
     split_timestamps_by_gap,
     validate_epoch_alignment,
@@ -130,3 +133,40 @@ def test_save_pynapple_outputs_round_trip(tmp_path) -> None:
     assert np.allclose(position_group[0].t, timestamps_position["sleep1"])
     assert np.allclose(position_group[1].t, timestamps_position["run1"])
     assert list(position_group["epoch"]) == epoch_tags
+
+
+def test_parse_arguments_defaults_to_npz_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_timestamps.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.save_pkl is False
+
+
+def test_parse_arguments_accepts_save_pkl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_timestamps.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+            "--save-pkl",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.save_pkl is True

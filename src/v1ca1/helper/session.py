@@ -56,6 +56,13 @@ def get_analysis_path(
     return data_root / animal_name / date
 
 
+def save_pickle_output(output_path: Path, value: Any) -> Path:
+    """Write one compatibility pickle artifact and return its path."""
+    with open(output_path, "wb") as f:
+        pickle.dump(value, f)
+    return output_path
+
+
 def _extract_interval_dataframe(intervals: "nap.IntervalSet") -> "pd.DataFrame":
     """Return a dataframe-like view of a pynapple IntervalSet."""
     if hasattr(intervals, "as_dataframe"):

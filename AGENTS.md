@@ -40,6 +40,7 @@ Concise guidance for LLM agents working in this repository.
 - Probe-to-region mappings are session-specific; override `--v1-probes` and `--ca1-probes` when needed.
 - Ripple channel assignments are session-specific too; register new sessions in `v1ca1.ripple._channels` instead of hard-coding channels inside scripts.
 - Refactored helper, spikesorting, ripple, task-progression, and signal-dimension scripts write one JSON run log per execution to `analysis_root / animal_name / date / v1ca1_log/`, including script name, package version, git state, parameters, and key outputs. `get_timestamps.py` also records ephys gap segmentation.
+- When a workflow writes both tables and figures, keep tables in the workflow data folder and save figures under `analysis_root / animal_name / date / figs / <workflow_name>/` rather than mixing image files into the data directory.
 
 ## Legacy Modules
 
