@@ -15,6 +15,7 @@ dependencies:
   - pynwb
   - pytest>=8
   - pip:
+      - mountainsort4>=1.0
       - "-e .[analysis,test]"
 
 # Additional packages used by some analyses may need to be installed manually,
@@ -28,6 +29,7 @@ dependencies:
 # - non_local_detector
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency
+# - mountainsort4  # installed above via pip for spikesorting workflows
 # - sortingview
 # - kachery-cloud
 #
