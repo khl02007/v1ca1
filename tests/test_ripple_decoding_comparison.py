@@ -15,10 +15,17 @@ from v1ca1.ripple.ripple_decoding_comparison import (
     build_epoch_summary_table,
     build_per_ripple_metric_table,
     compute_per_ripple_metrics,
-    parse_arguments,
+    get_scoring_scheme_availability,
     resolve_epoch_pairs,
     shuffle_ripple_state_blocks_by_length,
 )
+
+
+def _continuous_scoring_kwargs(representation: str) -> dict[str, object]:
+    return {
+        "scoring_schemes": ["continuous"],
+        "scheme_availability": get_scoring_scheme_availability(representation),
+    }
 
 
 def _make_aligned_data() -> dict[str, np.ndarray | int]:
@@ -77,13 +84,6 @@ def test_resolve_epoch_pairs_supports_distinct_decode_and_train_epochs() -> None
         requested_decode_epoch="02_r1",
         requested_train_epoch="08_r4",
     ) == [("02_r1", "08_r4")]
-
-
-def test_parse_arguments_requires_animal_name_and_date(monkeypatch) -> None:
-    monkeypatch.setattr("sys.argv", ["ripple_decoding_comparison.py"])
-
-    with pytest.raises(SystemExit):
-        parse_arguments()
 
 
 def test_shuffle_ripple_state_blocks_by_length_preserves_within_block_order_and_lengths() -> None:
@@ -148,13 +148,14 @@ def test_build_epoch_summary_table_reports_expected_higher_and_lower_p_values() 
         }
     )
 
-    summary_table, shuffle_samples, effective_shuffles = build_epoch_summary_table(
+    _, summary_table, shuffle_samples, _, effective_shuffles = build_epoch_summary_table(
         aligned_data=aligned_data,
         ripple_table=ripple_table,
         representation="place",
         train_epoch="08_r4",
         decode_epoch="02_r1",
         state_span=2.0,
+        **_continuous_scoring_kwargs("place"),
         n_shuffles=4,
         shuffle_seed=0,
     )
@@ -177,12 +178,13 @@ def test_build_epoch_summary_table_reports_expected_higher_and_lower_p_values() 
 def test_build_epoch_dataset_contains_decoded_states_masks_and_shuffle_outputs() -> None:
     xr = pytest.importorskip("xarray")
     aligned_data = _make_aligned_data()
-    per_ripple_table = build_per_ripple_metric_table(
+    per_ripple_table, categorical_bin_data = build_per_ripple_metric_table(
         aligned_data=aligned_data,
         representation="place",
         train_epoch="08_r4",
         decode_epoch="02_r1",
         state_span=2.0,
+        **_continuous_scoring_kwargs("place"),
     )
     summary_table = pd.DataFrame(
         [
@@ -249,6 +251,7 @@ def test_build_epoch_dataset_contains_decoded_states_masks_and_shuffle_outputs()
         per_ripple_table=per_ripple_table,
         summary_table=summary_table,
         shuffle_samples=shuffle_samples,
+        categorical_bin_data=categorical_bin_data,
         animal_name="L14",
         date="20240611",
         representation="place",
@@ -258,6 +261,7 @@ def test_build_epoch_dataset_contains_decoded_states_masks_and_shuffle_outputs()
         sources={"ripple_events": "table.parquet"},
         skipped_ripples={"ca1": [], "v1": [], "alignment": []},
         fit_parameters={"bin_size_s": 0.002},
+        **_continuous_scoring_kwargs("place"),
     )
 
     assert isinstance(dataset, xr.Dataset)

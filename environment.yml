@@ -30,9 +30,8 @@ dependencies:
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency
 # - mountainsort4  # installed above via pip for spikesorting workflows
-# - sortingview
-# - kachery-cloud
+# `-e .[analysis,test]` now includes figurl support for
+# `src/v1ca1/spikesorting/generate_figurl.py`.
 #
-# If you want figurl or GLM workflow support, install the optional extras:
-#   pip install -e ".[analysis,test,figurl]"
+# If you want GLM workflow support, install the optional extra:
 #   pip install -e ".[analysis,test,glm]"

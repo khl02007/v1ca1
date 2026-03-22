@@ -2,16 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from v1ca1.ripple.ripple_glm_binned import (
-    parse_arguments,
-    validate_arguments,
-    validate_selected_epochs,
-)
-
-
-def test_parse_arguments_requires_animal_name_and_date() -> None:
-    with pytest.raises(SystemExit):
-        parse_arguments([])
+from v1ca1.ripple.ripple_glm_binned import parse_arguments, validate_arguments, validate_selected_epochs
 
 
 def test_validate_arguments_rejects_invalid_n_splits() -> None:

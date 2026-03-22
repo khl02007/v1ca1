@@ -135,38 +135,43 @@ def test_save_pynapple_outputs_round_trip(tmp_path) -> None:
     assert list(position_group["epoch"]) == epoch_tags
 
 
-def test_parse_arguments_defaults_to_npz_only(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("argv", "expected_save_pkl"),
+    [
+        (
+            [
+                "get_timestamps.py",
+                "--animal-name",
+                "animal",
+                "--date",
+                "20240101",
+            ],
+            False,
+        ),
+        (
+            [
+                "get_timestamps.py",
+                "--animal-name",
+                "animal",
+                "--date",
+                "20240101",
+                "--save-pkl",
+            ],
+            True,
+        ),
+    ],
+)
+def test_parse_arguments_save_pkl_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected_save_pkl: bool,
+) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "get_timestamps.py",
-            "--animal-name",
-            "animal",
-            "--date",
-            "20240101",
-        ],
+        argv,
     )
 
     args = parse_arguments()
 
-    assert args.save_pkl is False
-
-
-def test_parse_arguments_accepts_save_pkl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "get_timestamps.py",
-            "--animal-name",
-            "animal",
-            "--date",
-            "20240101",
-            "--save-pkl",
-        ],
-    )
-
-    args = parse_arguments()
-
-    assert args.save_pkl is True
+    assert args.save_pkl is expected_save_pkl

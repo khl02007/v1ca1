@@ -14,6 +14,7 @@ SpikeInterface sorting object via `si.apply_sortingview_curation(...)`.
 """
 
 import argparse
+import os
 import pickle
 import time
 from pathlib import Path
@@ -27,6 +28,17 @@ DEFAULT_CURATION_BASE_URI = (
     "gh://LorenFrankLab/sorting-curations/main/khl02007"
 )
 _SPIKEINTERFACE = None
+
+
+def require_kachery_api_key() -> str:
+    """Return the Kachery API key from the environment or raise a clear error."""
+    api_key = os.environ.get("KACHERY_API_KEY")
+    if not api_key:
+        raise EnvironmentError(
+            "KACHERY_API_KEY is required to create figurls. "
+            "Set it in your shell environment before running generate_figurl.py."
+        )
+    return api_key
 
 
 def get_spikeinterface():
@@ -72,13 +84,16 @@ def create_figurl_spikesorting(
     If `curation_uri` is provided, the figurl loads and writes curation state
     against that remote JSON path so manual labels can be reused downstream.
     """
+    require_kachery_api_key()
+
     try:
         import sortingview.views as vv
         from sortingview.SpikeSortingView import SpikeSortingView
     except ImportError as exc:
         raise ImportError(
-            "generate_figurl.py requires `sortingview` and `kachery-cloud` "
-            "to create figurls."
+            "generate_figurl.py requires `sortingview` plus figurl dependencies "
+            "(`kachery-cloud` and `kachery`) to create figurls. "
+            f"Original import error: {exc}"
         ) from exc
 
     spike_sorting_view = SpikeSortingView.create(

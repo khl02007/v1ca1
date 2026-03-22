@@ -168,6 +168,24 @@ def apply_curation(
     return curated_sorting
 
 
+def stamp_sorting_provenance(
+    sorting: Any,
+    region: str,
+    probe_idx: int,
+    shank_idx: int,
+    sorting_curations_path: Path,
+    curation_root: Path,
+) -> Any:
+    """Attach per-unit provenance needed by downstream NWB export."""
+    unit_ids = sorting.get_unit_ids()
+    curation_json_relpath = sorting_curations_path.relative_to(curation_root).as_posix()
+    sorting.set_property("region", [region] * len(unit_ids))
+    sorting.set_property("probe_idx", [int(probe_idx)] * len(unit_ids))
+    sorting.set_property("shank_idx", [int(shank_idx)] * len(unit_ids))
+    sorting.set_property("curation_json_relpath", [curation_json_relpath] * len(unit_ids))
+    return sorting
+
+
 def consolidate_region_sorting(
     animal_name: str,
     date: str,
@@ -210,6 +228,14 @@ def consolidate_region_sorting(
             curated_sorting = apply_curation(
                 sorting=sorting,
                 sorting_curations_path=sorting_curations_path,
+            )
+            curated_sorting = stamp_sorting_provenance(
+                sorting=curated_sorting,
+                region=region,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+                sorting_curations_path=sorting_curations_path,
+                curation_root=curation_root,
             )
             print(
                 f"after curation {curated_sorting.get_num_units()} units "
