@@ -349,6 +349,79 @@ def load_position_data(
     return {epoch: normalized_position_dict[epoch] for epoch in epoch_tags}
 
 
+def load_clean_dlc_position_data(
+    analysis_path: Path,
+    input_dirname: str = "dlc_position_cleaned",
+    input_name: str = "position.parquet",
+    validate_timestamps: bool = True,
+) -> tuple[list[str], dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Load one combined cleaned DLC parquet and split it into per-epoch XY arrays."""
+    import pandas as pd
+
+    input_path = analysis_path / input_dirname / input_name
+    if not input_path.exists():
+        raise FileNotFoundError(f"Combined cleaned DLC position file not found: {input_path}")
+
+    table = pd.read_parquet(input_path)
+    required_columns = (
+        "epoch",
+        "frame",
+        "frame_time_s",
+        "head_x",
+        "head_y",
+        "body_x",
+        "body_y",
+    )
+    missing_columns = [column for column in required_columns if column not in table.columns]
+    if missing_columns:
+        raise ValueError(
+            f"Combined cleaned DLC position parquet is missing required columns: {missing_columns!r}"
+        )
+    if table.empty:
+        raise ValueError(f"Combined cleaned DLC position parquet is empty: {input_path}")
+
+    epoch_series = table["epoch"].astype(str)
+    epoch_order = list(dict.fromkeys(epoch_series.tolist()))
+    timestamps_position: dict[str, np.ndarray] | None = None
+    if validate_timestamps:
+        _epoch_tags, timestamps_position, _source = load_position_timestamps(analysis_path)
+
+    head_position: dict[str, np.ndarray] = {}
+    body_position: dict[str, np.ndarray] = {}
+    for epoch in epoch_order:
+        epoch_table = table.loc[epoch_series == epoch].reset_index(drop=True)
+        frame_numbers = epoch_table["frame"].to_numpy(dtype=int)
+        if np.unique(frame_numbers).size != frame_numbers.size:
+            raise ValueError(f"Combined cleaned DLC position contains duplicate frames for epoch {epoch!r}.")
+        if frame_numbers.size > 1 and np.any(np.diff(frame_numbers) < 0):
+            raise ValueError(
+                f"Combined cleaned DLC position frames are not monotonic for epoch {epoch!r}."
+            )
+
+        frame_times = epoch_table["frame_time_s"].to_numpy(dtype=float)
+        if validate_timestamps and timestamps_position is not None:
+            if epoch not in timestamps_position:
+                raise ValueError(
+                    f"Combined cleaned DLC position epoch {epoch!r} was not found in saved position timestamps."
+                )
+            expected_times = np.asarray(timestamps_position[epoch], dtype=float)
+            if frame_times.size != expected_times.size:
+                raise ValueError(
+                    "Combined cleaned DLC position row count does not match saved position timestamps "
+                    f"for epoch {epoch!r}: {frame_times.size} vs {expected_times.size}."
+                )
+            if not np.allclose(frame_times, expected_times, rtol=0.0, atol=1e-9):
+                raise ValueError(
+                    "Combined cleaned DLC position timestamps do not match saved position timestamps "
+                    f"for epoch {epoch!r}."
+                )
+
+        head_position[epoch] = epoch_table[["head_x", "head_y"]].to_numpy(dtype=float)
+        body_position[epoch] = epoch_table[["body_x", "body_y"]].to_numpy(dtype=float)
+
+    return epoch_order, head_position, body_position
+
+
 def _get_interval_metadata_values(
     intervals: "nap.IntervalSet",
     key: str,

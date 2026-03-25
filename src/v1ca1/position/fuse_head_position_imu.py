@@ -86,10 +86,15 @@ def _normalize_interval_times(
     return starts, stops
 
 
-def load_head_dlc(dlc_h5_path: Path) -> pd.DataFrame:
-    """Load one head-point DLC H5 into a flat dataframe."""
+def load_dlc_bodypart(
+    dlc_h5_path: Path,
+    bodypart: str,
+) -> pd.DataFrame:
+    """Load one DLC bodypart track into a flat dataframe."""
     if not dlc_h5_path.exists():
         raise FileNotFoundError(f"DLC H5 file not found: {dlc_h5_path}")
+    if not bodypart:
+        raise ValueError("bodypart must be a non-empty string.")
 
     table = pd.read_hdf(dlc_h5_path)
     if not isinstance(table.columns, pd.MultiIndex) or table.columns.nlevels < 3:
@@ -100,23 +105,30 @@ def load_head_dlc(dlc_h5_path: Path) -> pd.DataFrame:
     scorer = table.columns.get_level_values(0)[0]
     scorer_table = table[scorer]
     bodyparts = scorer_table.columns.get_level_values(0).astype(str)
-    if "head" not in set(bodyparts):
-        raise ValueError(f"DLC H5 does not contain the required 'head' bodypart: {dlc_h5_path}")
+    if bodypart not in set(bodyparts):
+        raise ValueError(
+            f"DLC H5 does not contain the required {bodypart!r} bodypart: {dlc_h5_path}"
+        )
 
-    head_table = scorer_table["head"]
+    bodypart_table = scorer_table[bodypart]
     missing_columns = [
-        column for column in ("x", "y", "likelihood") if column not in head_table.columns
+        column for column in ("x", "y", "likelihood") if column not in bodypart_table.columns
     ]
     if missing_columns:
         raise ValueError(
-            "DLC H5 head track is missing required columns: "
+            f"DLC H5 {bodypart!r} track is missing required columns: "
             f"{missing_columns!r} in {dlc_h5_path}"
         )
 
-    head = head_table[["x", "y", "likelihood"]].copy()
-    head = head.rename(columns={"x": "head_x_raw", "y": "head_y_raw"})
-    head.index.name = "frame"
-    return head.reset_index()
+    track = bodypart_table[["x", "y", "likelihood"]].copy()
+    track.index.name = "frame"
+    return track.reset_index()
+
+
+def load_head_dlc(dlc_h5_path: Path) -> pd.DataFrame:
+    """Load one head-point DLC H5 into a flat dataframe."""
+    head = load_dlc_bodypart(dlc_h5_path=dlc_h5_path, bodypart="head")
+    return head.rename(columns={"x": "head_x_raw", "y": "head_y_raw"})
 
 
 def load_imu_table(imu_path: Path) -> pd.DataFrame:

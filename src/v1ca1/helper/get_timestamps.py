@@ -246,6 +246,21 @@ def save_pynapple_outputs(
     position_group.save(analysis_path / "timestamps_position.npz")
 
 
+def ensure_analysis_path(
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+) -> Path:
+    """Return the session analysis path, creating it when missing."""
+    analysis_path = get_analysis_path(
+        animal_name=animal_name,
+        date=date,
+        data_root=data_root,
+    )
+    analysis_path.mkdir(parents=True, exist_ok=True)
+    return analysis_path
+
+
 def get_timestamps(
     animal_name: str,
     date: str,
@@ -257,7 +272,7 @@ def get_timestamps(
     """Save timestamps for one session."""
     import pynwb
 
-    analysis_path = get_analysis_path(
+    analysis_path = ensure_analysis_path(
         animal_name=animal_name,
         date=date,
         data_root=data_root,
@@ -266,8 +281,6 @@ def get_timestamps(
 
     if not nwb_path.exists():
         raise FileNotFoundError(f"NWB file not found: {nwb_path}")
-    if not analysis_path.exists():
-        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
     print(f"Processing {animal_name} {date}.")
     with pynwb.NWBHDF5IO(nwb_path, "r") as io:

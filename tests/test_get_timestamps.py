@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import sys
+import types
 
 import numpy as np
 import pytest
 
+import v1ca1.helper.get_timestamps as get_timestamps_module
 from v1ca1.helper.get_timestamps import (
+    get_timestamps,
     parse_arguments,
     save_pynapple_outputs,
     split_timestamps_by_gap,
@@ -133,6 +136,80 @@ def test_save_pynapple_outputs_round_trip(tmp_path) -> None:
     assert np.allclose(position_group[0].t, timestamps_position["sleep1"])
     assert np.allclose(position_group[1].t, timestamps_position["run1"])
     assert list(position_group["epoch"]) == epoch_tags
+
+
+def test_get_timestamps_creates_missing_analysis_path(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "analysis"
+    nwb_root = tmp_path / "nwb"
+    nwb_root.mkdir()
+    nwb_path = nwb_root / "animal20240101.nwb"
+    nwb_path.touch()
+
+    fake_nwbfile = types.SimpleNamespace(
+        acquisition={
+            "e-series": types.SimpleNamespace(
+                timestamps=np.array([0.0, 0.001, 0.002]),
+            )
+        }
+    )
+
+    class FakeNWBHDF5IO:
+        def __init__(self, path, mode) -> None:
+            assert path == nwb_path
+            assert mode == "r"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self):
+            return fake_nwbfile
+
+    fake_pynwb = types.ModuleType("pynwb")
+    fake_pynwb.NWBHDF5IO = FakeNWBHDF5IO
+    monkeypatch.setitem(sys.modules, "pynwb", fake_pynwb)
+    monkeypatch.setattr(
+        get_timestamps_module,
+        "extract_epoch_metadata",
+        lambda nwbfile: (
+            ["run1"],
+            np.array([0.0]),
+            np.array([0.002]),
+        ),
+    )
+    monkeypatch.setattr(
+        get_timestamps_module,
+        "get_timestamps_position",
+        lambda nwbfile, epoch_tags: {"run1": np.array([0.0, 0.1])},
+    )
+
+    saved_paths: list[object] = []
+    monkeypatch.setattr(
+        get_timestamps_module,
+        "save_pynapple_outputs",
+        lambda analysis_path, **kwargs: saved_paths.append(analysis_path),
+    )
+    monkeypatch.setattr(
+        get_timestamps_module,
+        "write_run_log",
+        lambda analysis_path, **kwargs: analysis_path / "run_log.json",
+    )
+
+    get_timestamps(
+        animal_name="animal",
+        date="20240101",
+        data_root=data_root,
+        nwb_root=nwb_root,
+    )
+
+    expected_analysis_path = data_root / "animal" / "20240101"
+    assert expected_analysis_path.is_dir()
+    assert saved_paths == [expected_analysis_path]
 
 
 @pytest.mark.parametrize(
