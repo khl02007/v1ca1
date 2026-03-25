@@ -1,0 +1,240 @@
+from __future__ import annotations
+
+import importlib
+import sys
+
+import numpy as np
+import pytest
+
+
+MODULE_NAME = "v1ca1.task_progression.task_progression_dark_light"
+
+
+def _reload_dark_light_module(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+):
+    monkeypatch.setattr(sys, "argv", list(argv))
+    sys.modules.pop(MODULE_NAME, None)
+    return importlib.import_module(MODULE_NAME)
+
+
+def _fake_result(
+    module,
+    *,
+    speed_outputs: dict[str, object],
+) -> dict[str, object]:
+    n_units = 2
+    return {
+        "unit_ids": np.asarray([11, 12], dtype=int),
+        "has_speed": True,
+        **speed_outputs,
+        "bin_size_s": 0.02,
+        "n_splines": 3,
+        "spline_order": 4,
+        "pos_bounds": np.asarray([0.0, 1.0], dtype=float),
+        "spike_sum_cv": np.asarray([10.0, 11.0]),
+        "ll_base_sum_cv": np.asarray([1.0, 2.0]),
+        "ll_full_sum_cv": np.asarray([1.5, 2.5]),
+        "dLL_sum_cv": np.asarray([0.5, 0.5]),
+        "ll_base_per_spike_cv": np.asarray([0.1, 0.2]),
+        "ll_full_per_spike_cv": np.asarray([0.15, 0.25]),
+        "dll_per_spike_cv": np.asarray([0.05, 0.05]),
+        "ll_base_bits_per_spike_cv": np.asarray([0.2, 0.3]),
+        "ll_full_bits_per_spike_cv": np.asarray([0.25, 0.35]),
+        "dll_bits_per_spike_cv": np.asarray([0.05, 0.05]),
+        "coef_intercept_base_all": np.asarray([0.1, 0.2]),
+        "coef_place_base_all": np.ones((3, n_units), dtype=float),
+        "coef_light_base_all": np.asarray([0.3, 0.4]),
+        "coef_place_x_light_base_all": np.full((2, n_units), np.nan),
+        "coef_intercept_full_all": np.asarray([0.2, 0.3]),
+        "coef_place_full_all": np.full((3, n_units), 2.0, dtype=float),
+        "coef_light_full_all": np.asarray([0.4, 0.5]),
+        "coef_place_x_light_full_all": np.full((2, n_units), 0.25, dtype=float),
+        "coef_add_intercept_full_all": np.full((n_units,), np.nan),
+        "coef_add_place_full_all": np.full((0, n_units), np.nan),
+        "grid_tp": np.linspace(0.0, 1.0, 5),
+        "dark_hz_grid": np.full((5, n_units), 1.0, dtype=float),
+        "light_hz_grid": np.full((5, n_units), 2.0, dtype=float),
+    }
+
+
+def test_cuda_visible_devices_is_preparsed_before_normal_argparse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    module = _reload_dark_light_module(
+        monkeypatch,
+        [
+            "task_progression_dark_light.py",
+            "--cuda-visible-devices",
+            "0,1",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+        ],
+    )
+
+    assert module._CUDA_VISIBLE_DEVICES_CLI == "0,1"
+    assert "--cuda-visible-devices" not in sys.argv
+    assert "0,1" not in sys.argv
+    assert module.os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
+
+    args = module.parse_arguments()
+
+    assert args.cuda_visible_devices == "0,1"
+    assert args.animal_name == "L14"
+    assert args.date == "20240611"
+
+
+def test_format_speed_outputs_linear_preserves_scalar_coefficients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["task_progression_dark_light.py"],
+    )
+    transform = module._fit_speed_feature_transform(
+        np.asarray([1.0, 2.0, 4.0]),
+        speed_feature_mode="linear",
+    )
+
+    outputs = module._format_speed_outputs(
+        transform=transform,
+        coef_speed_basis_base=np.asarray([[0.5, -0.25]]),
+        coef_speed_basis_full=np.asarray([[0.75, -0.5]]),
+        n_units=2,
+    )
+
+    assert outputs["speed_feature_mode"] == "linear"
+    assert outputs["n_speed_features"] == 1
+    assert np.allclose(outputs["coef_speed_base_all"], [0.5, -0.25])
+    assert np.allclose(outputs["coef_speed_full_all"], [0.75, -0.5])
+    assert np.isfinite(outputs["speed_mean"])
+    assert np.isfinite(outputs["speed_std"])
+    assert outputs["coef_speed_basis_base_all"].shape == (1, 2)
+
+
+def test_make_speed_design_train_test_uses_training_bounds_for_bspline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["task_progression_dark_light.py"],
+    )
+    if module.BSplineEval is None:
+        pytest.skip("nemos is required for bspline speed-feature tests")
+
+    values = np.asarray([0.0, 1.0, 2.0, 100.0], dtype=float)
+    train_idx = np.asarray([0, 1, 2], dtype=int)
+    test_idx = np.asarray([3], dtype=int)
+
+    train_design, test_design, transform = module._make_speed_design_train_test(
+        values,
+        train_idx,
+        test_idx,
+        speed_feature_mode="bspline",
+        n_splines_speed=4,
+        spline_order_speed=3,
+    )
+
+    assert np.allclose(transform["bounds"], [0.0, 2.0])
+    assert train_design.shape == (3, 4)
+    assert test_design.shape == (1, 4)
+    assert np.all(np.isfinite(test_design))
+
+
+def test_format_speed_outputs_bspline_stores_basis_coefficients_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["task_progression_dark_light.py"],
+    )
+    transform = {
+        "mode": "bspline",
+        "basis": "bspline",
+        "n_features": 4,
+        "spline_order": 3,
+        "bounds": np.asarray([0.0, 2.0], dtype=float),
+        "reference_value": 1.0,
+        "mean": np.nan,
+        "std": np.nan,
+    }
+
+    outputs = module._format_speed_outputs(
+        transform=transform,
+        coef_speed_basis_base=np.arange(8, dtype=float).reshape(4, 2),
+        coef_speed_basis_full=np.arange(8, 16, dtype=float).reshape(4, 2),
+        n_units=2,
+    )
+
+    assert outputs["speed_feature_mode"] == "bspline"
+    assert outputs["speed_basis"] == "bspline"
+    assert outputs["n_speed_features"] == 4
+    assert np.isnan(outputs["coef_speed_base_all"]).all()
+    assert np.isnan(outputs["coef_speed_full_all"]).all()
+    assert outputs["coef_speed_basis_base_all"].shape == (4, 2)
+    assert outputs["coef_speed_basis_full_all"].shape == (4, 2)
+
+
+def test_build_family_dataset_includes_speed_basis_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("xarray")
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["task_progression_dark_light.py"],
+    )
+    speed_outputs = module._format_speed_outputs(
+        transform={
+            "mode": "bspline",
+            "basis": "bspline",
+            "n_features": 4,
+            "spline_order": 3,
+            "bounds": np.asarray([0.0, 2.0], dtype=float),
+            "reference_value": 1.0,
+            "mean": np.nan,
+            "std": np.nan,
+        },
+        coef_speed_basis_base=np.arange(8, dtype=float).reshape(4, 2),
+        coef_speed_basis_full=np.arange(8, 16, dtype=float).reshape(4, 2),
+        n_units=2,
+    )
+    results_by_traj = {
+        trajectory: {0.1: _fake_result(module, speed_outputs=speed_outputs)}
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    dataset = module.build_family_dataset(
+        family_name="mult",
+        results_by_traj=results_by_traj,
+        ridge_values=[0.1],
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        light_epoch="02_r1",
+        dark_epoch="08_r4",
+        dark_movement_firing_rates=np.asarray([1.0, 2.0]),
+        min_dark_firing_rate_hz=0.5,
+        sources={"analysis_path": "/tmp/example"},
+        fit_parameters={"speed_feature_mode": "bspline"},
+    )
+
+    assert "speed_feature_mode" in dataset
+    assert "coef_speed_basis_base_all" in dataset
+    assert "coef_speed_basis_full_all" in dataset
+    assert dataset["speed_feature_mode"].sel(
+        trajectory=module.TRAJECTORY_TYPES[0],
+        ridge=0.1,
+    ).item() == "bspline"
+    assert dataset["coef_speed_basis_full_all"].dims == (
+        "trajectory",
+        "ridge",
+        "speed_basis_feature",
+        "unit",
+    )
+    assert dataset.sizes["speed_basis_feature"] == 4
+    assert list(dataset.coords["speed_bound"].values) == ["lower", "upper"]

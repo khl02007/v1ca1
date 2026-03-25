@@ -21,6 +21,8 @@ Supported model families:
 
 import argparse
 import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
@@ -42,6 +44,21 @@ from v1ca1.task_progression._session import (
 
 if TYPE_CHECKING:
     import xarray as xr
+
+
+def _extract_cuda_visible_devices(argv: list[str]) -> str | None:
+    """Extract `--cuda-visible-devices` before importing JAX."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--cuda-visible-devices", dest="cuda_visible_devices")
+    args, remaining = parser.parse_known_args(argv[1:])
+    sys.argv = [argv[0], *remaining]
+    return args.cuda_visible_devices
+
+
+_CUDA_VISIBLE_DEVICES_CLI = _extract_cuda_visible_devices(sys.argv)
+if _CUDA_VISIBLE_DEVICES_CLI is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _CUDA_VISIBLE_DEVICES_CLI
+
 
 try:
     import jax
@@ -254,6 +271,260 @@ def _coef_feat_by_unit(model: PopulationGLM, n_features: int) -> np.ndarray:
     if coef.shape[0] != n_features:
         coef = coef.T
     return coef
+
+
+def _empty_speed_design(n_rows: int) -> np.ndarray:
+    """Return an empty speed design matrix with the requested row count."""
+    return np.zeros((int(n_rows), 0), dtype=float)
+
+
+def _normalize_speed_feature_mode(speed_feature_mode: str) -> str:
+    """Validate the requested speed parameterization mode."""
+    mode = str(speed_feature_mode).lower()
+    if mode not in {"linear", "bspline"}:
+        raise ValueError(
+            "speed_feature_mode must be one of {'linear', 'bspline'}. "
+            f"Got {speed_feature_mode!r}."
+        )
+    return mode
+
+
+def _empty_speed_feature_transform() -> dict[str, Any]:
+    """Return a sentinel speed-transform metadata object for no-speed fits."""
+    return {
+        "mode": "none",
+        "basis": "none",
+        "n_features": 0,
+        "spline_order": np.nan,
+        "bounds": np.asarray([np.nan, np.nan], dtype=float),
+        "reference_value": np.nan,
+        "mean": np.nan,
+        "std": np.nan,
+    }
+
+
+def _sanitize_feature_bounds(
+    lower: float,
+    upper: float,
+    *,
+    eps: float = 1e-6,
+) -> tuple[float, float]:
+    """Return finite, strictly increasing bounds for spline features."""
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError("Feature bounds must be finite.")
+    if upper <= lower:
+        pad = max(abs(lower), abs(upper), 1.0) * eps
+        lower -= pad
+        upper += pad
+    return float(lower), float(upper)
+
+
+def _fit_speed_feature_transform(
+    values: np.ndarray,
+    *,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
+    eps: float = 1e-12,
+) -> dict[str, Any]:
+    """Fit the speed-feature transform from training or full-data samples."""
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if values.size == 0:
+        raise ValueError("Speed feature transform requires at least one sample.")
+
+    mode = _normalize_speed_feature_mode(speed_feature_mode)
+    reference_value = float(np.mean(values))
+
+    if mode == "linear":
+        return {
+            "mode": "linear",
+            "basis": "linear",
+            "n_features": 1,
+            "spline_order": np.nan,
+            "bounds": np.asarray([np.nan, np.nan], dtype=float),
+            "reference_value": reference_value,
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values) + eps),
+        }
+
+    if speed_bounds is None:
+        lower = float(np.min(values))
+        upper = float(np.max(values))
+    else:
+        bounds_arr = np.asarray(speed_bounds, dtype=float).reshape(-1)
+        if bounds_arr.shape != (2,):
+            raise ValueError(
+                f"speed_bounds must be a length-2 tuple. Got shape={bounds_arr.shape}."
+            )
+        lower, upper = float(bounds_arr[0]), float(bounds_arr[1])
+
+    lower, upper = _sanitize_feature_bounds(lower, upper)
+    return {
+        "mode": "bspline",
+        "basis": "bspline",
+        "n_features": int(n_splines_speed),
+        "spline_order": int(spline_order_speed),
+        "bounds": np.asarray([lower, upper], dtype=float),
+        "reference_value": reference_value,
+        "mean": np.nan,
+        "std": np.nan,
+    }
+
+
+def _transform_speed_with_feature_transform(
+    values: np.ndarray,
+    transform: dict[str, Any],
+) -> np.ndarray:
+    """Apply a fitted speed transform to one vector of speed samples."""
+    values = np.asarray(values, dtype=float).reshape(-1)
+    mode = str(transform["mode"])
+
+    if mode == "none":
+        return _empty_speed_design(values.size)
+
+    if mode == "linear":
+        return ((values - float(transform["mean"])) / float(transform["std"]))[:, None]
+
+    lower, upper = np.asarray(transform["bounds"], dtype=float)
+    basis = BSplineEval(
+        n_basis_funcs=int(transform["n_features"]),
+        order=int(transform["spline_order"]),
+        bounds=(float(lower), float(upper)),
+    )
+    return np.asarray(
+        basis.compute_features(np.clip(values, float(lower), float(upper))),
+        dtype=float,
+    )
+
+
+def _make_speed_design_train_test(
+    values: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    *,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Fit a speed transform on train indices and apply it to train/test."""
+    transform = _fit_speed_feature_transform(
+        values[train_idx],
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
+        eps=eps,
+    )
+    return (
+        _transform_speed_with_feature_transform(values[train_idx], transform),
+        _transform_speed_with_feature_transform(values[test_idx], transform),
+        transform,
+    )
+
+
+def _make_speed_design_all(
+    values: np.ndarray,
+    *,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit and apply a speed transform using all available samples."""
+    transform = _fit_speed_feature_transform(
+        values,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
+        eps=eps,
+    )
+    return _transform_speed_with_feature_transform(values, transform), transform
+
+
+def _speed_reference_design(transform: dict[str, Any]) -> np.ndarray:
+    """Return the design row evaluated at the transform reference speed."""
+    if transform["mode"] == "none":
+        return _empty_speed_design(1)
+    return _transform_speed_with_feature_transform(
+        np.asarray([transform["reference_value"]], dtype=float),
+        transform,
+    )
+
+
+def _speed_reference_effect(
+    transform: dict[str, Any],
+    coef_speed_basis: np.ndarray,
+    n_units: int,
+) -> np.ndarray:
+    """Return the speed contribution used for TP grid predictions."""
+    coef_speed_basis = np.asarray(coef_speed_basis, dtype=float).reshape(-1, n_units)
+    if coef_speed_basis.shape[0] == 0:
+        return np.zeros((1, n_units), dtype=float)
+    return _speed_reference_design(transform) @ coef_speed_basis
+
+
+def _format_speed_outputs(
+    *,
+    transform: dict[str, Any],
+    coef_speed_basis_base: np.ndarray | None,
+    coef_speed_basis_full: np.ndarray | None,
+    n_units: int,
+) -> dict[str, Any]:
+    """Normalize speed metadata and coefficient outputs across modes."""
+    nan_u = np.full((n_units,), np.nan)
+    empty_speed = np.full((0, n_units), np.nan)
+
+    if coef_speed_basis_base is None:
+        coef_speed_basis_base = empty_speed
+    else:
+        coef_speed_basis_base = np.asarray(coef_speed_basis_base, dtype=float).reshape(
+            -1,
+            n_units,
+        )
+
+    if coef_speed_basis_full is None:
+        coef_speed_basis_full = empty_speed
+    else:
+        coef_speed_basis_full = np.asarray(coef_speed_basis_full, dtype=float).reshape(
+            -1,
+            n_units,
+        )
+
+    mode = str(transform["mode"])
+    if mode == "linear" and coef_speed_basis_base.shape[0] > 0:
+        coef_speed_base = coef_speed_basis_base[0, :]
+        coef_speed_full = coef_speed_basis_full[0, :]
+        speed_mean = float(transform["mean"])
+        speed_std = float(transform["std"])
+    else:
+        coef_speed_base = nan_u
+        coef_speed_full = nan_u
+        speed_mean = np.nan
+        speed_std = np.nan
+
+    return {
+        "speed_feature_mode": mode,
+        "n_speed_features": int(transform["n_features"]),
+        "speed_basis": str(transform["basis"]),
+        "speed_spline_order": float(transform["spline_order"]),
+        "speed_basis_bounds": np.asarray(transform["bounds"], dtype=float),
+        "speed_reference_value": (
+            float(transform["reference_value"])
+            if np.isfinite(transform["reference_value"])
+            else np.nan
+        ),
+        "speed_mean": speed_mean,
+        "speed_std": speed_std,
+        "coef_speed_base_all": coef_speed_base,
+        "coef_speed_full_all": coef_speed_full,
+        "coef_speed_basis_base_all": coef_speed_basis_base,
+        "coef_speed_basis_full_all": coef_speed_basis_full,
+    }
 
 
 def _validate_segment_edges(
@@ -528,6 +799,10 @@ def _fit_exp_poisson_models(
     ridge: float,
     n_folds: int,
     seed: int,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Run CV and full-data fits for nested exp-link Poisson GLMs."""
     _require_nemos()
@@ -540,13 +815,46 @@ def _fit_exp_poisson_models(
     ll_full_sum = np.zeros(n_units, dtype=float)
     spike_sum = np.zeros(n_units, dtype=float)
 
+    if has_speed:
+        v_all = np.asarray(v_all, dtype=float).reshape(-1)
+        V_all, speed_transform_all = _make_speed_design_all(
+            v_all,
+            speed_feature_mode=speed_feature_mode,
+            n_splines_speed=n_splines_speed,
+            spline_order_speed=spline_order_speed,
+            speed_bounds=speed_bounds,
+        )
+    else:
+        V_all = _empty_speed_design(y_all.shape[0])
+        speed_transform_all = _empty_speed_feature_transform()
+
     for train_idx, test_idx in folds:
         if has_speed:
-            v_train, v_test, _, _ = _zscore_train_apply(v_all, train_idx, test_idx)
-            x_base_train = np.concatenate([x_base_nospeed[train_idx], v_train[:, None]], axis=1)
-            x_base_test = np.concatenate([x_base_nospeed[test_idx], v_test[:, None]], axis=1)
-            x_full_train = np.concatenate([x_full_nospeed[train_idx], v_train[:, None]], axis=1)
-            x_full_test = np.concatenate([x_full_nospeed[test_idx], v_test[:, None]], axis=1)
+            V_train, V_test, _ = _make_speed_design_train_test(
+                v_all,
+                train_idx,
+                test_idx,
+                speed_feature_mode=speed_feature_mode,
+                n_splines_speed=n_splines_speed,
+                spline_order_speed=spline_order_speed,
+                speed_bounds=speed_bounds,
+            )
+            x_base_train = np.concatenate(
+                [x_base_nospeed[train_idx], V_train],
+                axis=1,
+            )
+            x_base_test = np.concatenate(
+                [x_base_nospeed[test_idx], V_test],
+                axis=1,
+            )
+            x_full_train = np.concatenate(
+                [x_full_nospeed[train_idx], V_train],
+                axis=1,
+            )
+            x_full_test = np.concatenate(
+                [x_full_nospeed[test_idx], V_test],
+                axis=1,
+            )
         else:
             x_base_train = x_base_nospeed[train_idx]
             x_base_test = x_base_nospeed[test_idx]
@@ -591,17 +899,8 @@ def _fit_exp_poisson_models(
         ll_full_per_spike = np.where(spike_sum > 0, ll_full_sum / spike_sum, np.nan)
         d_ll_per_spike = np.where(spike_sum > 0, d_ll_sum / spike_sum, np.nan)
 
-    if has_speed:
-        speed_mean = float(np.mean(v_all))
-        speed_std = float(np.std(v_all) + 1e-12)
-        v_all_z = (v_all - speed_mean) / speed_std
-        x_base_all = np.concatenate([x_base_nospeed, v_all_z[:, None]], axis=1)
-        x_full_all = np.concatenate([x_full_nospeed, v_all_z[:, None]], axis=1)
-    else:
-        speed_mean = np.nan
-        speed_std = np.nan
-        x_base_all = x_base_nospeed
-        x_full_all = x_full_nospeed
+    x_base_all = np.concatenate([x_base_nospeed, V_all], axis=1)
+    x_full_all = np.concatenate([x_full_nospeed, V_all], axis=1)
 
     model_base_all = PopulationGLM(
         "Poisson",
@@ -616,9 +915,21 @@ def _fit_exp_poisson_models(
     model_base_all.fit(x_base_all, y_all)
     model_full_all.fit(x_full_all, y_all)
 
+    coef_base = _coef_feat_by_unit(model_base_all, n_features=x_base_all.shape[1])
+    coef_full = _coef_feat_by_unit(model_full_all, n_features=x_full_all.shape[1])
+    n_speed_features = int(speed_transform_all["n_features"])
+    if n_speed_features > 0:
+        coef_speed_basis_base = coef_base[-n_speed_features:, :]
+        coef_speed_basis_full = coef_full[-n_speed_features:, :]
+    else:
+        coef_speed_basis_base = np.full((0, n_units), np.nan)
+        coef_speed_basis_full = np.full((0, n_units), np.nan)
+
     return {
-        "coef_base": _coef_feat_by_unit(model_base_all, n_features=x_base_all.shape[1]),
-        "coef_full": _coef_feat_by_unit(model_full_all, n_features=x_full_all.shape[1]),
+        "coef_base": coef_base,
+        "coef_full": coef_full,
+        "coef_speed_basis_base": coef_speed_basis_base,
+        "coef_speed_basis_full": coef_speed_basis_full,
         "intercept_base": np.asarray(model_base_all.intercept_).reshape(-1),
         "intercept_full": np.asarray(model_full_all.intercept_).reshape(-1),
         "spike_sum_cv": spike_sum,
@@ -631,9 +942,8 @@ def _fit_exp_poisson_models(
         "ll_base_bits_per_spike_cv": ll_base_per_spike * inv_log2,
         "ll_full_bits_per_spike_cv": ll_full_per_spike * inv_log2,
         "dll_bits_per_spike_cv": d_ll_per_spike * inv_log2,
-        "speed_mean": speed_mean,
-        "speed_std": speed_std,
         "has_speed": has_speed,
+        "speed_transform": speed_transform_all,
     }
 
 
@@ -642,8 +952,7 @@ def _standard_result_dict(
     unit_ids: np.ndarray,
     bin_size_s: float,
     has_speed: bool,
-    speed_mean: float,
-    speed_std: float,
+    speed_outputs: dict[str, Any],
     pos_bounds: tuple[float, float],
     n_splines: int,
     spline_order: int,
@@ -669,8 +978,7 @@ def _standard_result_dict(
     result = {
         "unit_ids": np.asarray(unit_ids),
         "has_speed": bool(has_speed),
-        "speed_mean": float(speed_mean),
-        "speed_std": float(speed_std),
+        **speed_outputs,
         "bin_size_s": float(bin_size_s),
         "n_splines": int(n_splines),
         "spline_order": int(spline_order),
@@ -730,6 +1038,10 @@ def fit_shared_place_light_mod_nemos_per_traj(
     seed: int = 0,
     unit_mask: np.ndarray | None = None,
     restrict_ep_by_epoch: dict[str, Any] | None = None,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit the shared-place multiplicative light modulation model."""
     _require_nemos()
@@ -768,23 +1080,43 @@ def fit_shared_place_light_mod_nemos_per_traj(
         ridge=ridge,
         n_folds=n_folds,
         seed=seed,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
     )
 
     coef0 = cv_result["coef_base"]
     coef1 = cv_result["coef_full"]
+    speed_transform_all = cv_result["speed_transform"]
+    coef_speed_basis_base = cv_result["coef_speed_basis_base"]
+    coef_speed_basis_full = cv_result["coef_speed_basis_full"]
     coef_place_base = coef0[:n_basis]
     coef_light_base = coef0[n_basis]
-    coef_speed_base = coef0[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_full = coef1[:n_basis]
     coef_light_full = coef1[n_basis]
     coef_place_x_light_full = coef1[(n_basis + 1) : (n_basis + 1 + n_basis)]
-    coef_speed_full = coef1[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     nan_u = np.full((n_units,), np.nan)
     nan_basis = np.full((n_basis, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200)
     grid_basis = np.asarray(basis.compute_features(grid), dtype=float)
-    dark_lin = cv_result["intercept_full"][None, :] + (grid_basis @ coef_place_full)
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_lin = (
+        cv_result["intercept_full"][None, :]
+        + (grid_basis @ coef_place_full)
+        + speed_ref_effect
+    )
     light_lin = dark_lin + coef_light_full[None, :] + (
         grid_basis @ coef_place_x_light_full
     )
@@ -792,8 +1124,7 @@ def fit_shared_place_light_mod_nemos_per_traj(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=cv_result["has_speed"],
-        speed_mean=cv_result["speed_mean"],
-        speed_std=cv_result["speed_std"],
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -802,12 +1133,12 @@ def fit_shared_place_light_mod_nemos_per_traj(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=coef_light_base,
         coef_place_x_light_base_all=nan_basis,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
         coef_place_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
         coef_place_x_light_full_all=coef_place_x_light_full,
-        coef_speed_full_all=coef_speed_full,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_basis,
         grid_tp=grid,
@@ -836,6 +1167,10 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_gain(
     unit_mask: np.ndarray | None = None,
     restrict_ep_by_epoch: dict[str, Any] | None = None,
     gain_overlap_frac: float = 0.0,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit the segment-raised-cosine multiplicative light modulation model."""
     _require_nemos()
@@ -887,20 +1222,31 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_gain(
         ridge=ridge,
         n_folds=n_folds,
         seed=seed,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
     )
 
     coef0 = cv_result["coef_base"]
     coef1 = cv_result["coef_full"]
+    speed_transform_all = cv_result["speed_transform"]
+    coef_speed_basis_base = cv_result["coef_speed_basis_base"]
+    coef_speed_basis_full = cv_result["coef_speed_basis_full"]
     coef_place_base = coef0[:n_dark_basis]
     coef_light_base = coef0[n_dark_basis]
-    coef_speed_base = coef0[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_full = coef1[:n_dark_basis]
     coef_light_full = coef1[n_dark_basis]
     coef_gain_full = coef1[(n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)]
-    coef_speed_full = coef1[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     nan_u = np.full((n_units,), np.nan)
     nan_dark = np.full((n_dark_basis, n_units), np.nan)
     nan_gain = np.full((n_gain_basis, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200)
     grid_dark = np.asarray(basis_dark.compute_features(grid), dtype=float)
@@ -910,14 +1256,22 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_gain(
         pos_bounds=pos_bounds,
         overlap_frac=gain_overlap_frac,
     )
-    dark_lin = cv_result["intercept_full"][None, :] + (grid_dark @ coef_place_full)
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_lin = (
+        cv_result["intercept_full"][None, :]
+        + (grid_dark @ coef_place_full)
+        + speed_ref_effect
+    )
     light_lin = dark_lin + coef_light_full[None, :] + (grid_gain @ coef_gain_full)
     return _standard_result_dict(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=cv_result["has_speed"],
-        speed_mean=cv_result["speed_mean"],
-        speed_std=cv_result["speed_std"],
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -926,12 +1280,12 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_gain(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=coef_light_base,
         coef_place_x_light_base_all=nan_gain,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
         coef_place_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
         coef_place_x_light_full_all=coef_gain_full,
-        coef_speed_full_all=coef_speed_full,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
@@ -966,6 +1320,10 @@ def fit_shared_place_light_mod_nemos_per_traj_gain_splines(
     seed: int = 0,
     unit_mask: np.ndarray | None = None,
     restrict_ep_by_epoch: dict[str, Any] | None = None,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit the multiplicative light modulation model with a separate gain basis."""
     _require_nemos()
@@ -1017,32 +1375,51 @@ def fit_shared_place_light_mod_nemos_per_traj_gain_splines(
         ridge=ridge,
         n_folds=n_folds,
         seed=seed,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
     )
 
     coef0 = cv_result["coef_base"]
     coef1 = cv_result["coef_full"]
+    speed_transform_all = cv_result["speed_transform"]
+    coef_speed_basis_base = cv_result["coef_speed_basis_base"]
+    coef_speed_basis_full = cv_result["coef_speed_basis_full"]
     coef_place_base = coef0[:n_dark_basis]
     coef_light_base = coef0[n_dark_basis]
-    coef_speed_base = coef0[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_full = coef1[:n_dark_basis]
     coef_light_full = coef1[n_dark_basis]
     coef_gain_full = coef1[(n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)]
-    coef_speed_full = coef1[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     nan_u = np.full((n_units,), np.nan)
     nan_dark = np.full((n_dark_basis, n_units), np.nan)
     nan_gain = np.full((n_gain_basis, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200)
     grid_dark = np.asarray(basis_dark.compute_features(grid), dtype=float)
     grid_gain = np.asarray(basis_gain.compute_features(grid), dtype=float)
-    dark_lin = cv_result["intercept_full"][None, :] + (grid_dark @ coef_place_full)
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_lin = (
+        cv_result["intercept_full"][None, :]
+        + (grid_dark @ coef_place_full)
+        + speed_ref_effect
+    )
     light_lin = dark_lin + coef_light_full[None, :] + (grid_gain @ coef_gain_full)
     return _standard_result_dict(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=cv_result["has_speed"],
-        speed_mean=cv_result["speed_mean"],
-        speed_std=cv_result["speed_std"],
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -1051,12 +1428,12 @@ def fit_shared_place_light_mod_nemos_per_traj_gain_splines(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=coef_light_base,
         coef_place_x_light_base_all=nan_gain,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
         coef_place_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
         coef_place_x_light_full_all=coef_gain_full,
-        coef_speed_full_all=coef_speed_full,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
@@ -1089,6 +1466,10 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
     seed: int = 0,
     unit_mask: np.ndarray | None = None,
     restrict_ep_by_epoch: dict[str, Any] | None = None,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit the piecewise-constant segment gain model."""
     _require_nemos()
@@ -1135,19 +1516,30 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         ridge=ridge,
         n_folds=n_folds,
         seed=seed,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
     )
 
     coef0 = cv_result["coef_base"]
     coef1 = cv_result["coef_full"]
+    speed_transform_all = cv_result["speed_transform"]
+    coef_speed_basis_base = cv_result["coef_speed_basis_base"]
+    coef_speed_basis_full = cv_result["coef_speed_basis_full"]
     coef_place_base = coef0[:n_dark_basis]
     coef_light_base = coef0[n_dark_basis]
-    coef_speed_base = coef0[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_full = coef1[:n_dark_basis]
     coef_light_full = coef1[n_dark_basis]
     coef_gain_full = coef1[(n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)]
-    coef_speed_full = coef1[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     nan_u = np.full((n_units,), np.nan)
     nan_dark = np.full((n_dark_basis, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200)
     grid_dark = np.asarray(basis_dark.compute_features(grid), dtype=float)
@@ -1157,14 +1549,22 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         pos_bounds=pos_bounds,
         drop_first=True,
     )
-    dark_lin = cv_result["intercept_full"][None, :] + (grid_dark @ coef_place_full)
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_lin = (
+        cv_result["intercept_full"][None, :]
+        + (grid_dark @ coef_place_full)
+        + speed_ref_effect
+    )
     light_lin = dark_lin + coef_light_full[None, :] + (grid_segment @ coef_gain_full)
     return _standard_result_dict(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=cv_result["has_speed"],
-        speed_mean=cv_result["speed_mean"],
-        speed_std=cv_result["speed_std"],
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -1173,12 +1573,12 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=coef_light_base,
         coef_place_x_light_base_all=nan_dark,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
         coef_place_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
         coef_place_x_light_full_all=coef_gain_full,
-        coef_speed_full_all=coef_speed_full,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
@@ -1249,21 +1649,22 @@ def _init_additive_from_base(
     n_units = y.shape[1]
     del n_time
 
-    if speed is not None:
-        x_base = np.concatenate([basis, speed[:, None]], axis=1)
+    if speed is not None and speed.shape[1] > 0:
+        n_speed_features = int(speed.shape[1])
+        x_base = np.concatenate([basis, speed], axis=1)
         model = PopulationGLM("Poisson", regularizer="Ridge", regularizer_strength=ridge)
         model.fit(x_base, y)
-        coef = _coef_feat_by_unit(model, n_features=n_basis + 1)
+        coef = _coef_feat_by_unit(model, n_features=n_basis + n_speed_features)
         theta0 = np.asarray(model.intercept_).reshape(-1).astype(np.float32)
         beta = coef[:n_basis].astype(np.float32)
-        beta_speed = coef[n_basis].astype(np.float32)
+        beta_speed = coef[n_basis : (n_basis + n_speed_features)].astype(np.float32)
     else:
         model = PopulationGLM("Poisson", regularizer="Ridge", regularizer_strength=ridge)
         model.fit(basis, y)
         coef = _coef_feat_by_unit(model, n_features=n_basis)
         theta0 = np.asarray(model.intercept_).reshape(-1).astype(np.float32)
         beta = coef.astype(np.float32)
-        beta_speed = np.full((n_units,), np.nan, dtype=np.float32)
+        beta_speed = None
 
     eps = 1e-6
     light_mask = light.astype(bool)
@@ -1273,7 +1674,7 @@ def _init_additive_from_base(
     phi0 = np.log(add_mu + eps).astype(np.float32)
     delta = np.zeros((n_basis, n_units), dtype=np.float32)
 
-    if speed is not None:
+    if beta_speed is not None:
         return _AddRateParamsBatched(
             theta0=jnp.asarray(theta0),
             beta=jnp.asarray(beta),
@@ -1323,14 +1724,14 @@ def _fit_additive_rate_batched_jax(
     idx_light = jnp.where(light_j > 0.5)[0]
     idx_dark = jnp.where(light_j <= 0.5)[0]
 
-    if speed is not None:
-        speed_j = jnp.asarray(speed, dtype=jnp.float32).reshape(-1)
+    if speed is not None and speed.shape[1] > 0:
+        speed_j = jnp.asarray(speed, dtype=jnp.float32)
 
         def nll(params: _AddRateParamsBatched) -> jnp.ndarray:
             eta = (
                 params.theta0[None, :]
                 + (basis_j @ params.beta)
-                + speed_j[:, None] * params.beta_speed[None, :]
+                + (speed_j @ params.beta_speed)
             )
             z_add = params.phi0[None, :] + (basis_j @ params.delta)
             eta_dark = eta[idx_dark]
@@ -1524,6 +1925,10 @@ def fit_true_additive_rate_poisson_fast_per_traj(
     restrict_ep_by_epoch: dict[str, Any] | None = None,
     maxiter_full: int = 200,
     lr_full: float = 5e-2,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit the additive-in-rate light model."""
     _require_nemos()
@@ -1543,15 +1948,25 @@ def fit_true_additive_rate_poisson_fast_per_traj(
     y_all = np.asarray(fit_inputs["y_all"], dtype=np.float32)
     p_all = np.asarray(fit_inputs["p_all"], dtype=np.float32)
     l_all = np.asarray(fit_inputs["l_all"], dtype=np.float32)
-    v_all = (
-        None
-        if fit_inputs["v_all"] is None
-        else np.asarray(fit_inputs["v_all"], dtype=np.float32)
-    )
+    v_all = None if fit_inputs["v_all"] is None else np.asarray(fit_inputs["v_all"], dtype=np.float32)
     basis = BSplineEval(n_basis_funcs=n_splines, order=spline_order, bounds=pos_bounds)
     basis_all = np.asarray(basis.compute_features(p_all), dtype=np.float32)
     n_basis = basis_all.shape[1]
     n_units = y_all.shape[1]
+    if v_all is not None:
+        V_all, speed_transform_all = _make_speed_design_all(
+            v_all,
+            speed_feature_mode=speed_feature_mode,
+            n_splines_speed=n_splines_speed,
+            spline_order_speed=spline_order_speed,
+            speed_bounds=speed_bounds,
+            eps=1e-6,
+        )
+        V_all = np.asarray(V_all, dtype=np.float32)
+    else:
+        V_all = _empty_speed_design(y_all.shape[0]).astype(np.float32)
+        speed_transform_all = _empty_speed_feature_transform()
+    n_speed_features = int(speed_transform_all["n_features"])
 
     folds = _contiguous_folds(l_all, n_folds=n_folds, seed=seed)
     ll_base_sum = np.zeros(n_units, dtype=np.float64)
@@ -1567,23 +1982,37 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         y_test = y_all[test_idx]
 
         if v_all is not None:
-            v_train, v_test, _, _ = _zscore_train_apply(v_all, train_idx, test_idx, eps=1e-6)
-            x_base_train = np.concatenate([basis_train, v_train[:, None]], axis=1)
+            V_train, V_test, _ = _make_speed_design_train_test(
+                v_all,
+                train_idx,
+                test_idx,
+                speed_feature_mode=speed_feature_mode,
+                n_splines_speed=n_splines_speed,
+                spline_order_speed=spline_order_speed,
+                speed_bounds=speed_bounds,
+                eps=1e-6,
+            )
+            V_train = np.asarray(V_train, dtype=np.float32)
+            V_test = np.asarray(V_test, dtype=np.float32)
+            x_base_train = np.concatenate([basis_train, V_train], axis=1)
             model_base = PopulationGLM(
                 "Poisson",
                 regularizer="Ridge",
                 regularizer_strength=ridge,
             )
             model_base.fit(x_base_train, y_train)
-            coef_base = _coef_feat_by_unit(model_base, n_features=n_basis + 1)
+            coef_base = _coef_feat_by_unit(
+                model_base,
+                n_features=n_basis + n_speed_features,
+            )
             theta0_base = np.asarray(model_base.intercept_).reshape(-1).astype(np.float32)
             beta_base = coef_base[:n_basis].astype(np.float32)
-            beta_speed_base = coef_base[n_basis].astype(np.float32)
-            eta_base_test = (
-                theta0_base[None, :]
-                + (basis_test @ beta_base)
-                + v_test[:, None] * beta_speed_base[None, :]
+            beta_speed_base = coef_base[n_basis : (n_basis + n_speed_features)].astype(
+                np.float32
             )
+            eta_base_test = theta0_base[None, :] + (basis_test @ beta_base)
+            if n_speed_features > 0:
+                eta_base_test = eta_base_test + (V_test @ beta_speed_base)
         else:
             model_base = PopulationGLM(
                 "Poisson",
@@ -1595,8 +2024,8 @@ def fit_true_additive_rate_poisson_fast_per_traj(
             theta0_base = np.asarray(model_base.intercept_).reshape(-1).astype(np.float32)
             beta_base = coef_base.astype(np.float32)
             eta_base_test = theta0_base[None, :] + (basis_test @ beta_base)
-            v_train = None
-            v_test = None
+            V_train = None
+            V_test = None
 
         ll_base = np.sum(y_test * eta_base_test - np.exp(eta_base_test), axis=0)
         ll_norm = np.sum(scipy.special.gammaln(y_test + 1.0), axis=0)
@@ -1605,18 +2034,18 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         pars = _fit_additive_rate_batched_jax(
             y=np.asarray(y_train, dtype=np.float32),
             basis=np.asarray(basis_train, dtype=np.float32),
-            speed=None if v_train is None else np.asarray(v_train, dtype=np.float32),
+            speed=None if V_train is None else np.asarray(V_train, dtype=np.float32),
             light=np.asarray(light_train, dtype=np.float32),
             ridge=ridge,
             maxiter=maxiter_full,
             lr=lr_full,
         )
 
-        if v_test is not None:
+        if V_test is not None and n_speed_features > 0:
             eta_dark = (
                 np.asarray(pars.theta0)[None, :]
                 + (basis_test @ np.asarray(pars.beta))
-                + v_test[:, None] * np.asarray(pars.beta_speed)[None, :]
+                + (V_test @ np.asarray(pars.beta_speed))
             )
             z_add = np.asarray(pars.phi0)[None, :] + (basis_test @ np.asarray(pars.delta))
         else:
@@ -1649,40 +2078,22 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         ll_full_per_spike = np.where(spike_sum > 0, ll_full_sum / spike_sum, np.nan)
         d_ll_per_spike = np.where(spike_sum > 0, d_ll_sum / spike_sum, np.nan)
 
-    if v_all is not None:
-        speed_mean = float(np.mean(v_all))
-        speed_std = float(np.std(v_all) + 1e-6)
-        v_all_z = (v_all - speed_mean) / speed_std
-        x_base_all = np.concatenate([basis_all, v_all_z[:, None]], axis=1)
-        model_base_all = PopulationGLM(
-            "Poisson",
-            regularizer="Ridge",
-            regularizer_strength=ridge,
-        )
-        model_base_all.fit(x_base_all, y_all)
-        coef0 = _coef_feat_by_unit(model_base_all, n_features=n_basis + 1)
-        intercept0 = np.asarray(model_base_all.intercept_).reshape(-1)
-        coef_place_base = coef0[:n_basis]
-        coef_speed_base = coef0[n_basis]
-    else:
-        speed_mean = np.nan
-        speed_std = np.nan
-        v_all_z = None
-        model_base_all = PopulationGLM(
-            "Poisson",
-            regularizer="Ridge",
-            regularizer_strength=ridge,
-        )
-        model_base_all.fit(basis_all, y_all)
-        coef0 = _coef_feat_by_unit(model_base_all, n_features=n_basis)
-        intercept0 = np.asarray(model_base_all.intercept_).reshape(-1)
-        coef_place_base = coef0
-        coef_speed_base = np.full((n_units,), np.nan)
+    x_base_all = np.concatenate([basis_all, V_all], axis=1)
+    model_base_all = PopulationGLM(
+        "Poisson",
+        regularizer="Ridge",
+        regularizer_strength=ridge,
+    )
+    model_base_all.fit(x_base_all, y_all)
+    coef0 = _coef_feat_by_unit(model_base_all, n_features=n_basis + n_speed_features)
+    intercept0 = np.asarray(model_base_all.intercept_).reshape(-1)
+    coef_place_base = coef0[:n_basis]
+    coef_speed_basis_base = coef0[n_basis : (n_basis + n_speed_features)]
 
     pars_all = _fit_additive_rate_batched_jax(
         y=np.asarray(y_all, dtype=np.float32),
         basis=np.asarray(basis_all, dtype=np.float32),
-        speed=None if v_all_z is None else np.asarray(v_all_z, dtype=np.float32),
+        speed=None if n_speed_features == 0 else np.asarray(V_all, dtype=np.float32),
         light=np.asarray(l_all, dtype=np.float32),
         ridge=ridge,
         maxiter=maxiter_full,
@@ -1693,14 +2104,25 @@ def fit_true_additive_rate_poisson_fast_per_traj(
     beta_all = np.asarray(pars_all.beta)
     phi0_all = np.asarray(pars_all.phi0)
     delta_all = np.asarray(pars_all.delta)
-    if v_all_z is not None:
-        beta_speed_all = np.asarray(pars_all.beta_speed)
+    if n_speed_features > 0:
+        coef_speed_basis_full = np.asarray(pars_all.beta_speed)
     else:
-        beta_speed_all = np.full((n_units,), np.nan)
+        coef_speed_basis_full = np.full((0, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200).astype(np.float32)
     grid_basis = np.asarray(basis.compute_features(grid), dtype=np.float32)
-    dark_bin = np.exp(theta0_all[None, :] + (grid_basis @ beta_all))
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_bin = np.exp(theta0_all[None, :] + (grid_basis @ beta_all) + speed_ref_effect)
     add_bin = np.exp(phi0_all[None, :] + (grid_basis @ delta_all))
     nan_u = np.full((n_units,), np.nan)
     nan_basis = np.full((n_basis, n_units), np.nan)
@@ -1708,8 +2130,7 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=v_all is not None,
-        speed_mean=speed_mean,
-        speed_std=speed_std,
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -1729,12 +2150,12 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=nan_u,
         coef_place_x_light_base_all=nan_basis,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=theta0_all,
         coef_place_full_all=beta_all,
         coef_light_full_all=nan_u,
         coef_place_x_light_full_all=nan_basis,
-        coef_speed_full_all=beta_speed_all,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=phi0_all,
         coef_add_place_full_all=delta_all,
         grid_tp=np.asarray(grid),
@@ -1765,6 +2186,10 @@ def fit_separate_dark_light_fields_nemos_per_traj(
     seed: int = 0,
     unit_mask: np.ndarray | None = None,
     restrict_ep_by_epoch: dict[str, Any] | None = None,
+    speed_feature_mode: str = "linear",
+    n_splines_speed: int = 5,
+    spline_order_speed: int = 4,
+    speed_bounds: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Fit separate dark and light place fields."""
     _require_nemos()
@@ -1802,35 +2227,55 @@ def fit_separate_dark_light_fields_nemos_per_traj(
         ridge=ridge,
         n_folds=n_folds,
         seed=seed,
+        speed_feature_mode=speed_feature_mode,
+        n_splines_speed=n_splines_speed,
+        spline_order_speed=spline_order_speed,
+        speed_bounds=speed_bounds,
     )
 
     coef0 = cv_result["coef_base"]
     coef1 = cv_result["coef_full"]
+    speed_transform_all = cv_result["speed_transform"]
+    coef_speed_basis_base = cv_result["coef_speed_basis_base"]
+    coef_speed_basis_full = cv_result["coef_speed_basis_full"]
     coef_place_base = coef0[:n_basis]
     coef_light_base = coef0[n_basis]
-    coef_speed_base = coef0[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_dark = coef1[:n_basis]
     coef_place_light = coef1[n_basis : (2 * n_basis)]
     coef_light_full = coef1[2 * n_basis]
-    coef_speed_full = coef1[-1] if cv_result["has_speed"] else np.full((n_units,), np.nan)
     coef_place_change = coef_place_light - coef_place_dark
     nan_u = np.full((n_units,), np.nan)
     nan_basis = np.full((n_basis, n_units), np.nan)
+    speed_outputs = _format_speed_outputs(
+        transform=speed_transform_all,
+        coef_speed_basis_base=coef_speed_basis_base,
+        coef_speed_basis_full=coef_speed_basis_full,
+        n_units=n_units,
+    )
 
     grid = np.linspace(pos_bounds[0], pos_bounds[1], 200)
     grid_basis = np.asarray(basis.compute_features(grid), dtype=float)
-    dark_lin = cv_result["intercept_full"][None, :] + (grid_basis @ coef_place_dark)
+    speed_ref_effect = _speed_reference_effect(
+        speed_transform_all,
+        coef_speed_basis_full,
+        n_units,
+    )
+    dark_lin = (
+        cv_result["intercept_full"][None, :]
+        + (grid_basis @ coef_place_dark)
+        + speed_ref_effect
+    )
     light_lin = (
         cv_result["intercept_full"][None, :]
         + coef_light_full[None, :]
         + (grid_basis @ coef_place_light)
+        + speed_ref_effect
     )
     return _standard_result_dict(
         unit_ids=fit_inputs["unit_ids"],
         bin_size_s=bin_size_s,
         has_speed=cv_result["has_speed"],
-        speed_mean=cv_result["speed_mean"],
-        speed_std=cv_result["speed_std"],
+        speed_outputs=speed_outputs,
         pos_bounds=pos_bounds,
         n_splines=n_splines,
         spline_order=spline_order,
@@ -1839,12 +2284,12 @@ def fit_separate_dark_light_fields_nemos_per_traj(
         coef_place_base_all=coef_place_base,
         coef_light_base_all=coef_light_base,
         coef_place_x_light_base_all=nan_basis,
-        coef_speed_base_all=coef_speed_base,
+        coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
         coef_place_full_all=coef_place_dark,
         coef_light_full_all=coef_light_full,
         coef_place_x_light_full_all=coef_place_change,
-        coef_speed_full_all=coef_speed_full,
+        coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_basis,
         grid_tp=grid,
@@ -1872,7 +2317,7 @@ def _stack_family_array(
         [
             np.stack(
                 [
-                    np.asarray(results_by_traj[trajectory][ridge][key], dtype=float)
+                    np.asarray(results_by_traj[trajectory][ridge][key])
                     for ridge in ridge_values
                 ],
                 axis=0,
@@ -1912,6 +2357,7 @@ def build_family_dataset(
     place_basis_count = int(np.asarray(first["coef_place_base_all"]).shape[0])
     light_mod_basis_count = int(np.asarray(first["coef_place_x_light_full_all"]).shape[0])
     add_basis_count = int(np.asarray(first["coef_add_place_full_all"]).shape[0])
+    speed_basis_count = int(np.asarray(first["coef_speed_basis_full_all"]).shape[0])
 
     attrs = {
         "schema_version": "1",
@@ -1948,6 +2394,12 @@ def build_family_dataset(
     dataset = xr.Dataset(
         data_vars={
             "dark_movement_firing_rate_hz": ("unit", np.asarray(dark_movement_firing_rates, dtype=float)),
+            "speed_feature_mode": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_feature_mode")),
+            "n_speed_features": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "n_speed_features")),
+            "speed_basis": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_basis")),
+            "speed_spline_order": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_spline_order")),
+            "speed_basis_bounds": (("trajectory", "ridge", "speed_bound"), _stack_family_array(results_by_traj, ridge_values, "speed_basis_bounds")),
+            "speed_reference_value": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_reference_value")),
             "speed_mean": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_mean")),
             "speed_std": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_std")),
             "spike_sum_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "spike_sum_cv")),
@@ -1965,11 +2417,13 @@ def build_family_dataset(
             "coef_light_base_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_light_base_all")),
             "coef_place_x_light_base_all": (("trajectory", "ridge", "light_mod_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_x_light_base_all")),
             "coef_speed_base_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_base_all")),
+            "coef_speed_basis_base_all": (("trajectory", "ridge", "speed_basis_feature", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_base_all")),
             "coef_intercept_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_intercept_full_all")),
             "coef_place_full_all": (("trajectory", "ridge", "place_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_full_all")),
             "coef_light_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_light_full_all")),
             "coef_place_x_light_full_all": (("trajectory", "ridge", "light_mod_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_x_light_full_all")),
             "coef_speed_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_full_all")),
+            "coef_speed_basis_full_all": (("trajectory", "ridge", "speed_basis_feature", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_full_all")),
             "coef_add_intercept_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_add_intercept_full_all")),
             "coef_add_place_full_all": (("trajectory", "ridge", "add_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_add_place_full_all")),
             "dark_hz_grid": (("trajectory", "ridge", "tp_grid", "unit"), _stack_family_array(results_by_traj, ridge_values, "dark_hz_grid")),
@@ -1982,6 +2436,8 @@ def build_family_dataset(
             "tp_grid": tp_grid,
             "place_basis": np.arange(place_basis_count, dtype=int),
             "light_mod_basis": np.arange(light_mod_basis_count, dtype=int),
+            "speed_basis_feature": np.arange(speed_basis_count, dtype=int),
+            "speed_bound": np.asarray(["lower", "upper"], dtype=str),
             "add_basis": np.arange(add_basis_count, dtype=int),
             "cv_metric": np.asarray(CV_METRIC_NAMES, dtype=str),
         },
@@ -1999,6 +2455,14 @@ def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the dark/light task-progression GLM script."""
     parser = argparse.ArgumentParser(
         description="Fit dark/light task-progression GLM families for one session"
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        default=_CUDA_VISIBLE_DEVICES_CLI,
+        help=(
+            "Optional CUDA_VISIBLE_DEVICES value applied before importing JAX. "
+            "Default: unset"
+        ),
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
@@ -2128,6 +2592,31 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.set_defaults(use_speed=True)
     parser.add_argument(
+        "--speed-feature-mode",
+        choices=("linear", "bspline"),
+        default="linear",
+        help="Speed covariate parameterization to use when speed is enabled. Default: linear",
+    )
+    parser.add_argument(
+        "--n-splines-speed",
+        type=int,
+        default=5,
+        help="Number of spline basis functions for bspline speed features. Default: 5",
+    )
+    parser.add_argument(
+        "--spline-order-speed",
+        type=int,
+        default=4,
+        help="Spline order for bspline speed features. Default: 4",
+    )
+    parser.add_argument(
+        "--speed-bounds",
+        nargs=2,
+        type=float,
+        metavar=("LOW", "HIGH"),
+        help="Optional explicit bounds for bspline speed features.",
+    )
+    parser.add_argument(
         "--segment-edges",
         nargs="+",
         type=float,
@@ -2175,6 +2664,10 @@ def _fit_model_family(
         "seed": args.seed,
         "unit_mask": unit_mask,
         "restrict_ep_by_epoch": movement_by_run,
+        "speed_feature_mode": args.speed_feature_mode,
+        "n_splines_speed": args.n_splines_speed,
+        "spline_order_speed": args.spline_order_speed,
+        "speed_bounds": None if args.speed_bounds is None else tuple(args.speed_bounds),
     }
     if family_name == "mult":
         return fit_shared_place_light_mod_nemos_per_traj(**common_kwargs)
@@ -2315,6 +2808,7 @@ def main() -> None:
                     continue
 
                 fit_parameters = {
+                    "cuda_visible_devices": args.cuda_visible_devices,
                     "position_offset": args.position_offset,
                     "speed_threshold_cm_s": args.speed_threshold_cm_s,
                     "bin_size_s": args.bin_size_s,
@@ -2326,6 +2820,10 @@ def main() -> None:
                     "n_splines_gain": args.n_splines_gain,
                     "spline_order_gain": args.spline_order_gain,
                     "use_speed": args.use_speed,
+                    "speed_feature_mode": args.speed_feature_mode,
+                    "n_splines_speed": args.n_splines_speed,
+                    "spline_order_speed": args.spline_order_speed,
+                    "speed_bounds": args.speed_bounds,
                     "segment_edges": [float(edge) for edge in segment_edges],
                     "gain_overlap_frac": args.gain_overlap_frac,
                     "model_family": family_name,
@@ -2358,6 +2856,7 @@ def main() -> None:
             "animal_name": args.animal_name,
             "date": args.date,
             "data_root": args.data_root,
+            "cuda_visible_devices": args.cuda_visible_devices,
             "regions": args.regions,
             "epochs": selected_epochs,
             "light_epochs": args.light_epochs,
@@ -2376,6 +2875,10 @@ def main() -> None:
             "n_splines_gain": args.n_splines_gain,
             "spline_order_gain": args.spline_order_gain,
             "use_speed": args.use_speed,
+            "speed_feature_mode": args.speed_feature_mode,
+            "n_splines_speed": args.n_splines_speed,
+            "spline_order_speed": args.spline_order_speed,
+            "speed_bounds": args.speed_bounds,
             "segment_edges": segment_edges.tolist(),
             "gain_overlap_frac": args.gain_overlap_frac,
         },
