@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.helper.session import DEFAULT_DATA_ROOT, get_analysis_path
+from v1ca1.helper.session import (
+    DEFAULT_DATA_ROOT,
+    get_analysis_path,
+    load_trajectory_intervals,
+)
 from v1ca1.ripple._decoding import (
     build_region_unit_mask_table as build_region_unit_mask_table_from_session,
     get_representation_inputs as get_representation_inputs_from_session,
@@ -226,37 +230,6 @@ def _sampling_rate(timestamps: np.ndarray) -> float:
     return (len(values) - 1) / (values[-1] - values[0])
 
 
-def _empty_intervalset() -> Any:
-    import pynapple as nap
-
-    return nap.IntervalSet(
-        start=np.array([], dtype=float), end=np.array([], dtype=float)
-    )
-
-
-def _trajectory_interval(values: Any) -> Any:
-    import pynapple as nap
-
-    array = np.asarray(values)
-    if array.size == 0:
-        return _empty_intervalset()
-    if array.ndim == 1:
-        if array.size < 2:
-            return _empty_intervalset()
-        return nap.IntervalSet(
-            start=[float(array[0])],
-            end=[float(array[-1])],
-            time_units="s",
-        )
-    if array.shape[1] < 2:
-        return _empty_intervalset()
-    return nap.IntervalSet(
-        start=np.asarray(array[:, 0], dtype=float),
-        end=np.asarray(array[:, -1], dtype=float),
-        time_units="s",
-    )
-
-
 def _build_track_graphs() -> tuple[dict[str, Any], dict[str, Any]]:
     import track_linearization as tl
 
@@ -328,20 +301,6 @@ def build_speed_tsd(
 
 def build_movement_interval(speed_tsd: Any, speed_threshold_cm_s: float) -> Any:
     return speed_tsd.threshold(float(speed_threshold_cm_s), method="above").time_support
-
-
-def build_trajectory_intervals(
-    trajectory_times: dict[str, Any],
-    run_epochs: list[str],
-) -> dict[str, dict[str, Any]]:
-    trajectory_intervals: dict[str, dict[str, Any]] = {}
-    for epoch in run_epochs:
-        trajectory_intervals[epoch] = {}
-        for trajectory_type in TRAJECTORY_TYPES:
-            trajectory_intervals[epoch][trajectory_type] = _trajectory_interval(
-                trajectory_times[epoch].get(trajectory_type, [])
-            )
-    return trajectory_intervals
 
 
 def build_linear_position(
@@ -500,7 +459,10 @@ def prepare_task_progression_session(analysis_path: Path) -> dict[str, Any]:
     timestamps_position = _load_pickle(analysis_path / "timestamps_position.pkl")
     timestamps_ephys_all = _load_pickle(analysis_path / "timestamps_ephys_all.pkl")
     position_by_epoch = _load_pickle(analysis_path / "position.pkl")
-    trajectory_times = _load_pickle(analysis_path / "trajectory_times.pkl")
+    trajectory_intervals, trajectory_source = load_trajectory_intervals(
+        analysis_path,
+        run_epoch_list,
+    )
 
     sorting_by_region = {
         region: si.load(analysis_path / f"sorting_{region}") for region in REGIONS
@@ -510,7 +472,6 @@ def prepare_task_progression_session(analysis_path: Path) -> dict[str, Any]:
         for region, sorting in sorting_by_region.items()
     }
 
-    trajectory_intervals = build_trajectory_intervals(trajectory_times, run_epoch_list)
     all_epoch_by_run: dict[str, Any] = {}
     speed_by_run: dict[str, Any] = {}
     movement_by_run: dict[str, Any] = {}
@@ -566,7 +527,7 @@ def prepare_task_progression_session(analysis_path: Path) -> dict[str, Any]:
             "timestamps_position": "pickle",
             "timestamps_ephys_all": "pickle",
             "position": "pickle",
-            "trajectory_intervals": "trajectory_times.pkl",
+            "trajectory_intervals": trajectory_source,
             "sorting": "spikeinterface",
             "ripple_events": "pickle",
         },

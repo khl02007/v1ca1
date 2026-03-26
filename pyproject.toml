@@ -26,7 +26,10 @@ analysis = [
     "spikeinterface>=0.100",
     "pynapple>=0.7",
     "pynwb>=2.0",
+    "position_tools",
     "probeinterface>=0.2",
+    "ripple_detection",
+    "track_linearization",
     "xarray>=2023.0",
 ]
 figurl = [

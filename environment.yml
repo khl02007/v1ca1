@@ -16,6 +16,9 @@ dependencies:
   - pytest>=8
   - pip:
       - mountainsort4>=1.0
+      - position_tools
+      - ripple_detection
+      - track_linearization
       - "-e .[analysis,test]"
 
 # Additional packages used by some analyses may need to be installed manually,
@@ -23,9 +26,6 @@ dependencies:
 # - jax
 # - nemos
 # - replay_trajectory_classification
-# - position_tools
-# - track_linearization
-# - ripple_detection
 # - non_local_detector
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency

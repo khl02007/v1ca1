@@ -12,9 +12,10 @@ the four supported trajectory types:
 - `right_to_center`
 - `center_to_right`
 
-By default it writes a single `trajectory_times.npz` pynapple `IntervalSet`
-whose metadata stores the full
-epoch label (for example `02_r1`) and trajectory type for each interval row.
+By default it writes a single `trajectory_times.parquet` table with one row per
+trajectory interval. The parquet columns are `start`, `end`, `epoch`, and
+`trajectory_type`, so filtered rows can be passed directly to `pynapple`
+`IntervalSet` constructors.
 
 The script prefers the pynapple-backed `timestamps_ephys.npz` export when it is
 available and readable, and otherwise falls back to `timestamps_ephys.pkl`.
@@ -250,17 +251,14 @@ def save_legacy_trajectory_pickle_output(
     return save_pickle_output(output_path, trajectory_times)
 
 
-def save_pynapple_trajectory_output(
+def save_trajectory_table_output(
     analysis_path: Path,
     trajectory_times: dict[str, dict[str, np.ndarray]],
 ) -> Path:
-    """Write one pynapple IntervalSet with epoch and trajectory metadata."""
-    import pynapple as nap
+    """Write one canonical parquet table of trajectory intervals."""
+    import pandas as pd
 
-    starts: list[np.ndarray] = []
-    ends: list[np.ndarray] = []
-    epochs: list[str] = []
-    trajectory_types: list[str] = []
+    rows: list[dict[str, float | str]] = []
 
     for epoch, trajectory_times_by_type in trajectory_times.items():
         for trajectory_type, intervals in trajectory_times_by_type.items():
@@ -273,23 +271,28 @@ def save_pynapple_trajectory_output(
                     f"{epoch!r} / {trajectory_type!r}, got {interval_array.shape}."
                 )
 
-            starts.append(interval_array[:, 0])
-            ends.append(interval_array[:, 1])
-            epochs.extend([str(epoch)] * interval_array.shape[0])
-            trajectory_types.extend([str(trajectory_type)] * interval_array.shape[0])
+            for start, end in interval_array:
+                rows.append(
+                    {
+                        "start": float(start),
+                        "end": float(end),
+                        "epoch": str(epoch),
+                        "trajectory_type": str(trajectory_type),
+                    }
+                )
 
-    if starts:
-        start_array = np.concatenate(starts).astype(float, copy=False)
-        end_array = np.concatenate(ends).astype(float, copy=False)
-    else:
-        start_array = np.array([], dtype=float)
-        end_array = np.array([], dtype=float)
+    trajectory_table = pd.DataFrame.from_records(
+        rows,
+        columns=["start", "end", "epoch", "trajectory_type"],
+    )
+    if not trajectory_table.empty:
+        trajectory_table = trajectory_table.sort_values(
+            by=["start", "end", "epoch", "trajectory_type"],
+            kind="stable",
+        ).reset_index(drop=True)
 
-    interval_set = nap.IntervalSet(start=start_array, end=end_array, time_units="s")
-    interval_set.set_info(epoch=epochs, trajectory_type=trajectory_types)
-
-    output_path = analysis_path / "trajectory_times.npz"
-    interval_set.save(output_path)
+    output_path = analysis_path / "trajectory_times.parquet"
+    trajectory_table.to_parquet(output_path, index=False)
     return output_path
 
 
@@ -382,7 +385,7 @@ def get_trajectory_times(
         "epoch_tags": epoch_tags,
         "run_epochs": run_epoch_list,
         "trajectory_types": list(TRAJECTORY_TYPES.values()),
-        "trajectory_times_pynapple_path": save_pynapple_trajectory_output(
+        "trajectory_times_parquet_path": save_trajectory_table_output(
             analysis_path=analysis_path,
             trajectory_times=trajectory_times,
         ),
@@ -436,7 +439,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--save-pkl",
         action="store_true",
-        help="Also write the legacy trajectory_times.pkl export alongside trajectory_times.npz.",
+        help="Also write the legacy trajectory_times.pkl export alongside trajectory_times.parquet.",
     )
     return parser.parse_args()
 

@@ -57,6 +57,7 @@ from v1ca1.helper.session import (
     load_position_data,
     load_position_timestamps,
     load_spikes_by_region,
+    load_trajectory_time_bounds,
 )
 from v1ca1.helper.wtrack import (
     get_wtrack_branch_graph,
@@ -180,9 +181,11 @@ def load_meme_session(
         )
     timestamps_ephys_all_ptp, _ = load_ephys_timestamps_all(analysis_path)
     position_dict = load_position_data(analysis_path, epoch_list)
-    trajectory_times = _load_pickle(analysis_path / "trajectory_times.pkl")
-
     run_epochs = get_run_epochs(epoch_list)
+    trajectory_times, _trajectory_source = load_trajectory_time_bounds(
+        analysis_path,
+        run_epochs,
+    )
     epoch_names = list(epoch_list[:-2])
     spikes_by_region = load_spikes_by_region(
         analysis_path,

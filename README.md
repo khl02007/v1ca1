@@ -97,7 +97,7 @@ pip install -e ".[figurl]"
 pip install -e ".[dev]"
 ```
 
-- `.[analysis]` covers the main scientific Python and neuroscience analysis stack used by the modernized CLIs.
+- `.[analysis]` covers the main scientific Python and neuroscience analysis stack used by the modernized CLIs, including `position_tools` and `track_linearization`.
 - `.[glm]` adds JAX- and `nemos`-based dependencies used by GLM-heavy ripple and task-progression workflows.
 - `.[figurl]` adds figurl support for curation export.
 - `.[dev]` adds the current pytest-based test dependencies.
@@ -129,13 +129,12 @@ session run log under `v1ca1_log/`.
 PYTHONPATH=src python src/v1ca1/helper/get_trajectory_times.py \
   --animal-name L14 \
   --date 20240611 \
-  --trajectory-format both
+  --save-pkl
 ```
 
-That command reads saved epoch bounds plus NWB poke events and writes both the
-legacy `trajectory_times.pkl` artifact and a `trajectory_times.npz`
-`IntervalSet` with saved epoch and trajectory metadata when `--trajectory-format both`
-is used.
+That command reads saved epoch bounds plus NWB poke events and always writes
+the canonical `trajectory_times.parquet` table. Passing `--save-pkl` also
+writes the legacy `trajectory_times.pkl` compatibility artifact.
 
 ```bash
 PYTHONPATH=src python src/v1ca1/helper/get_immobility_times.py \
@@ -254,7 +253,7 @@ Many scripts expect precomputed intermediate files such as:
 - `timestamps_position.npz`
 - `position.pkl`
 - `trajectory_times.pkl`
-- `trajectory_times.npz`
+- `trajectory_times.parquet`
 - `run_times.pkl`
 - `run_times.npz`
 - `immobility_times.pkl`

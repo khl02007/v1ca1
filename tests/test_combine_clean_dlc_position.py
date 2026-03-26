@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from v1ca1.helper.session import load_clean_dlc_position_data
-from v1ca1.position.clean_dlc_position import DEFAULT_OUTPUT_DIRNAME
+from v1ca1.position.clean_dlc_position import DEFAULT_OUTPUT_DIRNAME, clean_dlc_position
 from v1ca1.position.combine_clean_dlc_position import (
     DEFAULT_OUTPUT_NAME,
     combine_clean_dlc_position,
@@ -25,6 +25,38 @@ def _write_session_files(
 ) -> None:
     analysis_path.mkdir(parents=True)
     _write_pickle(analysis_path / "timestamps_position.pkl", timestamps_position)
+
+
+def _write_dlc_h5(
+    path: Path,
+    tracks: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("tables")
+
+    columns: list[tuple[str, str, str]] = []
+    data: list[np.ndarray] = []
+    for bodypart, (x, y, likelihood) in tracks.items():
+        columns.extend(
+            [
+                ("scorer", bodypart, "x"),
+                ("scorer", bodypart, "y"),
+                ("scorer", bodypart, "likelihood"),
+            ]
+        )
+        data.extend(
+            [
+                np.asarray(x, dtype=float),
+                np.asarray(y, dtype=float),
+                np.asarray(likelihood, dtype=float),
+            ]
+        )
+
+    table = pd.DataFrame(
+        np.column_stack(data),
+        columns=pd.MultiIndex.from_tuples(columns),
+    )
+    table.to_hdf(path, key="df", mode="w")
 
 
 def _write_cleaned_epoch_parquet(
@@ -59,10 +91,10 @@ def _write_cleaned_epoch_parquet(
             "epoch": epoch,
             "frame": np.arange(n_frames, dtype=int),
             "frame_time_s": frame_times_array,
-            "head_x_cleaned": head_array[:, 0],
-            "head_y_cleaned": head_array[:, 1],
-            "body_x_cleaned": body_array[:, 0],
-            "body_y_cleaned": body_array[:, 1],
+            "head_x_cleaned_cm": head_array[:, 0],
+            "head_y_cleaned_cm": head_array[:, 1],
+            "body_x_cleaned_cm": body_array[:, 0],
+            "body_y_cleaned_cm": body_array[:, 1],
             "head_invalid": np.asarray(head_invalid, dtype=bool),
             "body_invalid": np.asarray(body_invalid, dtype=bool),
             "head_interpolated": np.asarray(head_interpolated, dtype=bool),
@@ -92,10 +124,10 @@ def _write_combined_cleaned_parquet(
             "epoch": epoch,
             "frame": np.arange(n_frames, dtype=int),
             "frame_time_s": frame_times_array,
-            "head_x": head_array[:, 0],
-            "head_y": head_array[:, 1],
-            "body_x": body_array[:, 0],
-            "body_y": body_array[:, 1],
+            "head_x_cm": head_array[:, 0],
+            "head_y_cm": head_array[:, 1],
+            "body_x_cm": body_array[:, 0],
+            "body_y_cm": body_array[:, 1],
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,10 +178,10 @@ def test_combine_clean_dlc_position_writes_one_combined_parquet_and_loader_round
         "epoch",
         "frame",
         "frame_time_s",
-        "head_x",
-        "head_y",
-        "body_x",
-        "body_y",
+        "head_x_cm",
+        "head_y_cm",
+        "body_x_cm",
+        "body_y_cm",
     ]
     assert combined["epoch"].tolist() == ["02_r1", "02_r1", "02_r1", "03_s2", "03_s2"]
     assert combined.shape[0] == 5
@@ -159,6 +191,100 @@ def test_combine_clean_dlc_position_writes_one_combined_parquet_and_loader_round
     assert epoch_order == ["02_r1", "03_s2"]
     assert np.allclose(head_position["02_r1"], np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
     assert np.allclose(body_position["03_s2"], np.array([[17.0, 18.0], [19.0, 20.0]]))
+
+
+def test_combine_clean_dlc_position_accepts_clean_dlc_position_outputs(
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("tables")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    timestamps_position = {
+        "02_r1": np.array([0.0, 1.0, 2.0, 3.0], dtype=float),
+        "04_r2": np.array([10.0, 11.0, 12.0, 13.0], dtype=float),
+    }
+    _write_session_files(analysis_path=analysis_path, timestamps_position=timestamps_position)
+
+    dlc_r1_path = tmp_path / "02_r1.h5"
+    _write_dlc_h5(
+        dlc_r1_path,
+        tracks={
+            "head": (
+                np.array([0.0, 1.0, 100.0, 3.0]),
+                np.zeros(4),
+                np.array([0.999, 0.999, 0.01, 0.999]),
+            ),
+            "body": (
+                np.array([35.0, 36.0, 37.0, 38.0]),
+                np.zeros(4),
+                np.full(4, 0.999),
+            ),
+        },
+    )
+    dlc_r2_path = tmp_path / "04_r2.h5"
+    _write_dlc_h5(
+        dlc_r2_path,
+        tracks={
+            "head": (
+                np.array([10.0, 11.0, 12.0, 13.0]),
+                np.zeros(4),
+                np.full(4, 0.999),
+            ),
+            "body": (
+                np.array([40.0, 41.0, 42.0, 43.0]),
+                np.zeros(4),
+                np.full(4, 0.999),
+            ),
+        },
+    )
+
+    clean_dlc_position(
+        animal_name="RatA",
+        date="20240101",
+        epoch="02_r1",
+        dlc_h5_path=dlc_r1_path,
+        data_root=tmp_path,
+        threshold_z=0.0,
+        min_jump_threshold_px=10.0,
+        meters_per_pixel=0.02,
+    )
+    clean_dlc_position(
+        animal_name="RatA",
+        date="20240101",
+        epoch="04_r2",
+        dlc_h5_path=dlc_r2_path,
+        data_root=tmp_path,
+        threshold_z=0.0,
+        min_jump_threshold_px=10.0,
+        meters_per_pixel=0.02,
+    )
+
+    output_path = combine_clean_dlc_position(
+        animal_name="RatA",
+        date="20240101",
+        data_root=tmp_path,
+    )
+
+    combined = pd.read_parquet(output_path)
+    assert combined.columns.tolist() == [
+        "epoch",
+        "frame",
+        "frame_time_s",
+        "head_x_cm",
+        "head_y_cm",
+        "body_x_cm",
+        "body_y_cm",
+    ]
+    assert combined["epoch"].tolist() == ["02_r1", "02_r1", "02_r1", "02_r1", "04_r2", "04_r2", "04_r2", "04_r2"]
+    assert combined.loc[2, "head_x_cm"] == pytest.approx(4.0)
+    assert combined.loc[4, "body_x_cm"] == pytest.approx(80.0)
+
+    epoch_order, head_position, body_position = load_clean_dlc_position_data(analysis_path)
+    assert epoch_order == ["02_r1", "04_r2"]
+    assert np.allclose(head_position["02_r1"], np.array([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0], [6.0, 0.0]]))
+    assert np.allclose(body_position["04_r2"], np.array([[80.0, 0.0], [82.0, 0.0], [84.0, 0.0], [86.0, 0.0]]))
 
 
 def test_combine_clean_dlc_position_rejects_missing_timestamp_epoch(tmp_path: Path) -> None:

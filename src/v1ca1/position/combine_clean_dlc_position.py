@@ -17,19 +17,19 @@ REQUIRED_INPUT_COLUMNS = (
     "epoch",
     "frame",
     "frame_time_s",
-    "head_x_cleaned",
-    "head_y_cleaned",
-    "body_x_cleaned",
-    "body_y_cleaned",
+    "head_x_cleaned_cm",
+    "head_y_cleaned_cm",
+    "body_x_cleaned_cm",
+    "body_y_cleaned_cm",
 )
 OUTPUT_COLUMNS = (
     "epoch",
     "frame",
     "frame_time_s",
-    "head_x",
-    "head_y",
-    "body_x",
-    "body_y",
+    "head_x_cm",
+    "head_y_cm",
+    "body_x_cm",
+    "body_y_cm",
 )
 
 
@@ -79,17 +79,17 @@ def _validate_epoch_table(
             "epoch",
             "frame",
             "frame_time_s",
-            "head_x_cleaned",
-            "head_y_cleaned",
-            "body_x_cleaned",
-            "body_y_cleaned",
+            "head_x_cleaned_cm",
+            "head_y_cleaned_cm",
+            "body_x_cleaned_cm",
+            "body_y_cleaned_cm",
         ],
     ].rename(
         columns={
-            "head_x_cleaned": "head_x",
-            "head_y_cleaned": "head_y",
-            "body_x_cleaned": "body_x",
-            "body_y_cleaned": "body_y",
+            "head_x_cleaned_cm": "head_x_cm",
+            "head_y_cleaned_cm": "head_y_cm",
+            "body_x_cleaned_cm": "body_x_cm",
+            "body_y_cleaned_cm": "body_y_cm",
         }
     )
     return epoch, curated

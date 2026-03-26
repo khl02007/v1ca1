@@ -33,6 +33,14 @@ DEFAULT_POSITION_OFFSET = 10
 DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
 DEFAULT_SPEED_SIGMA_S = 0.1
 DEFAULT_PLACE_BIN_SIZE_CM = 4.0
+DEFAULT_CLEAN_DLC_POSITION_DIRNAME = "dlc_position_cleaned"
+DEFAULT_CLEAN_DLC_POSITION_NAME = "position.parquet"
+POSITION_SOURCE_CHOICES = (
+    "auto",
+    "clean_dlc_head",
+    "position",
+    "body_position",
+)
 
 REGIONS = ("v1", "ca1")
 TRAJECTORY_TYPES = (
@@ -349,10 +357,28 @@ def load_position_data(
     return {epoch: normalized_position_dict[epoch] for epoch in epoch_tags}
 
 
+def load_available_position_pickle_data(
+    analysis_path: Path,
+    input_name: str = "position.pkl",
+) -> dict[str, np.ndarray]:
+    """Load one saved per-epoch XY pickle without enforcing epoch alignment."""
+    input_path = analysis_path / input_name
+    if not input_path.exists():
+        raise FileNotFoundError(f"Position file not found: {input_path}")
+
+    with open(input_path, "rb") as file:
+        position_dict = pickle.load(file)
+
+    return {
+        str(epoch): coerce_position_array(value)
+        for epoch, value in position_dict.items()
+    }
+
+
 def load_clean_dlc_position_data(
     analysis_path: Path,
-    input_dirname: str = "dlc_position_cleaned",
-    input_name: str = "position.parquet",
+    input_dirname: str = DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     validate_timestamps: bool = True,
 ) -> tuple[list[str], dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Load one combined cleaned DLC parquet and split it into per-epoch XY arrays."""
@@ -367,10 +393,10 @@ def load_clean_dlc_position_data(
         "epoch",
         "frame",
         "frame_time_s",
-        "head_x",
-        "head_y",
-        "body_x",
-        "body_y",
+        "head_x_cm",
+        "head_y_cm",
+        "body_x_cm",
+        "body_y_cm",
     )
     missing_columns = [column for column in required_columns if column not in table.columns]
     if missing_columns:
@@ -416,10 +442,67 @@ def load_clean_dlc_position_data(
                     f"for epoch {epoch!r}."
                 )
 
-        head_position[epoch] = epoch_table[["head_x", "head_y"]].to_numpy(dtype=float)
-        body_position[epoch] = epoch_table[["body_x", "body_y"]].to_numpy(dtype=float)
+        head_position[epoch] = epoch_table[["head_x_cm", "head_y_cm"]].to_numpy(dtype=float)
+        body_position[epoch] = epoch_table[["body_x_cm", "body_y_cm"]].to_numpy(dtype=float)
 
     return epoch_order, head_position, body_position
+
+
+def load_position_data_with_precedence(
+    analysis_path: Path,
+    *,
+    position_source: str = "auto",
+    clean_dlc_input_dirname: str = DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
+    validate_timestamps: bool = True,
+) -> tuple[dict[str, np.ndarray], str]:
+    """Load one preferred per-epoch XY source for a session.
+
+    The default `auto` mode prefers combined cleaned DLC head position, then
+    falls back to `position.pkl`, then `body_position.pkl`.
+    """
+    if position_source not in POSITION_SOURCE_CHOICES:
+        raise ValueError(
+            f"Unknown position_source {position_source!r}. "
+            f"Expected one of {POSITION_SOURCE_CHOICES!r}."
+        )
+
+    clean_dlc_path = analysis_path / clean_dlc_input_dirname / clean_dlc_input_name
+    position_path = analysis_path / "position.pkl"
+    body_position_path = analysis_path / "body_position.pkl"
+
+    if position_source in {"auto", "clean_dlc_head"} and clean_dlc_path.exists():
+        epoch_order, head_position, _body_position = load_clean_dlc_position_data(
+            analysis_path,
+            input_dirname=clean_dlc_input_dirname,
+            input_name=clean_dlc_input_name,
+            validate_timestamps=validate_timestamps,
+        )
+        return {epoch: head_position[epoch] for epoch in epoch_order}, str(clean_dlc_path)
+
+    if position_source in {"auto", "position"} and position_path.exists():
+        return load_available_position_pickle_data(
+            analysis_path,
+            input_name=position_path.name,
+        ), str(position_path)
+
+    if position_source in {"auto", "body_position"} and body_position_path.exists():
+        return load_available_position_pickle_data(
+            analysis_path,
+            input_name=body_position_path.name,
+        ), str(body_position_path)
+
+    if position_source == "clean_dlc_head":
+        raise FileNotFoundError(f"Combined cleaned DLC position file not found: {clean_dlc_path}")
+    if position_source == "position":
+        raise FileNotFoundError(f"Position file not found: {position_path}")
+    if position_source == "body_position":
+        raise FileNotFoundError(f"Body position file not found: {body_position_path}")
+
+    raise FileNotFoundError(
+        "Could not find cleaned DLC position, position.pkl, or body_position.pkl under "
+        f"{analysis_path}. Expected one of {clean_dlc_path}, {position_path}, or {body_position_path}."
+    )
 
 
 def _get_interval_metadata_values(
@@ -447,44 +530,59 @@ def load_trajectory_intervals(
     analysis_path: Path,
     run_epochs: list[str],
 ) -> tuple[dict[str, dict[str, "nap.IntervalSet"]], str]:
-    """Load trajectory intervals per epoch and trajectory, preferring `trajectory_times.npz`."""
+    """Load trajectory intervals per epoch and trajectory, preferring parquet."""
     import pynapple as nap
+    import pandas as pd
 
-    npz_path = analysis_path / "trajectory_times.npz"
-    npz_error: Exception | None = None
-    if npz_path.exists():
+    parquet_path = analysis_path / "trajectory_times.parquet"
+    parquet_error: Exception | None = None
+    if parquet_path.exists():
         try:
-            trajectory_intervals = nap.load_file(npz_path)
-            epochs = _get_interval_metadata_values(trajectory_intervals, "epoch").astype(str)
-            trajectory_types = _get_interval_metadata_values(
-                trajectory_intervals,
-                "trajectory_type",
-            ).astype(str)
-            starts = np.asarray(trajectory_intervals.start, dtype=float)
-            ends = np.asarray(trajectory_intervals.end, dtype=float)
+            trajectory_table = pd.read_parquet(parquet_path)
+            required_columns = {"start", "end", "epoch", "trajectory_type"}
+            missing_columns = required_columns.difference(trajectory_table.columns)
+            if missing_columns:
+                raise ValueError(
+                    "trajectory_times.parquet is missing required columns: "
+                    f"{sorted(missing_columns)!r}."
+                )
+
+            trajectory_table = trajectory_table.loc[
+                :,
+                ["start", "end", "epoch", "trajectory_type"],
+            ].copy()
+            trajectory_table["start"] = trajectory_table["start"].astype(float)
+            trajectory_table["end"] = trajectory_table["end"].astype(float)
+            trajectory_table["epoch"] = trajectory_table["epoch"].astype(str)
+            trajectory_table["trajectory_type"] = trajectory_table["trajectory_type"].astype(
+                str
+            )
 
             intervals_by_epoch: dict[str, dict[str, nap.IntervalSet]] = {}
             for epoch in run_epochs:
                 intervals_by_epoch[epoch] = {}
                 for trajectory_type in TRAJECTORY_TYPES:
-                    mask = (epochs == epoch) & (trajectory_types == trajectory_type)
+                    interval_rows = trajectory_table.loc[
+                        (trajectory_table["epoch"] == epoch)
+                        & (trajectory_table["trajectory_type"] == trajectory_type),
+                        ["start", "end"],
+                    ].reset_index(drop=True)
                     intervals_by_epoch[epoch][trajectory_type] = nap.IntervalSet(
-                        start=starts[mask],
-                        end=ends[mask],
+                        interval_rows,
                         time_units="s",
                     )
-            return intervals_by_epoch, "pynapple"
+            return intervals_by_epoch, "parquet"
         except Exception as exc:
-            npz_error = exc
+            parquet_error = exc
 
     pickle_path = analysis_path / "trajectory_times.pkl"
     if not pickle_path.exists():
-        if npz_error is not None:
+        if parquet_error is not None:
             raise ValueError(
-                f"Failed to load {npz_path} and no pickle fallback was found."
-            ) from npz_error
+                f"Failed to load {parquet_path} and no pickle fallback was found."
+            ) from parquet_error
         raise FileNotFoundError(
-            f"Could not find trajectory_times.npz or trajectory_times.pkl under {analysis_path}."
+            f"Could not find trajectory_times.parquet or trajectory_times.pkl under {analysis_path}."
         )
 
     with open(pickle_path, "rb") as f:
@@ -507,6 +605,26 @@ def load_trajectory_intervals(
                 time_units="s",
             )
     return intervals_by_epoch, "pickle"
+
+
+def load_trajectory_time_bounds(
+    analysis_path: Path,
+    run_epochs: list[str],
+) -> tuple[dict[str, dict[str, np.ndarray]], str]:
+    """Load trajectory intervals and return `(n, 2)` float arrays per epoch/type."""
+    trajectory_intervals, source = load_trajectory_intervals(analysis_path, run_epochs)
+    trajectory_times: dict[str, dict[str, np.ndarray]] = {}
+    for epoch in run_epochs:
+        trajectory_times[epoch] = {}
+        for trajectory_type in TRAJECTORY_TYPES:
+            starts, ends = _extract_interval_bounds_from_intervalset(
+                trajectory_intervals[epoch][trajectory_type]
+            )
+            if starts.size == 0:
+                trajectory_times[epoch][trajectory_type] = np.empty((0, 2), dtype=float)
+            else:
+                trajectory_times[epoch][trajectory_type] = np.column_stack((starts, ends))
+    return trajectory_times, source
 
 
 def get_position_sampling_rate(timestamps_position: np.ndarray) -> float:

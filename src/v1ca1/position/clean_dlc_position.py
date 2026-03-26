@@ -12,7 +12,9 @@ import pandas as pd
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_NWB_ROOT,
     get_analysis_path,
+    get_run_epochs,
     load_position_timestamps,
 )
 from v1ca1.position.fuse_head_position_imu import load_dlc_bodypart
@@ -27,6 +29,157 @@ DEFAULT_MIN_JUMP_THRESHOLD_PX = 25.0
 DEFAULT_LIKELIHOOD_LOSS_Z = 8.0
 DEFAULT_MIN_PAIR_DISTANCE_THRESHOLD_PX = 50.0
 DEFAULT_PAIR_DISTANCE_Z = 10.0
+CM_PER_M = 100.0
+CM_COLUMN_RENAMES = {
+    "head_x_raw": "head_x_raw_cm",
+    "head_y_raw": "head_y_raw_cm",
+    "head_x_cleaned": "head_x_cleaned_cm",
+    "head_y_cleaned": "head_y_cleaned_cm",
+    "head_step_prev_px": "head_step_prev_cm",
+    "head_step_next_px": "head_step_next_cm",
+    "body_x_raw": "body_x_raw_cm",
+    "body_y_raw": "body_y_raw_cm",
+    "body_x_cleaned": "body_x_cleaned_cm",
+    "body_y_cleaned": "body_y_cleaned_cm",
+    "body_step_prev_px": "body_step_prev_cm",
+    "body_step_next_px": "body_step_next_cm",
+    "head_body_distance_px": "head_body_distance_cm",
+}
+
+
+def _validate_meters_per_pixel(meters_per_pixel: float) -> float:
+    """Return one validated meters-per-pixel scale."""
+    scale = float(meters_per_pixel)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("--meters-per-pixel must be a positive finite value.")
+    return scale
+
+
+def _extract_nwb_epoch_tags(nwbfile: Any) -> list[str]:
+    """Extract ordered epoch tags from one NWB file."""
+    if nwbfile.epochs is None:
+        raise ValueError("NWB file does not contain an epochs table.")
+
+    epochs = nwbfile.epochs[:]
+    epoch_tags: list[str] = []
+    for row_tags in epochs["tags"]:
+        if len(row_tags) != 1:
+            raise ValueError(
+                "Expected exactly one tag per NWB epoch row, "
+                f"found {len(row_tags)} tags: {row_tags!r}"
+            )
+        epoch_tags.append(str(row_tags[0]))
+
+    if not epoch_tags:
+        raise ValueError("NWB epochs table is empty.")
+    return epoch_tags
+
+
+def _get_position_series_by_epoch(nwbfile: Any) -> tuple[dict[str, tuple[str, Any]], str]:
+    """Return one epoch-to-SpatialSeries mapping from the NWB behavior/position module."""
+    behavior = nwbfile.processing.get("behavior")
+    if behavior is None:
+        raise ValueError("NWB file does not contain a behavior processing module.")
+    if "position" not in behavior.data_interfaces:
+        raise ValueError("NWB behavior module does not contain a position interface.")
+
+    position = behavior.data_interfaces["position"]
+    spatial_series = getattr(position, "spatial_series", None)
+    if spatial_series is None or len(spatial_series) == 0:
+        raise ValueError("NWB behavior/position does not contain any spatial series.")
+
+    epoch_tags = _extract_nwb_epoch_tags(nwbfile)
+    series_items = list(spatial_series.items())
+
+    if len(series_items) == len(epoch_tags):
+        mapped_epochs = epoch_tags
+        mapping_mode = "all_epochs"
+    else:
+        run_epochs = get_run_epochs(epoch_tags)
+        if len(series_items) != len(run_epochs):
+            raise ValueError(
+                "Could not map NWB position spatial series to session epochs: "
+                f"{len(series_items)} spatial series, {len(epoch_tags)} total epochs, "
+                f"{len(run_epochs)} run epochs."
+            )
+        mapped_epochs = run_epochs
+        mapping_mode = "run_epochs"
+
+    return {
+        epoch: (series_name, series)
+        for epoch, (series_name, series) in zip(mapped_epochs, series_items, strict=True)
+    }, mapping_mode
+
+
+def _resolve_position_scale(
+    animal_name: str,
+    date: str,
+    epoch: str,
+    meters_per_pixel: float | None,
+    nwb_root: Path,
+) -> dict[str, float | str | None | Path]:
+    """Resolve one per-epoch position scale from the CLI or NWB metadata."""
+    if meters_per_pixel is not None:
+        scale = _validate_meters_per_pixel(meters_per_pixel)
+        return {
+            "meters_per_pixel": scale,
+            "cm_per_pixel": scale * CM_PER_M,
+            "position_scale_source": "cli",
+            "position_scale_epoch_mapping": None,
+            "position_scale_series_name": None,
+            "nwb_path": None,
+        }
+
+    import pynwb
+
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+    if not nwb_path.exists():
+        raise FileNotFoundError(f"NWB file not found: {nwb_path}")
+
+    with pynwb.NWBHDF5IO(nwb_path, "r", load_namespaces=True) as io:
+        nwbfile = io.read()
+        position_series_by_epoch, mapping_mode = _get_position_series_by_epoch(nwbfile)
+
+    if epoch not in position_series_by_epoch:
+        raise ValueError(
+            f"Could not resolve a position scale for epoch {epoch!r} from {nwb_path}. "
+            f"Available mapped epochs: {sorted(position_series_by_epoch)!r}. "
+            "Pass --meters-per-pixel explicitly for this epoch."
+        )
+
+    series_name, spatial_series = position_series_by_epoch[epoch]
+    unit = str(getattr(spatial_series, "unit", "") or "")
+    if unit != "meters":
+        raise ValueError(
+            "NWB position spatial series must use meter units to derive meters-per-pixel. "
+            f"Found unit {unit!r} for epoch {epoch!r} in series {series_name!r}."
+        )
+
+    conversion = getattr(spatial_series, "conversion", None)
+    if conversion is None:
+        raise ValueError(
+            f"NWB position spatial series {series_name!r} does not define a conversion value."
+        )
+    scale = _validate_meters_per_pixel(float(conversion))
+    return {
+        "meters_per_pixel": scale,
+        "cm_per_pixel": scale * CM_PER_M,
+        "position_scale_source": "nwb",
+        "position_scale_epoch_mapping": mapping_mode,
+        "position_scale_series_name": series_name,
+        "nwb_path": nwb_path,
+    }
+
+
+def _convert_output_table_to_cm(
+    output_table: pd.DataFrame,
+    cm_per_pixel: float,
+) -> pd.DataFrame:
+    """Return one saved output table converted from pixels to centimeters."""
+    converted = output_table.rename(columns=CM_COLUMN_RENAMES).copy()
+    for column in CM_COLUMN_RENAMES.values():
+        converted[column] = converted[column].to_numpy(dtype=float) * float(cm_per_pixel)
+    return converted
 
 
 def _step_prev_next(values_x: np.ndarray, values_y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -599,10 +752,10 @@ def save_before_after_position_figure(
 
     figure, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
     panels = (
-        ("Head Before", "head_x_raw", "head_y_raw"),
-        ("Head After", "head_x_cleaned", "head_y_cleaned"),
-        ("Body Before", "body_x_raw", "body_y_raw"),
-        ("Body After", "body_x_cleaned", "body_y_cleaned"),
+        ("Head Before", "head_x_raw_cm", "head_y_raw_cm"),
+        ("Head After", "head_x_cleaned_cm", "head_y_cleaned_cm"),
+        ("Body Before", "body_x_raw_cm", "body_y_raw_cm"),
+        ("Body After", "body_x_cleaned_cm", "body_y_cleaned_cm"),
     )
     for axis, (title, x_column, y_column) in zip(axes.reshape(-1), panels):
         axis.plot(
@@ -612,8 +765,8 @@ def save_before_after_position_figure(
             alpha=0.9,
         )
         axis.set_title(title)
-        axis.set_xlabel("x (px)")
-        axis.set_ylabel("y (px)")
+        axis.set_xlabel("x (cm)")
+        axis.set_ylabel("y (cm)")
         axis.set_aspect("equal", adjustable="box")
 
     figure.suptitle(f"{epoch} head/body position before/after cleaning")
@@ -629,10 +782,12 @@ def clean_dlc_position(
     epoch: str,
     dlc_h5_path: Path,
     data_root: Path = DEFAULT_DATA_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
     output_dirname: str = DEFAULT_OUTPUT_DIRNAME,
     output_name_template: str = DEFAULT_OUTPUT_NAME_TEMPLATE,
     threshold_z: float = DEFAULT_THRESHOLD_Z,
     min_jump_threshold_px: float = DEFAULT_MIN_JUMP_THRESHOLD_PX,
+    meters_per_pixel: float | None = None,
 ) -> Path:
     """Clean one epoch's head/body DLC tracks and save one per-epoch parquet."""
     analysis_path = get_analysis_path(
@@ -675,8 +830,19 @@ def clean_dlc_position(
         min_jump_threshold_px=min_jump_threshold_px,
     )
 
+    scale_metadata = _resolve_position_scale(
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        meters_per_pixel=meters_per_pixel,
+        nwb_root=nwb_root,
+    )
     output_table = diagnostics.copy()
     output_table.insert(0, "epoch", epoch)
+    output_table = _convert_output_table_to_cm(
+        output_table=output_table,
+        cm_per_pixel=float(scale_metadata["cm_per_pixel"]),
+    )
 
     output_dir = analysis_path / output_dirname
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -698,10 +864,12 @@ def clean_dlc_position(
             "epoch": epoch,
             "dlc_h5_path": dlc_h5_path,
             "data_root": data_root,
+            "nwb_root": nwb_root,
             "output_dirname": output_dirname,
             "output_name_template": output_name_template,
             "threshold_z": threshold_z,
             "min_jump_threshold_px": min_jump_threshold_px,
+            "meters_per_pixel": meters_per_pixel,
         },
         outputs={
             "position_timestamp_source": timestamp_source,
@@ -709,6 +877,7 @@ def clean_dlc_position(
             "cleaned_output_path": output_path,
             "figure_path": figure_path,
             "cleaning_metadata": cleaning_metadata,
+            **scale_metadata,
         },
     )
     print(f"Saved cleaned head/body position parquet to {output_path}")
@@ -750,6 +919,12 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
     )
     parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
         "--output-dirname",
         default=DEFAULT_OUTPUT_DIRNAME,
         help=(
@@ -777,6 +952,15 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_MIN_JUMP_THRESHOLD_PX,
         help=f"Hard lower bound on the jump threshold in pixels. Default: {DEFAULT_MIN_JUMP_THRESHOLD_PX}",
     )
+    parser.add_argument(
+        "--meters-per-pixel",
+        type=float,
+        default=None,
+        help=(
+            "Explicit pixel scale in meters per pixel. When omitted, the script "
+            "looks for an epoch-matched scale in the NWB behavior/position metadata."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -789,10 +973,12 @@ def main() -> None:
         epoch=args.epoch,
         dlc_h5_path=args.dlc_h5_path,
         data_root=args.data_root,
+        nwb_root=args.nwb_root,
         output_dirname=args.output_dirname,
         output_name_template=args.output_name_template,
         threshold_z=args.threshold_z,
         min_jump_threshold_px=args.min_jump_threshold_px,
+        meters_per_pixel=args.meters_per_pixel,
     )
 
 

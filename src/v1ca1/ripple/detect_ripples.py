@@ -3,12 +3,11 @@ from __future__ import annotations
 """Detect hippocampal ripples for one session.
 
 This modernized CLI replaces the legacy ripple-detection lab script with
-validated session loading, explicit CLI arguments, legacy-compatible detector
-pickles, and modern pynapple outputs under the session analysis directory.
+validated session loading, explicit CLI arguments, and modern pynapple outputs
+under the session analysis directory.
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -16,15 +15,13 @@ import numpy as np
 
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
     DEFAULT_DATA_ROOT,
     DEFAULT_NWB_ROOT,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_SIGMA_S,
     get_analysis_path,
-    load_ephys_timestamps_all,
-    load_ephys_timestamps_by_epoch,
-    load_position_data,
-    load_position_timestamps,
 )
 from v1ca1.ripple._channels import get_session_ripple_channels
 
@@ -40,6 +37,9 @@ DEFAULT_NOTCH_BASE_FREQ = 60.0
 DEFAULT_NOTCH_HARMONICS = 10
 DEFAULT_NOTCH_QUALITY = 50.0
 DEFAULT_ENABLE_NOTCH_FILTER = True
+LFP_CACHE_DIRNAME = "ripple_channels_lfp"
+LFP_CACHE_FORMAT = "ripple_channels_lfp_netcdf"
+LFP_CACHE_FORMAT_VERSION = 1
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -137,6 +137,31 @@ def validate_selected_epochs_across_sources(
         )
 
 
+def select_speed_gated_epochs(
+    available_epochs: list[str],
+    *,
+    requested_epochs: list[str] | None,
+    position_timestamp_epochs: dict[str, np.ndarray],
+    clean_dlc_epochs: list[str],
+) -> list[str]:
+    """Select speed-gated epochs, filtering incomplete epochs only for implicit runs."""
+    if requested_epochs is not None:
+        return validate_epochs(available_epochs, requested_epochs)
+
+    clean_dlc_epoch_set = set(clean_dlc_epochs)
+    selected_epochs = [
+        epoch
+        for epoch in available_epochs
+        if epoch in position_timestamp_epochs and epoch in clean_dlc_epoch_set
+    ]
+    if not selected_epochs:
+        raise ValueError(
+            "No epochs have both cleaned position data and position timestamps for "
+            "speed-gated ripple detection."
+        )
+    return selected_epochs
+
+
 def validate_ripple_channels(channels: list[int]) -> list[int]:
     """Return a validated list of ripple channel ids."""
     if not channels:
@@ -160,19 +185,408 @@ def get_ripple_channels_for_session(animal_name: str, date: str) -> list[int]:
 
 
 def get_output_paths(output_dir: Path, use_speed_gating: bool) -> dict[str, Path]:
-    """Return the legacy and modern output paths for one detector mode."""
+    """Return the ripple event-table and LFP cache paths for one detector mode."""
     output_dir.mkdir(parents=True, exist_ok=True)
     if use_speed_gating:
-        legacy_pickle = output_dir / "Kay_ripple_detector.pkl"
         stem = "ripple_times"
     else:
-        legacy_pickle = output_dir / "Kay_ripple_detector_no_speed.pkl"
         stem = "ripple_times_no_speed"
     return {
-        "legacy_pickle": legacy_pickle,
-        "interval_npz": output_dir / f"{stem}.npz",
-        "lfp_cache": output_dir / "ripple_channels_lfp.pkl",
+        "interval_parquet": output_dir / f"{stem}.parquet",
+        "lfp_cache_dir": output_dir / LFP_CACHE_DIRNAME,
     }
+
+
+def get_epoch_lfp_cache_path(cache_dir: Path, epoch: str) -> Path:
+    """Return the NetCDF cache path for one epoch."""
+    return cache_dir / f"{epoch}_ripple_channels_lfp.nc"
+
+
+def build_epoch_lfp_dataset(
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    timestamps: np.ndarray,
+    filtered_lfp: np.ndarray,
+    sampling_frequency: float,
+    channel_ids: list[int],
+    enable_notch_filter: bool,
+):
+    """Build one epoch-level ripple-band LFP cache dataset."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "xarray is required to store ripple-band LFP caches as NetCDF files."
+        ) from exc
+
+    time_array = np.asarray(timestamps, dtype=float)
+    lfp_array = np.asarray(filtered_lfp, dtype=float)
+    channel_array = np.asarray(channel_ids, dtype=int)
+    if lfp_array.ndim != 2:
+        raise ValueError(
+            f"filtered_lfp must be a 2D array, got shape {lfp_array.shape} for epoch {epoch!r}."
+        )
+    if time_array.ndim != 1:
+        raise ValueError(f"timestamps must be 1D, got shape {time_array.shape} for epoch {epoch!r}.")
+    if lfp_array.shape[0] != time_array.size:
+        raise ValueError(
+            "filtered_lfp sample count does not match timestamps for epoch "
+            f"{epoch!r}: {lfp_array.shape[0]} vs {time_array.size}."
+        )
+    if lfp_array.shape[1] != channel_array.size:
+        raise ValueError(
+            "filtered_lfp channel count does not match channel_ids for epoch "
+            f"{epoch!r}: {lfp_array.shape[1]} vs {channel_array.size}."
+        )
+
+    return xr.Dataset(
+        data_vars={
+            "filtered_lfp": (("sample", "channel"), lfp_array),
+            "sampling_frequency_hz": ((), float(sampling_frequency)),
+        },
+        coords={
+            "time": ("sample", time_array),
+            "channel": ("channel", channel_array),
+        },
+        attrs={
+            "animal_name": str(animal_name),
+            "date": str(date),
+            "epoch": str(epoch),
+            "notch_filter_enabled": int(bool(enable_notch_filter)),
+            "notch_base_freq_hz": float(DEFAULT_NOTCH_BASE_FREQ),
+            "notch_harmonics": int(DEFAULT_NOTCH_HARMONICS),
+            "notch_quality": float(DEFAULT_NOTCH_QUALITY),
+            "lowcut_hz": float(DEFAULT_LOWCUT_HZ),
+            "highcut_hz": float(DEFAULT_HIGHCUT_HZ),
+            "target_sampling_frequency_hz": float(DEFAULT_TARGET_NEW_SAMPLING_FREQUENCY),
+            "cache_format": LFP_CACHE_FORMAT,
+            "cache_format_version": int(LFP_CACHE_FORMAT_VERSION),
+        },
+    )
+
+
+def save_epoch_lfp_dataset(path: Path, dataset: Any) -> Path:
+    """Save one epoch-level ripple-band LFP cache as NetCDF."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_netcdf(path, engine="scipy")
+    return path
+
+
+def load_epoch_lfp_dataset(path: Path):
+    """Load one epoch-level ripple-band LFP cache dataset."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "xarray is required to load ripple-band LFP caches stored as NetCDF files."
+        ) from exc
+    return xr.load_dataset(path, engine="scipy")
+
+
+def epoch_lfp_dataset_matches_request(
+    dataset: Any,
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    channel_ids: list[int],
+    enable_notch_filter: bool,
+) -> bool:
+    """Return whether one cached epoch dataset matches the current request."""
+    if "filtered_lfp" not in dataset.data_vars or "sampling_frequency_hz" not in dataset.data_vars:
+        return False
+    if "time" not in dataset.coords or "channel" not in dataset.coords:
+        return False
+    if "sample" not in dataset.dims or "channel" not in dataset.dims:
+        return False
+
+    filtered_lfp = np.asarray(dataset["filtered_lfp"].values, dtype=float)
+    time_array = np.asarray(dataset["time"].values, dtype=float)
+    channel_array = np.asarray(dataset["channel"].values, dtype=int)
+    if filtered_lfp.ndim != 2:
+        return False
+    if time_array.ndim != 1:
+        return False
+    if filtered_lfp.shape[0] != time_array.size:
+        return False
+    if filtered_lfp.shape[1] != channel_array.size:
+        return False
+    if list(channel_array.tolist()) != list(channel_ids):
+        return False
+
+    attrs = dataset.attrs
+    if attrs.get("cache_format") != LFP_CACHE_FORMAT:
+        return False
+    if int(attrs.get("cache_format_version", -1)) != LFP_CACHE_FORMAT_VERSION:
+        return False
+    if str(attrs.get("animal_name")) != str(animal_name):
+        return False
+    if str(attrs.get("date")) != str(date):
+        return False
+    if str(attrs.get("epoch")) != str(epoch):
+        return False
+    if int(attrs.get("notch_filter_enabled", -1)) != int(bool(enable_notch_filter)):
+        return False
+    if float(attrs.get("notch_base_freq_hz", np.nan)) != float(DEFAULT_NOTCH_BASE_FREQ):
+        return False
+    if int(attrs.get("notch_harmonics", -1)) != int(DEFAULT_NOTCH_HARMONICS):
+        return False
+    if float(attrs.get("notch_quality", np.nan)) != float(DEFAULT_NOTCH_QUALITY):
+        return False
+    if float(attrs.get("lowcut_hz", np.nan)) != float(DEFAULT_LOWCUT_HZ):
+        return False
+    if float(attrs.get("highcut_hz", np.nan)) != float(DEFAULT_HIGHCUT_HZ):
+        return False
+    if float(attrs.get("target_sampling_frequency_hz", np.nan)) != float(
+        DEFAULT_TARGET_NEW_SAMPLING_FREQUENCY
+    ):
+        return False
+    return True
+
+
+def _extract_interval_dataframe(intervals: Any):
+    """Return a dataframe-like view of a pynapple IntervalSet."""
+    if hasattr(intervals, "as_dataframe"):
+        return intervals.as_dataframe()
+    if hasattr(intervals, "_metadata"):
+        return intervals._metadata.copy()  # type: ignore[attr-defined]
+    raise ValueError("Could not read metadata from timestamps_ephys.npz.")
+
+
+def _extract_epoch_tags_from_intervalset(epoch_intervals: Any) -> list[str]:
+    """Extract saved epoch labels from a pynapple IntervalSet."""
+    try:
+        epoch_info = epoch_intervals.get_info("epoch")
+    except Exception:
+        epoch_info = None
+
+    if epoch_info is not None:
+        epoch_array = np.asarray(epoch_info)
+        if epoch_array.size:
+            return [str(epoch) for epoch in epoch_array.tolist()]
+
+    interval_df = _extract_interval_dataframe(epoch_intervals)
+    if "epoch" in interval_df.columns:
+        return [str(epoch) for epoch in interval_df["epoch"].tolist()]
+
+    raise ValueError("timestamps_ephys.npz does not contain saved epoch labels.")
+
+
+def _extract_interval_bounds_from_intervalset(
+    intervals: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract aligned start/end arrays from a pynapple IntervalSet."""
+    starts = np.asarray(intervals.start, dtype=float).ravel()
+    ends = np.asarray(intervals.end, dtype=float).ravel()
+    if starts.shape != ends.shape:
+        raise ValueError(
+            "timestamps_ephys.npz has mismatched start/end arrays: "
+            f"{starts.shape} vs {ends.shape}."
+        )
+    return starts, ends
+
+
+def _extract_epoch_tags_from_tsgroup(position_group: Any) -> list[str]:
+    """Extract saved epoch labels from a pynapple TsGroup."""
+    try:
+        epoch_info = position_group["epoch"]
+    except Exception:
+        epoch_info = None
+
+    if epoch_info is None:
+        raise ValueError("timestamps_position.npz does not contain the saved epoch labels.")
+
+    epoch_array = np.asarray(epoch_info)
+    if epoch_array.size == 0:
+        raise ValueError("timestamps_position.npz does not contain any saved epoch labels.")
+    return [str(epoch) for epoch in epoch_array.tolist()]
+
+
+def _load_required_npz(path: Path, artifact_name: str) -> Any:
+    """Load one required pynapple-backed `.npz` artifact."""
+    try:
+        import pynapple as nap
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            f"pynapple is required to read {artifact_name} for ripple detection."
+        ) from exc
+
+    if not path.exists():
+        raise FileNotFoundError(f"Required {artifact_name} not found: {path}")
+
+    try:
+        return nap.load_file(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to load required {artifact_name}: {path}") from exc
+
+
+def load_ephys_timestamps_all_npz(analysis_path: Path) -> np.ndarray:
+    """Load concatenated ephys timestamps from the required `.npz` export."""
+    npz_path = analysis_path / "timestamps_ephys_all.npz"
+    timestamps_all = _load_required_npz(npz_path, "timestamps_ephys_all.npz")
+    return np.asarray(timestamps_all.t, dtype=float)
+
+
+def load_ephys_timestamps_by_epoch_npz(
+    analysis_path: Path,
+) -> tuple[list[str], dict[str, np.ndarray]]:
+    """Load per-epoch ephys timestamps from the required `.npz` export."""
+    npz_path = analysis_path / "timestamps_ephys.npz"
+    epoch_intervals = _load_required_npz(npz_path, "timestamps_ephys.npz")
+    epoch_tags = _extract_epoch_tags_from_intervalset(epoch_intervals)
+    starts, ends = _extract_interval_bounds_from_intervalset(epoch_intervals)
+    if len(epoch_tags) != starts.size:
+        raise ValueError(f"Mismatch between epoch labels and saved epoch intervals in {npz_path}.")
+
+    timestamps_all = load_ephys_timestamps_all_npz(analysis_path)
+    timestamps_by_epoch: dict[str, np.ndarray] = {}
+    for epoch, start, end in zip(epoch_tags, starts, ends):
+        start_index = int(np.searchsorted(timestamps_all, float(start), side="left"))
+        end_index = int(np.searchsorted(timestamps_all, float(end), side="right"))
+        epoch_timestamps = np.asarray(timestamps_all[start_index:end_index], dtype=float)
+        if epoch_timestamps.size == 0:
+            raise ValueError(
+                "Could not reconstruct any ephys timestamps for epoch "
+                f"{epoch!r} from {npz_path}."
+            )
+        timestamps_by_epoch[epoch] = epoch_timestamps
+    return epoch_tags, timestamps_by_epoch
+
+
+def load_position_timestamps_npz(analysis_path: Path) -> tuple[list[str], dict[str, np.ndarray]]:
+    """Load per-epoch position timestamps from the required `.npz` export."""
+    npz_path = analysis_path / "timestamps_position.npz"
+    position_group = _load_required_npz(npz_path, "timestamps_position.npz")
+    epoch_tags = _extract_epoch_tags_from_tsgroup(position_group)
+    if len(epoch_tags) != len(position_group):
+        raise ValueError(
+            f"Mismatch between epoch labels and time series count in {npz_path}."
+        )
+    timestamps_position = {
+        epoch: np.asarray(position_group[index].t, dtype=float)
+        for index, epoch in enumerate(epoch_tags)
+    }
+    return epoch_tags, timestamps_position
+
+
+def load_clean_dlc_head_position(
+    analysis_path: Path,
+    *,
+    selected_epochs: list[str],
+    timestamps_position_by_epoch: dict[str, np.ndarray],
+) -> tuple[dict[str, np.ndarray], Path]:
+    """Load cleaned DLC head position from the combined session parquet."""
+    import pandas as pd
+
+    input_path = (
+        analysis_path
+        / DEFAULT_CLEAN_DLC_POSITION_DIRNAME
+        / DEFAULT_CLEAN_DLC_POSITION_NAME
+    )
+    if not input_path.exists():
+        raise FileNotFoundError(
+            "Combined cleaned DLC position file not found: "
+            f"{input_path}. Generate it with "
+            f"`python -m v1ca1.position.combine_clean_dlc_position --animal-name {analysis_path.parent.name} "
+            f"--date {analysis_path.name}`."
+        )
+
+    table = pd.read_parquet(input_path)
+    required_columns = (
+        "epoch",
+        "frame",
+        "frame_time_s",
+        "head_x_cm",
+        "head_y_cm",
+    )
+    missing_columns = [column for column in required_columns if column not in table.columns]
+    if missing_columns:
+        raise ValueError(
+            "Combined cleaned DLC position parquet is missing required columns: "
+            f"{missing_columns!r}"
+        )
+    if table.empty:
+        raise ValueError(f"Combined cleaned DLC position parquet is empty: {input_path}")
+
+    epoch_series = table["epoch"].astype(str)
+    available_epochs = set(epoch_series.tolist())
+    missing_epochs = [epoch for epoch in selected_epochs if epoch not in available_epochs]
+    if missing_epochs:
+        raise ValueError(
+            "Selected epochs are missing required session inputs. "
+            f"Missing epochs by source: clean_dlc_position: {missing_epochs!r}"
+        )
+
+    head_position: dict[str, np.ndarray] = {}
+    for epoch in selected_epochs:
+        epoch_table = table.loc[epoch_series == epoch].reset_index(drop=True)
+        frame_numbers = epoch_table["frame"].to_numpy(dtype=int)
+        if np.unique(frame_numbers).size != frame_numbers.size:
+            raise ValueError(
+                f"Combined cleaned DLC position contains duplicate frames for epoch {epoch!r}."
+            )
+        if frame_numbers.size > 1 and np.any(np.diff(frame_numbers) < 0):
+            raise ValueError(
+                f"Combined cleaned DLC position frames are not monotonic for epoch {epoch!r}."
+            )
+
+        frame_times = epoch_table["frame_time_s"].to_numpy(dtype=float)
+        expected_times = np.asarray(timestamps_position_by_epoch[epoch], dtype=float)
+        if frame_times.size != expected_times.size:
+            raise ValueError(
+                "Combined cleaned DLC position row count does not match saved position timestamps "
+                f"for epoch {epoch!r}: {frame_times.size} vs {expected_times.size}."
+            )
+        if not np.allclose(frame_times, expected_times, rtol=0.0, atol=1e-9):
+            raise ValueError(
+                "Combined cleaned DLC position timestamps do not match saved position timestamps "
+                f"for epoch {epoch!r}."
+            )
+
+        head_position[epoch] = epoch_table[["head_x_cm", "head_y_cm"]].to_numpy(dtype=float)
+
+    return head_position, input_path
+
+
+def load_available_clean_dlc_epochs(analysis_path: Path) -> tuple[list[str], Path]:
+    """Return the cleaned DLC epochs available in the combined session parquet."""
+    import pandas as pd
+
+    input_path = (
+        analysis_path
+        / DEFAULT_CLEAN_DLC_POSITION_DIRNAME
+        / DEFAULT_CLEAN_DLC_POSITION_NAME
+    )
+    if not input_path.exists():
+        raise FileNotFoundError(
+            "Combined cleaned DLC position file not found: "
+            f"{input_path}. Generate it with "
+            f"`python -m v1ca1.position.combine_clean_dlc_position --animal-name {analysis_path.parent.name} "
+            f"--date {analysis_path.name}`."
+        )
+
+    table = pd.read_parquet(input_path)
+    required_columns = (
+        "epoch",
+        "frame",
+        "frame_time_s",
+        "head_x_cm",
+        "head_y_cm",
+    )
+    missing_columns = [column for column in required_columns if column not in table.columns]
+    if missing_columns:
+        raise ValueError(
+            "Combined cleaned DLC position parquet is missing required columns: "
+            f"{missing_columns!r}"
+        )
+    if table.empty:
+        raise ValueError(f"Combined cleaned DLC position parquet is empty: {input_path}")
+
+    epoch_series = table["epoch"].astype(str)
+    available_epochs = list(dict.fromkeys(epoch_series.tolist()))
+    return available_epochs, input_path
 
 
 def get_recording(animal_name: str, date: str, nwb_root: Path):
@@ -310,7 +724,7 @@ def initialize_lfp_cache(
     *,
     enable_notch_filter: bool,
 ) -> dict[str, Any]:
-    """Return an empty ripple-band cache structure."""
+    """Return an empty in-memory ripple-band cache structure."""
     return {
         "time": {},
         "data": {},
@@ -323,59 +737,35 @@ def initialize_lfp_cache(
         "lowcut_hz": DEFAULT_LOWCUT_HZ,
         "highcut_hz": DEFAULT_HIGHCUT_HZ,
         "target_sampling_frequency_hz": DEFAULT_TARGET_NEW_SAMPLING_FREQUENCY,
+        "epoch_cache_actions": {},
     }
 
 
-def cache_matches_request(
+def record_lfp_cache_action(
     cache: dict[str, Any],
-    selected_epochs: list[str],
-    channel_ids: list[int],
     *,
-    enable_notch_filter: bool,
-) -> bool:
-    """Return whether an existing LFP cache can be reused for this request."""
-    if "time" not in cache or "data" not in cache or "fs" not in cache:
-        return False
-    stored_channels = cache.get("channel_ids")
-    if stored_channels is None:
-        return False
-    if list(stored_channels) != list(channel_ids):
-        return False
-    if bool(cache.get("notch_filter_enabled")) is not bool(enable_notch_filter):
-        return False
-    if cache.get("notch_base_freq_hz") != DEFAULT_NOTCH_BASE_FREQ:
-        return False
-    if cache.get("notch_harmonics") != DEFAULT_NOTCH_HARMONICS:
-        return False
-    if cache.get("notch_quality") != DEFAULT_NOTCH_QUALITY:
-        return False
-    return all(epoch in cache["time"] and epoch in cache["data"] and epoch in cache["fs"] for epoch in selected_epochs)
-
-
-def cache_channels_match(
-    cache: dict[str, Any],
-    channel_ids: list[int],
-    *,
-    enable_notch_filter: bool,
-) -> bool:
-    """Return whether an existing cache was built from the requested channels."""
-    stored_channels = cache.get("channel_ids")
-    if stored_channels is None:
-        return False
-    if bool(cache.get("notch_filter_enabled")) is not bool(enable_notch_filter):
-        return False
-    if cache.get("notch_base_freq_hz") != DEFAULT_NOTCH_BASE_FREQ:
-        return False
-    if cache.get("notch_harmonics") != DEFAULT_NOTCH_HARMONICS:
-        return False
-    if cache.get("notch_quality") != DEFAULT_NOTCH_QUALITY:
-        return False
-    return list(stored_channels) == list(channel_ids)
+    epoch: str,
+    action: str,
+    reason: str,
+    cache_path: Path,
+) -> None:
+    """Record and print one ripple LFP cache action for an epoch."""
+    cache["epoch_cache_actions"][epoch] = {
+        "action": str(action),
+        "reason": str(reason),
+        "cache_path": str(cache_path),
+    }
+    print(
+        f"Ripple LFP cache {action} for {epoch}: {reason}. "
+        f"Cache path: {cache_path}"
+    )
 
 
 def compute_or_load_ripple_lfp_cache(
     *,
-    cache_path: Path,
+    cache_dir: Path,
+    animal_name: str,
+    date: str,
     recording: Any,
     selected_epochs: list[str],
     timestamps_by_epoch: dict[str, np.ndarray],
@@ -385,40 +775,74 @@ def compute_or_load_ripple_lfp_cache(
     overwrite: bool,
 ) -> tuple[dict[str, Any], str]:
     """Load or compute the cached ripple-band LFP traces."""
-    cache: dict[str, Any] | None = None
-    if cache_path.exists():
-        with open(cache_path, "rb") as file:
-            loaded_cache = pickle.load(file)
-        if isinstance(loaded_cache, dict) and not overwrite:
-            if cache_matches_request(
-                loaded_cache,
-                selected_epochs,
-                channel_ids,
-                enable_notch_filter=enable_notch_filter,
-            ):
-                return loaded_cache, "existing_pickle"
-            if (
-                "time" in loaded_cache
-                and "data" in loaded_cache
-                and "fs" in loaded_cache
-                and cache_channels_match(
-                    loaded_cache,
-                    channel_ids,
-                    enable_notch_filter=enable_notch_filter,
-                )
-            ):
-                cache = loaded_cache
-
-    if cache is None or not isinstance(cache, dict):
-        cache = initialize_lfp_cache(channel_ids, enable_notch_filter=enable_notch_filter)
-    else:
-        cache["channel_ids"] = list(channel_ids)
-        cache["notch_filter_enabled"] = bool(enable_notch_filter)
-        cache["notch_base_freq_hz"] = DEFAULT_NOTCH_BASE_FREQ
-        cache["notch_harmonics"] = DEFAULT_NOTCH_HARMONICS
-        cache["notch_quality"] = DEFAULT_NOTCH_QUALITY
-
+    cache = initialize_lfp_cache(channel_ids, enable_notch_filter=enable_notch_filter)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     for epoch in selected_epochs:
+        cache_path = get_epoch_lfp_cache_path(cache_dir, epoch)
+        if overwrite:
+            if cache_path.exists():
+                record_lfp_cache_action(
+                    cache,
+                    epoch=epoch,
+                    action="recompute",
+                    reason="overwrite requested; existing cache will be replaced",
+                    cache_path=cache_path,
+                )
+            else:
+                record_lfp_cache_action(
+                    cache,
+                    epoch=epoch,
+                    action="compute",
+                    reason="overwrite requested and no existing cache was found",
+                    cache_path=cache_path,
+                )
+        elif cache_path.exists():
+            try:
+                dataset = load_epoch_lfp_dataset(cache_path)
+            except Exception as exc:
+                record_lfp_cache_action(
+                    cache,
+                    epoch=epoch,
+                    action="recompute",
+                    reason=f"existing cache could not be loaded ({type(exc).__name__}: {exc})",
+                    cache_path=cache_path,
+                )
+            else:
+                if epoch_lfp_dataset_matches_request(
+                    dataset,
+                    animal_name=animal_name,
+                    date=date,
+                    epoch=epoch,
+                    channel_ids=channel_ids,
+                    enable_notch_filter=enable_notch_filter,
+                ):
+                    cache["time"][epoch] = np.asarray(dataset["time"].values, dtype=float)
+                    cache["data"][epoch] = np.asarray(dataset["filtered_lfp"].values, dtype=float)
+                    cache["fs"][epoch] = float(dataset["sampling_frequency_hz"].values)
+                    record_lfp_cache_action(
+                        cache,
+                        epoch=epoch,
+                        action="reuse",
+                        reason="existing cache matches the current request",
+                        cache_path=cache_path,
+                    )
+                    continue
+                record_lfp_cache_action(
+                    cache,
+                    epoch=epoch,
+                    action="recompute",
+                    reason="existing cache does not match the current request",
+                    cache_path=cache_path,
+                )
+        else:
+            record_lfp_cache_action(
+                cache,
+                epoch=epoch,
+                action="compute",
+                reason="no existing cache was found",
+                cache_path=cache_path,
+            )
+
         timestamps_decimated, filtered_lfp, actual_fs, _ = filter_ripple_band_for_epoch(
             recording,
             epoch=epoch,
@@ -430,11 +854,19 @@ def compute_or_load_ripple_lfp_cache(
         cache["time"][epoch] = timestamps_decimated
         cache["data"][epoch] = filtered_lfp
         cache["fs"][epoch] = actual_fs
+        dataset = build_epoch_lfp_dataset(
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            timestamps=timestamps_decimated,
+            filtered_lfp=filtered_lfp,
+            sampling_frequency=actual_fs,
+            channel_ids=channel_ids,
+            enable_notch_filter=enable_notch_filter,
+        )
+        save_epoch_lfp_dataset(cache_path, dataset)
 
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cache_path, "wb") as file:
-        pickle.dump(cache, file)
-    return cache, "computed"
+    return cache, "netcdf"
 
 
 def compute_speed(
@@ -595,34 +1027,6 @@ def detect_ripples_for_epoch(
     return normalize_ripple_table(detector_result, epoch=epoch)
 
 
-def load_existing_ripple_tables(path: Path) -> dict[str, "pd.DataFrame"]:
-    """Load an existing legacy detector pickle into normalized dataframes."""
-    if not path.exists():
-        return {}
-
-    with open(path, "rb") as file:
-        loaded = pickle.load(file)
-    if not isinstance(loaded, dict):
-        raise ValueError(f"Existing ripple detector pickle is not a dictionary: {path}")
-
-    return {str(epoch): normalize_ripple_table(table, epoch=str(epoch)) for epoch, table in loaded.items()}
-
-
-def merge_ripple_tables(
-    epoch_order: list[str],
-    existing_tables: dict[str, "pd.DataFrame"],
-    updated_tables: dict[str, "pd.DataFrame"],
-) -> dict[str, "pd.DataFrame"]:
-    """Merge updated per-epoch detector tables with any existing saved results."""
-    combined = {**existing_tables, **updated_tables}
-    ordered_combined: dict[str, pd.DataFrame] = {}
-    remaining_epochs = [epoch for epoch in combined if epoch not in epoch_order]
-    for epoch in [*epoch_order, *sorted(remaining_epochs)]:
-        if epoch in combined:
-            ordered_combined[epoch] = combined[epoch]
-    return ordered_combined
-
-
 def flatten_ripple_tables(ripple_tables_by_epoch: dict[str, "pd.DataFrame"]) -> "pd.DataFrame":
     """Flatten per-epoch detector tables into one event table with an epoch column."""
     import pandas as pd
@@ -637,62 +1041,29 @@ def flatten_ripple_tables(ripple_tables_by_epoch: dict[str, "pd.DataFrame"]) -> 
         return pd.DataFrame(columns=["epoch", "start_time", "end_time"])
     return pd.concat(tables, ignore_index=True, sort=False)
 
-
-def save_legacy_detector_pickle(
-    path: Path,
-    ripple_tables_by_epoch: dict[str, "pd.DataFrame"],
-) -> Path:
-    """Write the legacy per-epoch ripple detector pickle."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as file:
-        pickle.dump(ripple_tables_by_epoch, file)
-    return path
-
-
-def _to_metadata_list(values: list[Any]) -> list[Any] | None:
-    """Convert one metadata column to pynapple-compatible scalar values."""
-    metadata_values: list[Any] = []
-    for value in values:
-        if isinstance(value, np.generic):
-            metadata_values.append(value.item())
-            continue
-        if value is None or isinstance(value, (str, bool, int, float)):
-            metadata_values.append(value)
-            continue
-        if isinstance(value, Path):
-            metadata_values.append(str(value))
-            continue
-        if np.isscalar(value):
-            metadata_values.append(value)
-            continue
-        return None
-    return metadata_values
-
-
 def save_ripple_interval_output(path: Path, flat_table: "pd.DataFrame") -> Path:
-    """Write the flattened ripple event table as one pynapple IntervalSet."""
-    import pynapple as nap
+    """Write the flattened ripple event table as one canonical parquet table."""
+    output_table = flat_table.copy()
+    rename_columns = {}
+    if "start_time" in output_table.columns:
+        rename_columns["start_time"] = "start"
+    if "end_time" in output_table.columns:
+        rename_columns["end_time"] = "end"
+    output_table = output_table.rename(columns=rename_columns)
 
-    start_array = np.asarray(flat_table["start_time"], dtype=float)
-    end_array = np.asarray(flat_table["end_time"], dtype=float)
-    interval_set = nap.IntervalSet(start=start_array, end=end_array, time_units="s")
+    preferred_columns = ["start", "end", "epoch"]
+    ordered_columns = [column for column in preferred_columns if column in output_table.columns]
+    ordered_columns.extend(
+        column for column in output_table.columns if column not in ordered_columns
+    )
+    output_table = output_table.loc[:, ordered_columns]
 
-    metadata: dict[str, list[Any]] = {}
-    if "epoch" in flat_table.columns:
-        metadata["epoch"] = [str(epoch) for epoch in flat_table["epoch"].tolist()]
-
-    for column_name in flat_table.columns:
-        if column_name in {"start_time", "end_time", "epoch"}:
-            continue
-        metadata_values = _to_metadata_list(flat_table[column_name].tolist())
-        if metadata_values is not None:
-            metadata[column_name] = metadata_values
-
-    if metadata:
-        interval_set.set_info(**metadata)
+    sort_columns = [column for column in ["start", "end", "epoch"] if column in output_table.columns]
+    if sort_columns:
+        output_table = output_table.sort_values(by=sort_columns, kind="mergesort").reset_index(drop=True)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    interval_set.save(path)
+    output_table.to_parquet(path, index=False)
     return path
 
 
@@ -738,27 +1109,57 @@ def get_ripple_times(
     if not analysis_path.exists():
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
-    epoch_tags, timestamps_ephys_by_epoch, ephys_source = load_ephys_timestamps_by_epoch(analysis_path)
-    timestamps_ephys_all, ephys_all_source = load_ephys_timestamps_all(analysis_path)
-    selected_epochs = validate_epochs(epoch_tags, epochs)
-    _, timestamps_position_by_epoch, position_timestamp_source = load_position_timestamps(
-        analysis_path
-    )
-    validate_selected_epochs_across_sources(
-        selected_epochs,
-        source_epochs={
-            "ephys_timestamps": timestamps_ephys_by_epoch,
-            "position_timestamps": timestamps_position_by_epoch,
-        },
-    )
-    position_by_epoch = load_position_data(analysis_path, selected_epochs)
-    channel_ids = get_ripple_channels_for_session(animal_name=animal_name, date=date)
+    epoch_tags, timestamps_ephys_by_epoch = load_ephys_timestamps_by_epoch_npz(analysis_path)
+    timestamps_ephys_all = load_ephys_timestamps_all_npz(analysis_path)
     use_speed_gating = not disable_speed_gating
+
+    timestamps_position_by_epoch: dict[str, np.ndarray] = {}
+    position_by_epoch: dict[str, np.ndarray] = {}
+    if use_speed_gating:
+        _position_epoch_tags, timestamps_position_by_epoch = load_position_timestamps_npz(
+            analysis_path
+        )
+        available_clean_dlc_epochs, position_source_path = load_available_clean_dlc_epochs(
+            analysis_path
+        )
+        selected_epochs = select_speed_gated_epochs(
+            epoch_tags,
+            requested_epochs=epochs,
+            position_timestamp_epochs=timestamps_position_by_epoch,
+            clean_dlc_epochs=available_clean_dlc_epochs,
+        )
+        validate_selected_epochs_across_sources(
+            selected_epochs,
+            source_epochs={
+                "ephys_timestamps": timestamps_ephys_by_epoch,
+                "position_timestamps": timestamps_position_by_epoch,
+                "clean_dlc_position": available_clean_dlc_epochs,
+            },
+        )
+        position_by_epoch, position_source_path = load_clean_dlc_head_position(
+            analysis_path,
+            selected_epochs=selected_epochs,
+            timestamps_position_by_epoch=timestamps_position_by_epoch,
+        )
+        position_timestamp_source = "npz"
+        position_source = str(position_source_path)
+    else:
+        selected_epochs = validate_epochs(epoch_tags, epochs)
+        validate_selected_epochs_across_sources(
+            selected_epochs,
+            source_epochs={"ephys_timestamps": timestamps_ephys_by_epoch},
+        )
+        position_timestamp_source = "not_required_disable_speed_gating"
+        position_source = "not_required_disable_speed_gating"
+
+    channel_ids = get_ripple_channels_for_session(animal_name=animal_name, date=date)
 
     output_paths = get_output_paths(analysis_path / "ripple", use_speed_gating=use_speed_gating)
     recording = get_recording(animal_name=animal_name, date=date, nwb_root=nwb_root)
     ripple_lfp_cache, lfp_cache_source = compute_or_load_ripple_lfp_cache(
-        cache_path=output_paths["lfp_cache"],
+        cache_dir=output_paths["lfp_cache_dir"],
+        animal_name=animal_name,
+        date=date,
         recording=recording,
         selected_epochs=selected_epochs,
         timestamps_by_epoch=timestamps_ephys_by_epoch,
@@ -781,12 +1182,8 @@ def get_ripple_times(
             use_speed_gating=use_speed_gating,
         )
 
-    existing_tables = load_existing_ripple_tables(output_paths["legacy_pickle"])
-    combined_tables = merge_ripple_tables(epoch_tags, existing_tables, updated_tables)
-    flat_table = flatten_ripple_tables(combined_tables)
-
-    legacy_pickle_path = save_legacy_detector_pickle(output_paths["legacy_pickle"], combined_tables)
-    interval_npz_path = save_ripple_interval_output(output_paths["interval_npz"], flat_table)
+    flat_table = flatten_ripple_tables(updated_tables)
+    interval_parquet_path = save_ripple_interval_output(output_paths["interval_parquet"], flat_table)
 
     epoch_summaries = build_epoch_summaries(
         selected_epochs=selected_epochs,
@@ -795,21 +1192,24 @@ def get_ripple_times(
         enable_notch_filter=enable_notch_filter,
     )
 
-    print(f"Saved legacy ripple detector pickle to {legacy_pickle_path}")
-    print(f"Saved ripple intervals to {interval_npz_path}")
+    print(f"Saved ripple intervals to {interval_parquet_path}")
 
     return {
         "analysis_path": analysis_path,
-        "legacy_pickle_path": legacy_pickle_path,
-        "interval_npz_path": interval_npz_path,
-        "lfp_cache_path": output_paths["lfp_cache"],
+        "interval_parquet_path": interval_parquet_path,
+        "lfp_cache_dir": output_paths["lfp_cache_dir"],
+        "lfp_cache_epoch_paths": {
+            epoch: get_epoch_lfp_cache_path(output_paths["lfp_cache_dir"], epoch)
+            for epoch in selected_epochs
+        },
         "sources": {
-            "timestamps_ephys": ephys_source,
-            "timestamps_ephys_all": ephys_all_source,
+            "timestamps_ephys": "npz",
+            "timestamps_ephys_all": "npz",
             "timestamps_position": position_timestamp_source,
-            "position": "pickle",
+            "position": position_source,
             "lfp_cache": lfp_cache_source,
         },
+        "lfp_cache_epoch_actions": dict(ripple_lfp_cache["epoch_cache_actions"]),
         "available_epochs": epoch_tags,
         "selected_epochs": selected_epochs,
         "epoch_summaries": epoch_summaries,
@@ -855,9 +1255,10 @@ def main() -> None:
         },
         outputs={
             "sources": result["sources"],
-            "saved_legacy_pickle": result["legacy_pickle_path"],
-            "saved_interval_npz": result["interval_npz_path"],
-            "saved_lfp_cache": result["lfp_cache_path"],
+            "saved_interval_parquet": result["interval_parquet_path"],
+            "saved_lfp_cache_dir": result["lfp_cache_dir"],
+            "saved_lfp_cache_epoch_paths": result["lfp_cache_epoch_paths"],
+            "lfp_cache_epoch_actions": result["lfp_cache_epoch_actions"],
             "available_epochs": result["available_epochs"],
             "selected_epochs": result["selected_epochs"],
             "epoch_summaries": result["epoch_summaries"],

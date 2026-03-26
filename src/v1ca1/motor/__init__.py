@@ -1,1 +1,4 @@
-"""Motor analysis subpackage."""
+"""Motor analysis subpackage.
+
+Legacy scripts live under :mod:`v1ca1.motor.legacy`.
+"""
