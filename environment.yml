@@ -24,14 +24,13 @@ dependencies:
 # Additional packages used by some analyses may need to be installed manually,
 # depending on which workflows you run and how your lab environment is managed:
 # - jax
-# - nemos
 # - replay_trajectory_classification
 # - non_local_detector
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency
 # - mountainsort4  # installed above via pip for spikesorting workflows
-# `-e .[analysis,test]` now includes figurl support for
+# `-e .[analysis,test]` now includes figurl support and nemos for
 # `src/v1ca1/spikesorting/generate_figurl.py`.
 #
-# If you want GLM workflow support, install the optional extra:
+# If you want the explicit JAX pin from the GLM extra as well, install:
 #   pip install -e ".[analysis,test,glm]"

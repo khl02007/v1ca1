@@ -1,549 +1,305 @@
 from __future__ import annotations
 
-from numpy.typing import NDArray
-from typing import Tuple, Union
-from pathlib import Path
-import pandas as pd
-import kyutils
-import pickle
-import scipy.signal
-import scipy.stats
-import spikeinterface.full as si
-import numpy as np
-import position_tools as pt
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-import track_linearization as tl
+"""Compute sleep intervals for one session from V1 LFP and movement speed.
+
+The canonical output is a single parquet table with one row per sleep interval
+and columns `start`, `end`, and `epoch`.
+"""
 
 import argparse
+from pathlib import Path
+from typing import Any
 
-animal_name = "L14"
-date = "20240611"
-data_path = Path("/nimbus/kyu") / animal_name
-analysis_path = data_path / "singleday_sort" / "20240611"
-
-num_sleep_epochs = 5
-num_run_epochs = 4
-
-nwb_file_base_path = Path("/stelmo/nwb/raw")
-
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
+from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_DATA_ROOT, DEFAULT_NWB_ROOT, DEFAULT_POSITION_OFFSET
+from v1ca1.sleep._session import (
+    DEFAULT_SLEEP_DOWNSAMPLED_FREQUENCY_HZ,
+    DEFAULT_SLEEP_MAX_GAP_S,
+    DEFAULT_SLEEP_MIN_DURATION_S,
+    DEFAULT_SLEEP_PC1_THRESHOLD,
+    DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S,
+    DEFAULT_SLEEP_SPECTROGRAM_NOVERLAP,
+    DEFAULT_SLEEP_SPECTROGRAM_NPERSEG,
+    DEFAULT_TIME_BIN_SIZE_S,
+    DEFAULT_V1_LFP_CHANNEL,
+    build_uniform_time_grid,
+    butter_filter_and_decimate,
+    compute_sleep_time_intervals,
+    compute_spectrogram_principal_component,
+    get_analysis_path,
+    get_epoch_trace,
+    get_nwb_path,
+    get_recording_sampling_frequency,
+    get_speed_trace,
+    interpolate_to_grid,
+    load_recording,
+    load_sleep_session_inputs,
+    save_interval_table_output,
+    validate_epochs,
+    validate_recording_channel,
+    validate_selected_epochs_across_sources,
 )
-sleep_epoch_list = [epoch for epoch in epoch_list if epoch not in run_epoch_list]
-
-regions = ["v1", "ca1"]
-
-position_offset = 10
-
-trajectory_types = [
-    "center_to_left",
-    "center_to_right",
-    "left_to_center",
-    "right_to_center",
-]
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
-
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position_dict = pickle.load(f)
-
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
-
-with open(analysis_path / "position.pkl", "rb") as f:
-    position_dict = pickle.load(f)
-
-with open(analysis_path / "trajectory_times.pkl", "rb") as f:
-    trajectory_times = pickle.load(f)
 
 
-sorting = {}
-for region in regions:
-    sorting[region] = si.load(analysis_path / f"sorting_{region}")
-
-position_offset = 10
-
-time_bin_size = 2e-3
-sampling_rate = int(1 / time_bin_size)
-
-save_dir = analysis_path / "sleep_times"
-save_dir.mkdir(parents=True, exist_ok=True)
-
-
-nwb_file_name = f"{animal_name}{date}.nwb"
-
-nperseg = 128  # Length of each segment for FFT
-noverlap = 64  # Overlap between segments
-
-lfp_channel = 12
+def select_sleep_ready_epochs(
+    selected_epochs: list[str],
+    *,
+    timestamps_position: dict[str, Any],
+    position_by_epoch: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return epochs that have both position timestamps and position samples."""
+    selected_ready = [
+        epoch
+        for epoch in selected_epochs
+        if epoch in timestamps_position and epoch in position_by_epoch
+    ]
+    skipped_epochs = [epoch for epoch in selected_epochs if epoch not in selected_ready]
+    return selected_ready, skipped_epochs
 
 
-def butter_filter_and_decimate(
-    timestamps: np.ndarray,
-    data: np.ndarray,
-    sampling_frequency: float,
-    new_sampling_frequency: float,
-    cutoff: float = 150.0,
-    order: int = 4,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply Butterworth lowpass filter and decimate signal.
-
-    Parameters
-    ----------
-    timestamps : np.ndarray
-        Time vector in seconds. Shape: (n_times,)
-    data : np.ndarray
-        Time series signal. Shape: (n_times, n_channels)
-    sampling_frequency : float
-        Original sampling rate in Hz.
-    new_sampling_frequency : float
-        Desired sampling rate in Hz.
-    lowcut : float
-        Lower cutoff frequency in Hz.
-    highcut : float
-        Upper cutoff frequency in Hz.
-    order : int
-        Filter order.
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        Decimated timestamps and filtered data. Shapes: (n_times_new,), (n_times_new, n_channels)
-    """
-    if timestamps.ndim != 1 or data.shape[0] != timestamps.shape[0]:
-        raise ValueError("Timestamps must be 1D and match first dimension of data.")
-
-    q = int(round(sampling_frequency / new_sampling_frequency))
-
-    nyquist = 0.5 * sampling_frequency
-    normal_cutoff = cutoff / nyquist
-    b, a = scipy.signal.butter(order, normal_cutoff, btype="low", analog=False)
-
-    if data.ndim == 1:
-        data = data[:, np.newaxis]
-
-    # Zero-phase filter along time axis
-    filtered = np.apply_along_axis(
-        lambda x: scipy.signal.filtfilt(b, a, x), axis=0, arr=data
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for sleep interval extraction."""
+    parser = argparse.ArgumentParser(description="Compute sleep intervals for one session")
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
     )
-
-    # Decimate
-    decimated_data = np.apply_along_axis(
-        lambda x: scipy.signal.decimate(x, q, ftype="iir", zero_phase=True),
-        axis=0,
-        arr=filtered,
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
     )
-
-    decimated_timestamps = timestamps[::q]
-    min_len = min(len(decimated_timestamps), decimated_data.shape[0])
-    return decimated_timestamps[:min_len], decimated_data[:min_len].flatten()
-
-
-def find_joint_threshold_intervals(
-    t: NDArray[np.generic],
-    x1: NDArray[np.floating],
-    x2: NDArray[np.floating],
-    thr1: float,
-    thr2: float,
-    min_duration: float | None = None,
-) -> NDArray[np.int64]:
-    """
-    Identify contiguous index intervals where both time series exceed thresholds.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Monotonic timestamps.
-    x1 : ndarray of shape (n_time,)
-        First time series.
-    x2 : ndarray of shape (n_time,)
-        Second time series.
-    thr1 : float
-        Threshold for x1.
-    thr2 : float
-        Threshold for x2.
-    min_duration : float or None
-        Minimum interval duration in same units as t. If None, no filtering.
-
-    Returns
-    -------
-    intervals : ndarray of shape (n_intervals, 2)
-        Each row = [start_idx, end_idx) in index coordinates.
-    """
-    if t.shape != x1.shape or t.shape != x2.shape:
-        raise ValueError("Shapes of t, x1, x2 must match.")
-
-    mask = (x1 > thr1) & (x2 < thr2)
-
-    if not np.any(mask):
-        return np.empty((0, 2), dtype=np.int64)
-
-    mask_int = mask.astype(np.int8)
-    diff = np.diff(mask_int)
-
-    starts = np.where(diff == 1)[0] + 1
-    ends = np.where(diff == -1)[0] + 1
-
-    if mask[0]:
-        starts = np.concatenate(([0], starts))
-
-    if mask[-1]:
-        ends = np.concatenate((ends, [len(mask)]))
-
-    intervals = np.column_stack((starts, ends))
-
-    if min_duration is not None:
-        durations = t[intervals[:, 1] - 1] - t[intervals[:, 0]]
-        intervals = intervals[durations >= min_duration]
-
-    return intervals.astype(np.int64)
-
-
-def intervals_to_times(
-    t: NDArray[np.generic],
-    intervals: NDArray[np.int64],
-) -> NDArray[np.generic]:
-    """
-    Convert index intervals to timestamp intervals.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Timestamps corresponding to the time axis.
-    intervals : ndarray of shape (n_intervals, 2)
-        Index intervals [start_idx, end_idx), as returned by
-        `find_joint_threshold_intervals`.
-
-    Returns
-    -------
-    time_intervals : ndarray of shape (n_intervals, 2)
-        Each row is [start_time, end_time], where:
-        - start_time = t[start_idx]
-        - end_time   = t[end_idx - 1]
-    """
-    if intervals.size == 0:
-        return np.empty((0, 2), dtype=t.dtype)
-
-    starts = t[intervals[:, 0]]
-    ends = t[intervals[:, 1] - 1]  # end index is exclusive
-    time_intervals = np.column_stack((starts, ends))
-    return time_intervals
-
-
-def build_mask_from_intervals(
-    n_time: int,
-    intervals: NDArray[np.int64],
-) -> NDArray[np.bool_]:
-    """
-    Build a Boolean mask of length `n_time` that is True inside given intervals.
-
-    Parameters
-    ----------
-    n_time : int
-        Length of the time axis.
-    intervals : ndarray of shape (n_intervals, 2)
-        Index intervals [start_idx, end_idx).
-
-    Returns
-    -------
-    mask : ndarray of shape (n_time,)
-        Boolean mask with True inside intervals and False outside.
-    """
-    mask = np.zeros(n_time, dtype=bool)
-    for start, end in intervals:
-        mask[start:end] = True
-    return mask
-
-
-def plot_time_series_with_intervals(
-    t: NDArray[np.generic],
-    x1: NDArray[np.floating],
-    x2: NDArray[np.floating],
-    thr1: float,
-    thr2: float,
-    min_duration: float | None = None,
-    figsize: Tuple[float, float] = (10.0, 5.0),
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot two time series, thresholds, and highlight joint-exceedance intervals.
-
-    Parameters
-    ----------
-    t : ndarray of shape (n_time,)
-        Timestamps.
-    x1 : ndarray of shape (n_time,)
-        First time series.
-    x2 : ndarray of shape (n_time,)
-        Second time series.
-    thr1 : float
-        Threshold for `x1`.
-    thr2 : float
-        Threshold for `x2`.
-    min_duration : float or None, optional
-        Minimum duration of intervals to highlight (same units as `t`).
-        If None, all joint-exceedance intervals are highlighted.
-    figsize : tuple of float, optional
-        Size of the figure (width, height).
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        Figure object.
-    ax : matplotlib.axes.Axes
-        Axes with the plot.
-    """
-    # Get filtered intervals (duration constraint applied here)
-    intervals = find_joint_threshold_intervals(t, x1, x2, thr1, thr2, min_duration)
-
-    # Build a mask that is True only on the kept intervals
-    mask = build_mask_from_intervals(t.shape[0], intervals)
-
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Plot time series
-    ax.plot(t, x1, label="x1", linewidth=1.5)
-    ax.plot(t, x2, label="x2", linewidth=1.5)
-
-    # Plot thresholds
-    ax.axhline(thr1, linestyle="--", linewidth=1.0, label=f"thr1 = {thr1}")
-    ax.axhline(thr2, linestyle="--", linewidth=1.0, label=f"thr2 = {thr2}")
-
-    # Highlight only the intervals that satisfy the duration constraint
-    ymin, ymax = ax.get_ylim()
-    ax.fill_between(t, ymin, ymax, where=mask, alpha=0.15)
-
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Value")
-    ax.set_title(
-        "Time series with joint threshold-exceedance intervals "
-        f"(min_duration={min_duration})"
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
     )
-    ax.legend(loc="best")
-    ax.grid(True, linestyle=":")
-
-    fig.tight_layout()
-    return fig, ax
-
-
-def intervals_to_dataframe(
-    t: NDArray[np.generic], intervals: NDArray[np.int64]
-) -> pd.DataFrame:
-    """
-    Convert index intervals to a pandas DataFrame.
-
-    Parameters
-    ----------
-    t : ndarray (n_time,)
-        Timestamps.
-    intervals : ndarray (n_intervals, 2)
-        Index intervals [start_idx, end_idx).
-
-    Returns
-    -------
-    df : pandas.DataFrame
-        Columns:
-        - start_time
-        - end_time
-        - duration
-    """
-    # print("len(t):", len(t))
-    # print("intervals.shape:", intervals.shape)
-    # print("intervals min start:", intervals[:, 0].min())
-    # print("intervals max start:", intervals[:, 0].max())
-    # print("intervals min end:", intervals[:, 1].min())
-    # print("intervals max end:", intervals[:, 1].max())
-
-    if intervals.size == 0:
-        return pd.DataFrame(columns=["start_time", "end_time", "duration"])
-
-    starts = t[intervals[:, 0]]
-    ends = t[intervals[:, 1] - 1]
-    durations = ends - starts
-
-    return pd.DataFrame(
-        {
-            "start_time": starts,
-            "end_time": ends,
-            "duration": durations,
-        }
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch when defining speed. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
     )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define low-movement periods. "
+            f"Default: {DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--pc1-threshold",
+        type=float,
+        default=DEFAULT_SLEEP_PC1_THRESHOLD,
+        help=(
+            "Threshold on the V1 spectrogram PC1 used to define sleep. "
+            f"Default: {DEFAULT_SLEEP_PC1_THRESHOLD}"
+        ),
+    )
+    parser.add_argument(
+        "--min-duration-s",
+        type=float,
+        default=DEFAULT_SLEEP_MIN_DURATION_S,
+        help=f"Minimum interval duration in seconds. Default: {DEFAULT_SLEEP_MIN_DURATION_S}",
+    )
+    parser.add_argument(
+        "--max-gap-s",
+        type=float,
+        default=DEFAULT_SLEEP_MAX_GAP_S,
+        help=(
+            "Merge adjacent sleep intervals when the gap is at most this many seconds. "
+            f"Default: {DEFAULT_SLEEP_MAX_GAP_S}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-lfp-channel",
+        type=int,
+        default=DEFAULT_V1_LFP_CHANNEL,
+        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
+    )
+    return parser.parse_args(argv)
 
 
-def merge_close_intervals(
-    df: pd.DataFrame,
-    max_gap: Union[float, np.timedelta64, pd.Timedelta],
-) -> pd.DataFrame:
-    """
-    Merge consecutive intervals if the gap between them is less than or equal
-    to a given threshold.
+def get_sleep_times_for_session(
+    *,
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
+    epochs: list[str] | None = None,
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+    speed_threshold_cm_s: float = DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S,
+    pc1_threshold: float = DEFAULT_SLEEP_PC1_THRESHOLD,
+    min_duration_s: float = DEFAULT_SLEEP_MIN_DURATION_S,
+    max_gap_s: float = DEFAULT_SLEEP_MAX_GAP_S,
+    v1_lfp_channel: int = DEFAULT_V1_LFP_CHANNEL,
+) -> dict[str, Any]:
+    """Compute and save session sleep intervals as one root-level parquet table."""
+    if position_offset < 0:
+        raise ValueError("--position-offset must be non-negative.")
+    if min_duration_s < 0:
+        raise ValueError("--min-duration-s must be non-negative.")
+    if max_gap_s < 0:
+        raise ValueError("--max-gap-s must be non-negative.")
 
-    Intervals are assumed to be half-open [start_time, end_time], and the gap
-    between interval i and i+1 is defined as:
+    analysis_path = get_analysis_path(animal_name=animal_name, date=date, data_root=data_root)
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
-        gap_i = start_time_{i+1} - end_time_i
-
-    Consecutive intervals with gap_i <= max_gap are merged into a single
-    interval spanning from the first start_time to the last end_time.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame, shape (n_intervals, 3)
-        DataFrame with columns:
-        - "start_time"
-        - "end_time"
-        - "duration"
-        Typically produced by `intervals_to_dataframe`.
-    max_gap : float or numpy.timedelta64 or pandas.Timedelta
-        Maximum allowed gap between consecutive intervals for them to be
-        merged. Must be compatible with the dtype of `start_time` / `end_time`.
-        For numeric time, use a float; for datetime-like time, use a Timedelta.
-
-    Returns
-    -------
-    merged_df : pandas.DataFrame, shape (n_merged_intervals, 3)
-        DataFrame with merged intervals, with columns:
-        - "start_time"
-        - "end_time"
-        - "duration"
-    """
-    if df.empty:
-        return df.copy()
-
-    # Ensure sorted by start_time
-    df_sorted = df.sort_values("start_time").reset_index(drop=True)
-
-    start_vals = df_sorted["start_time"].to_numpy()
-    end_vals = df_sorted["end_time"].to_numpy()
-
-    n_intervals = len(df_sorted)
-    if n_intervals == 1:
-        # Nothing to merge; just recompute duration to be safe
-        out = df_sorted[["start_time", "end_time"]].copy()
-        out["duration"] = out["end_time"] - out["start_time"]
-        return out
-
-    # Compute gaps between consecutive intervals: start_{i+1} - end_i
-    gaps = start_vals[1:] - end_vals[:-1]
-
-    # Start a new group where gap > max_gap; keep same group where gap <= max_gap
-    new_group = np.empty(n_intervals, dtype=bool)
-    new_group[0] = True
-    new_group[1:] = gaps > max_gap
-
-    group_ids = np.cumsum(new_group.astype(int)) - 1  # 0-based group IDs
-
-    df_sorted = df_sorted.assign(_group=group_ids)
-
-    merged = (
-        df_sorted.groupby("_group", sort=False)
-        .agg(
-            start_time=("start_time", "min"),
-            end_time=("end_time", "max"),
+    session = load_sleep_session_inputs(analysis_path)
+    selected_epochs = validate_epochs(session["epoch_tags"], epochs)
+    selected_epochs, skipped_epochs_missing_position = select_sleep_ready_epochs(
+        selected_epochs,
+        timestamps_position=session["timestamps_position"],
+        position_by_epoch=session["position_by_epoch"],
+    )
+    if skipped_epochs_missing_position:
+        print(
+            "Skipping epochs missing position timestamps or position samples: "
+            f"{skipped_epochs_missing_position!r}"
         )
-        .reset_index(drop=True)
+    if not selected_epochs:
+        raise ValueError("No selected epochs have both position timestamps and position samples.")
+    validate_selected_epochs_across_sources(
+        selected_epochs,
+        source_epochs={
+            "timestamps_ephys": session["timestamps_ephys"],
+            "timestamps_position": session["timestamps_position"],
+            "position": session["position_by_epoch"],
+        },
     )
 
-    merged["duration"] = merged["end_time"] - merged["start_time"]
-
-    return merged
-
-
-def get_sleep_times(
-    epoch, speed_threshold=4.0, pc1_threshold=0.5, min_duration=0.1, max_gap=0.1
-):
-    recording = si.read_nwb_recording(nwb_file_base_path / nwb_file_name)
-    fs = recording.get_sampling_frequency()
-
-    # get speed
-    position = position_dict[epoch][position_offset:]
-    t_position = timestamps_position_dict[epoch][position_offset:]
-    position_sampling_rate = len(position) / (t_position[-1] - t_position[0])
-
-    speed = pt.get_speed(
-        position,
-        time=t_position,
-        sampling_frequency=position_sampling_rate,
-        sigma=0.1,
+    recording = load_recording(get_nwb_path(animal_name=animal_name, date=date, nwb_root=nwb_root))
+    validated_v1_channel = validate_recording_channel(
+        recording,
+        v1_lfp_channel,
+        channel_name="V1 LFP channel",
     )
+    sampling_frequency = get_recording_sampling_frequency(recording)
 
-    # get first PC of spectrogram from a cortical channel
-    i1 = np.searchsorted(timestamps_ephys_all_ptp, timestamps_ephys[epoch][0])
-    i2 = np.searchsorted(timestamps_ephys_all_ptp, timestamps_ephys[epoch][-1])
+    print(f"Processing {animal_name} {date}.")
 
-    v1_signal = recording.get_traces(
-        channel_ids=[lfp_channel],
-        return_in_uV=True,
-        start_frame=i1,
-        end_frame=i2,
-    ).flatten()
+    intervals_by_epoch: dict[str, Any] = {}
+    epoch_summaries: dict[str, dict[str, float]] = {}
+    for epoch in selected_epochs:
+        position = session["position_by_epoch"][epoch]
+        timestamps_position = session["timestamps_position"][epoch]
+        _trimmed_position, position_time, speed = get_speed_trace(
+            position,
+            timestamps_position,
+            position_offset=position_offset,
+        )
+        lfp_time, v1_signal = get_epoch_trace(
+            recording,
+            epoch_timestamps=session["timestamps_ephys"][epoch],
+            timestamps_ephys_all=session["timestamps_ephys_all"],
+            channel_id=validated_v1_channel,
+        )
+        decimated_time, decimated_signal = butter_filter_and_decimate(
+            lfp_time,
+            v1_signal,
+            sampling_frequency=sampling_frequency,
+            new_sampling_frequency=DEFAULT_SLEEP_DOWNSAMPLED_FREQUENCY_HZ,
+            cutoff_hz=150.0,
+        )
+        spectrogram_time, v1_pc1 = compute_spectrogram_principal_component(
+            decimated_signal,
+            DEFAULT_SLEEP_DOWNSAMPLED_FREQUENCY_HZ,
+            max_frequency_hz=60.0,
+            nperseg=DEFAULT_SLEEP_SPECTROGRAM_NPERSEG,
+            noverlap=DEFAULT_SLEEP_SPECTROGRAM_NOVERLAP,
+        )
+        time_grid = build_uniform_time_grid(
+            float(position_time[0]),
+            float(position_time[-1]),
+            1.0 / DEFAULT_TIME_BIN_SIZE_S,
+        )
+        pc1_interp = interpolate_to_grid(decimated_time[0] + spectrogram_time, v1_pc1, time_grid)
+        speed_interp = interpolate_to_grid(position_time, speed, time_grid)
+        sleep_intervals = compute_sleep_time_intervals(
+            time_grid,
+            pc1_interp,
+            speed_interp,
+            pc1_threshold=pc1_threshold,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+            min_duration_s=min_duration_s,
+            max_gap_s=max_gap_s,
+        )
+        intervals_by_epoch[epoch] = sleep_intervals
+        epoch_summaries[epoch] = {
+            "sleep_interval_count": float(sleep_intervals.shape[0]),
+            "sleep_total_duration_s": float(
+                0.0 if sleep_intervals.size == 0 else (sleep_intervals[:, 1] - sleep_intervals[:, 0]).sum()
+            ),
+            "grid_sample_count": float(time_grid.shape[0]),
+            "position_sample_count": float(position_time.shape[0]),
+            "spectrogram_sample_count": float(v1_pc1.shape[0]),
+        }
 
-    new_sampling_frequency = 60
-    t, v1_signal_decimated = butter_filter_and_decimate(
-        timestamps=timestamps_ephys_all_ptp[i1:i2],
-        data=v1_signal,
-        sampling_frequency=fs,
-        new_sampling_frequency=new_sampling_frequency,
-        cutoff=150,
+    output_path = save_interval_table_output(
+        analysis_path,
+        output_name="sleep_times",
+        intervals_by_epoch=intervals_by_epoch,
     )
-
-    v1_frequencies, v1_times, v1_Sxx = scipy.signal.spectrogram(
-        x=v1_signal_decimated,
-        fs=new_sampling_frequency,
-        nperseg=nperseg,
-        noverlap=noverlap,
+    outputs = {
+        "sleep_times_path": output_path,
+        "selected_epochs": selected_epochs,
+        "skipped_epochs_missing_position": skipped_epochs_missing_position,
+        "sources": session["sources"],
+        "epoch_summaries": epoch_summaries,
+        "v1_lfp_channel": validated_v1_channel,
+    }
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.sleep.get_sleep_times",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "data_root": data_root,
+            "nwb_root": nwb_root,
+            "epochs": epochs,
+            "position_offset": position_offset,
+            "speed_threshold_cm_s": speed_threshold_cm_s,
+            "pc1_threshold": pc1_threshold,
+            "min_duration_s": min_duration_s,
+            "max_gap_s": max_gap_s,
+            "v1_lfp_channel": validated_v1_channel,
+        },
+        outputs=outputs,
     )
-    v1_times_spectrogram = v1_times + timestamps_ephys_all_ptp[i1]
-    v1_Sxx_filtered = v1_Sxx[v1_frequencies < 60, :]
-    Sxx_flat = v1_Sxx_filtered.T  # Transpose to have time as rows for PCA
-    pca = PCA(n_components=1)
-    v1_lfp_spectrogram_pc1 = scipy.stats.zscore(pca.fit_transform(Sxx_flat)).squeeze()
+    print(f"Saved sleep intervals to {output_path}")
+    print(f"Saved run metadata to {log_path}")
+    outputs["log_path"] = log_path
+    outputs["intervals_by_epoch"] = intervals_by_epoch
+    return outputs
 
-    # interpolate to have same timestamps
-    start_time = t_position[0]
-    end_time = t_position[-1]
 
-    n_samples = int(np.ceil((end_time - start_time) * sampling_rate)) + 1
-
-    time = np.linspace(start_time, end_time, n_samples)
-
-    f_pc1 = scipy.interpolate.interp1d(
-        v1_times_spectrogram,
-        v1_lfp_spectrogram_pc1,
-        axis=0,
-        bounds_error=False,
-        kind="linear",
+def main(argv: list[str] | None = None) -> None:
+    """Run the sleep interval extraction CLI."""
+    args = parse_arguments(argv)
+    get_sleep_times_for_session(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        nwb_root=args.nwb_root,
+        epochs=args.epochs,
+        position_offset=args.position_offset,
+        speed_threshold_cm_s=args.speed_threshold_cm_s,
+        pc1_threshold=args.pc1_threshold,
+        min_duration_s=args.min_duration_s,
+        max_gap_s=args.max_gap_s,
+        v1_lfp_channel=args.v1_lfp_channel,
     )
-    f_speed = scipy.interpolate.interp1d(
-        t_position, speed, axis=0, bounds_error=False, kind="linear"
-    )
-
-    pc1_interp = f_pc1(time)
-    speed_interp = f_speed(time)
-
-    # detect threshold crossing
-    intervals = find_joint_threshold_intervals(
-        t=time,
-        x1=pc1_interp,
-        x2=speed_interp,
-        thr1=pc1_threshold,
-        thr2=speed_threshold,
-        min_duration=min_duration,
-    )
-    df = intervals_to_dataframe(time, intervals)
-    # plot_time_series_with_intervals(t, x1, x2, thr1, thr2, min_duration=min_duration)
-    df = merge_close_intervals(df, max_gap=max_gap)
-
-    with open(save_dir / f"{epoch}.pkl", "wb") as f:
-        pickle.dump(df, f)
-
-    return df
-
-
-def main():
-    # args = parse_arguments()
-    for epoch in epoch_list:
-        get_sleep_times(epoch)
 
 
 if __name__ == "__main__":

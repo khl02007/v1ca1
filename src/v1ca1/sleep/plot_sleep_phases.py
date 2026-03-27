@@ -1,524 +1,467 @@
-from typing import Tuple
-from pathlib import Path
+from __future__ import annotations
 
-import kyutils
-import pickle
-import spikeinterface.full as si
-import numpy as np
-import position_tools as pt
-import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt, decimate, spectrogram
-from scipy.stats import zscore
-from sklearn.decomposition import PCA
-import ripple_detection as rd
-import track_linearization as tl
+"""Plot behavioral and neural state traces across sleep and run epochs."""
 
 import argparse
+from pathlib import Path
+from typing import Any
 
-animal_name = "L14"
-date = "20240611"
-data_path = Path("/nimbus/kyu") / animal_name
-analysis_path = data_path / "singleday_sort" / "20240611"
+import numpy as np
 
-num_sleep_epochs = 5
-num_run_epochs = 4
-
-nwb_file_base_path = Path("/stelmo/nwb/raw")
-
-epoch_list, run_epoch_list = kyutils.get_epoch_list(
-    num_sleep_epochs=num_sleep_epochs, num_run_epochs=num_run_epochs
-)
-sleep_epoch_list = [epoch for epoch in epoch_list if epoch not in run_epoch_list]
-
-regions = ["v1", "ca1"]
-
-position_offset = 10
-
-trajectory_types = [
-    "center_to_left",
-    "center_to_right",
-    "left_to_center",
-    "right_to_center",
-]
-with open(analysis_path / "timestamps_ephys.pkl", "rb") as f:
-    timestamps_ephys = pickle.load(f)
-
-with open(analysis_path / "timestamps_position.pkl", "rb") as f:
-    timestamps_position_dict = pickle.load(f)
-
-with open(analysis_path / "timestamps_ephys_all.pkl", "rb") as f:
-    timestamps_ephys_all_ptp = pickle.load(f)
-
-with open(analysis_path / "position.pkl", "rb") as f:
-    position_dict = pickle.load(f)
-
-with open(analysis_path / "trajectory_times.pkl", "rb") as f:
-    trajectory_times = pickle.load(f)
-
-
-sorting = {}
-for region in regions:
-    sorting[region] = si.load(analysis_path / f"sorting_{region}")
-
-position_offset = 10
-
-time_bin_size = 2e-3
-sampling_rate = int(1 / time_bin_size)
-
-eps = 1e-12
-
-lfp_channel = 12
-ripple_channel = 16 + 32 * 2 + 128 * 2
-
-
-# define track graph for linearization
-node_positions = np.array(
-    [
-        (55, 81),  # center well
-        (23, 81),  # left well
-        (87, 81),  # right well
-        (55, 10),  # center junction
-        (23, 10),  # left junction
-        (87, 10),  # right junction
-    ]
+from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.session import DEFAULT_DATA_ROOT, DEFAULT_NWB_ROOT, DEFAULT_POSITION_OFFSET
+from v1ca1.sleep._session import (
+    DEFAULT_FIRING_RATE_BIN_SIZE_S,
+    DEFAULT_PLOT_CUTOFF_HZ,
+    DEFAULT_PLOT_SPECTROGRAM_NOVERLAP,
+    DEFAULT_PLOT_SPECTROGRAM_NPERSEG,
+    DEFAULT_RIPPLE_CHANNEL,
+    DEFAULT_TIME_BIN_SIZE_S,
+    DEFAULT_V1_LFP_CHANNEL,
+    butter_filter_and_decimate,
+    compute_firing_rate_matrix,
+    compute_spectrogram_principal_component,
+    compute_theta_delta_ratio,
+    decimate_signal,
+    get_analysis_path,
+    get_epoch_trace,
+    get_nwb_path,
+    get_recording_sampling_frequency,
+    get_speed_trace,
+    get_time_spike_indicator,
+    load_recording,
+    load_sleep_session_inputs,
+    load_sleep_sortings,
+    lowpass_filter,
+    order_units_by_epoch_spike_count,
+    validate_epochs,
+    validate_recording_channel,
+    validate_selected_epochs_across_sources,
 )
 
-edges = np.array(
-    [
-        (0, 3),
-        (3, 4),
-        (3, 5),
-        (4, 1),
-        (5, 2),
-    ]
-)
 
-linear_edge_order = [
-    (0, 3),
-    (3, 4),
-    (4, 1),
-    (3, 5),
-    (5, 2),
-]
-linear_edge_spacing = 10
-track_graph = tl.make_track_graph(node_positions, edges)
-
-
-def get_time(epoch: str, time_bin_size: float, ptp: bool = True):
-    sampling_rate = int(1 / (time_bin_size))
-
-    # define reference time offset and subtract it from the timestamps
-    t_position = timestamps_position_dict[epoch][position_offset:]
-    if not ptp:
-        t_position = t_position - timestamps_ephys[epoch][0]
-
-    # define time vector for decoding (temporal resolution: 2 ms)
-    start_time = t_position[0]
-    end_time = t_position[-1]
-
-    n_samples = int(np.ceil((end_time - start_time) * sampling_rate)) + 1
-
-    time = np.linspace(start_time, end_time, n_samples)
-
-    return time
-
-
-def get_spike_indicator(epoch, sorting, t_all, time, ptp):
-    if not ptp:
-        t_all = t_all - timestamps_ephys[epoch][0]
-    spike_indicator = []
-    for unit_id in sorting.get_unit_ids():
-        spike_times = t_all[sorting.get_unit_spike_train(unit_id)]
-        spike_times = spike_times[(spike_times > time[0]) & (spike_times <= time[-1])]
-        spike_indicator.append(
-            np.bincount(np.digitize(spike_times, time[1:-1]), minlength=time.shape[0])
-        )
-    spike_indicator = np.asarray(spike_indicator).T
-    return spike_indicator
-
-
-def get_time_spike_indicator(
-    epoch, time_bin_size, ptp, sorting, t_all, temporal_overlap
-):
-    if temporal_overlap:
-        time1 = get_time(epoch, time_bin_size, ptp)
-        time2 = time1 + time_bin_size / 2
-        time2 = time2[:-1]
-        time = np.sort(np.concatenate([time1, time2]))
-
-        spike_indicator1 = get_spike_indicator(epoch, sorting, t_all, time1, ptp)
-        spike_indicator2 = get_spike_indicator(epoch, sorting, t_all, time2, ptp)
-        spike_indicator = np.zeros((len(time), spike_indicator1.shape[1]))
-        spike_indicator[0::2] = spike_indicator1
-        spike_indicator[1::2] = spike_indicator2
-    else:
-        time = get_time(epoch, time_bin_size, ptp)
-        spike_indicator = get_spike_indicator(epoch, sorting, t_all, time, ptp)
-
-    return time, spike_indicator
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for sleep phase figures."""
+    parser = argparse.ArgumentParser(description="Plot behavioral and neural sleep-phase traces")
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch when plotting speed. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-lfp-channel",
+        type=int,
+        default=DEFAULT_V1_LFP_CHANNEL,
+        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
+    )
+    parser.add_argument(
+        "--ripple-channel",
+        type=int,
+        default=DEFAULT_RIPPLE_CHANNEL,
+        help=(
+            "Recording channel id used for the ripple-band CA1 LFP trace. "
+            f"Default: {DEFAULT_RIPPLE_CHANNEL}"
+        ),
+    )
+    parser.add_argument(
+        "--region",
+        choices=("ca1", "v1"),
+        help="Optional heatmap region to plot. Default: include both CA1 and V1 heatmaps.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display each figure in addition to saving it.",
+    )
+    return parser.parse_args(argv)
 
 
-def butter_bandpass_filter(
-    sampling_frequency: float,
-    lowcut: float = 150.0,
-    highcut: float = 250.0,
-    order: int = 4,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Design a Butterworth bandpass filter.
-
-    Parameters
-    ----------
-    sampling_frequency : float
-        Sampling rate in Hz.
-    lowcut : float
-        Low frequency cutoff in Hz.
-    highcut : float
-        High frequency cutoff in Hz.
-    order : int
-        Filter order.
-
-    Returns
-    -------
-    b : np.ndarray
-        Numerator filter coefficients.
-    a : np.ndarray
-        Denominator filter coefficients.
-    """
-    nyq = 0.5 * sampling_frequency
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype="band")
-    return b, a
+def is_run_epoch(epoch: str) -> bool:
+    """Return whether one epoch label follows the lab run-epoch naming convention."""
+    return "r" in str(epoch).lower()
 
 
-def butter_filter_and_decimate(
+def select_plot_epochs(
+    requested_epochs: list[str],
+    *,
+    timestamps_position: dict[str, np.ndarray],
+    position_by_epoch: dict[str, np.ndarray],
+) -> tuple[list[str], list[str]]:
+    """Return plottable epochs and skipped epochs based on available position inputs."""
+    plottable_epochs: list[str] = []
+    skipped_epochs: list[str] = []
+    for epoch in requested_epochs:
+        if epoch in timestamps_position and epoch in position_by_epoch:
+            plottable_epochs.append(epoch)
+        else:
+            skipped_epochs.append(epoch)
+    return plottable_epochs, skipped_epochs
+
+
+def get_linearized_run_position(position: np.ndarray) -> np.ndarray:
+    """Return the legacy full-track linearized position used in sleep-phase figures."""
+    import track_linearization as tl
+
+    node_positions = np.array(
+        [
+            (55.0, 81.0),
+            (23.0, 81.0),
+            (87.0, 81.0),
+            (55.0, 10.0),
+            (23.0, 10.0),
+            (87.0, 10.0),
+        ],
+        dtype=float,
+    )
+    edges = np.array(
+        [
+            (0, 3),
+            (3, 4),
+            (3, 5),
+            (4, 1),
+            (5, 2),
+        ],
+        dtype=int,
+    )
+    track_graph = tl.make_track_graph(node_positions, edges)
+    position_df = tl.get_linearized_position(
+        position=np.asarray(position, dtype=float),
+        track_graph=track_graph,
+        edge_order=[(0, 3), (3, 4), (4, 1), (3, 5), (5, 2)],
+        edge_spacing=10,
+    )
+    return np.asarray(position_df["linear_position"], dtype=float)
+
+
+def compute_multiunit_population_rate(
+    spike_indicator: np.ndarray,
+    *,
     timestamps: np.ndarray,
-    data: np.ndarray,
-    sampling_frequency: float,
-    new_sampling_frequency: float,
-    lowcut: float = 150.0,
-    highcut: float = 250.0,
-    order: int = 4,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply Butterworth bandpass filter and decimate signal.
+) -> np.ndarray:
+    """Return the ripple-detection population firing-rate trace for one spike matrix."""
+    import ripple_detection as rd
 
-    Parameters
-    ----------
-    timestamps : np.ndarray
-        Time vector in seconds. Shape: (n_times,)
-    data : np.ndarray
-        Time series signal. Shape: (n_times, n_channels)
-    sampling_frequency : float
-        Original sampling rate in Hz.
-    new_sampling_frequency : float
-        Desired sampling rate in Hz.
-    lowcut : float
-        Lower cutoff frequency in Hz.
-    highcut : float
-        Upper cutoff frequency in Hz.
-    order : int
-        Filter order.
+    time_array = np.asarray(timestamps, dtype=float)
+    if time_array.size < 2:
+        raise ValueError("timestamps must contain at least two samples.")
+    sampling_frequency = int(round(1.0 / np.median(np.diff(time_array))))
+    return np.asarray(
+        rd.get_multiunit_population_firing_rate(
+            np.asarray(spike_indicator, dtype=float),
+            sampling_frequency=sampling_frequency,
+        ),
+        dtype=float,
+    ).reshape(-1)
 
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        Decimated timestamps and filtered data. Shapes: (n_times_new,), (n_times_new, n_channels)
-    """
-    if timestamps.ndim != 1 or data.shape[0] != timestamps.shape[0]:
-        raise ValueError("Timestamps must be 1D and match first dimension of data.")
 
-    q = int(round(sampling_frequency / new_sampling_frequency))
+def plot_sleep_phases_for_session(
+    *,
+    animal_name: str,
+    date: str,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    nwb_root: Path = DEFAULT_NWB_ROOT,
+    epochs: list[str] | None = None,
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+    v1_lfp_channel: int = DEFAULT_V1_LFP_CHANNEL,
+    ripple_channel: int = DEFAULT_RIPPLE_CHANNEL,
+    region: str | None = None,
+    show: bool = False,
+) -> dict[str, Any]:
+    """Plot and save one multi-panel sleep-phase figure per selected epoch."""
+    import matplotlib.pyplot as plt
 
-    b, a = butter_bandpass_filter(sampling_frequency, lowcut, highcut, order)
+    if position_offset < 0:
+        raise ValueError("--position-offset must be non-negative.")
 
-    if data.ndim == 1:
-        data = data[:, np.newaxis]
+    analysis_path = get_analysis_path(animal_name=animal_name, date=date, data_root=data_root)
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
-    # Zero-phase filter along time axis
-    filtered = np.apply_along_axis(lambda x: filtfilt(b, a, x), axis=0, arr=data)
-
-    # Decimate
-    decimated_data = np.apply_along_axis(
-        lambda x: decimate(x, q, ftype="iir", zero_phase=True), axis=0, arr=filtered
+    session = load_sleep_session_inputs(analysis_path)
+    selected_epochs = validate_epochs(session["epoch_tags"], epochs)
+    validate_selected_epochs_across_sources(
+        selected_epochs,
+        source_epochs={
+            "timestamps_ephys": session["timestamps_ephys"],
+        },
     )
 
-    decimated_timestamps = timestamps[::q]
-    min_len = min(len(decimated_timestamps), decimated_data.shape[0])
-    return decimated_timestamps[:min_len], decimated_data[:min_len]
+    recording = load_recording(get_nwb_path(animal_name=animal_name, date=date, nwb_root=nwb_root))
+    validated_v1_channel = validate_recording_channel(
+        recording,
+        v1_lfp_channel,
+        channel_name="V1 LFP channel",
+    )
+    validated_ripple_channel = validate_recording_channel(
+        recording,
+        ripple_channel,
+        channel_name="Ripple channel",
+    )
+    sampling_frequency = get_recording_sampling_frequency(recording)
+    sortings = load_sleep_sortings(analysis_path)
 
+    figure_dir = analysis_path / "figs" / "sleep"
+    figure_dir.mkdir(parents=True, exist_ok=True)
 
-def butter_lowpass(cutoff, fs, order=4):
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype="low", analog=False)
-    return b, a
+    print(f"Processing {animal_name} {date}.")
+    print(
+        "Using position source: "
+        f"{session.get('sources', {}).get('position', 'unknown position source')}"
+    )
+    print(f"Saving figures under {figure_dir}")
 
+    heatmap_regions = ("ca1", "v1") if region is None else (str(region),)
+    heatmap_label = "_".join(heatmap_regions)
+    print(f"Plotting heatmap regions: {', '.join(heatmap_regions)}")
 
-def lowpass_filter(signal, cutoff, fs, order=4):
-    b, a = butter_lowpass(cutoff, fs, order)
-    return filtfilt(b, a, signal)
+    selected_epochs, skipped_epochs = select_plot_epochs(
+        selected_epochs,
+        timestamps_position=session["timestamps_position"],
+        position_by_epoch=session["position_by_epoch"],
+    )
+    if skipped_epochs:
+        print(
+            "Skipping epochs without combined position data: "
+            + ", ".join(skipped_epochs)
+        )
+    if not selected_epochs:
+        raise ValueError(
+            "No epochs have both saved timestamps and usable position data for sleep-phase plotting."
+        )
+    print(f"Plotting {len(selected_epochs)} epoch(s): {', '.join(selected_epochs)}")
 
+    output_paths: dict[str, Path] = {}
+    epoch_summaries: dict[str, dict[str, float]] = {}
+    downsample_factor = max(1, int(sampling_frequency // 150))
+    downsampled_sampling_frequency = sampling_frequency / float(downsample_factor)
 
-def get_firing_rate_matrix(sorting, epoch, bin_size, zscore=True):
+    for epoch in selected_epochs:
+        print(f"Plotting {date} {epoch}.")
 
-    start_time = timestamps_ephys[epoch][0]
-    stop_time = timestamps_ephys[epoch][-1]
-
-    bin_edges = np.arange(start_time, stop_time, bin_size)
-    time = bin_edges[:-1] + bin_size / 2
-
-    fr = np.zeros((len(sorting.get_unit_ids()), len(bin_edges) - 1))
-
-    for k, unit_id in enumerate(sorting.get_unit_ids()):
-
-        spike_times = timestamps_ephys_all_ptp[sorting.get_unit_spike_train(unit_id)]
-        spike_times = spike_times[
-            (spike_times > start_time) & (spike_times <= stop_time)
-        ]
-
-        spike_counts, _ = np.histogram(spike_times, bin_edges)
-        if np.all(spike_counts == 0):
-            continue
-
-        firing_rate = spike_counts / bin_size
-        if zscore:
-            mean_fr = np.mean(firing_rate)
-            std_fr = np.std(firing_rate)
-            fr[k] = (firing_rate - mean_fr) / std_fr
-        else:
-            fr[k] = firing_rate
-    return fr, time
-
-
-def plot_sleep_phases():
-    fig_save_dir = analysis_path / "figs" / "sleep"
-    fig_save_dir.mkdir(parents=True, exist_ok=True)
-
-    nperseg = 256  # Length of each segment for FFT
-    noverlap = 128  # Overlap between segments
-    cutoff = 70  # Hz, frequency below which to keep for spectrogram
-
-    nwb_file_name = f"{animal_name}{date}.nwb"
-    recording = si.read_nwb_recording(nwb_file_base_path / nwb_file_name)
-    fs = recording.get_sampling_frequency()
-    downsample_factor = int(fs // 150)
-    fr_bin_size = 100e-3
-    for epoch in epoch_list:
-
-        print(f"plotting {date} {epoch}")
-
-        i1 = np.searchsorted(timestamps_ephys_all_ptp, timestamps_ephys[epoch][0])
-        i2 = np.searchsorted(timestamps_ephys_all_ptp, timestamps_ephys[epoch][-1])
-        ca1_signal = recording.get_traces(
-            channel_ids=[ripple_channel],
-            return_in_uV=True,
-            start_frame=i1,
-            end_frame=i2,
-        ).flatten()
-        v1_signal = recording.get_traces(
-            channel_ids=[lfp_channel],
-            return_in_uV=True,
-            start_frame=i1,
-            end_frame=i2,
-        ).flatten()
-
-        t = timestamps_ephys_all_ptp[i1:i2]
-
+        epoch_timestamps = session["timestamps_ephys"][epoch]
+        epoch_time, ca1_signal = get_epoch_trace(
+            recording,
+            epoch_timestamps=epoch_timestamps,
+            timestamps_ephys_all=session["timestamps_ephys_all"],
+            channel_id=validated_ripple_channel,
+        )
+        _epoch_time_v1, v1_signal = get_epoch_trace(
+            recording,
+            epoch_timestamps=epoch_timestamps,
+            timestamps_ephys_all=session["timestamps_ephys_all"],
+            channel_id=validated_v1_channel,
+        )
         ripple_lfp_time, ripple_lfp = butter_filter_and_decimate(
-            timestamps=t,
-            data=ca1_signal,
-            sampling_frequency=fs,
-            new_sampling_frequency=1000,
-            lowcut=150.0,
-            highcut=250.0,
-            order=4,
+            epoch_time,
+            ca1_signal,
+            sampling_frequency=sampling_frequency,
+            new_sampling_frequency=1000.0,
+            lowcut_hz=150.0,
+            highcut_hz=250.0,
         )
 
-        ca1_filtered_signal = lowpass_filter(ca1_signal, cutoff, fs)
-        v1_filtered_signal = lowpass_filter(v1_signal, cutoff, fs)
+        ca1_lowpass = lowpass_filter(ca1_signal, DEFAULT_PLOT_CUTOFF_HZ, sampling_frequency)
+        v1_lowpass = lowpass_filter(v1_signal, DEFAULT_PLOT_CUTOFF_HZ, sampling_frequency)
+        ca1_downsampled = decimate_signal(ca1_lowpass, downsample_factor)
+        v1_downsampled = decimate_signal(v1_lowpass, downsample_factor)
 
-        v1_downsampled_signal = decimate(v1_filtered_signal, downsample_factor)
-        ca1_downsampled_signal = decimate(ca1_filtered_signal, downsample_factor)
-        fs_downsampled = fs // downsample_factor
-        t_downsampled = t[::downsample_factor]
-
-        v1_frequencies, v1_times, v1_Sxx = spectrogram(
-            v1_downsampled_signal,
-            fs_downsampled,
-            nperseg=nperseg,
-            noverlap=noverlap,
+        v1_spectrogram_time, v1_pc1 = compute_spectrogram_principal_component(
+            v1_downsampled,
+            downsampled_sampling_frequency,
+            max_frequency_hz=60.0,
+            nperseg=DEFAULT_PLOT_SPECTROGRAM_NPERSEG,
+            noverlap=DEFAULT_PLOT_SPECTROGRAM_NOVERLAP,
         )
-        v1_time_spectrogram = (
-            v1_times * (nperseg - noverlap)
-        ) / fs_downsampled  # Time in seconds in the downsampled signal
-
-        v1_Sxx_filtered = v1_Sxx[v1_frequencies < 60, :]
-        Sxx_flat = v1_Sxx_filtered.T  # Transpose to have time as rows for PCA
-        pca = PCA(n_components=1)
-        v1_lfp_spectrogram_pc1 = zscore(pca.fit_transform(Sxx_flat)).squeeze()
-
-        ca1_frequencies, ca1_times, ca1_Sxx = spectrogram(
-            ca1_downsampled_signal,
-            fs_downsampled,
-            nperseg=nperseg,
-            noverlap=noverlap,
+        ca1_spectrogram_time, theta_delta_ratio = compute_theta_delta_ratio(
+            ca1_downsampled,
+            downsampled_sampling_frequency,
+            nperseg=DEFAULT_PLOT_SPECTROGRAM_NPERSEG,
+            noverlap=DEFAULT_PLOT_SPECTROGRAM_NOVERLAP,
         )
 
-        theta_pow = ca1_Sxx[(ca1_frequencies > 5) & (ca1_frequencies <= 10)].sum(axis=0)
-        delta_pow = ca1_Sxx[(ca1_frequencies > 0.5) & (ca1_frequencies <= 4)].sum(
-            axis=0
-        )
-        ca1_theta_delta = theta_pow / np.maximum(delta_pow, eps)
-
-        tt, spike_indicator_ca1 = get_time_spike_indicator(
-            epoch=epoch,
-            time_bin_size=0.002,
-            ptp=True,
-            sorting=sorting["ca1"],
-            t_all=timestamps_ephys_all_ptp,
+        spike_time, spike_indicator_ca1 = get_time_spike_indicator(
+            session["timestamps_position"][epoch],
+            position_offset=position_offset,
+            time_bin_size_s=DEFAULT_TIME_BIN_SIZE_S,
+            sorting=sortings["ca1"],
+            timestamps_ephys_all=session["timestamps_ephys_all"],
             temporal_overlap=False,
         )
-
-        tt, spike_indicator_v1 = get_time_spike_indicator(
-            epoch=epoch,
-            time_bin_size=0.002,
-            ptp=True,
-            sorting=sorting["v1"],
-            t_all=timestamps_ephys_all_ptp,
+        _spike_time_v1, spike_indicator_v1 = get_time_spike_indicator(
+            session["timestamps_position"][epoch],
+            position_offset=position_offset,
+            time_bin_size_s=DEFAULT_TIME_BIN_SIZE_S,
+            sorting=sortings["v1"],
+            timestamps_ephys_all=session["timestamps_ephys_all"],
             temporal_overlap=False,
         )
-
-        multiunit_ca1 = rd.get_multiunit_population_firing_rate(
+        multiunit_ca1 = compute_multiunit_population_rate(
             spike_indicator_ca1,
-            sampling_frequency=int(1 / np.median(np.diff(tt))),
+            timestamps=spike_time,
         )
-        multiunit_v1 = rd.get_multiunit_population_firing_rate(
+        multiunit_v1 = compute_multiunit_population_rate(
             spike_indicator_v1,
-            sampling_frequency=int(1 / np.median(np.diff(tt))),
+            timestamps=spike_time,
         )
 
-        position = position_dict[epoch][position_offset:]
-        t_position = timestamps_position_dict[epoch][position_offset:]
-        position_sampling_rate = len(position) / (t_position[-1] - t_position[0])
-
-        speed = pt.get_speed(
-            position,
-            time=t_position,
-            sampling_frequency=position_sampling_rate,
-            sigma=0.1,
+        trimmed_position, position_time, speed = get_speed_trace(
+            session["position_by_epoch"][epoch],
+            session["timestamps_position"][epoch],
+            position_offset=position_offset,
         )
-
-        fr_ca1, time = get_firing_rate_matrix(
-            sorting["ca1"], epoch, bin_size=fr_bin_size, zscore=True
-        )
-        fr_v1, time = get_firing_rate_matrix(
-            sorting["v1"], epoch, bin_size=fr_bin_size, zscore=True
-        )
-
-        sliced_sorting_ca1 = sorting["ca1"].time_slice(
-            start_time=t[0],
-            end_time=t[-1],
-        )
-        sliced_sorting_v1 = sorting["v1"].time_slice(
-            start_time=t[0],
-            end_time=t[-1],
-        )
-
-        order_ca1 = np.argsort(
-            [
-                len(sliced_sorting_ca1.get_unit_spike_train(unit_id))
-                for unit_id in sliced_sorting_ca1.get_unit_ids()
-            ]
-        )
-        order_v1 = np.argsort(
-            [
-                len(sliced_sorting_v1.get_unit_spike_train(unit_id))
-                for unit_id in sliced_sorting_v1.get_unit_ids()
-            ]
-        )
-
-        fr_ca1 = fr_ca1[order_ca1]
-        fr_v1 = fr_v1[order_v1]
-
-        fig, ax = plt.subplots(
-            nrows=7,
-            figsize=(40, 7 * 3),
-            gridspec_kw={"height_ratios": [1, 1, 1, 1, 1, 3, 3]},
-        )
-
-        if epoch[3] == "r":
-
-            position_df = tl.get_linearized_position(
-                position=position,
-                track_graph=track_graph,
-                edge_order=linear_edge_order,
-                edge_spacing=linear_edge_spacing,
+        firing_rate_by_region: dict[str, np.ndarray] = {}
+        firing_rate_time: np.ndarray | None = None
+        for selected_region in heatmap_regions:
+            firing_rate_matrix, region_time = compute_firing_rate_matrix(
+                sortings[selected_region],
+                epoch_timestamps=epoch_timestamps,
+                timestamps_ephys_all=session["timestamps_ephys_all"],
+                bin_size_s=DEFAULT_FIRING_RATE_BIN_SIZE_S,
+                zscore_values=True,
             )
-            linear_position = position_df["linear_position"]
+            unit_order = order_units_by_epoch_spike_count(
+                sortings[selected_region],
+                start_time=float(epoch_timestamps[0]),
+                end_time=float(epoch_timestamps[-1]),
+            )
+            firing_rate_by_region[selected_region] = firing_rate_matrix[unit_order]
+            if firing_rate_time is None:
+                firing_rate_time = region_time
+        if firing_rate_time is None:
+            raise ValueError("Could not build a firing-rate time axis for the selected regions.")
 
-            ax[0].plot(t_position, linear_position)
-            ax[0].twinx().plot(t_position, speed, "k")
-            ax[0].set_ylabel("Position (cm)\nSpeed (cm/s)")
+        fig, axes = plt.subplots(
+            nrows=5 + len(heatmap_regions),
+            figsize=(40, 3 * (5 + len(heatmap_regions))),
+            gridspec_kw={"height_ratios": [1, 1, 1, 1, 1] + [3] * len(heatmap_regions)},
+        )
+        axes = np.atleast_1d(axes)
+
+        if is_run_epoch(epoch):
+            linear_position = get_linearized_run_position(trimmed_position)
+            axes[0].plot(position_time, linear_position)
+            axes[0].twinx().plot(position_time, speed, "k")
+            axes[0].set_ylabel("Position (cm)\nSpeed (cm/s)")
         else:
-            ax[0].plot(t_position, speed, "k")
-            ax[0].set_ylabel("Speed (cm/s)")
+            axes[0].plot(position_time, speed, "k")
+            axes[0].set_ylabel("Speed (cm/s)")
 
-        ax[1].plot(v1_times + t[0], v1_lfp_spectrogram_pc1)
-        ax[2].plot(ca1_times + t[0], ca1_theta_delta)
-        ax[3].plot(ripple_lfp_time, ripple_lfp)
-        ax[4].plot(tt, np.asarray(multiunit_ca1).squeeze(), label="CA1")
-        ax[4].plot(tt, np.asarray(multiunit_v1).squeeze(), label="V1")
-        ax[4].legend()
-        ax[5].imshow(
-            fr_ca1,
-            vmin=-1.0,
-            vmax=1.0,
-            aspect="auto",
-            extent=[time[0], time[-1], 0, fr_ca1.shape[0]],
-        )
-        ax[6].imshow(
-            fr_v1,
-            vmin=-1.0,
-            vmax=1.0,
-            aspect="auto",
-            extent=[time[0], time[-1], 0, fr_v1.shape[0]],
-        )
+        axes[1].plot(v1_spectrogram_time + epoch_time[0], v1_pc1)
+        axes[2].plot(ca1_spectrogram_time + epoch_time[0], theta_delta_ratio)
+        axes[3].plot(ripple_lfp_time, ripple_lfp)
+        axes[4].plot(spike_time, multiunit_ca1, label="CA1")
+        axes[4].plot(spike_time, multiunit_v1, label="V1")
+        axes[4].legend()
+        axes[1].set_ylabel("V1 LFP spectrogram\nPC1 (zscore)")
+        axes[2].set_ylabel("CA1 Theta / Delta")
+        axes[3].set_ylabel(r"CA1 ripple band LFP ($\mu$V)")
+        axes[4].set_ylabel("Multiunit firing rate (Hz)")
+        for axis, selected_region in zip(axes[5:], heatmap_regions, strict=True):
+            firing_rate_matrix = firing_rate_by_region[selected_region]
+            axis.imshow(
+                firing_rate_matrix,
+                vmin=-1.0,
+                vmax=1.0,
+                aspect="auto",
+                extent=[firing_rate_time[0], firing_rate_time[-1], 0, firing_rate_matrix.shape[0]],
+            )
+            axis.set_ylabel(f"Firing rate {selected_region.upper()} (zscore)")
 
-        ax[1].set_ylabel("V1 LFP spectrogram\nPC1 (zscore)")
-        ax[2].set_ylabel("CA1 Theta / Delta")
-        ax[3].set_ylabel(r"CA1 ripple band LFP ($\mu$V)")
-        ax[4].set_ylabel("Multiunit firing rate (Hz)")
-        ax[5].set_ylabel("Firing rate CA1 (zscore)")
-        ax[6].set_ylabel("Firing rate V1 (zscore)")
+        for axis in axes:
+            axis.set_xlim([firing_rate_time[0], firing_rate_time[-1]])
+        axes[1].set_ylim([0, 10])
+        axes[2].set_ylim([0, 50])
+        axes[-1].set_xlabel("Time (s)")
+        axes[0].set_title(f"{date} {epoch} sleep phase")
 
-        for a in ax:
-            a.set_xlim([time[0], time[-1]])
-        ax[1].set_ylim([0, 10])
-        ax[2].set_ylim([0, 50])
-        ax[-1].set_xlabel("Time (s)")
-
-        ax[0].set_title(f"{date} {epoch} sleep phase")
-
-        fig.savefig(
-            fig_save_dir / f"{epoch}.pdf",
-            # dpi=300,
-            bbox_inches="tight",
-        )
+        output_path = figure_dir / f"{epoch}_{heatmap_label}.png"
+        fig.savefig(output_path, bbox_inches="tight")
+        if show:
+            plt.show()
         plt.close(fig)
+        print(f"Saved figure to {output_path}")
 
-    return None
+        output_paths[epoch] = output_path
+        epoch_summaries[epoch] = {
+            **{
+                f"{selected_region}_unit_count": float(firing_rate_by_region[selected_region].shape[0])
+                for selected_region in heatmap_regions
+            },
+            "firing_rate_bin_count": float(firing_rate_time.shape[0]),
+            "spike_indicator_sample_count": float(spike_time.shape[0]),
+            "position_sample_count": float(position_time.shape[0]),
+            "heatmap_region_count": float(len(heatmap_regions)),
+        }
 
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Plot behavioral and neural data during sleep"
+    outputs = {
+        "figure_paths": output_paths,
+        "selected_epochs": selected_epochs,
+        "sources": session["sources"],
+        "epoch_summaries": epoch_summaries,
+        "v1_lfp_channel": validated_v1_channel,
+        "ripple_channel": validated_ripple_channel,
+        "heatmap_regions": list(heatmap_regions),
+    }
+    log_path = write_run_log(
+        analysis_path=analysis_path,
+        script_name="v1ca1.sleep.plot_sleep_phases",
+        parameters={
+            "animal_name": animal_name,
+            "date": date,
+            "data_root": data_root,
+            "nwb_root": nwb_root,
+            "epochs": epochs,
+            "position_offset": position_offset,
+            "v1_lfp_channel": validated_v1_channel,
+            "ripple_channel": validated_ripple_channel,
+            "region": region,
+            "show": show,
+        },
+        outputs=outputs,
     )
-    return parser.parse_args()
+    print(f"Saved run metadata to {log_path}")
+    outputs["log_path"] = log_path
+    return outputs
 
 
-def main():
-    args = parse_arguments()
-    plot_sleep_phases()
+def main(argv: list[str] | None = None) -> None:
+    """Run the sleep-phase plotting CLI."""
+    args = parse_arguments(argv)
+    plot_sleep_phases_for_session(
+        animal_name=args.animal_name,
+        date=args.date,
+        data_root=args.data_root,
+        nwb_root=args.nwb_root,
+        epochs=args.epochs,
+        position_offset=args.position_offset,
+        v1_lfp_channel=args.v1_lfp_channel,
+        ripple_channel=args.ripple_channel,
+        region=args.region,
+        show=args.show,
+    )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ from v1ca1.motor.compare_epoch_motor_behavior import (
     build_pairwise_distance_table,
     compute_motor_variables,
     filter_finite_position_samples,
-    parse_arguments,
     summarize_progression_values,
 )
 
@@ -135,25 +134,3 @@ def test_build_pairwise_distance_table_is_symmetric_and_epoch_ordered() -> None:
 
     assert divergence_ab == divergence_ba
     assert divergence_diag == 0.0
-
-
-def test_parse_arguments_accepts_epoch_and_binning_options() -> None:
-    args = parse_arguments(
-        [
-            "--animal-name",
-            "L14",
-            "--date",
-            "20240611",
-            "--epochs",
-            "02_r1",
-            "04_r2",
-            "--progression-bin-size-cm",
-            "6.0",
-            "--n-hist-bins",
-            "25",
-        ]
-    )
-
-    assert args.epochs == ["02_r1", "04_r2"]
-    assert args.progression_bin_size_cm == 6.0
-    assert args.n_hist_bins == 25

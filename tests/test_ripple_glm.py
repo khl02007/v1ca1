@@ -12,6 +12,8 @@ from v1ca1.ripple.ripple_glm import (
     build_metric_figure_data,
     empirical_p_values,
     get_epoch_skip_reason,
+    load_ripple_tables,
+    load_ripple_tables_from_parquet_output,
     load_ripple_tables_from_interval_output,
     load_ripple_tables_from_legacy_pickle,
     make_preripple_ep,
@@ -55,6 +57,42 @@ def test_load_ripple_tables_normalizes_modern_and_legacy_sources(tmp_path) -> No
     assert np.allclose(modern_tables["01_s1"]["end_time"], [1.2, 2.7])
     assert np.allclose(legacy_tables["02_r1"]["start_time"], [5.0])
     assert np.allclose(legacy_tables["02_r1"]["end_time"], [5.2])
+
+
+def test_load_ripple_tables_prefers_parquet_and_preserves_extra_columns(tmp_path) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    ripple_dir = analysis_path / "ripple"
+    ripple_dir.mkdir(parents=True)
+    parquet_path = ripple_dir / "ripple_times.parquet"
+    legacy_path = ripple_dir / "Kay_ripple_detector.pkl"
+
+    pd.DataFrame(
+        {
+            "epoch": ["01_s1", "01_s1", "02_r1"],
+            "start": [1.0, 2.5, 5.0],
+            "end": [1.2, 2.7, 5.2],
+            "mean_zscore": [2.0, 3.0, 4.0],
+        }
+    ).to_parquet(parquet_path, index=False)
+
+    with open(legacy_path, "wb") as file:
+        pickle.dump(
+            {"02_r1": pd.DataFrame({"start_time": [9.0], "end_time": [9.2]})},
+            file,
+        )
+
+    parquet_tables = load_ripple_tables_from_parquet_output(parquet_path)
+    loaded_tables, source = load_ripple_tables(analysis_path)
+
+    assert source == "parquet"
+    assert sorted(parquet_tables) == ["01_s1", "02_r1"]
+    assert np.allclose(parquet_tables["01_s1"]["start_time"], [1.0, 2.5])
+    assert np.allclose(parquet_tables["02_r1"]["end_time"], [5.2])
+    assert np.allclose(parquet_tables["01_s1"]["mean_zscore"], [2.0, 3.0])
+    assert np.allclose(loaded_tables["02_r1"]["mean_zscore"], [4.0])
 
 
 def test_make_preripple_ep_clips_to_epoch_bounds() -> None:

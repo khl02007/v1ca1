@@ -16,20 +16,22 @@ empirical shuffle null built by refitting after independently shuffling each
 V1 unit's ripple responses, which yields per-unit shuffle means, shuffle
 standard deviations, and one-sided p-values.
 
-Successful epochs are saved under the session analysis directory as one
-NetCDF-backed xarray dataset per epoch in `ripple_glm/`. Each dataset stores
-the raw ripple fold arrays, ripple shuffle arrays, pre-ripple metrics,
-per-unit ripple summary variables, unit IDs, and fit metadata. The script also
-writes four summary figures per epoch in `figs/ripple_glm/`, one each for
-pseudo-R^2, MAE, deviance explained, and bits/spike. Each figure has a left
-panel with overlaid ripple and pre-ripple unit distributions plus compact
-boxplots, and a right panel with ripple effect size versus `-log10(shuffle
-p)`. A JSON run log is written under `v1ca1_log/`.
+Successful fits are saved under the session analysis directory as one
+NetCDF-backed xarray dataset per epoch and ridge strength in `ripple_glm/`.
+Each dataset stores the raw ripple fold arrays, ripple shuffle arrays,
+pre-ripple metrics, per-unit ripple summary variables, unit IDs, and fit
+metadata. The script also writes four summary figures per epoch and ridge
+strength in `figs/ripple_glm/`, one each for pseudo-R^2, MAE, deviance
+explained, and bits/spike. Each figure has a left panel with overlaid ripple
+and pre-ripple unit distributions plus compact boxplots, and a right panel
+with ripple effect size versus `-log10(shuffle p)`. A JSON run log is written
+under `v1ca1_log/`.
 """
 
 import argparse
 import gc
 import json
+import os
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -60,9 +62,11 @@ DEFAULT_RIPPLE_WINDOW_S = 0.2
 DEFAULT_PRE_BUFFER_S = 0.02
 DEFAULT_PRE_EXCLUDE_GUARD_S = 0.05
 DEFAULT_MIN_SPIKES_PER_RIPPLE = 0.1
+DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE = 0.0
 DEFAULT_N_SPLITS = 5
 DEFAULT_N_SHUFFLES_RIPPLE = 100
 DEFAULT_RIDGE_STRENGTH = 1e-1
+DEFAULT_RIDGE_STRENGTH_SWEEP = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 DEFAULT_SHUFFLE_SEED = 45
 DEFAULT_MAXITER = 6000
 DEFAULT_TOL = 1e-7
@@ -140,6 +144,15 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--min-ca1-spikes-per-ripple",
+        type=float,
+        default=DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
+        help=(
+            "Minimum average CA1 spikes per ripple required to keep one source unit. "
+            f"Default: {DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
         "--n-splits",
         type=int,
         default=DEFAULT_N_SPLITS,
@@ -157,8 +170,20 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--ridge-strength",
         type=float,
-        default=DEFAULT_RIDGE_STRENGTH,
-        help=f"Ridge regularization strength. Default: {DEFAULT_RIDGE_STRENGTH}",
+        help=(
+            "Optional single ridge regularization strength override. "
+            "When provided, runs only this value."
+        ),
+    )
+    parser.add_argument(
+        "--ridge-strengths",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_RIDGE_STRENGTH_SWEEP),
+        help=(
+            "Ridge regularization strengths to sweep. "
+            f"Default: {list(DEFAULT_RIDGE_STRENGTH_SWEEP)!r}"
+        ),
     )
     parser.add_argument(
         "--shuffle-seed",
@@ -185,6 +210,13 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_TOL,
         help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
     )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help=(
+            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
+            "nemos/JAX, for example '0' or '0,1'."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -200,12 +232,18 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--pre-exclude-guard-s must be non-negative.")
     if args.min_spikes_per_ripple < 0:
         raise ValueError("--min-spikes-per-ripple must be non-negative.")
+    if args.min_ca1_spikes_per_ripple < 0:
+        raise ValueError("--min-ca1-spikes-per-ripple must be non-negative.")
     if args.n_splits < 2:
         raise ValueError("--n-splits must be at least 2.")
     if args.n_shuffles_ripple < 0:
         raise ValueError("--n-shuffles-ripple must be non-negative.")
-    if args.ridge_strength < 0:
-        raise ValueError("--ridge-strength must be non-negative.")
+    if args.ridge_strength is not None and args.ridge_strength < 0:
+        raise ValueError("--ridge-strength must be non-negative when provided.")
+    if not args.ridge_strengths:
+        raise ValueError("--ridge-strengths must contain at least one value.")
+    if any(ridge_strength < 0 for ridge_strength in args.ridge_strengths):
+        raise ValueError("--ridge-strengths must contain only non-negative values.")
     if args.maxiter <= 0:
         raise ValueError("--maxiter must be positive.")
     if args.tol <= 0:
@@ -253,6 +291,35 @@ def validate_selected_epochs_across_sources(
         )
 
 
+def restrict_epochs_to_ripple_event_epochs(
+    selected_epochs: list[str],
+    *,
+    ripple_event_epochs: list[str],
+    ripple_event_source: str,
+) -> list[str]:
+    """Keep only epochs that are present in the loaded ripple event table."""
+    ripple_epoch_set = set(ripple_event_epochs)
+    kept_epochs = [epoch for epoch in selected_epochs if epoch in ripple_epoch_set]
+    skipped_epochs = [epoch for epoch in selected_epochs if epoch not in ripple_epoch_set]
+
+    if ripple_event_source == "parquet":
+        source_label = "ripple_times.parquet"
+    else:
+        source_label = f"the loaded ripple event source ({ripple_event_source})"
+
+    print(f"Restricting ripple GLM to epochs present in {source_label}.")
+    print(f"Processing epochs: {kept_epochs!r}")
+    if skipped_epochs:
+        print(f"Skipping epochs without saved ripple events in {source_label}: {skipped_epochs!r}")
+
+    if not kept_epochs:
+        raise ValueError(
+            "No selected epochs are present in the loaded ripple event table. "
+            f"Selected epochs: {selected_epochs!r}; source: {source_label}."
+        )
+    return kept_epochs
+
+
 def normalize_ripple_table(result: Any, epoch: str) -> pd.DataFrame:
     """Normalize one ripple-event payload into a dataframe."""
     if result is None or (isinstance(result, dict) and not result):
@@ -290,67 +357,29 @@ def normalize_ripple_table(result: Any, epoch: str) -> pd.DataFrame:
     return dataframe
 
 
-def _extract_interval_dataframe(intervals: Any) -> pd.DataFrame:
-    """Return a dataframe-like view of a pynapple IntervalSet."""
-    if hasattr(intervals, "as_dataframe"):
-        interval_df = intervals.as_dataframe()
-        if isinstance(interval_df, pd.DataFrame):
-            return interval_df.copy()
-    if hasattr(intervals, "_metadata"):
-        metadata = intervals._metadata  # type: ignore[attr-defined]
-        if isinstance(metadata, pd.DataFrame):
-            return metadata.copy()
-    return pd.DataFrame()
-
-
-def _extract_epoch_metadata(intervals: Any) -> np.ndarray:
-    """Extract the saved epoch labels from a pynapple IntervalSet."""
-    try:
-        epoch_values = intervals.get_info("epoch")
-    except Exception:
-        epoch_values = None
-
-    if epoch_values is not None:
-        epoch_array = np.asarray(epoch_values)
-        if epoch_array.size:
-            return epoch_array.astype(str)
-
-    interval_df = _extract_interval_dataframe(intervals)
-    if "epoch" in interval_df.columns:
-        return np.asarray(interval_df["epoch"], dtype=str)
-
-    raise ValueError("The ripple interval output does not contain saved epoch labels.")
-
-
-def load_ripple_tables_from_interval_output(path: Path) -> dict[str, pd.DataFrame]:
-    """Load ripple events from the modern flattened pynapple interval output."""
-    import pynapple as nap
-
+def load_ripple_tables_from_parquet_output(path: Path) -> dict[str, pd.DataFrame]:
+    """Load ripple events from the modern flattened parquet output."""
     if not path.exists():
-        raise FileNotFoundError(f"Ripple interval output not found: {path}")
+        raise FileNotFoundError(f"Ripple parquet output not found: {path}")
 
-    interval_set = nap.load_file(path)
-    epoch_values = _extract_epoch_metadata(interval_set)
-    start_values = np.asarray(interval_set.start, dtype=float).ravel()
-    end_values = np.asarray(interval_set.end, dtype=float).ravel()
-    if start_values.shape != end_values.shape or start_values.size != epoch_values.size:
-        raise ValueError(
-            "The ripple interval output has mismatched start/end/epoch lengths: "
-            f"{start_values.shape}, {end_values.shape}, {epoch_values.shape}."
-        )
-
-    flat_table = pd.DataFrame(
-        {
-            "epoch": epoch_values.astype(str),
-            "start_time": start_values,
-            "end_time": end_values,
-        }
-    )
+    flat_table = pd.read_parquet(path)
     if flat_table.empty:
         return {}
 
+    working_table = flat_table.copy()
+    rename_columns = {}
+    if "start" in working_table.columns and "start_time" not in working_table.columns:
+        rename_columns["start"] = "start_time"
+    if "end" in working_table.columns and "end_time" not in working_table.columns:
+        rename_columns["end"] = "end_time"
+    if rename_columns:
+        working_table = working_table.rename(columns=rename_columns)
+
+    if "epoch" not in working_table.columns:
+        raise ValueError(f"Ripple parquet output is missing the required 'epoch' column: {path}")
+
     ripple_tables: dict[str, pd.DataFrame] = {}
-    for epoch, group in flat_table.groupby("epoch", sort=False):
+    for epoch, group in working_table.groupby("epoch", sort=False):
         ripple_tables[str(epoch)] = normalize_ripple_table(
             group.drop(columns="epoch").reset_index(drop=True),
             epoch=str(epoch),
@@ -375,26 +404,26 @@ def load_ripple_tables_from_legacy_pickle(path: Path) -> dict[str, pd.DataFrame]
 
 
 def load_ripple_tables(analysis_path: Path) -> tuple[dict[str, pd.DataFrame], str]:
-    """Load ripple events, preferring the modern interval output."""
-    interval_path = analysis_path / "ripple" / "ripple_times.npz"
+    """Load ripple events, preferring the supported parquet output."""
+    parquet_path = analysis_path / "ripple" / "ripple_times.parquet"
     legacy_path = analysis_path / "ripple" / "Kay_ripple_detector.pkl"
 
-    interval_error: Exception | None = None
-    if interval_path.exists():
+    parquet_error: Exception | None = None
+    if parquet_path.exists():
         try:
-            return load_ripple_tables_from_interval_output(interval_path), "pynapple"
+            return load_ripple_tables_from_parquet_output(parquet_path), "parquet"
         except Exception as exc:
-            interval_error = exc
+            parquet_error = exc
 
     if legacy_path.exists():
         return load_ripple_tables_from_legacy_pickle(legacy_path), "pickle"
 
-    if interval_error is not None:
+    if parquet_error is not None:
         raise ValueError(
-            f"Failed to load {interval_path} and no legacy pickle fallback was found."
-        ) from interval_error
+            f"Failed to load {parquet_path} and no legacy pickle fallback was found."
+        ) from parquet_error
     raise FileNotFoundError(
-        f"Could not find {interval_path} or {legacy_path} under {analysis_path}."
+        f"Could not find {parquet_path} or {legacy_path} under {analysis_path}."
     )
 
 
@@ -418,6 +447,7 @@ def prepare_ripple_glm_session(
         regions=(TARGET_REGION, SOURCE_REGION),
     )
     loaded_ripple_tables, ripple_source = load_ripple_tables(analysis_path)
+    ripple_event_epochs = list(loaded_ripple_tables.keys())
     ripple_tables = {
         epoch: loaded_ripple_tables.get(epoch, normalize_ripple_table(None, epoch))
         for epoch in epoch_tags
@@ -434,6 +464,7 @@ def prepare_ripple_glm_session(
         "timestamps_ephys_all": timestamps_ephys_all,
         "epoch_intervals": epoch_intervals,
         "spikes_by_region": spikes_by_region,
+        "ripple_event_epochs": ripple_event_epochs,
         "ripple_tables": ripple_tables,
         "sources": {
             "timestamps_ephys": ephys_source,
@@ -637,13 +668,23 @@ def get_epoch_skip_reason(
     n_ripples: int,
     n_splits: int,
     n_kept_v1_units: int | None = None,
+    n_kept_ca1_units: int | None = None,
 ) -> str | None:
     """Return a skip reason string for common weak-epoch cases."""
     if n_ripples < n_splits:
         return f"Not enough ripples for CV: n_ripples={n_ripples}, n_splits={n_splits}"
     if n_kept_v1_units is not None and n_kept_v1_units <= 0:
         return "No V1 units passed the minimum spikes-per-ripple threshold."
+    if n_kept_ca1_units is not None and n_kept_ca1_units <= 0:
+        return "No CA1 units passed the minimum spikes-per-ripple threshold."
     return None
+
+
+def resolve_ridge_strengths(args: argparse.Namespace) -> list[float]:
+    """Return the ridge strengths to run for this invocation."""
+    if args.ridge_strength is not None:
+        return [float(args.ridge_strength)]
+    return [float(ridge_strength) for ridge_strength in args.ridge_strengths]
 
 
 def _clear_jax_caches() -> None:
@@ -662,6 +703,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
     epoch_interval: "nap.IntervalSet",
     ripple_table: pd.DataFrame,
     min_spikes_per_ripple: float = DEFAULT_MIN_SPIKES_PER_RIPPLE,
+    min_ca1_spikes_per_ripple: float = DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
     n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
@@ -721,13 +763,19 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
     y_p = y_p[:, keep_y]
 
     v1_unit_ids = np.asarray(list(spikes[TARGET_REGION].keys()))
-    ca1_unit_ids = np.asarray(list(spikes[SOURCE_REGION].keys()))
     kept_v1_unit_ids = v1_unit_ids[keep_y]
+    keep_x_ripple = (X_r.sum(axis=0) / max(n_ripples, 1)) >= float(min_ca1_spikes_per_ripple)
+    X_r = X_r[:, keep_x_ripple]
+    X_p = X_p[:, keep_x_ripple]
+    ca1_unit_ids = np.asarray(list(spikes[SOURCE_REGION].keys()))
+    kept_ca1_unit_ids = ca1_unit_ids[keep_x_ripple]
     n_cells = int(y_r.shape[1])
+    n_ca1_cells = int(X_r.shape[1])
     skip_reason = get_epoch_skip_reason(
         n_ripples=n_ripples,
         n_splits=n_splits,
         n_kept_v1_units=n_cells,
+        n_kept_ca1_units=n_ca1_cells,
     )
     if skip_reason is not None:
         raise ValueError(skip_reason)
@@ -888,6 +936,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         "epoch": epoch,
         "shuffle_seed": int(shuffle_seed),
         "min_spikes_per_ripple": float(min_spikes_per_ripple),
+        "min_ca1_spikes_per_ripple": float(min_ca1_spikes_per_ripple),
         "n_splits": int(n_splits),
         "n_shuffles_ripple": int(n_shuffles_ripple),
         "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
@@ -898,8 +947,9 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         "n_ripples": n_ripples,
         "n_pre": n_pre,
         "n_cells": n_cells,
+        "n_ca1_cells": n_ca1_cells,
         "v1_unit_ids": kept_v1_unit_ids,
-        "ca1_unit_ids": ca1_unit_ids,
+        "ca1_unit_ids": kept_ca1_unit_ids,
         "pseudo_r2_ripple_folds": pseudo_r2_ripple,
         "mae_ripple_folds": mae_ripple,
         "devexp_ripple_folds": devexp_ripple,
@@ -946,6 +996,24 @@ def nansem(values: np.ndarray, axis: int = 0) -> np.ndarray:
     counts = np.sum(np.isfinite(values), axis=axis)
     sd = np.nanstd(values, axis=axis, ddof=0)
     return np.where(counts > 0, sd / np.sqrt(counts), np.nan)
+
+
+def format_ripple_window_suffix(ripple_window_s: float) -> str:
+    """Return a filesystem-friendly suffix for one ripple window length."""
+    window_text = f"{float(ripple_window_s):.6f}".rstrip("0").rstrip(".")
+    return f"rw_{window_text.replace('.', 'p')}s"
+
+
+def format_ridge_strength_suffix(ridge_strength: float) -> str:
+    """Return a filesystem-friendly suffix for one ridge strength."""
+    ridge_text = f"{float(ridge_strength):.0e}"
+    mantissa, exponent = ridge_text.split("e")
+    exponent = exponent.lstrip("+")
+    if exponent.startswith("-0"):
+        exponent = f"-{exponent[2:]}"
+    elif exponent.startswith("0"):
+        exponent = exponent[1:]
+    return f"ridge_{mantissa}e{exponent}"
 
 
 def empirical_p_values(
@@ -1162,6 +1230,7 @@ def plot_metric_summary(
     animal_name: str,
     date: str,
     epoch: str,
+    ridge_strength: float,
     metric_label: str,
     out_path: Path,
 ) -> Path:
@@ -1287,7 +1356,10 @@ def plot_metric_summary(
     sig_ax.set_ylabel(r"$-\log_{10}(p)$ (shuffle)")
     sig_ax.set_title("Ripple effect size vs significance")
 
-    fig.suptitle(f"{animal_name} {date} {epoch} {metric_label}", fontsize=14)
+    fig.suptitle(
+        f"{animal_name} {date} {epoch} {metric_label} ridge={ridge_strength:.1e}",
+        fontsize=14,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
@@ -1301,9 +1373,13 @@ def save_epoch_figures(
     animal_name: str,
     date: str,
     epoch: str,
+    ripple_window_s: float,
+    ridge_strength: float,
 ) -> list[Path]:
     """Save the configured epoch summary figures."""
     fig_dir.mkdir(parents=True, exist_ok=True)
+    ripple_window_suffix = format_ripple_window_suffix(ripple_window_s)
+    ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
     metric_specs = [
         ("pseudo_r2", "Pseudo R^2"),
         ("mae", "MAE"),
@@ -1322,8 +1398,10 @@ def save_epoch_figures(
                 animal_name=animal_name,
                 date=date,
                 epoch=epoch,
+                ridge_strength=ridge_strength,
                 metric_label=metric_label,
-                out_path=fig_dir / f"{epoch}_{metric_name}_summary.png",
+                out_path=fig_dir
+                / f"{epoch}_{ripple_window_suffix}_{ridge_strength_suffix}_{metric_name}_summary.png",
             )
         )
     return figure_paths
@@ -1333,13 +1411,21 @@ def main() -> None:
     """Run the ripple GLM CLI."""
     args = parse_arguments()
     validate_arguments(args)
+    if args.cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+        print(f"Setting CUDA_VISIBLE_DEVICES={args.cuda_visible_devices!r} for ripple GLM.")
 
     session = prepare_ripple_glm_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
     )
-    selected_epochs = validate_epochs(session["epoch_tags"], args.epochs)
+    requested_epochs = validate_epochs(session["epoch_tags"], args.epochs)
+    selected_epochs = restrict_epochs_to_ripple_event_epochs(
+        requested_epochs,
+        ripple_event_epochs=session["ripple_event_epochs"],
+        ripple_event_source=session["sources"]["ripple_events"],
+    )
     validate_selected_epochs_across_sources(
         selected_epochs,
         source_epochs={
@@ -1354,7 +1440,9 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir = analysis_path / "figs" / "ripple_glm"
     pre_window_s = args.pre_window_s if args.pre_window_s is not None else args.ripple_window_s
-    fit_parameters = {
+    ridge_strengths = resolve_ridge_strengths(args)
+    print(f"Sweeping ridge strengths: {ridge_strengths!r}")
+    run_parameters = {
         "animal_name": args.animal_name,
         "date": args.date,
         "data_root": str(args.data_root),
@@ -1365,74 +1453,104 @@ def main() -> None:
         "exclude_ripples": bool(args.exclude_ripples),
         "pre_exclude_guard_s": float(args.pre_exclude_guard_s),
         "min_spikes_per_ripple": float(args.min_spikes_per_ripple),
+        "min_ca1_spikes_per_ripple": float(args.min_ca1_spikes_per_ripple),
         "n_splits": int(args.n_splits),
         "n_shuffles_ripple": int(args.n_shuffles_ripple),
-        "ridge_strength": float(args.ridge_strength),
+        "ridge_strengths": list(ridge_strengths),
         "shuffle_seed": int(args.shuffle_seed),
         "maxiter": int(args.maxiter),
         "tol": float(args.tol),
+        "cuda_visible_devices": args.cuda_visible_devices,
     }
 
     saved_datasets: list[Path] = []
     saved_figures: list[Path] = []
     skipped_epochs: list[dict[str, Any]] = []
+    ripple_window_suffix = format_ripple_window_suffix(args.ripple_window_s)
 
     for epoch in selected_epochs:
         ripple_table = session["ripple_tables"][epoch]
-        try:
-            results = fit_ripple_glm_train_on_ripple_predict_pre(
-                epoch=epoch,
-                spikes=session["spikes_by_region"],
-                epoch_interval=session["epoch_intervals"][epoch],
-                ripple_table=ripple_table,
-                min_spikes_per_ripple=args.min_spikes_per_ripple,
-                n_shuffles_ripple=args.n_shuffles_ripple,
-                shuffle_seed=args.shuffle_seed,
-                ripple_window_s=args.ripple_window_s,
-                pre_window_s=pre_window_s,
-                pre_buffer_s=args.pre_buffer_s,
-                exclude_ripples=args.exclude_ripples,
-                pre_exclude_guard_s=args.pre_exclude_guard_s,
-                n_splits=args.n_splits,
-                ridge_strength=args.ridge_strength,
-                maxiter=args.maxiter,
-                tol=args.tol,
+        for ridge_strength in ridge_strengths:
+            ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
+            print(
+                "Fitting ripple GLM for "
+                f"{args.animal_name} {args.date} {epoch} with ridge_strength={ridge_strength:.1e}"
             )
-        except ValueError as exc:
-            skipped_epochs.append({"epoch": epoch, "reason": str(exc)})
-            print(f"Skipping {args.animal_name} {args.date} {epoch}: {exc}")
-            continue
-        except Exception as exc:
-            skipped_epochs.append(
-                {
-                    "epoch": epoch,
-                    "reason": "fit failed",
-                    "error": str(exc),
-                }
-            )
-            print(f"Skipping {args.animal_name} {args.date} {epoch}: fit failed: {exc}")
-            continue
+            try:
+                results = fit_ripple_glm_train_on_ripple_predict_pre(
+                    epoch=epoch,
+                    spikes=session["spikes_by_region"],
+                    epoch_interval=session["epoch_intervals"][epoch],
+                    ripple_table=ripple_table,
+                    min_spikes_per_ripple=args.min_spikes_per_ripple,
+                    min_ca1_spikes_per_ripple=args.min_ca1_spikes_per_ripple,
+                    n_shuffles_ripple=args.n_shuffles_ripple,
+                    shuffle_seed=args.shuffle_seed,
+                    ripple_window_s=args.ripple_window_s,
+                    pre_window_s=pre_window_s,
+                    pre_buffer_s=args.pre_buffer_s,
+                    exclude_ripples=args.exclude_ripples,
+                    pre_exclude_guard_s=args.pre_exclude_guard_s,
+                    n_splits=args.n_splits,
+                    ridge_strength=ridge_strength,
+                    maxiter=args.maxiter,
+                    tol=args.tol,
+                )
+            except ValueError as exc:
+                skipped_epochs.append(
+                    {
+                        "epoch": epoch,
+                        "ridge_strength": float(ridge_strength),
+                        "reason": str(exc),
+                    }
+                )
+                print(
+                    f"Skipping {args.animal_name} {args.date} {epoch} "
+                    f"(ridge_strength={ridge_strength:.1e}): {exc}"
+                )
+                continue
+            except Exception as exc:
+                skipped_epochs.append(
+                    {
+                        "epoch": epoch,
+                        "ridge_strength": float(ridge_strength),
+                        "reason": "fit failed",
+                        "error": str(exc),
+                    }
+                )
+                print(
+                    f"Skipping {args.animal_name} {args.date} {epoch} "
+                    f"(ridge_strength={ridge_strength:.1e}): fit failed: {exc}"
+                )
+                continue
 
-        fit_dataset = build_epoch_fit_dataset(
-            results,
-            animal_name=args.animal_name,
-            date=args.date,
-            epoch=epoch,
-            sources=session["sources"],
-            fit_parameters=fit_parameters,
-        )
-        result_path = data_dir / f"{epoch}_ripple_glm.nc"
-        fit_dataset.to_netcdf(result_path)
-        saved_datasets.append(result_path)
-        saved_figures.extend(
-            save_epoch_figures(
-                results=results,
-                fig_dir=fig_dir,
+            fit_parameters = dict(run_parameters)
+            fit_parameters["ridge_strength"] = float(ridge_strength)
+            fit_dataset = build_epoch_fit_dataset(
+                results,
                 animal_name=args.animal_name,
                 date=args.date,
                 epoch=epoch,
+                sources=session["sources"],
+                fit_parameters=fit_parameters,
             )
-        )
+            result_path = (
+                data_dir
+                / f"{epoch}_{ripple_window_suffix}_{ridge_strength_suffix}_ripple_glm.nc"
+            )
+            fit_dataset.to_netcdf(result_path)
+            saved_datasets.append(result_path)
+            saved_figures.extend(
+                save_epoch_figures(
+                    results=results,
+                    fig_dir=fig_dir,
+                    animal_name=args.animal_name,
+                    date=args.date,
+                    epoch=epoch,
+                    ripple_window_s=args.ripple_window_s,
+                    ridge_strength=ridge_strength,
+                )
+            )
 
     if not saved_datasets:
         raise RuntimeError(
@@ -1454,12 +1572,14 @@ def main() -> None:
             "exclude_ripples": args.exclude_ripples,
             "pre_exclude_guard_s": args.pre_exclude_guard_s,
             "min_spikes_per_ripple": args.min_spikes_per_ripple,
+            "min_ca1_spikes_per_ripple": args.min_ca1_spikes_per_ripple,
             "n_splits": args.n_splits,
             "n_shuffles_ripple": args.n_shuffles_ripple,
-            "ridge_strength": args.ridge_strength,
+            "ridge_strengths": ridge_strengths,
             "shuffle_seed": args.shuffle_seed,
             "maxiter": args.maxiter,
             "tol": args.tol,
+            "cuda_visible_devices": args.cuda_visible_devices,
             "model_direction": f"{SOURCE_REGION}_to_{TARGET_REGION}",
         },
         outputs={
