@@ -192,6 +192,7 @@ def test_compute_modulation_stats_returns_expected_zscore() -> None:
     assert stats["baseline_mean_hz"] == pytest.approx(10.0)
     assert stats["baseline_std_hz"] == pytest.approx(5.0)
     assert stats["response_mean_hz"] == pytest.approx(35.0)
+    assert stats["ripple_modulation_index"] == pytest.approx((35.0 - 10.0) / (35.0 + 10.0))
     assert stats["response_zscore"] == pytest.approx(5.0)
     assert stats["invalid_reason"] is None
 
@@ -205,6 +206,7 @@ def test_compute_modulation_stats_marks_zero_baseline_std_invalid() -> None:
     )
 
     assert stats["baseline_std_hz"] == pytest.approx(0.0)
+    assert stats["ripple_modulation_index"] == pytest.approx((20.0 - 10.0) / (20.0 + 10.0))
     assert np.isnan(stats["response_zscore"])
     assert stats["invalid_reason"] == "zero_baseline_std"
 

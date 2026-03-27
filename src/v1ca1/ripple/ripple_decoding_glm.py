@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 
+from v1ca1.helper.cuda import configure_cuda_visible_devices
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
@@ -160,6 +161,13 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Minimum V1 firing rate during ripple bins in each decoded epoch. "
             f"Default: {DEFAULT_V1_MIN_RIPPLE_FR_HZ}"
+        ),
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help=(
+            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
+            "nemos/JAX, for example '0' or '0,1'."
         ),
     )
     return parser.parse_args()
@@ -1124,6 +1132,7 @@ def main() -> None:
     """Run the ripple decoding GLM CLI."""
     args = parse_arguments()
     validate_arguments(args)
+    configure_cuda_visible_devices(args.cuda_visible_devices)
 
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
@@ -1171,6 +1180,7 @@ def main() -> None:
         "shuffle_seed": args.shuffle_seed,
         "v1_min_movement_fr_hz": args.v1_min_movement_fr_hz,
         "v1_min_ripple_fr_hz": args.v1_min_ripple_fr_hz,
+        "cuda_visible_devices": args.cuda_visible_devices,
         "model_direction": "decoded_ca1_state_to_v1",
     }
 
@@ -1365,6 +1375,7 @@ def main() -> None:
             "shuffle_seed": args.shuffle_seed,
             "v1_min_movement_fr_hz": args.v1_min_movement_fr_hz,
             "v1_min_ripple_fr_hz": args.v1_min_ripple_fr_hz,
+            "cuda_visible_devices": args.cuda_visible_devices,
             "model_direction": "decoded_ca1_state_to_v1",
         },
         outputs={

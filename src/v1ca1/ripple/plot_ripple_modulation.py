@@ -47,6 +47,7 @@ SUMMARY_COLUMNS = [
     "baseline_mean_hz",
     "baseline_std_hz",
     "response_mean_hz",
+    "ripple_modulation_index",
     "response_zscore",
     "invalid_reason",
 ]
@@ -356,7 +357,7 @@ def compute_modulation_stats(
     response_window: tuple[float, float],
     baseline_window: tuple[float, float],
 ) -> dict[str, Any]:
-    """Compute baseline, response, and z-score metrics for one unit trace."""
+    """Compute baseline, response, modulation-index, and z-score metrics for one unit trace."""
     response_mask = (time_values >= response_window[0]) & (time_values < response_window[1])
     baseline_mask = (time_values >= baseline_window[0]) & (time_values < baseline_window[1])
     if not np.any(response_mask):
@@ -373,6 +374,13 @@ def compute_modulation_stats(
     baseline_mean_hz = float(np.mean(mean_rate_hz[baseline_mask]))
     baseline_std_hz = float(np.std(mean_rate_hz[baseline_mask]))
     response_mean_hz = float(np.mean(mean_rate_hz[response_mask]))
+    rate_sum_hz = response_mean_hz + baseline_mean_hz
+    if np.isclose(rate_sum_hz, 0.0):
+        ripple_modulation_index = float("nan")
+    else:
+        ripple_modulation_index = float(
+            (response_mean_hz - baseline_mean_hz) / rate_sum_hz
+        )
 
     invalid_reason: str | None = None
     if np.isclose(baseline_std_hz, 0.0):
@@ -385,6 +393,7 @@ def compute_modulation_stats(
         "baseline_mean_hz": baseline_mean_hz,
         "baseline_std_hz": baseline_std_hz,
         "response_mean_hz": response_mean_hz,
+        "ripple_modulation_index": ripple_modulation_index,
         "response_zscore": response_zscore,
         "invalid_reason": invalid_reason,
     }

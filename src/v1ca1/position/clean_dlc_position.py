@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
-
 import numpy as np
 import pandas as pd
 
@@ -14,9 +12,9 @@ from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
     DEFAULT_NWB_ROOT,
     get_analysis_path,
-    get_run_epochs,
     load_position_timestamps,
 )
+from v1ca1.position._meters_per_pixel import get_session_meters_per_pixel
 from v1ca1.position.fuse_head_position_imu import load_dlc_bodypart
 
 BODY_PARTS = ("head", "body")
@@ -55,119 +53,37 @@ def _validate_meters_per_pixel(meters_per_pixel: float) -> float:
     return scale
 
 
-def _extract_nwb_epoch_tags(nwbfile: Any) -> list[str]:
-    """Extract ordered epoch tags from one NWB file."""
-    if nwbfile.epochs is None:
-        raise ValueError("NWB file does not contain an epochs table.")
-
-    epochs = nwbfile.epochs[:]
-    epoch_tags: list[str] = []
-    for row_tags in epochs["tags"]:
-        if len(row_tags) != 1:
-            raise ValueError(
-                "Expected exactly one tag per NWB epoch row, "
-                f"found {len(row_tags)} tags: {row_tags!r}"
-            )
-        epoch_tags.append(str(row_tags[0]))
-
-    if not epoch_tags:
-        raise ValueError("NWB epochs table is empty.")
-    return epoch_tags
-
-
-def _get_position_series_by_epoch(nwbfile: Any) -> tuple[dict[str, tuple[str, Any]], str]:
-    """Return one epoch-to-SpatialSeries mapping from the NWB behavior/position module."""
-    behavior = nwbfile.processing.get("behavior")
-    if behavior is None:
-        raise ValueError("NWB file does not contain a behavior processing module.")
-    if "position" not in behavior.data_interfaces:
-        raise ValueError("NWB behavior module does not contain a position interface.")
-
-    position = behavior.data_interfaces["position"]
-    spatial_series = getattr(position, "spatial_series", None)
-    if spatial_series is None or len(spatial_series) == 0:
-        raise ValueError("NWB behavior/position does not contain any spatial series.")
-
-    epoch_tags = _extract_nwb_epoch_tags(nwbfile)
-    series_items = list(spatial_series.items())
-
-    if len(series_items) == len(epoch_tags):
-        mapped_epochs = epoch_tags
-        mapping_mode = "all_epochs"
-    else:
-        run_epochs = get_run_epochs(epoch_tags)
-        if len(series_items) != len(run_epochs):
-            raise ValueError(
-                "Could not map NWB position spatial series to session epochs: "
-                f"{len(series_items)} spatial series, {len(epoch_tags)} total epochs, "
-                f"{len(run_epochs)} run epochs."
-            )
-        mapped_epochs = run_epochs
-        mapping_mode = "run_epochs"
-
-    return {
-        epoch: (series_name, series)
-        for epoch, (series_name, series) in zip(mapped_epochs, series_items, strict=True)
-    }, mapping_mode
-
-
 def _resolve_position_scale(
     animal_name: str,
     date: str,
-    epoch: str,
     meters_per_pixel: float | None,
-    nwb_root: Path,
 ) -> dict[str, float | str | None | Path]:
-    """Resolve one per-epoch position scale from the CLI or NWB metadata."""
+    """Resolve one per-session position scale from the CLI or session registry."""
     if meters_per_pixel is not None:
         scale = _validate_meters_per_pixel(meters_per_pixel)
-        return {
-            "meters_per_pixel": scale,
-            "cm_per_pixel": scale * CM_PER_M,
-            "position_scale_source": "cli",
-            "position_scale_epoch_mapping": None,
-            "position_scale_series_name": None,
-            "nwb_path": None,
-        }
+        position_scale_source = "cli"
+    else:
+        try:
+            configured_scale = get_session_meters_per_pixel(
+                animal_name=animal_name,
+                date=date,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                "No meters-per-pixel was provided and no session mapping is configured. "
+                "Pass --meters-per-pixel or add the session to "
+                "v1ca1.position._meters_per_pixel.METERS_PER_PIXEL_BY_SESSION."
+            ) from exc
+        scale = _validate_meters_per_pixel(configured_scale)
+        position_scale_source = "registry"
 
-    import pynwb
-
-    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
-    if not nwb_path.exists():
-        raise FileNotFoundError(f"NWB file not found: {nwb_path}")
-
-    with pynwb.NWBHDF5IO(nwb_path, "r", load_namespaces=True) as io:
-        nwbfile = io.read()
-        position_series_by_epoch, mapping_mode = _get_position_series_by_epoch(nwbfile)
-
-    if epoch not in position_series_by_epoch:
-        raise ValueError(
-            f"Could not resolve a position scale for epoch {epoch!r} from {nwb_path}. "
-            f"Available mapped epochs: {sorted(position_series_by_epoch)!r}. "
-            "Pass --meters-per-pixel explicitly for this epoch."
-        )
-
-    series_name, spatial_series = position_series_by_epoch[epoch]
-    unit = str(getattr(spatial_series, "unit", "") or "")
-    if unit != "meters":
-        raise ValueError(
-            "NWB position spatial series must use meter units to derive meters-per-pixel. "
-            f"Found unit {unit!r} for epoch {epoch!r} in series {series_name!r}."
-        )
-
-    conversion = getattr(spatial_series, "conversion", None)
-    if conversion is None:
-        raise ValueError(
-            f"NWB position spatial series {series_name!r} does not define a conversion value."
-        )
-    scale = _validate_meters_per_pixel(float(conversion))
     return {
         "meters_per_pixel": scale,
         "cm_per_pixel": scale * CM_PER_M,
-        "position_scale_source": "nwb",
-        "position_scale_epoch_mapping": mapping_mode,
-        "position_scale_series_name": series_name,
-        "nwb_path": nwb_path,
+        "position_scale_source": position_scale_source,
+        "position_scale_epoch_mapping": None,
+        "position_scale_series_name": None,
+        "nwb_path": None,
     }
 
 
@@ -799,6 +715,11 @@ def clean_dlc_position(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
     if not output_dirname:
         raise ValueError("--output-dirname must be a non-empty string.")
+    scale_metadata = _resolve_position_scale(
+        animal_name=animal_name,
+        date=date,
+        meters_per_pixel=meters_per_pixel,
+    )
 
     print(f"Processing {animal_name} {date} epoch {epoch}.")
     _epoch_tags, position_timestamps, timestamp_source = load_position_timestamps(analysis_path)
@@ -830,13 +751,6 @@ def clean_dlc_position(
         min_jump_threshold_px=min_jump_threshold_px,
     )
 
-    scale_metadata = _resolve_position_scale(
-        animal_name=animal_name,
-        date=date,
-        epoch=epoch,
-        meters_per_pixel=meters_per_pixel,
-        nwb_root=nwb_root,
-    )
     output_table = diagnostics.copy()
     output_table.insert(0, "epoch", epoch)
     output_table = _convert_output_table_to_cm(
@@ -957,8 +871,8 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Explicit pixel scale in meters per pixel. When omitted, the script "
-            "looks for an epoch-matched scale in the NWB behavior/position metadata."
+            "Optional pixel scale override in meters per pixel. When omitted, the script "
+            "uses the session registry in v1ca1.position._meters_per_pixel."
         ),
     )
     return parser.parse_args()

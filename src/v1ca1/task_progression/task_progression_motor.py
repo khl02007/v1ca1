@@ -30,6 +30,14 @@ import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from v1ca1.helper.cuda import (
+    configure_cuda_visible_devices,
+    pop_cuda_visible_devices_argument,
+)
+
+_CUDA_VISIBLE_DEVICES_CLI = pop_cuda_visible_devices_argument()
+configure_cuda_visible_devices(_CUDA_VISIBLE_DEVICES_CLI)
+
 import jax.numpy as jnp
 import numpy as np
 import position_tools as pt
@@ -1290,6 +1298,14 @@ def parse_arguments() -> argparse.Namespace:
             "for one task-progression session"
         )
     )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        default=_CUDA_VISIBLE_DEVICES_CLI,
+        help=(
+            "Optional CUDA_VISIBLE_DEVICES value applied before importing JAX. "
+            "Default: unset"
+        ),
+    )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
     parser.add_argument(
@@ -1512,6 +1528,7 @@ def main() -> None:
                     "body_position": "pickle",
                 },
                 fit_parameters={
+                    "cuda_visible_devices": args.cuda_visible_devices,
                     "position_offset": args.position_offset,
                     "speed_threshold_cm_s": args.speed_threshold_cm_s,
                     "speed_sigma_s": DEFAULT_SPEED_SIGMA_S,
@@ -1535,6 +1552,7 @@ def main() -> None:
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.task_progression_motor",
         parameters={
+            "cuda_visible_devices": args.cuda_visible_devices,
             "animal_name": args.animal_name,
             "date": args.date,
             "data_root": args.data_root,

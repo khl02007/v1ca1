@@ -22,13 +22,16 @@ Supported model families:
 import argparse
 import json
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 
+from v1ca1.helper.cuda import (
+    configure_cuda_visible_devices,
+    pop_cuda_visible_devices_argument,
+)
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.wtrack import get_wtrack_geometry, get_wtrack_total_length
 from v1ca1.task_progression._session import (
@@ -46,18 +49,8 @@ if TYPE_CHECKING:
     import xarray as xr
 
 
-def _extract_cuda_visible_devices(argv: list[str]) -> str | None:
-    """Extract `--cuda-visible-devices` before importing JAX."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--cuda-visible-devices", dest="cuda_visible_devices")
-    args, remaining = parser.parse_known_args(argv[1:])
-    sys.argv = [argv[0], *remaining]
-    return args.cuda_visible_devices
-
-
-_CUDA_VISIBLE_DEVICES_CLI = _extract_cuda_visible_devices(sys.argv)
-if _CUDA_VISIBLE_DEVICES_CLI is not None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = _CUDA_VISIBLE_DEVICES_CLI
+_CUDA_VISIBLE_DEVICES_CLI = pop_cuda_visible_devices_argument()
+configure_cuda_visible_devices(_CUDA_VISIBLE_DEVICES_CLI)
 
 
 try:

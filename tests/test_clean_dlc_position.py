@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pickle
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import v1ca1.position.clean_dlc_position as clean_dlc_position_module
+import v1ca1.position._meters_per_pixel as meters_per_pixel_module
+from v1ca1.position._meters_per_pixel import get_session_meters_per_pixel
 from v1ca1.position.clean_dlc_position import (
     DEFAULT_FIGURE_NAME_TEMPLATE,
     DEFAULT_OUTPUT_DIRNAME,
@@ -62,58 +64,6 @@ def _write_dlc_h5(
         columns=pd.MultiIndex.from_tuples(columns),
     )
     table.to_hdf(path, key="df", mode="w")
-
-
-def _write_test_position_nwb(
-    nwb_path: Path,
-    epoch_tags: list[str],
-    series_specs: list[dict[str, object]] | None,
-    *,
-    include_behavior: bool = True,
-    include_position: bool = True,
-) -> None:
-    pynwb = pytest.importorskip("pynwb")
-
-    nwbfile = pynwb.NWBFile(
-        session_description="test session",
-        identifier="test-id",
-        session_start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
-    )
-    for index, epoch_tag in enumerate(epoch_tags):
-        start_time = float(index * 10.0)
-        nwbfile.add_epoch(
-            start_time=start_time,
-            stop_time=start_time + 5.0,
-            tags=[str(epoch_tag)],
-        )
-
-    if include_behavior:
-        behavior = nwbfile.create_processing_module("behavior", "test behavior module")
-        if include_position:
-            position = pynwb.behavior.Position(name="position")
-            for index, spec in enumerate(series_specs or []):
-                data = np.asarray(
-                    spec.get("data", np.zeros((5, 2), dtype=float)),
-                    dtype=float,
-                )
-                timestamps = np.asarray(
-                    spec.get("timestamps", np.arange(data.shape[0], dtype=float)),
-                    dtype=float,
-                )
-                position.add_spatial_series(
-                    pynwb.behavior.SpatialSeries(
-                        name=str(spec.get("name", f"series_{index}")),
-                        data=data,
-                        timestamps=timestamps,
-                        reference_frame="origin",
-                        unit=str(spec.get("unit", "meters")),
-                        conversion=float(spec.get("conversion", 1.0)),
-                    )
-                )
-            behavior.add(position)
-
-    with pynwb.NWBHDF5IO(nwb_path, "w") as io:
-        io.write(nwbfile)
 
 
 def test_run_joint_position_cleaning_interpolates_low_likelihood_and_jump_frames() -> None:
@@ -362,27 +312,46 @@ def test_clean_dlc_position_cleans_full_epoch_without_internal_offset_and_scales
     assert cleaned_position.loc[2, "body_x_cleaned_cm"] == pytest.approx(64.0)
 
 
-def test_clean_dlc_position_resolves_scale_from_nwb_all_epoch_mapping(tmp_path: Path) -> None:
+def test_get_session_meters_per_pixel_returns_configured_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        meters_per_pixel_module,
+        "METERS_PER_PIXEL_BY_SESSION",
+        {"RatA": {"20240101": 0.02}},
+    )
+
+    assert get_session_meters_per_pixel("RatA", "20240101") == pytest.approx(0.02)
+
+
+def test_get_session_meters_per_pixel_rejects_missing_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        meters_per_pixel_module,
+        "METERS_PER_PIXEL_BY_SESSION",
+        {},
+    )
+
+    with pytest.raises(KeyError, match="RatA"):
+        get_session_meters_per_pixel("RatA", "20240101")
+
+
+def test_clean_dlc_position_prefers_cli_scale_over_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     pytest.importorskip("tables")
 
     analysis_path = tmp_path / "RatA" / "20240101"
-    frame_times = np.arange(5, dtype=float)
+    frame_times = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=float)
     _write_session_files(
         analysis_path=analysis_path,
         timestamps_position={"02_r1": frame_times},
     )
-    _write_test_position_nwb(
-        tmp_path / "RatA20240101.nwb",
-        epoch_tags=["01_s1", "02_r1"],
-        series_specs=[
-            {"conversion": 0.01, "unit": "meters"},
-            {"conversion": 0.02, "unit": "meters"},
-        ],
-    )
-
-    dlc_h5_path = tmp_path / "all_epoch_mapping.h5"
+    dlc_h5_path = tmp_path / "cli_override.h5"
     _write_dlc_h5(
         dlc_h5_path,
         tracks={
@@ -397,6 +366,11 @@ def test_clean_dlc_position_resolves_scale_from_nwb_all_epoch_mapping(tmp_path: 
                 np.full(5, 0.999),
             ),
         },
+    )
+    monkeypatch.setattr(
+        clean_dlc_position_module,
+        "get_session_meters_per_pixel",
+        lambda animal_name, date: pytest.fail("CLI meters-per-pixel should bypass the registry"),
     )
 
     output_path = clean_dlc_position(
@@ -405,44 +379,30 @@ def test_clean_dlc_position_resolves_scale_from_nwb_all_epoch_mapping(tmp_path: 
         epoch="02_r1",
         dlc_h5_path=dlc_h5_path,
         data_root=tmp_path,
-        nwb_root=tmp_path,
         threshold_z=0.0,
         min_jump_threshold_px=10.0,
+        meters_per_pixel=0.02,
     )
 
     diagnostics = pd.read_parquet(output_path)
     assert diagnostics.loc[2, "head_x_cleaned_cm"] == pytest.approx(4.0)
 
-    log_files = sorted(
-        (analysis_path / "v1ca1_log").glob("v1ca1_position_clean_dlc_position_*.json")
-    )
-    log_text = log_files[0].read_text(encoding="utf-8")
-    assert '"position_scale_source": "nwb"' in log_text
-    assert '"position_scale_epoch_mapping": "all_epochs"' in log_text
-    assert '"position_scale_series_name": "series_1"' in log_text
 
-
-def test_clean_dlc_position_resolves_scale_from_nwb_run_epoch_mapping(tmp_path: Path) -> None:
+def test_clean_dlc_position_uses_registry_scale_when_cli_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     pytest.importorskip("tables")
 
     analysis_path = tmp_path / "RatA" / "20240101"
-    frame_times = np.arange(5, dtype=float)
+    frame_times = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=float)
     _write_session_files(
         analysis_path=analysis_path,
-        timestamps_position={"04_r2": frame_times},
+        timestamps_position={"02_r1": frame_times},
     )
-    _write_test_position_nwb(
-        tmp_path / "RatA20240101.nwb",
-        epoch_tags=["01_s1", "02_r1", "03_s2", "04_r2"],
-        series_specs=[
-            {"conversion": 0.02, "unit": "meters"},
-            {"conversion": 0.03, "unit": "meters"},
-        ],
-    )
-
-    dlc_h5_path = tmp_path / "run_epoch_mapping.h5"
+    dlc_h5_path = tmp_path / "registry_scale.h5"
     _write_dlc_h5(
         dlc_h5_path,
         tracks={
@@ -458,20 +418,32 @@ def test_clean_dlc_position_resolves_scale_from_nwb_run_epoch_mapping(tmp_path: 
             ),
         },
     )
+    monkeypatch.setattr(
+        clean_dlc_position_module,
+        "get_session_meters_per_pixel",
+        lambda animal_name, date: 0.03,
+    )
 
     output_path = clean_dlc_position(
         animal_name="RatA",
         date="20240101",
-        epoch="04_r2",
+        epoch="02_r1",
         dlc_h5_path=dlc_h5_path,
         data_root=tmp_path,
-        nwb_root=tmp_path,
         threshold_z=0.0,
         min_jump_threshold_px=10.0,
     )
 
     diagnostics = pd.read_parquet(output_path)
     assert diagnostics.loc[2, "head_x_cleaned_cm"] == pytest.approx(6.0)
+
+    log_files = sorted(
+        (analysis_path / "v1ca1_log").glob("v1ca1_position_clean_dlc_position_*.json")
+    )
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert '"position_scale_source": "registry"' in log_text
+    assert '"meters_per_pixel": 0.03' in log_text
 
 
 def test_clean_dlc_position_rejects_nonpositive_meters_per_pixel(tmp_path: Path) -> None:
@@ -502,81 +474,17 @@ def test_clean_dlc_position_rejects_nonpositive_meters_per_pixel(tmp_path: Path)
         )
 
 
-@pytest.mark.parametrize(
-    ("epoch_tags", "series_specs", "include_behavior", "include_position", "message"),
-    [
-        (
-            ["01_s1", "02_r1"],
-            None,
-            False,
-            False,
-            "behavior processing module",
-        ),
-        (
-            ["01_s1", "02_r1"],
-            None,
-            True,
-            False,
-            "position interface",
-        ),
-        (
-            ["01_s1", "02_r1"],
-            [],
-            True,
-            True,
-            "spatial series",
-        ),
-        (
-            ["01_s1", "02_r1"],
-            [{"conversion": 0.02, "unit": "centimeters"}],
-            True,
-            True,
-            "meter units",
-        ),
-        (
-            ["01_s1", "02_r1"],
-            [{"conversion": 0.0, "unit": "meters"}],
-            True,
-            True,
-            "meters-per-pixel",
-        ),
-        (
-            ["01_s1", "02_r1", "03_s2"],
-            [
-                {"conversion": 0.02, "unit": "meters"},
-                {"conversion": 0.03, "unit": "meters"},
-            ],
-            True,
-            True,
-            "Could not map NWB position spatial series",
-        ),
-    ],
-)
-def test_clean_dlc_position_rejects_invalid_nwb_scale_sources(
+def test_clean_dlc_position_rejects_missing_cli_and_registry_scale(
     tmp_path: Path,
-    epoch_tags: list[str],
-    series_specs: list[dict[str, object]] | None,
-    include_behavior: bool,
-    include_position: bool,
-    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pytest.importorskip("tables")
-    pytest.importorskip("pynwb")
-
     analysis_path = tmp_path / "RatA" / "20240101"
     _write_session_files(
         analysis_path=analysis_path,
         timestamps_position={"02_r1": np.array([0.0, 1.0], dtype=float)},
     )
-    _write_test_position_nwb(
-        tmp_path / "RatA20240101.nwb",
-        epoch_tags=epoch_tags,
-        series_specs=series_specs,
-        include_behavior=include_behavior,
-        include_position=include_position,
-    )
-
-    dlc_h5_path = tmp_path / "joint_bad_scale.h5"
+    dlc_h5_path = tmp_path / "joint_missing_scale.h5"
     _write_dlc_h5(
         dlc_h5_path,
         tracks={
@@ -585,14 +493,25 @@ def test_clean_dlc_position_rejects_invalid_nwb_scale_sources(
         },
     )
 
-    with pytest.raises(ValueError, match=message):
+    def _missing_scale(animal_name: str, date: str) -> float:
+        raise KeyError(f"Missing mapping for {animal_name} / {date}")
+
+    monkeypatch.setattr(
+        clean_dlc_position_module,
+        "get_session_meters_per_pixel",
+        _missing_scale,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Pass --meters-per-pixel or add the session to .*METERS_PER_PIXEL_BY_SESSION",
+    ):
         clean_dlc_position(
             animal_name="RatA",
             date="20240101",
             epoch="02_r1",
             dlc_h5_path=dlc_h5_path,
             data_root=tmp_path,
-            nwb_root=tmp_path,
         )
 
 
@@ -788,3 +707,26 @@ def test_parse_arguments_does_not_expose_position_offset(
     args = parse_arguments()
     assert not hasattr(args, "position_offset")
     assert args.meters_per_pixel == pytest.approx(0.02)
+
+
+def test_parse_arguments_allows_missing_meters_per_pixel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "clean_dlc_position.py",
+            "--animal-name",
+            "RatA",
+            "--date",
+            "20240101",
+            "--epoch",
+            "02_r1",
+            "--dlc-h5-path",
+            "/tmp/head.h5",
+        ],
+    )
+
+    args = parse_arguments()
+    assert args.meters_per_pixel is None

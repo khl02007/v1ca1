@@ -44,7 +44,6 @@ TARGET_REGION = "v1"
 SOURCE_REGION = "ca1"
 DEFAULT_BIN_SIZE_S = 0.01
 DEFAULT_MAX_LAG_BINS = 0
-DEFAULT_CUDA_VISIBLE_DEVICES = "7"
 DEFAULT_MIN_TOTAL_SPIKES = 10
 DEFAULT_N_SPLITS = 5
 DEFAULT_N_SHUFFLES_RIPPLE = 100
@@ -57,12 +56,11 @@ DEFAULT_XLA_PREALLOCATE = "false"
 DEFAULT_XLA_MEM_FRACTION = "0.70"
 
 
-def _parse_cuda_visible_devices(argv: list[str] | None = None) -> str:
+def _parse_cuda_visible_devices(argv: list[str] | None = None) -> str | None:
     """Return the requested CUDA device visibility before JAX import."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--cuda-visible-devices",
-        default=DEFAULT_CUDA_VISIBLE_DEVICES,
         type=str,
         help=(
             "Value assigned to CUDA_VISIBLE_DEVICES before JAX/NEMOS import. "
@@ -70,7 +68,7 @@ def _parse_cuda_visible_devices(argv: list[str] | None = None) -> str:
         ),
     )
     parsed, _ = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
-    return str(parsed.cuda_visible_devices)
+    return parsed.cuda_visible_devices
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -109,10 +107,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cuda-visible-devices",
         type=str,
-        default=DEFAULT_CUDA_VISIBLE_DEVICES,
         help=(
             "Value assigned to CUDA_VISIBLE_DEVICES before JAX/NEMOS import. "
-            f"Default: {DEFAULT_CUDA_VISIBLE_DEVICES!r}"
+            "Default: current environment"
         ),
     )
     parser.add_argument(
@@ -223,9 +220,10 @@ def validate_selected_epochs(
     return list(requested_epochs)
 
 
-def configure_jax_environment(cuda_visible_devices: str) -> None:
+def configure_jax_environment(cuda_visible_devices: str | None) -> None:
     """Configure CUDA visibility before importing JAX/NEMOS."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
+    if cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = DEFAULT_XLA_PREALLOCATE
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = DEFAULT_XLA_MEM_FRACTION
 
