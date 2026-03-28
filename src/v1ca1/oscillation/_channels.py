@@ -3,6 +3,9 @@ from __future__ import annotations
 """Session-specific theta channel assignments."""
 
 THETA_CHANNEL_BY_SESSION: dict[str, dict[str, int]] = {
+    "L14": {
+        "20240611": 162,
+    },
     "L15": {
         "20241121": 128 + 63,
     },

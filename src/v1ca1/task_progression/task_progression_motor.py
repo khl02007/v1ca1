@@ -16,11 +16,12 @@ For each selected region and run epoch, the script compares five Poisson GLMs:
 - trajectory-specific place only
 
 Motor covariates can be represented either as instantaneous z-scored values or
-as spline-expanded features. Task progression uses one tuning curve per same-
-turn trajectory pair, whereas place uses one tuning curve per trajectory type.
-Cross-validated full Poisson log-likelihood is reported in bits/spike, both
-pooled and per trajectory, and the saved dataset bundles those scores with fit
-coefficients, TP/place rate curves, and fit metadata.
+as spline-expanded features, including head angular acceleration on the binned
+time axis. Task progression uses one tuning curve per same-turn trajectory
+pair, whereas place uses one tuning curve per trajectory type. Cross-validated
+full Poisson log-likelihood is reported in bits/spike, both pooled and per
+trajectory, and the saved dataset bundles those scores with fit coefficients,
+TP/place rate curves, and fit metadata.
 """
 
 import argparse
@@ -44,6 +45,7 @@ import position_tools as pt
 from nemos.basis import BSplineEval
 from nemos.glm import PopulationGLM
 
+from v1ca1.helper.session import coerce_position_array
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
@@ -52,7 +54,6 @@ from v1ca1.task_progression._session import (
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     TRAJECTORY_TYPES,
-    coerce_position_array,
     compute_movement_firing_rates,
     get_analysis_path,
     prepare_task_progression_session,
@@ -83,6 +84,14 @@ CV_METRIC_NAMES = (
     "dll_motor_place_vs_motor_tp_bits_per_spike",
     "dll_place_only_vs_tp_only_bits_per_spike",
 )
+MOTOR_CONTINUOUS_FEATURE_NAMES = (
+    "speed",
+    "accel",
+    "hd_vel",
+    "hd_acc",
+    "abs_hd_vel",
+)
+MOTOR_RAW_FEATURE_NAMES = (*MOTOR_CONTINUOUS_FEATURE_NAMES, "sin_hd", "cos_hd")
 
 
 def load_body_position_data(
@@ -236,7 +245,7 @@ def compute_motor_covariates(
     position_timestamps: np.ndarray,
     spike_counts: Any,
 ) -> dict[str, np.ndarray]:
-    """Compute motor covariates and interpolate them onto spike-count bins."""
+    """Compute binned motor covariates, including head angular acceleration."""
     import pynapple as nap
 
     sampling_rate = (len(position_timestamps) - 1) / (
@@ -282,14 +291,18 @@ def compute_motor_covariates(
         dtype=float,
     ).reshape(-1)
     head_direction_velocity = np.gradient(head_direction_unwrapped_bin, dt)
+    head_direction_acceleration = np.gradient(head_direction_velocity, dt)
+    sin_head_direction = np.sin(head_direction_bin)
+    cos_head_direction = np.cos(head_direction_bin)
 
     return {
         "speed": speed_bin,
         "accel": acceleration,
-        "sin_hd": np.sin(head_direction_bin),
-        "cos_hd": np.cos(head_direction_bin),
         "hd_vel": head_direction_velocity,
+        "hd_acc": head_direction_acceleration,
         "abs_hd_vel": np.abs(head_direction_velocity),
+        "sin_hd": sin_head_direction,
+        "cos_hd": cos_head_direction,
     }
 
 
@@ -791,7 +804,7 @@ def fit_motor_task_progression_place_epoch(
     motor_standardization: dict[str, Any] | None = None
     if motor_feature_mode == "spline":
         motor_blocks: list[np.ndarray] = []
-        for covariate_name in ("speed", "accel", "hd_vel", "abs_hd_vel"):
+        for covariate_name in MOTOR_CONTINUOUS_FEATURE_NAMES:
             features = bspline_features(
                 masked_covariates[covariate_name],
                 n_basis=motor_spline_k,
@@ -807,7 +820,7 @@ def fit_motor_task_progression_place_epoch(
         motor_feature_names.extend(["sin_hd", "cos_hd"])
         motor_design = np.concatenate(motor_blocks, axis=1)
     elif motor_feature_mode == "zscore":
-        motor_raw_names = ["speed", "accel", "hd_vel", "abs_hd_vel", "sin_hd", "cos_hd"]
+        motor_raw_names = list(MOTOR_RAW_FEATURE_NAMES)
         motor_raw = np.column_stack(
             [masked_covariates[name] for name in motor_raw_names]
         )
