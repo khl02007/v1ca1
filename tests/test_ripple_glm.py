@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import v1ca1.ripple.ripple_glm as ripple_glm_module
 from v1ca1.ripple.ripple_glm import (
+    _format_nemos_solver_selection_message,
+    _resolve_nemos_population_glm_solver,
     build_epoch_fit_dataset,
     build_metric_figure_data,
     empirical_p_values,
@@ -57,6 +61,47 @@ def test_load_ripple_tables_normalizes_modern_and_legacy_sources(tmp_path) -> No
     assert np.allclose(modern_tables["01_s1"]["end_time"], [1.2, 2.7])
     assert np.allclose(legacy_tables["02_r1"]["start_time"], [5.0])
     assert np.allclose(legacy_tables["02_r1"]["end_time"], [5.2])
+
+
+def test_resolve_nemos_population_glm_solver_keeps_lbfgs_for_nemos_0_2_5() -> None:
+    version_text, solver_name = _resolve_nemos_population_glm_solver(
+        SimpleNamespace(__version__="0.2.5")
+    )
+
+    message = _format_nemos_solver_selection_message(version_text, solver_name)
+
+    assert version_text == "0.2.5"
+    assert solver_name == "LBFGS"
+    assert "0.2.5" in message
+    assert "solver_name='LBFGS'" in message
+
+
+def test_resolve_nemos_population_glm_solver_uses_jaxopt_after_0_2_5() -> None:
+    version_text, solver_name = _resolve_nemos_population_glm_solver(
+        SimpleNamespace(__version__="0.2.7")
+    )
+
+    message = _format_nemos_solver_selection_message(version_text, solver_name)
+
+    assert version_text == "0.2.7"
+    assert solver_name == "LBFGS[jaxopt]"
+    assert "0.2.7" in message
+    assert "solver_name='LBFGS[jaxopt]'" in message
+
+
+def test_resolve_nemos_population_glm_solver_falls_back_to_package_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ripple_glm_module, "package_version", lambda name: "0.2.6")
+
+    version_text, solver_name = _resolve_nemos_population_glm_solver(SimpleNamespace())
+
+    message = _format_nemos_solver_selection_message(version_text, solver_name)
+
+    assert version_text == "0.2.6"
+    assert solver_name == "LBFGS[jaxopt]"
+    assert "0.2.6" in message
+    assert "solver_name='LBFGS[jaxopt]'" in message
 
 
 def test_load_ripple_tables_prefers_parquet_and_preserves_extra_columns(tmp_path) -> None:
@@ -308,6 +353,8 @@ def test_save_epoch_figures_returns_four_metric_paths(monkeypatch, tmp_path) -> 
         animal_name="L14",
         date="20240611",
         epoch="01_s1",
+        ripple_window_s=0.2,
+        ridge_strength=1e-1,
     )
 
     assert len(figure_paths) == 4

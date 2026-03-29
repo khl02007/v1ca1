@@ -43,6 +43,8 @@ from v1ca1.task_progression._session import (
     compute_movement_firing_rates,
     compute_trajectory_task_progression_tuning_curves,
     get_analysis_path,
+    get_run_epochs,
+    load_epoch_tags,
     prepare_task_progression_session,
 )
 
@@ -413,19 +415,26 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     """Run the task-progression tuning similarity workflow for one session."""
     args = parse_arguments()
+    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    epoch_tags, _epoch_source = load_epoch_tags(analysis_path)
+    available_run_epochs = get_run_epochs(epoch_tags)
+    light_epoch, dark_epoch = get_light_and_dark_epochs(
+        available_run_epochs,
+        args.light_epoch,
+        args.dark_epoch,
+    )
+    selected_epochs = [light_epoch]
+    if dark_epoch != light_epoch:
+        selected_epochs.append(dark_epoch)
+
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
+        selected_run_epochs=selected_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    light_epoch, dark_epoch = get_light_and_dark_epochs(
-        session["run_epochs"],
-        args.light_epoch,
-        args.dark_epoch,
-    )
-    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     data_dir = analysis_path / "task_progression_tuning"
     fig_dir = analysis_path / "figs" / "task_progression_tuning"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +455,7 @@ def main() -> None:
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
-        session["run_epochs"],
+        selected_epochs,
     )
     similarity_outputs = compute_similarity_outputs(
         tuning_curves_by_region,

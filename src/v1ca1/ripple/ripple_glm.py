@@ -26,6 +26,13 @@ explained, and bits/spike. Each figure has a left panel with overlaid ripple
 and pre-ripple unit distributions plus compact boxplots, and a right panel
 with ripple effect size versus `-log10(shuffle p)`. A JSON run log is written
 under `v1ca1_log/`.
+
+When this script instantiates `nemos.glm.PopulationGLM`, it selects the solver
+backend from the installed `nemos` version. For `nemos<=0.2.5`, it keeps the
+legacy `solver_name="LBFGS"` behavior. For `nemos>0.2.5`, it uses
+`solver_name="LBFGS[jaxopt]"` because the default solver backend changed in
+`0.2.6` and the ripple GLM optimizer hyperparameters are tuned for the jaxopt
+backend.
 """
 
 import argparse
@@ -33,11 +40,13 @@ import gc
 import json
 import os
 import pickle
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from packaging.version import InvalidVersion, Version
 from scipy.special import gammaln
 from sklearn.model_selection import KFold
 
@@ -83,6 +92,9 @@ EMPIRICAL_P_VALUE_ATOL = 1e-12
 
 RIPPLE_FIGURE_COLOR = "#1f77b4"
 PRE_FIGURE_COLOR = "#d95f02"
+NEMOS_JAXOPT_SOLVER_MIN_VERSION = Version("0.2.6")
+NEMOS_LEGACY_SOLVER_NAME = "LBFGS"
+NEMOS_JAXOPT_SOLVER_NAME = "LBFGS[jaxopt]"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -169,19 +181,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ridge-strength",
-        type=float,
-        help=(
-            "Optional single ridge regularization strength override. "
-            "When provided, runs only this value."
-        ),
-    )
-    parser.add_argument(
-        "--ridge-strengths",
+        dest="ridge_strengths",
         nargs="+",
         type=float,
         default=list(DEFAULT_RIDGE_STRENGTH_SWEEP),
         help=(
-            "Ridge regularization strengths to sweep. "
+            "Ridge regularization strength values to run. Pass one value to fit "
+            "a single model, or multiple values to sweep. "
             f"Default: {list(DEFAULT_RIDGE_STRENGTH_SWEEP)!r}"
         ),
     )
@@ -238,12 +244,10 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--n-splits must be at least 2.")
     if args.n_shuffles_ripple < 0:
         raise ValueError("--n-shuffles-ripple must be non-negative.")
-    if args.ridge_strength is not None and args.ridge_strength < 0:
-        raise ValueError("--ridge-strength must be non-negative when provided.")
     if not args.ridge_strengths:
-        raise ValueError("--ridge-strengths must contain at least one value.")
+        raise ValueError("--ridge-strength must contain at least one value.")
     if any(ridge_strength < 0 for ridge_strength in args.ridge_strengths):
-        raise ValueError("--ridge-strengths must contain only non-negative values.")
+        raise ValueError("--ridge-strength must contain only non-negative values.")
     if args.maxiter <= 0:
         raise ValueError("--maxiter must be positive.")
     if args.tol <= 0:
@@ -380,6 +384,67 @@ def load_ripple_tables_from_parquet_output(path: Path) -> dict[str, pd.DataFrame
 
     ripple_tables: dict[str, pd.DataFrame] = {}
     for epoch, group in working_table.groupby("epoch", sort=False):
+        ripple_tables[str(epoch)] = normalize_ripple_table(
+            group.drop(columns="epoch").reset_index(drop=True),
+            epoch=str(epoch),
+        )
+    return ripple_tables
+
+
+def load_ripple_tables_from_interval_output(path: Path) -> dict[str, pd.DataFrame]:
+    """Load ripple events from a saved pynapple `IntervalSet` output."""
+    if not path.exists():
+        raise FileNotFoundError(f"Ripple interval output not found: {path}")
+
+    try:
+        import pynapple as nap
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "pynapple is required to load ripple interval outputs."
+        ) from exc
+
+    ripple_intervals = nap.load_file(path)
+    try:
+        epoch_info = ripple_intervals.get_info("epoch")
+    except Exception:
+        epoch_info = None
+
+    if epoch_info is None:
+        if hasattr(ripple_intervals, "as_dataframe"):
+            interval_df = ripple_intervals.as_dataframe()
+        elif hasattr(ripple_intervals, "_metadata"):
+            interval_df = ripple_intervals._metadata.copy()  # type: ignore[attr-defined]
+        else:
+            raise ValueError("Could not read metadata from the pynapple IntervalSet.")
+        if "epoch" not in interval_df.columns:
+            raise ValueError(
+                f"Ripple interval output is missing the required 'epoch' metadata: {path}"
+            )
+        epoch_array = np.asarray(interval_df["epoch"])
+    else:
+        epoch_array = np.asarray(epoch_info)
+
+    start_array = np.asarray(ripple_intervals.start, dtype=float).ravel()
+    end_array = np.asarray(ripple_intervals.end, dtype=float).ravel()
+    if start_array.shape != end_array.shape:
+        raise ValueError(
+            f"Ripple interval output has mismatched start/end shapes: {path}"
+        )
+    if len(epoch_array) != len(start_array):
+        raise ValueError(
+            "Ripple interval output has mismatched epoch/start metadata lengths: "
+            f"{path}"
+        )
+
+    flat_table = pd.DataFrame(
+        {
+            "epoch": [str(epoch) for epoch in epoch_array.tolist()],
+            "start_time": start_array,
+            "end_time": end_array,
+        }
+    )
+    ripple_tables: dict[str, pd.DataFrame] = {}
+    for epoch, group in flat_table.groupby("epoch", sort=False):
         ripple_tables[str(epoch)] = normalize_ripple_table(
             group.drop(columns="epoch").reset_index(drop=True),
             epoch=str(epoch),
@@ -682,8 +747,6 @@ def get_epoch_skip_reason(
 
 def resolve_ridge_strengths(args: argparse.Namespace) -> list[float]:
     """Return the ridge strengths to run for this invocation."""
-    if args.ridge_strength is not None:
-        return [float(args.ridge_strength)]
     return [float(ridge_strength) for ridge_strength in args.ridge_strengths]
 
 
@@ -694,6 +757,45 @@ def _clear_jax_caches() -> None:
     except ModuleNotFoundError:
         return
     jax.clear_caches()
+
+
+def _resolve_nemos_population_glm_solver(nmo: Any) -> tuple[str, str]:
+    """Return the installed `nemos` version and matching `PopulationGLM` solver."""
+    version_text = getattr(nmo, "__version__", None)
+    if version_text is None:
+        try:
+            version_text = package_version("nemos")
+        except PackageNotFoundError as exc:
+            raise RuntimeError(
+                "Could not determine installed `nemos` version from "
+                "`nemos.__version__` or importlib.metadata.version('nemos')."
+            ) from exc
+
+    try:
+        nemos_version = Version(str(version_text))
+    except InvalidVersion as exc:
+        raise RuntimeError(
+            f"Could not parse installed `nemos` version {version_text!r}."
+        ) from exc
+
+    if nemos_version < NEMOS_JAXOPT_SOLVER_MIN_VERSION:
+        solver_name = NEMOS_LEGACY_SOLVER_NAME
+    else:
+        solver_name = NEMOS_JAXOPT_SOLVER_NAME
+    return str(nemos_version), solver_name
+
+
+def _format_nemos_solver_selection_message(
+    nemos_version: str,
+    solver_name: str,
+) -> str:
+    """Return the runtime message describing the selected `nemos` solver."""
+    return (
+        f"Using nemos {nemos_version} with PopulationGLM solver_name={solver_name!r}. "
+        "For nemos>0.2.5, ripple_glm selects 'LBFGS[jaxopt]' because the default "
+        "solver backend changed in 0.2.6 and these hyperparameters are tuned for "
+        "the jaxopt backend."
+    )
 
 
 def fit_ripple_glm_train_on_ripple_predict_pre(
@@ -718,6 +820,8 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
 ) -> dict[str, Any]:
     """Fit the legacy ripple GLM workflow for one epoch."""
     import nemos as nmo
+    nemos_version, solver_name = _resolve_nemos_population_glm_solver(nmo)
+    print(_format_nemos_solver_selection_message(nemos_version, solver_name))
     import pynapple as nap
 
     rng = np.random.default_rng(shuffle_seed)
@@ -826,7 +930,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
             )
 
         glm = nmo.glm.PopulationGLM(
-            solver_name="LBFGS",
+            solver_name=solver_name,
             regularizer="Ridge",
             regularizer_strength=float(ridge_strength),
             solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),
@@ -854,7 +958,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         for shuffle_index in range(n_shuffles_ripple):
             y_train_shuffled = shuffle_time_per_neuron(y_train_r, rng)
             glm_shuffle = nmo.glm.PopulationGLM(
-                solver_name="LBFGS",
+                solver_name=solver_name,
                 regularizer="Ridge",
                 regularizer_strength=float(ridge_strength),
                 solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),
@@ -907,7 +1011,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         X_p_pp = np.clip(X_p_pp, -10.0, 10.0)
 
         glm_all = nmo.glm.PopulationGLM(
-            solver_name="LBFGS",
+            solver_name=solver_name,
             regularizer="Ridge",
             regularizer_strength=float(ridge_strength),
             solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),

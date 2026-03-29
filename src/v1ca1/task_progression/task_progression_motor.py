@@ -5,7 +5,10 @@ from __future__ import annotations
 This script uses the shared session loaders under
 `v1ca1.task_progression._session`, exposes a CLI for session and fit settings,
 and writes one labeled NetCDF-backed `xarray.Dataset` per fit under the
-analysis directory.
+analysis directory. Position inputs default to the cleaned DLC
+`dlc_position_cleaned/position.parquet` export when present, using head
+coordinates for task progression and body coordinates for head-direction motor
+covariates. Trajectory intervals are loaded from `trajectory_times.parquet`.
 
 For each selected region and run epoch, the script compares five Poisson GLMs:
 
@@ -26,7 +29,6 @@ TP/place rate curves, and fit metadata.
 
 import argparse
 import json
-import pickle
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -45,7 +47,6 @@ import position_tools as pt
 from nemos.basis import BSplineEval
 from nemos.glm import PopulationGLM
 
-from v1ca1.helper.session import coerce_position_array
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
@@ -92,34 +93,6 @@ MOTOR_CONTINUOUS_FEATURE_NAMES = (
     "abs_hd_vel",
 )
 MOTOR_RAW_FEATURE_NAMES = (*MOTOR_CONTINUOUS_FEATURE_NAMES, "sin_hd", "cos_hd")
-
-
-def load_body_position_data(
-    analysis_path: Path,
-    epoch_tags: list[str],
-) -> dict[str, np.ndarray]:
-    """Load per-epoch body position arrays from `body_position.pkl`."""
-    body_position_path = analysis_path / "body_position.pkl"
-    if not body_position_path.exists():
-        raise FileNotFoundError(f"Body position file not found: {body_position_path}")
-
-    with open(body_position_path, "rb") as file:
-        body_position_dict = pickle.load(file)
-
-    normalized_body_position = {
-        str(epoch): coerce_position_array(value)
-        for epoch, value in body_position_dict.items()
-    }
-    missing_epochs = [
-        epoch for epoch in epoch_tags if epoch not in normalized_body_position
-    ]
-    extra_epochs = sorted(set(normalized_body_position) - set(epoch_tags))
-    if missing_epochs or extra_epochs:
-        raise ValueError(
-            "Body position epochs do not match saved session epochs. "
-            f"Missing body position epochs: {missing_epochs!r}; extra body position epochs: {extra_epochs!r}"
-        )
-    return {epoch: normalized_body_position[epoch] for epoch in epoch_tags}
 
 
 def select_run_epochs(
@@ -1440,10 +1413,6 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    body_position_by_epoch = load_body_position_data(
-        analysis_path,
-        session["epoch_tags"],
-    )
     selected_epochs = select_run_epochs(session["run_epochs"], args.epochs)
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
@@ -1488,7 +1457,7 @@ def main() -> None:
                 args.position_offset,
             )
             body_position_tsd = build_position_tsdframe(
-                body_position_by_epoch[epoch],
+                session["body_position_by_epoch"][epoch],
                 session["timestamps_position"][epoch],
                 args.position_offset,
             )
@@ -1538,7 +1507,6 @@ def main() -> None:
                 min_firing_rate_hz=region_thresholds[region],
                 sources={
                     **session["sources"],
-                    "body_position": "pickle",
                 },
                 fit_parameters={
                     "cuda_visible_devices": args.cuda_visible_devices,
@@ -1589,7 +1557,6 @@ def main() -> None:
         outputs={
             "sources": {
                 **session["sources"],
-                "body_position": "pickle",
             },
             "saved_datasets": saved_datasets,
             "skipped_fits": skipped_fits,

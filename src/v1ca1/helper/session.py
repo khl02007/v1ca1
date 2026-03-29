@@ -505,6 +505,38 @@ def load_position_data_with_precedence(
     )
 
 
+def load_body_position_data_with_precedence(
+    analysis_path: Path,
+    *,
+    clean_dlc_input_dirname: str = DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
+    validate_timestamps: bool = True,
+) -> tuple[dict[str, np.ndarray], str]:
+    """Load per-epoch body XY arrays, preferring cleaned DLC parquet."""
+    clean_dlc_path = analysis_path / clean_dlc_input_dirname / clean_dlc_input_name
+    body_position_path = analysis_path / "body_position.pkl"
+
+    if clean_dlc_path.exists():
+        epoch_order, _head_position, body_position = load_clean_dlc_position_data(
+            analysis_path,
+            input_dirname=clean_dlc_input_dirname,
+            input_name=clean_dlc_input_name,
+            validate_timestamps=validate_timestamps,
+        )
+        return {epoch: body_position[epoch] for epoch in epoch_order}, str(clean_dlc_path)
+
+    if body_position_path.exists():
+        return load_available_position_pickle_data(
+            analysis_path,
+            input_name=body_position_path.name,
+        ), str(body_position_path)
+
+    raise FileNotFoundError(
+        "Could not find cleaned DLC position or body_position.pkl under "
+        f"{analysis_path}. Expected one of {clean_dlc_path} or {body_position_path}."
+    )
+
+
 def _get_interval_metadata_values(
     intervals: "nap.IntervalSet",
     key: str,
@@ -530,81 +562,50 @@ def load_trajectory_intervals(
     analysis_path: Path,
     run_epochs: list[str],
 ) -> tuple[dict[str, dict[str, "nap.IntervalSet"]], str]:
-    """Load trajectory intervals per epoch and trajectory, preferring parquet."""
+    """Load trajectory intervals per epoch and trajectory from parquet."""
     import pynapple as nap
     import pandas as pd
 
     parquet_path = analysis_path / "trajectory_times.parquet"
-    parquet_error: Exception | None = None
-    if parquet_path.exists():
-        try:
-            trajectory_table = pd.read_parquet(parquet_path)
-            required_columns = {"start", "end", "epoch", "trajectory_type"}
-            missing_columns = required_columns.difference(trajectory_table.columns)
-            if missing_columns:
-                raise ValueError(
-                    "trajectory_times.parquet is missing required columns: "
-                    f"{sorted(missing_columns)!r}."
-                )
-
-            trajectory_table = trajectory_table.loc[
-                :,
-                ["start", "end", "epoch", "trajectory_type"],
-            ].copy()
-            trajectory_table["start"] = trajectory_table["start"].astype(float)
-            trajectory_table["end"] = trajectory_table["end"].astype(float)
-            trajectory_table["epoch"] = trajectory_table["epoch"].astype(str)
-            trajectory_table["trajectory_type"] = trajectory_table["trajectory_type"].astype(
-                str
-            )
-
-            intervals_by_epoch: dict[str, dict[str, nap.IntervalSet]] = {}
-            for epoch in run_epochs:
-                intervals_by_epoch[epoch] = {}
-                for trajectory_type in TRAJECTORY_TYPES:
-                    interval_rows = trajectory_table.loc[
-                        (trajectory_table["epoch"] == epoch)
-                        & (trajectory_table["trajectory_type"] == trajectory_type),
-                        ["start", "end"],
-                    ].reset_index(drop=True)
-                    intervals_by_epoch[epoch][trajectory_type] = nap.IntervalSet(
-                        interval_rows,
-                        time_units="s",
-                    )
-            return intervals_by_epoch, "parquet"
-        except Exception as exc:
-            parquet_error = exc
-
-    pickle_path = analysis_path / "trajectory_times.pkl"
-    if not pickle_path.exists():
-        if parquet_error is not None:
-            raise ValueError(
-                f"Failed to load {parquet_path} and no pickle fallback was found."
-            ) from parquet_error
+    if not parquet_path.exists():
         raise FileNotFoundError(
-            f"Could not find trajectory_times.parquet or trajectory_times.pkl under {analysis_path}."
+            f"Could not find trajectory_times.parquet under {analysis_path}."
         )
 
-    with open(pickle_path, "rb") as f:
-        trajectory_times = pickle.load(f)
+    trajectory_table = pd.read_parquet(parquet_path)
+    required_columns = {"start", "end", "epoch", "trajectory_type"}
+    missing_columns = required_columns.difference(trajectory_table.columns)
+    if missing_columns:
+        raise ValueError(
+            "trajectory_times.parquet is missing required columns: "
+            f"{sorted(missing_columns)!r}."
+        )
 
-    intervals_by_epoch = {}
+    trajectory_table = trajectory_table.loc[
+        :,
+        ["start", "end", "epoch", "trajectory_type"],
+    ].copy()
+    trajectory_table["start"] = trajectory_table["start"].astype(float)
+    trajectory_table["end"] = trajectory_table["end"].astype(float)
+    trajectory_table["epoch"] = trajectory_table["epoch"].astype(str)
+    trajectory_table["trajectory_type"] = trajectory_table["trajectory_type"].astype(
+        str
+    )
+
+    intervals_by_epoch: dict[str, dict[str, nap.IntervalSet]] = {}
     for epoch in run_epochs:
         intervals_by_epoch[epoch] = {}
         for trajectory_type in TRAJECTORY_TYPES:
-            interval_array = np.asarray(trajectory_times[epoch][trajectory_type], dtype=float)
-            if interval_array.size == 0:
-                start = np.array([], dtype=float)
-                end = np.array([], dtype=float)
-            else:
-                start = interval_array[:, 0]
-                end = interval_array[:, 1]
+            interval_rows = trajectory_table.loc[
+                (trajectory_table["epoch"] == epoch)
+                & (trajectory_table["trajectory_type"] == trajectory_type),
+                ["start", "end"],
+            ].reset_index(drop=True)
             intervals_by_epoch[epoch][trajectory_type] = nap.IntervalSet(
-                start=start,
-                end=end,
+                interval_rows,
                 time_units="s",
             )
-    return intervals_by_epoch, "pickle"
+    return intervals_by_epoch, "parquet"
 
 
 def load_trajectory_time_bounds(

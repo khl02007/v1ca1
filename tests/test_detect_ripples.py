@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,43 @@ from v1ca1.helper.session import (
     DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
     DEFAULT_CLEAN_DLC_POSITION_NAME,
 )
+
+
+def test_parse_arguments_disables_notch_filter_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["detect_ripples.py", "--animal-name", "RatA", "--date", "20240101"],
+    )
+
+    args = detect_ripples_module.parse_arguments()
+
+    assert args.enable_notch_filter is False
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [
+        ("--enable-notch-filter", True),
+        ("--disable-notch-filter", False),
+    ],
+)
+def test_parse_arguments_accepts_explicit_notch_filter_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["detect_ripples.py", "--animal-name", "RatA", "--date", "20240101", flag],
+    )
+
+    args = detect_ripples_module.parse_arguments()
+
+    assert args.enable_notch_filter is expected
 
 
 def _write_ephys_npz(
@@ -89,6 +127,10 @@ def _stub_compute_or_load_ripple_lfp_cache(
                 for epoch in selected_epochs
             },
             "fs": {epoch: 1000.0 for epoch in selected_epochs},
+            "epoch_cache_actions": {
+                epoch: {"action": "compute", "reason": "stubbed cache for unit test"}
+                for epoch in selected_epochs
+            },
         },
         "computed",
     )
@@ -627,6 +669,7 @@ def test_get_ripple_times_uses_clean_dlc_head_position_for_speed_gating(
     assert result["sources"]["position"] == str(position_path)
     assert result["selected_epochs"] == ["01_r1"]
     assert result["use_speed_gating"] is True
+    assert result["enable_notch_filter"] is False
     assert result["epoch_summaries"]["01_r1"]["ripple_count"] == 1
     interval_table = pd.read_parquet(result["interval_parquet_path"])
     assert list(interval_table.columns) == ["start", "end", "epoch"]

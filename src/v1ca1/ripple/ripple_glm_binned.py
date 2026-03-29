@@ -11,17 +11,26 @@ saved as one compressed `.npz` payload per epoch under
 `ripple_glm_binned/`, summary figures are written under
 `figs/ripple_glm_binned/`, and a JSON run log is written under
 `v1ca1_log/`.
+
+When this script instantiates `nemos.glm.PopulationGLM`, it selects the solver
+backend from the installed `nemos` version. For `nemos<=0.2.5`, it keeps the
+legacy `solver_name="LBFGS"` behavior. For `nemos>0.2.5`, it uses
+`solver_name="LBFGS[jaxopt]"` because the default solver backend changed in
+`0.2.6` and the ripple-binned GLM optimizer hyperparameters are tuned for the
+jaxopt backend.
 """
 
 import argparse
 import gc
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from packaging.version import InvalidVersion, Version
 from scipy.special import gammaln
 from sklearn.model_selection import KFold
 
@@ -54,6 +63,9 @@ DEFAULT_BASELINE_N_BASIS = 5
 DEFAULT_SHUFFLE_SEED = 45
 DEFAULT_XLA_PREALLOCATE = "false"
 DEFAULT_XLA_MEM_FRACTION = "0.70"
+NEMOS_JAXOPT_SOLVER_MIN_VERSION = Version("0.2.6")
+NEMOS_LEGACY_SOLVER_NAME = "LBFGS"
+NEMOS_JAXOPT_SOLVER_NAME = "LBFGS[jaxopt]"
 
 
 def _parse_cuda_visible_devices(argv: list[str] | None = None) -> str | None:
@@ -457,6 +469,7 @@ def _preprocess_X_fit_apply(
 
 def _make_glm(
     *,
+    solver_name: str,
     ridge_strength: float,
     maxiter: int,
     tol: float,
@@ -464,10 +477,49 @@ def _make_glm(
     """Construct one NEMOS population GLM."""
     _jax, nmo = require_glm_modules()
     return nmo.glm.PopulationGLM(
-        solver_name="LBFGS",
+        solver_name=solver_name,
         regularizer="Ridge",
         regularizer_strength=float(ridge_strength),
         solver_kwargs=dict(maxiter=int(maxiter), tol=float(tol), stepsize=0),
+    )
+
+
+def _resolve_nemos_population_glm_solver(nmo: Any) -> tuple[str, str]:
+    """Return the installed `nemos` version and matching `PopulationGLM` solver."""
+    version_text = getattr(nmo, "__version__", None)
+    if version_text is None:
+        try:
+            version_text = package_version("nemos")
+        except PackageNotFoundError as exc:
+            raise RuntimeError(
+                "Could not determine installed `nemos` version from "
+                "`nemos.__version__` or importlib.metadata.version('nemos')."
+            ) from exc
+
+    try:
+        nemos_version = Version(str(version_text))
+    except InvalidVersion as exc:
+        raise RuntimeError(
+            f"Could not parse installed `nemos` version {version_text!r}."
+        ) from exc
+
+    if nemos_version < NEMOS_JAXOPT_SOLVER_MIN_VERSION:
+        solver_name = NEMOS_LEGACY_SOLVER_NAME
+    else:
+        solver_name = NEMOS_JAXOPT_SOLVER_NAME
+    return str(nemos_version), solver_name
+
+
+def _format_nemos_solver_selection_message(
+    nemos_version: str,
+    solver_name: str,
+) -> str:
+    """Return the runtime message describing the selected `nemos` solver."""
+    return (
+        f"Using nemos {nemos_version} with PopulationGLM solver_name={solver_name!r}. "
+        "For nemos>0.2.5, ripple_glm_binned selects 'LBFGS[jaxopt]' because the "
+        "default solver backend changed in 0.2.6 and these hyperparameters are "
+        "tuned for the jaxopt backend."
     )
 
 
@@ -724,7 +776,9 @@ def fit_ripple_glm_binned(
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
 ) -> dict[str, Any]:
     """Fit one ripple-binned GLM for one epoch."""
-    jax, _nmo = require_glm_modules()
+    jax, nmo = require_glm_modules()
+    nemos_version, solver_name = _resolve_nemos_population_glm_solver(nmo)
+    print(_format_nemos_solver_selection_message(nemos_version, solver_name))
     rng = np.random.default_rng(shuffle_seed)
 
     dataset = build_binned_ripple_dataset(
@@ -808,6 +862,7 @@ def fit_ripple_glm_binned(
             )
 
         glm = _make_glm(
+            solver_name=solver_name,
             ridge_strength=ridge_strength,
             maxiter=maxiter,
             tol=tol,
@@ -840,6 +895,7 @@ def fit_ripple_glm_binned(
             y_train_sh = shuffle_time_per_neuron(y_train, rng)
 
             glm_s = _make_glm(
+                solver_name=solver_name,
                 ridge_strength=ridge_strength,
                 maxiter=maxiter,
                 tol=tol,
@@ -896,6 +952,7 @@ def fit_ripple_glm_binned(
             lam_baseline = _constant_rate_predictor(y_train, y_test.shape[0])
         else:
             glm_base = _make_glm(
+                solver_name=solver_name,
                 ridge_strength=ridge_strength,
                 maxiter=maxiter,
                 tol=tol,

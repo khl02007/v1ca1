@@ -12,11 +12,14 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
     DEFAULT_DATA_ROOT,
     DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_SIGMA_S,
     DEFAULT_SPEED_THRESHOLD_CM_S,
+    POSITION_SOURCE_CHOICES,
     REGIONS,
     TRAJECTORY_TYPES,
     TURN_TRAJECTORY_PAIRS,
@@ -28,8 +31,9 @@ from v1ca1.helper.session import (
     get_analysis_path,
     get_run_epochs,
     load_ephys_timestamps_all,
+    load_body_position_data_with_precedence,
     load_epoch_tags,
-    load_position_data,
+    load_position_data_with_precedence,
     load_position_timestamps,
     load_spikes_by_region,
     load_trajectory_intervals,
@@ -227,6 +231,10 @@ def prepare_task_progression_session(
     date: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     regions: tuple[str, ...] = REGIONS,
+    selected_run_epochs: list[str] | None = None,
+    position_source: str = "auto",
+    clean_dlc_input_dirname: str = DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
 ) -> dict[str, Any]:
@@ -237,7 +245,20 @@ def prepare_task_progression_session(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
     epoch_tags, epoch_source = load_epoch_tags(analysis_path)
-    run_epochs = get_run_epochs(epoch_tags)
+    available_run_epochs = get_run_epochs(epoch_tags)
+    if selected_run_epochs is None:
+        run_epochs = available_run_epochs
+    else:
+        missing_run_epochs = [
+            epoch for epoch in selected_run_epochs if epoch not in available_run_epochs
+        ]
+        if missing_run_epochs:
+            raise ValueError(
+                "Requested run epochs were not found in the saved session epochs. "
+                f"Available run epochs: {available_run_epochs!r}; "
+                f"requested: {selected_run_epochs!r}; missing: {missing_run_epochs!r}"
+            )
+        run_epochs = list(dict.fromkeys(selected_run_epochs))
     position_epoch_tags, timestamps_position, position_timestamp_source = load_position_timestamps(
         analysis_path
     )
@@ -247,7 +268,47 @@ def prepare_task_progression_session(
             f"Ephys epochs: {epoch_tags!r}; position epochs: {position_epoch_tags!r}"
         )
 
-    position_by_epoch = load_position_data(analysis_path, epoch_tags)
+    if position_source not in POSITION_SOURCE_CHOICES:
+        raise ValueError(
+            f"Unknown position_source {position_source!r}. "
+            f"Expected one of {POSITION_SOURCE_CHOICES!r}."
+        )
+
+    loaded_position_by_epoch, position_source_path = load_position_data_with_precedence(
+        analysis_path,
+        position_source=position_source,
+        clean_dlc_input_dirname=clean_dlc_input_dirname,
+        clean_dlc_input_name=clean_dlc_input_name,
+        validate_timestamps=True,
+    )
+    loaded_body_position_by_epoch, body_position_source_path = (
+        load_body_position_data_with_precedence(
+            analysis_path,
+            clean_dlc_input_dirname=clean_dlc_input_dirname,
+            clean_dlc_input_name=clean_dlc_input_name,
+            validate_timestamps=True,
+        )
+    )
+    missing_position_epochs = [epoch for epoch in run_epochs if epoch not in loaded_position_by_epoch]
+    if missing_position_epochs:
+        raise ValueError(
+            "Selected run epochs are missing loaded position data. "
+            f"Requested run epochs: {run_epochs!r}; "
+            f"missing from {position_source_path}: {missing_position_epochs!r}"
+        )
+    missing_body_position_epochs = [
+        epoch for epoch in run_epochs if epoch not in loaded_body_position_by_epoch
+    ]
+    if missing_body_position_epochs:
+        raise ValueError(
+            "Selected run epochs are missing body position data. "
+            f"Requested run epochs: {run_epochs!r}; "
+            f"missing from {body_position_source_path}: {missing_body_position_epochs!r}"
+        )
+    position_by_epoch = {epoch: loaded_position_by_epoch[epoch] for epoch in run_epochs}
+    body_position_by_epoch = {
+        epoch: loaded_body_position_by_epoch[epoch] for epoch in run_epochs
+    }
     timestamps_ephys_all, ephys_all_source = load_ephys_timestamps_all(analysis_path)
     trajectory_intervals, trajectory_source = load_trajectory_intervals(analysis_path, run_epochs)
     spikes_by_region = load_spikes_by_region(analysis_path, timestamps_ephys_all, regions=regions)
@@ -299,9 +360,11 @@ def prepare_task_progression_session(
     return {
         "analysis_path": analysis_path,
         "epoch_tags": epoch_tags,
+        "available_run_epochs": available_run_epochs,
         "run_epochs": run_epochs,
         "timestamps_position": timestamps_position,
         "position_by_epoch": position_by_epoch,
+        "body_position_by_epoch": body_position_by_epoch,
         "timestamps_ephys_all": timestamps_ephys_all,
         "spikes_by_region": spikes_by_region,
         "trajectory_intervals": trajectory_intervals,
@@ -316,7 +379,8 @@ def prepare_task_progression_session(
             "timestamps_position": position_timestamp_source,
             "timestamps_ephys_all": ephys_all_source,
             "trajectory_intervals": trajectory_source,
-            "position": "pickle",
+            "position": position_source_path,
+            "body_position": body_position_source_path,
             "sorting": "spikeinterface",
             "track_geometry": animal_name,
         },
