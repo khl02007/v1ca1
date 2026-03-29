@@ -4,8 +4,8 @@ from __future__ import annotations
 
 This script uses the shared session loaders under
 `v1ca1.task_progression._session`, exposes a CLI for session and fit settings,
-and writes one labeled NetCDF-backed `xarray.Dataset` per fit under the
-analysis directory. Position inputs default to the cleaned DLC
+and writes one labeled NetCDF-backed `xarray.Dataset` plus one summary figure
+per fit under the analysis directory. Position inputs default to the cleaned DLC
 `dlc_position_cleaned/position.parquet` export when present, using head
 coordinates for task progression and body coordinates for head-direction motor
 covariates. Trajectory intervals are loaded from `trajectory_times.parquet`.
@@ -47,6 +47,12 @@ import position_tools as pt
 from nemos.basis import BSplineEval
 from nemos.glm import PopulationGLM
 
+from v1ca1.helper.session import (
+    get_run_epochs,
+    load_body_position_data_with_precedence,
+    load_epoch_tags,
+    load_position_data_with_precedence,
+)
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
@@ -108,6 +114,55 @@ def select_run_epochs(
             f"Requested epochs were not found in available run epochs {run_epochs!r}: {missing_epochs!r}"
         )
     return requested_epochs
+
+
+def has_any_finite_position(position_xy: np.ndarray | None) -> bool:
+    """Return whether one XY position array contains at least one finite sample."""
+    if position_xy is None:
+        return False
+    position_array = np.asarray(position_xy, dtype=float)
+    return position_array.size > 0 and np.isfinite(position_array).any()
+
+
+def select_epochs_with_usable_position_data(
+    analysis_path: Path,
+    requested_epochs: list[str] | None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Return run epochs with usable head/body position plus skipped-epoch reasons."""
+    epoch_tags, _epoch_source = load_epoch_tags(analysis_path)
+    requested_run_epochs = select_run_epochs(get_run_epochs(epoch_tags), requested_epochs)
+    position_by_epoch, position_source = load_position_data_with_precedence(
+        analysis_path,
+        validate_timestamps=True,
+    )
+    body_position_by_epoch, body_position_source = (
+        load_body_position_data_with_precedence(
+            analysis_path,
+            validate_timestamps=True,
+        )
+    )
+
+    usable_epochs: list[str] = []
+    skipped_epochs: list[dict[str, str]] = []
+    for epoch in requested_run_epochs:
+        reasons: list[str] = []
+        head_position = position_by_epoch.get(epoch)
+        body_position = body_position_by_epoch.get(epoch)
+        if head_position is None:
+            reasons.append(f"head position missing from {position_source}")
+        elif not has_any_finite_position(head_position):
+            reasons.append(f"head position is all NaN in {position_source}")
+        if body_position is None:
+            reasons.append(f"body position missing from {body_position_source}")
+        elif not has_any_finite_position(body_position):
+            reasons.append(f"body position is all NaN in {body_position_source}")
+
+        if reasons:
+            skipped_epochs.append({"epoch": epoch, "reason": "; ".join(reasons)})
+        else:
+            usable_epochs.append(epoch)
+
+    return usable_epochs, skipped_epochs
 
 
 def build_position_tsdframe(
@@ -645,6 +700,143 @@ def build_fit_dataset(
         dataset.attrs["motor_zscore_eps"] = float(motor_standardization["eps"])
 
     return dataset
+
+
+def plot_log_likelihood_difference_histograms(
+    fit_dataset: "xr.Dataset",
+    *,
+    out_path: Path,
+) -> Path:
+    """Save one 1x2 histogram summary of pooled CV log-likelihood differences."""
+    import matplotlib.pyplot as plt
+
+    panel_specs = (
+        (
+            "Task Progression",
+            (
+                (
+                    "dll_motor_tp_vs_motor_bits_per_spike",
+                    "Motor + TP minus Motor",
+                    "#4C72B0",
+                ),
+                (
+                    "dll_motor_tp_vs_tp_only_bits_per_spike",
+                    "Motor + TP minus TP-only",
+                    "#DD8452",
+                ),
+            ),
+        ),
+        (
+            "Place",
+            (
+                (
+                    "dll_motor_place_vs_motor_bits_per_spike",
+                    "Motor + Place minus Motor",
+                    "#55A868",
+                ),
+                (
+                    "dll_motor_place_vs_place_only_bits_per_spike",
+                    "Motor + Place minus Place-only",
+                    "#C44E52",
+                ),
+            ),
+        ),
+    )
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(12, 4.8),
+        constrained_layout=True,
+        sharey=True,
+    )
+
+    for axis, (panel_title, distribution_specs) in zip(np.ravel(axes), panel_specs):
+        distribution_values: list[tuple[str, str, np.ndarray]] = []
+        combined_values: list[np.ndarray] = []
+        for metric_name, label, color in distribution_specs:
+            metric_values = np.asarray(
+                fit_dataset["cv_pooled"].sel(cv_metric=metric_name).values,
+                dtype=float,
+            ).reshape(-1)
+            finite_values = metric_values[np.isfinite(metric_values)]
+            distribution_values.append((label, color, finite_values))
+            if finite_values.size > 0:
+                combined_values.append(finite_values)
+
+        axis.axvline(0.0, color="0.2", linestyle="--", linewidth=1.0)
+        axis.set_title(panel_title)
+        axis.set_xlabel("Delta log-likelihood (bits/spike)")
+        axis.set_ylabel("Fraction of units")
+
+        if not combined_values:
+            axis.text(
+                0.5,
+                0.5,
+                "No finite values",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+            continue
+
+        combined = np.concatenate(combined_values)
+        if np.allclose(combined, combined[0]):
+            half_width = max(0.1, abs(float(combined[0])) * 0.1 + 0.1)
+            bin_edges = np.linspace(
+                float(combined[0]) - half_width,
+                float(combined[0]) + half_width,
+                16,
+            )
+        else:
+            bin_edges = np.histogram_bin_edges(combined, bins="auto")
+
+        stats_lines = []
+        for label, color, finite_values in distribution_values:
+            if finite_values.size == 0:
+                stats_lines.append(f"{label}: n=0")
+                continue
+
+            axis.hist(
+                finite_values,
+                bins=bin_edges,
+                weights=np.full(finite_values.shape, 1.0 / finite_values.size),
+                color=color,
+                alpha=0.55,
+                edgecolor="white",
+                linewidth=0.8,
+                label=label,
+            )
+            stats_lines.append(
+                (
+                    f"{label}: n={finite_values.size}, "
+                    f"mean={np.mean(finite_values):.3f}, "
+                    f"median={np.median(finite_values):.3f}"
+                )
+            )
+
+        axis.legend(loc="upper left", frameon=False)
+        axis.text(
+            0.98,
+            0.98,
+            "\n".join(stats_lines),
+            ha="right",
+            va="top",
+            transform=axis.transAxes,
+            fontsize=9,
+            bbox={"facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
+        )
+
+    fig.suptitle(
+        (
+            f"{fit_dataset.attrs['animal_name']} {fit_dataset.attrs['date']} "
+            f"{fit_dataset.attrs['region']} {fit_dataset.attrs['epoch']}"
+        ),
+        fontsize=12,
+    )
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 def fit_motor_task_progression_place_epoch(
@@ -1302,6 +1494,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--regions",
+        "--region",
         nargs="+",
         choices=REGIONS,
         default=list(REGIONS),
@@ -1309,6 +1502,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--epochs",
+        "--epoch",
         nargs="+",
         help="Specific run epoch labels to fit. Defaults to all run epochs.",
     )
@@ -1406,14 +1600,25 @@ def main() -> None:
     """Run the modernized task-progression TP/place GLM workflow."""
     args = parse_arguments()
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    selected_epochs, skipped_position_epochs = select_epochs_with_usable_position_data(
+        analysis_path,
+        args.epochs,
+    )
+    if skipped_position_epochs:
+        print("Skipping epochs with unusable position data:")
+        for skipped_epoch in skipped_position_epochs:
+            print(f"  {skipped_epoch['epoch']}: {skipped_epoch['reason']}")
+    if not selected_epochs:
+        raise ValueError("No requested run epochs have usable head/body position data.")
+
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
+        selected_run_epochs=selected_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    selected_epochs = select_run_epochs(session["run_epochs"], args.epochs)
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
@@ -1421,13 +1626,16 @@ def main() -> None:
     )
 
     data_dir = analysis_path / "task_progression_motor"
+    fig_dir = analysis_path / "figs" / "task_progression_motor"
     data_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
     region_thresholds = {
         "v1": float(args.v1_min_fr_hz),
         "ca1": float(args.ca1_min_fr_hz),
     }
     saved_datasets: list[Path] = []
+    saved_figures: list[Path] = []
     skipped_fits: list[dict[str, Any]] = []
 
     for region in args.regions:
@@ -1528,6 +1736,12 @@ def main() -> None:
             result_path = data_dir / f"{result_stem}.nc"
             fit_dataset.to_netcdf(result_path)
             saved_datasets.append(result_path)
+            figure_path = fig_dir / f"{result_stem}_ll_hist.png"
+            plot_log_likelihood_difference_histograms(
+                fit_dataset,
+                out_path=figure_path,
+            )
+            saved_figures.append(figure_path)
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -1559,12 +1773,16 @@ def main() -> None:
                 **session["sources"],
             },
             "saved_datasets": saved_datasets,
+            "saved_figures": saved_figures,
+            "skipped_position_epochs": skipped_position_epochs,
             "skipped_fits": skipped_fits,
         },
     )
 
     if saved_datasets:
         print(f"Saved {len(saved_datasets)} NetCDF fit dataset(s) to {data_dir}")
+    if saved_figures:
+        print(f"Saved {len(saved_figures)} histogram figure(s) to {fig_dir}")
     print(f"Saved run metadata to {log_path}")
 
 

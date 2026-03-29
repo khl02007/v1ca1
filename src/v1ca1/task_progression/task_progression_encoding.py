@@ -23,14 +23,18 @@ The Poisson log-likelihood includes the full count term
 `k * log(lambda * dt) - lambda * dt - log(k!)` for both the encoding model and
 the null model.
 
+The script requires NPZ-backed timestamps and the combined cleaned DLC
+`position.parquet` export. The dark epoch must be specified explicitly. Light
+epochs may be provided explicitly; otherwise the script uses all run epochs
+with head position present in `position.parquet` except the selected dark
+epoch.
+
 Primary outputs are per-unit parquet tables, because they are summary tables
-rather than time-domain artifacts. Optional compatibility pickle outputs keep
-the legacy nested CV metric structure. A run log is written under
+rather than time-domain artifacts. A run log is written under
 `analysis_path / "v1ca1_log"`.
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +45,15 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.special import gammaln
 from sklearn.model_selection import KFold
 
+from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
+    get_run_epochs,
+    load_clean_dlc_position_data,
+    load_epoch_tags,
+    load_ephys_timestamps_all,
+    load_position_timestamps,
+)
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
@@ -60,8 +73,7 @@ DEFAULT_BIN_SIZE_S = 0.02
 DEFAULT_SIGMA_BINS = 1.0
 DEFAULT_RANDOM_STATE = 47
 DEFAULT_MIN_PLOT_SPIKES = 50
-DEFAULT_DARK_EPOCH = "08_r4"
-DEFAULT_LIGHT_EPOCHS = ("02_r1", "04_r2", "06_r3")
+
 
 def smooth_pf_along_position_nan_aware(
     pf: Any,
@@ -115,23 +127,102 @@ def _make_intervalset(starts: list[np.ndarray], ends: list[np.ndarray]) -> Any:
     return nap.IntervalSet(start=start_array[order], end=end_array[order], time_units="s")
 
 
-def get_light_dark_epochs(
+def require_npz_session_sources(analysis_path: Path) -> list[str]:
+    """Return run epochs after validating that all timestamp inputs are NPZ-backed."""
+    epoch_tags, epoch_source = load_epoch_tags(analysis_path)
+    if epoch_source != "pynapple":
+        raise ValueError(
+            "This script requires timestamps_ephys.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
+
+    _position_epoch_tags, _timestamps_position, position_source = load_position_timestamps(
+        analysis_path
+    )
+    if position_source != "pynapple":
+        raise ValueError(
+            "This script requires timestamps_position.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
+
+    _timestamps_ephys_all, ephys_all_source = load_ephys_timestamps_all(analysis_path)
+    if ephys_all_source != "pynapple":
+        raise ValueError(
+            "This script requires timestamps_ephys_all.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
+
+    return get_run_epochs(epoch_tags)
+
+
+def get_head_position_epochs_from_parquet(analysis_path: Path) -> set[str]:
+    """Return epochs present in the combined cleaned DLC `position.parquet` export."""
+    epoch_order, _head_position, _body_position = load_clean_dlc_position_data(
+        analysis_path,
+        input_dirname=DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+        input_name=DEFAULT_CLEAN_DLC_POSITION_NAME,
+        validate_timestamps=True,
+    )
+    return {str(epoch) for epoch in epoch_order}
+
+
+def resolve_light_dark_epochs(
     run_epochs: list[str],
-    dark_epoch: str = DEFAULT_DARK_EPOCH,
-    light_epochs: tuple[str, ...] = DEFAULT_LIGHT_EPOCHS,
-) -> tuple[tuple[str, ...], str]:
-    """Return validated light and dark run epochs for summary comparisons."""
+    head_position_epochs: set[str],
+    *,
+    dark_epoch: str,
+    light_epochs: list[str] | None,
+) -> tuple[list[str], str, list[str]]:
+    """Return validated light/dark epochs and the ordered run epochs to load."""
     if not run_epochs:
         raise ValueError("No run epochs were found for this session.")
 
-    requested_epochs = [*light_epochs, dark_epoch]
-    missing = [epoch for epoch in requested_epochs if epoch not in run_epochs]
-    if missing:
+    if dark_epoch not in run_epochs:
         raise ValueError(
-            "Requested light/dark epochs were not found in run epochs "
-            f"{run_epochs!r}: {missing!r}"
+            f"Requested dark epoch {dark_epoch!r} was not found in run epochs {run_epochs!r}."
         )
-    return light_epochs, dark_epoch
+    if dark_epoch not in head_position_epochs:
+        raise ValueError(
+            f"Dark epoch {dark_epoch!r} does not have head position in "
+            f"{DEFAULT_CLEAN_DLC_POSITION_NAME!r}."
+        )
+
+    if light_epochs is None:
+        selected_light_epochs = [
+            epoch
+            for epoch in run_epochs
+            if epoch in head_position_epochs and epoch != dark_epoch
+        ]
+    else:
+        selected_light_epochs = list(dict.fromkeys(light_epochs))
+        missing = [epoch for epoch in selected_light_epochs if epoch not in run_epochs]
+        if missing:
+            raise ValueError(
+                "Requested light epochs were not found in run epochs "
+                f"{run_epochs!r}: {missing!r}"
+            )
+        missing_head_position = [
+            epoch for epoch in selected_light_epochs if epoch not in head_position_epochs
+        ]
+        if missing_head_position:
+            raise ValueError(
+                "Requested light epochs do not have head position in "
+                f"{DEFAULT_CLEAN_DLC_POSITION_NAME!r}: {missing_head_position!r}"
+            )
+        if dark_epoch in selected_light_epochs:
+            raise ValueError("--light-epoch must not include the selected --dark-epoch.")
+
+    if not selected_light_epochs:
+        raise ValueError(
+            "No light epochs were selected. Provide --light-epoch explicitly or ensure "
+            "position.parquet contains head position for at least one run epoch other than "
+            f"{dark_epoch!r}."
+        )
+
+    selected_run_epochs = [
+        epoch for epoch in run_epochs if epoch == dark_epoch or epoch in selected_light_epochs
+    ]
+    return selected_light_epochs, dark_epoch, selected_run_epochs
 
 
 def get_min_lap_count(trajectory_intervals: dict[str, Any]) -> int:
@@ -639,27 +730,6 @@ def save_comparison_tables(
     return saved_paths
 
 
-def save_legacy_pickles(
-    cv_place_by_region: dict[str, dict[str, dict[Any, dict[str, Any]]]],
-    cv_tp_by_region: dict[str, dict[str, dict[Any, dict[str, Any]]]],
-    data_dir: Path,
-    n_folds: int,
-) -> list[Path]:
-    """Write the legacy nested CV pickle outputs for compatibility."""
-    saved_paths: list[Path] = []
-    for region in REGIONS:
-        place_path = data_dir / f"{region}_cv{n_folds}_place_ll.pkl"
-        with open(place_path, "wb") as file:
-            pickle.dump(cv_place_by_region[region], file)
-        saved_paths.append(place_path)
-
-        tp_path = data_dir / f"{region}_cv{n_folds}_tp_ll.pkl"
-        with open(tp_path, "wb") as file:
-            pickle.dump(cv_tp_by_region[region], file)
-        saved_paths.append(tp_path)
-    return saved_paths
-
-
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the encoding comparison workflow."""
     parser = argparse.ArgumentParser(
@@ -674,6 +744,14 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
     )
     parser.add_argument(
+        "--regions",
+        "--region",
+        nargs="+",
+        choices=REGIONS,
+        default=list(REGIONS),
+        help=f"Regions to fit. Default: {' '.join(REGIONS)}",
+    )
+    parser.add_argument(
         "--position-offset",
         type=int,
         default=DEFAULT_POSITION_OFFSET,
@@ -686,6 +764,21 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Speed threshold in cm/s used to define movement intervals. "
             f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--dark-epoch",
+        required=True,
+        help="Run epoch to treat as the dark comparison epoch.",
+    )
+    parser.add_argument(
+        "--light-epoch",
+        action="append",
+        default=None,
+        help=(
+            "Run epoch to treat as a light comparison epoch. Repeat to compare multiple light "
+            "epochs. If omitted, all run epochs present in position.parquet except --dark-epoch "
+            "are used."
         ),
     )
     parser.add_argument(
@@ -706,29 +799,35 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_SIGMA_BINS,
         help=f"Gaussian smoothing width in tuning-curve bins. Default: {DEFAULT_SIGMA_BINS}",
     )
-    parser.add_argument(
-        "--save-legacy-pickle",
-        action="store_true",
-        help="Also write the legacy nested CV pickle outputs for compatibility.",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the cross-validated encoding comparison workflow for one session."""
     args = parse_arguments()
+    selected_regions = tuple(args.regions)
+    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    run_epochs = require_npz_session_sources(analysis_path)
+    head_position_epochs = get_head_position_epochs_from_parquet(analysis_path)
+    light_epochs, dark_epoch, selected_run_epochs = resolve_light_dark_epochs(
+        run_epochs,
+        head_position_epochs,
+        dark_epoch=args.dark_epoch,
+        light_epochs=args.light_epoch,
+    )
+
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
+        regions=selected_regions,
+        selected_run_epochs=selected_run_epochs,
+        position_source="clean_dlc_head",
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    light_epochs, dark_epoch = get_light_dark_epochs(session["run_epochs"])
-
-    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
-    data_dir = analysis_path / "tp_encoding"
-    fig_dir = analysis_path / "figs" / "tp_encoding_cv"
+    data_dir = analysis_path / "task_progression_encoding"
+    fig_dir = analysis_path / "figs" / "task_progression_encoding"
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -739,13 +838,11 @@ def main() -> None:
     position_bins = build_linear_position_bins(args.animal_name)
     task_progression_bins = build_combined_task_progression_bins(args.animal_name)
 
-    summary_tables: dict[str, dict[str, pd.DataFrame]] = {region: {} for region in REGIONS}
-    cv_place_by_region: dict[str, dict[str, dict[Any, dict[str, Any]]]] = {}
-    cv_tp_by_region: dict[str, dict[str, dict[Any, dict[str, Any]]]] = {}
+    summary_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in selected_regions
+    }
 
-    for region in REGIONS:
-        cv_place_by_region[region] = {}
-        cv_tp_by_region[region] = {}
+    for region in selected_regions:
         for epoch in session["run_epochs"]:
             cv_place, cv_tp = run_cross_validated_encoding(
                 spikes=session["spikes_by_region"][region],
@@ -760,12 +857,12 @@ def main() -> None:
                 sigma_bins=args.sigma_bins,
                 random_state=DEFAULT_RANDOM_STATE,
             )
-            cv_place_by_region[region][epoch] = cv_place
-            cv_tp_by_region[region][epoch] = cv_tp
             summary_tables[region][epoch] = cv_epoch_to_df(cv_place, cv_tp)
 
-    comparison_tables: dict[str, dict[str, pd.DataFrame]] = {region: {} for region in REGIONS}
-    for region in REGIONS:
+    comparison_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in selected_regions
+    }
+    for region in selected_regions:
         for light_epoch in light_epochs:
             comparison_tables[region][light_epoch] = build_comparison_table(
                 summary_tables[region][light_epoch],
@@ -783,7 +880,7 @@ def main() -> None:
     )
 
     saved_figures: list[Path] = []
-    for region in REGIONS:
+    for region in selected_regions:
         filtered_dark = filter_epoch_df(summary_tables[region][dark_epoch])
         for light_epoch in light_epochs:
             filtered_light = filter_epoch_df(summary_tables[region][light_epoch])
@@ -799,15 +896,6 @@ def main() -> None:
             )
             saved_figures.append(figure_path)
 
-    saved_legacy_pickles: list[Path] = []
-    if args.save_legacy_pickle:
-        saved_legacy_pickles = save_legacy_pickles(
-            cv_place_by_region,
-            cv_tp_by_region,
-            data_dir=data_dir,
-            n_folds=args.n_folds,
-        )
-
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.task_progression_encoding",
@@ -815,14 +903,15 @@ def main() -> None:
             "animal_name": args.animal_name,
             "date": args.date,
             "data_root": args.data_root,
+            "regions": list(selected_regions),
+            "light_epochs": list(light_epochs),
+            "dark_epoch": dark_epoch,
+            "selected_run_epochs": selected_run_epochs,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
             "n_folds": args.n_folds,
             "bin_size_s": args.bin_size_s,
             "sigma_bins": args.sigma_bins,
-            "light_epochs": list(light_epochs),
-            "dark_epoch": dark_epoch,
-            "save_legacy_pickle": args.save_legacy_pickle,
             "random_state": DEFAULT_RANDOM_STATE,
         },
         outputs={
@@ -832,7 +921,6 @@ def main() -> None:
             "saved_epoch_tables": saved_epoch_tables,
             "saved_comparison_tables": saved_comparison_tables,
             "saved_figures": saved_figures,
-            "saved_legacy_pickles": saved_legacy_pickles,
         },
     )
     print(f"Saved run metadata to {log_path}")

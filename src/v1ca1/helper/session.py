@@ -53,6 +53,7 @@ TURN_TRAJECTORY_PAIRS = {
     "left": ("center_to_left", "right_to_center"),
     "right": ("center_to_right", "left_to_center"),
 }
+_PYNAPPLE_INTERVALSET_CLASS: type | None = None
 
 
 def get_analysis_path(
@@ -131,6 +132,8 @@ def _extract_epoch_tags_from_tsgroup(position_group: "nap.TsGroup") -> list[str]
 
 def load_epoch_tags(analysis_path: Path) -> tuple[list[str], str]:
     """Load saved epoch labels, preferring `timestamps_ephys.npz`."""
+    global _PYNAPPLE_INTERVALSET_CLASS
+
     npz_path = analysis_path / "timestamps_ephys.npz"
     npz_error: Exception | None = None
     if npz_path.exists():
@@ -141,6 +144,7 @@ def load_epoch_tags(analysis_path: Path) -> tuple[list[str], str]:
         else:
             try:
                 epoch_intervals = nap.load_file(npz_path)
+                _PYNAPPLE_INTERVALSET_CLASS = type(epoch_intervals)
                 return _extract_epoch_tags_from_intervalset(epoch_intervals), "pynapple"
             except Exception as exc:
                 npz_error = exc
@@ -558,6 +562,23 @@ def _get_interval_metadata_values(
     raise ValueError(f"The pynapple IntervalSet does not contain metadata {key!r}.")
 
 
+def _get_intervalset_class() -> type:
+    """Return the pynapple IntervalSet class across minor API variations."""
+    if _PYNAPPLE_INTERVALSET_CLASS is not None:
+        return _PYNAPPLE_INTERVALSET_CLASS
+
+    try:
+        from pynapple import IntervalSet
+    except Exception:
+        try:
+            from pynapple.core.interval_set import IntervalSet
+        except Exception as exc:
+            raise AttributeError(
+                "Could not resolve pynapple.IntervalSet from the installed pynapple package."
+            ) from exc
+    return IntervalSet
+
+
 def load_trajectory_intervals(
     analysis_path: Path,
     run_epochs: list[str],
@@ -591,6 +612,7 @@ def load_trajectory_intervals(
     trajectory_table["trajectory_type"] = trajectory_table["trajectory_type"].astype(
         str
     )
+    intervalset_class = _get_intervalset_class()
 
     intervals_by_epoch: dict[str, dict[str, nap.IntervalSet]] = {}
     for epoch in run_epochs:
@@ -601,7 +623,7 @@ def load_trajectory_intervals(
                 & (trajectory_table["trajectory_type"] == trajectory_type),
                 ["start", "end"],
             ].reset_index(drop=True)
-            intervals_by_epoch[epoch][trajectory_type] = nap.IntervalSet(
+            intervals_by_epoch[epoch][trajectory_type] = intervalset_class(
                 interval_rows,
                 time_units="s",
             )
@@ -694,8 +716,6 @@ def build_epoch_interval(
     position_offset: int = DEFAULT_POSITION_OFFSET,
 ) -> "nap.IntervalSet":
     """Return the full trimmed epoch interval after the requested position offset."""
-    import pynapple as nap
-
     if position_offset < 0:
         raise ValueError("--position-offset must be non-negative.")
     if timestamps_position.size <= position_offset:
@@ -703,7 +723,8 @@ def build_epoch_interval(
             "Position offset removes all timestamp samples for one epoch. "
             f"timestamp count: {timestamps_position.size}, position_offset: {position_offset}"
         )
-    return nap.IntervalSet(
+    intervalset_class = _get_intervalset_class()
+    return intervalset_class(
         start=float(timestamps_position[position_offset]),
         end=float(timestamps_position[-1]),
         time_units="s",
