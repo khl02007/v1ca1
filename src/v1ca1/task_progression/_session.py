@@ -237,6 +237,8 @@ def prepare_task_progression_session(
     clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
+    require_npz_timestamps: bool = False,
+    load_body_position: bool = True,
 ) -> dict[str, Any]:
     """Load one session and build shared task-progression preprocessing outputs."""
     epoch_source = ""
@@ -245,6 +247,11 @@ def prepare_task_progression_session(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
     epoch_tags, epoch_source = load_epoch_tags(analysis_path)
+    if require_npz_timestamps and epoch_source != "pynapple":
+        raise ValueError(
+            "This workflow requires timestamps_ephys.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
     available_run_epochs = get_run_epochs(epoch_tags)
     if selected_run_epochs is None:
         run_epochs = available_run_epochs
@@ -262,6 +269,11 @@ def prepare_task_progression_session(
     position_epoch_tags, timestamps_position, position_timestamp_source = load_position_timestamps(
         analysis_path
     )
+    if require_npz_timestamps and position_timestamp_source != "pynapple":
+        raise ValueError(
+            "This workflow requires timestamps_position.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
     if position_epoch_tags != epoch_tags:
         raise ValueError(
             "Saved position timestamp epochs do not match saved ephys epochs. "
@@ -281,14 +293,17 @@ def prepare_task_progression_session(
         clean_dlc_input_name=clean_dlc_input_name,
         validate_timestamps=True,
     )
-    loaded_body_position_by_epoch, body_position_source_path = (
-        load_body_position_data_with_precedence(
-            analysis_path,
-            clean_dlc_input_dirname=clean_dlc_input_dirname,
-            clean_dlc_input_name=clean_dlc_input_name,
-            validate_timestamps=True,
+    loaded_body_position_by_epoch: dict[str, np.ndarray] = {}
+    body_position_source_path: str | None = None
+    if load_body_position:
+        loaded_body_position_by_epoch, body_position_source_path = (
+            load_body_position_data_with_precedence(
+                analysis_path,
+                clean_dlc_input_dirname=clean_dlc_input_dirname,
+                clean_dlc_input_name=clean_dlc_input_name,
+                validate_timestamps=True,
+            )
         )
-    )
     missing_position_epochs = [epoch for epoch in run_epochs if epoch not in loaded_position_by_epoch]
     if missing_position_epochs:
         raise ValueError(
@@ -296,20 +311,28 @@ def prepare_task_progression_session(
             f"Requested run epochs: {run_epochs!r}; "
             f"missing from {position_source_path}: {missing_position_epochs!r}"
         )
-    missing_body_position_epochs = [
-        epoch for epoch in run_epochs if epoch not in loaded_body_position_by_epoch
-    ]
-    if missing_body_position_epochs:
-        raise ValueError(
-            "Selected run epochs are missing body position data. "
-            f"Requested run epochs: {run_epochs!r}; "
-            f"missing from {body_position_source_path}: {missing_body_position_epochs!r}"
-        )
+    if load_body_position:
+        missing_body_position_epochs = [
+            epoch for epoch in run_epochs if epoch not in loaded_body_position_by_epoch
+        ]
+        if missing_body_position_epochs:
+            raise ValueError(
+                "Selected run epochs are missing body position data. "
+                f"Requested run epochs: {run_epochs!r}; "
+                f"missing from {body_position_source_path}: {missing_body_position_epochs!r}"
+            )
     position_by_epoch = {epoch: loaded_position_by_epoch[epoch] for epoch in run_epochs}
-    body_position_by_epoch = {
-        epoch: loaded_body_position_by_epoch[epoch] for epoch in run_epochs
-    }
+    body_position_by_epoch = (
+        {epoch: loaded_body_position_by_epoch[epoch] for epoch in run_epochs}
+        if load_body_position
+        else {}
+    )
     timestamps_ephys_all, ephys_all_source = load_ephys_timestamps_all(analysis_path)
+    if require_npz_timestamps and ephys_all_source != "pynapple":
+        raise ValueError(
+            "This workflow requires timestamps_ephys_all.npz. Pickle timestamp inputs are not "
+            f"supported for {analysis_path}."
+        )
     trajectory_intervals, trajectory_source = load_trajectory_intervals(analysis_path, run_epochs)
     spikes_by_region = load_spikes_by_region(analysis_path, timestamps_ephys_all, regions=regions)
 
