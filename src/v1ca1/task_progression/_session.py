@@ -19,7 +19,6 @@ from v1ca1.helper.session import (
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_SIGMA_S,
     DEFAULT_SPEED_THRESHOLD_CM_S,
-    POSITION_SOURCE_CHOICES,
     REGIONS,
     TRAJECTORY_TYPES,
     TURN_TRAJECTORY_PAIRS,
@@ -30,10 +29,9 @@ from v1ca1.helper.session import (
     compute_movement_firing_rates,
     get_analysis_path,
     get_run_epochs,
+    load_clean_dlc_position_data,
     load_ephys_timestamps_all,
-    load_body_position_data_with_precedence,
     load_epoch_tags,
-    load_position_data_with_precedence,
     load_position_timestamps,
     load_spikes_by_region,
     load_trajectory_intervals,
@@ -226,18 +224,24 @@ def build_linear_position_bins(
     )
 
 
+def _has_any_head_position_sample(position: np.ndarray) -> bool:
+    """Return whether one epoch has at least one finite head-position sample."""
+    position_array = np.asarray(position, dtype=float)
+    return bool(np.isfinite(position_array).any())
+
+
 def prepare_task_progression_session(
     animal_name: str,
     date: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     regions: tuple[str, ...] = REGIONS,
     selected_run_epochs: list[str] | None = None,
-    position_source: str = "auto",
+    position_source: str = "clean_dlc_head",
     clean_dlc_input_dirname: str = DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
     clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    require_npz_timestamps: bool = False,
+    require_npz_timestamps: bool = True,
     load_body_position: bool = True,
 ) -> dict[str, Any]:
     """Load one session and build shared task-progression preprocessing outputs."""
@@ -253,19 +257,6 @@ def prepare_task_progression_session(
             f"supported for {analysis_path}."
         )
     available_run_epochs = get_run_epochs(epoch_tags)
-    if selected_run_epochs is None:
-        run_epochs = available_run_epochs
-    else:
-        missing_run_epochs = [
-            epoch for epoch in selected_run_epochs if epoch not in available_run_epochs
-        ]
-        if missing_run_epochs:
-            raise ValueError(
-                "Requested run epochs were not found in the saved session epochs. "
-                f"Available run epochs: {available_run_epochs!r}; "
-                f"requested: {selected_run_epochs!r}; missing: {missing_run_epochs!r}"
-            )
-        run_epochs = list(dict.fromkeys(selected_run_epochs))
     position_epoch_tags, timestamps_position, position_timestamp_source = load_position_timestamps(
         analysis_path
     )
@@ -280,47 +271,61 @@ def prepare_task_progression_session(
             f"Ephys epochs: {epoch_tags!r}; position epochs: {position_epoch_tags!r}"
         )
 
-    if position_source not in POSITION_SOURCE_CHOICES:
+    if position_source != "clean_dlc_head":
         raise ValueError(
-            f"Unknown position_source {position_source!r}. "
-            f"Expected one of {POSITION_SOURCE_CHOICES!r}."
+            "Task-progression session loading only supports cleaned DLC head position. "
+            f"Got position_source={position_source!r}."
         )
 
-    loaded_position_by_epoch, position_source_path = load_position_data_with_precedence(
+    clean_dlc_path = analysis_path / clean_dlc_input_dirname / clean_dlc_input_name
+    (
+        parquet_epoch_order,
+        loaded_position_by_epoch,
+        loaded_body_position_by_epoch,
+    ) = load_clean_dlc_position_data(
         analysis_path,
-        position_source=position_source,
-        clean_dlc_input_dirname=clean_dlc_input_dirname,
-        clean_dlc_input_name=clean_dlc_input_name,
+        input_dirname=clean_dlc_input_dirname,
+        input_name=clean_dlc_input_name,
         validate_timestamps=True,
     )
-    loaded_body_position_by_epoch: dict[str, np.ndarray] = {}
-    body_position_source_path: str | None = None
-    if load_body_position:
-        loaded_body_position_by_epoch, body_position_source_path = (
-            load_body_position_data_with_precedence(
-                analysis_path,
-                clean_dlc_input_dirname=clean_dlc_input_dirname,
-                clean_dlc_input_name=clean_dlc_input_name,
-                validate_timestamps=True,
-            )
-        )
-    missing_position_epochs = [epoch for epoch in run_epochs if epoch not in loaded_position_by_epoch]
-    if missing_position_epochs:
+    position_source_path = str(clean_dlc_path)
+    body_position_source_path = str(clean_dlc_path) if load_body_position else None
+
+    valid_run_epochs = [
+        epoch
+        for epoch in available_run_epochs
+        if epoch in parquet_epoch_order and _has_any_head_position_sample(loaded_position_by_epoch[epoch])
+    ]
+    if not valid_run_epochs:
         raise ValueError(
-            "Selected run epochs are missing loaded position data. "
-            f"Requested run epochs: {run_epochs!r}; "
-            f"missing from {position_source_path}: {missing_position_epochs!r}"
+            "No run epochs have finite head position samples in the cleaned DLC position parquet. "
+            f"Checked {clean_dlc_path}."
         )
-    if load_body_position:
-        missing_body_position_epochs = [
-            epoch for epoch in run_epochs if epoch not in loaded_body_position_by_epoch
+
+    if selected_run_epochs is None:
+        run_epochs = valid_run_epochs
+    else:
+        missing_run_epochs = [
+            epoch for epoch in selected_run_epochs if epoch not in available_run_epochs
         ]
-        if missing_body_position_epochs:
+        if missing_run_epochs:
             raise ValueError(
-                "Selected run epochs are missing body position data. "
-                f"Requested run epochs: {run_epochs!r}; "
-                f"missing from {body_position_source_path}: {missing_body_position_epochs!r}"
+                "Requested run epochs were not found in the saved session epochs. "
+                f"Available run epochs: {available_run_epochs!r}; "
+                f"requested: {selected_run_epochs!r}; missing: {missing_run_epochs!r}"
             )
+
+        invalid_position_epochs = [
+            epoch for epoch in selected_run_epochs if epoch not in valid_run_epochs
+        ]
+        if invalid_position_epochs:
+            raise ValueError(
+                "Requested run epochs do not have usable head position in the cleaned DLC "
+                "position parquet. "
+                f"Valid run epochs: {valid_run_epochs!r}; invalid: {invalid_position_epochs!r}"
+            )
+        run_epochs = list(dict.fromkeys(selected_run_epochs))
+
     position_by_epoch = {epoch: loaded_position_by_epoch[epoch] for epoch in run_epochs}
     body_position_by_epoch = (
         {epoch: loaded_body_position_by_epoch[epoch] for epoch in run_epochs}

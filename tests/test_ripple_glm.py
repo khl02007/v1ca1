@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,6 +16,7 @@ from v1ca1.ripple.ripple_glm import (
     build_epoch_fit_dataset,
     build_metric_figure_data,
     empirical_p_values,
+    fit_ripple_glm_train_on_ripple_predict_pre,
     get_epoch_skip_reason,
     load_ripple_tables,
     load_ripple_tables_from_parquet_output,
@@ -187,6 +189,7 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     results = {
         "v1_unit_ids": np.array([11, 12]),
         "ca1_unit_ids": np.array([101, 102, 103]),
+        "coef_ca1_unit_ids": np.array([101, 103]),
         "n_ripples": 8,
         "n_pre": 6,
         "pseudo_r2_ripple_folds": np.array([[0.2, 0.4], [0.4, 0.6]], dtype=float),
@@ -225,6 +228,8 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         "mae_pre": np.array([0.4, 0.5], dtype=float),
         "devexp_pre": np.array([0.02, 0.03], dtype=float),
         "bits_per_spike_pre": np.array([0.15, 0.25], dtype=float),
+        "coef_ca1_full_all": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
+        "coef_intercept_full_all": np.array([0.5, 0.6], dtype=float),
     }
 
     dataset = build_epoch_fit_dataset(
@@ -239,11 +244,17 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.sizes["fold"] == 2
     assert dataset.sizes["shuffle"] == 2
     assert dataset.sizes["unit"] == 2
+    assert dataset.sizes["coef_source_unit"] == 2
     assert np.array_equal(dataset.coords["unit"].values, [11, 12])
     assert np.array_equal(dataset["ca1_unit_id"].values, [101, 102, 103])
+    assert np.array_equal(dataset["coef_ca1_unit_id"].values, [101, 103])
     assert dataset["pseudo_r2_ripple_folds"].dims == ("fold", "unit")
     assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
     assert dataset["pseudo_r2_pre"].dims == ("unit",)
+    assert dataset["coef_ca1_full_all"].dims == ("coef_source_unit", "unit")
+    assert dataset["coef_intercept_full_all"].dims == ("unit",)
+    assert np.allclose(dataset["coef_ca1_full_all"].values, [[0.1, 0.2], [0.3, 0.4]])
+    assert np.allclose(dataset["coef_intercept_full_all"].values, [0.5, 0.6])
     assert np.allclose(dataset["ripple_pseudo_r2_mean"].values, [0.3, 0.5])
     assert np.allclose(dataset["ripple_mae_mean"].values, [0.4, 0.8])
     assert np.allclose(dataset["bits_per_spike_pre"].values, [0.15, 0.25])
@@ -256,11 +267,147 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
+    assert dataset.attrs["schema_version"] == "2"
+    assert dataset.attrs["coef_ca1_full_all_space"] == "preprocessed_predictor"
     assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
     assert json.loads(dataset.attrs["fit_parameters_json"]) == {
         "n_splits": 2,
         "ridge_strength": 0.1,
     }
+    assert json.loads(dataset.attrs["coef_ca1_full_all_preprocess_json"]) == {
+        "center": True,
+        "clip_abs": 10.0,
+        "divide_by_sqrt_n_features": True,
+        "scale": True,
+    }
+
+
+def test_fit_ripple_glm_returns_full_fit_coefficients_without_pre_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeIntervalSet:
+        def __init__(self, start, end, time_units="s", tag="ripple") -> None:
+            self.start = np.asarray(start, dtype=float)
+            self.end = np.asarray(end, dtype=float)
+            self.time_units = time_units
+            self.tag = tag
+
+        def __len__(self) -> int:
+            return int(self.start.size)
+
+    class FakePopulationGLM:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.coef_ = np.empty((0, 0), dtype=float)
+            self.intercept_ = np.empty((0,), dtype=float)
+
+        def fit(self, X, y) -> None:
+            X = np.asarray(X, dtype=float)
+            y = np.asarray(y, dtype=float)
+            n_features = X.shape[1]
+            n_units = y.shape[1]
+            self.coef_ = np.arange(1, n_features * n_units + 1, dtype=float).reshape(
+                n_features, n_units
+            )
+            self.intercept_ = np.linspace(0.25, 0.25 * n_units, n_units, dtype=float)
+
+        def predict(self, X) -> np.ndarray:
+            X = np.asarray(X, dtype=float)
+            return np.exp(X @ self.coef_ + self.intercept_[None, :])
+
+    class FakeTsGroup:
+        def __init__(self, unit_ids: list[int], ripple_counts: np.ndarray, pre_counts: np.ndarray) -> None:
+            self._unit_ids = list(unit_ids)
+            self._ripple_counts = np.asarray(ripple_counts, dtype=float)
+            self._pre_counts = np.asarray(pre_counts, dtype=float)
+
+        def keys(self):
+            return list(self._unit_ids)
+
+        def count(self, ep) -> np.ndarray:
+            if getattr(ep, "tag", "ripple") == "pre":
+                return self._pre_counts
+            return self._ripple_counts
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nemos",
+        SimpleNamespace(
+            __version__="0.2.6",
+            glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "pynapple",
+        SimpleNamespace(IntervalSet=FakeIntervalSet),
+    )
+    monkeypatch.setattr(
+        ripple_glm_module,
+        "make_preripple_ep",
+        lambda **kwargs: FakeIntervalSet([], [], time_units="s", tag="pre"),
+    )
+    monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
+
+    spikes = {
+        "ca1": FakeTsGroup(
+            unit_ids=[101, 102, 103],
+            ripple_counts=np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                ]
+            ),
+            pre_counts=np.empty((0, 3), dtype=float),
+        ),
+        "v1": FakeTsGroup(
+            unit_ids=[11, 12],
+            ripple_counts=np.array(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [1.0, 1.0],
+                    [2.0, 0.0],
+                ]
+            ),
+            pre_counts=np.empty((0, 2), dtype=float),
+        ),
+    }
+
+    results = fit_ripple_glm_train_on_ripple_predict_pre(
+        epoch="01_s1",
+        spikes=spikes,
+        epoch_interval=FakeIntervalSet([0.0], [10.0], time_units="s", tag="epoch"),
+        ripple_table=pd.DataFrame(
+            {
+                "start_time": [1.0, 2.0, 3.0, 4.0],
+                "end_time": [1.2, 2.2, 3.2, 4.2],
+            }
+        ),
+        n_splits=2,
+        n_shuffles_ripple=0,
+        min_spikes_per_ripple=0.1,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        pre_window_s=0.2,
+        pre_buffer_s=0.02,
+        exclude_ripples=False,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    assert results["n_pre"] == 0
+    assert np.array_equal(results["ca1_unit_ids"], [101, 102, 103])
+    assert np.array_equal(results["coef_ca1_unit_ids"], [101, 102])
+    assert results["coef_ca1_full_all"].shape == (2, 2)
+    assert results["coef_intercept_full_all"].shape == (2,)
+    assert np.allclose(results["coef_ca1_full_all"], [[1.0, 2.0], [3.0, 4.0]])
+    assert np.allclose(results["coef_intercept_full_all"], [0.25, 0.5])
+    assert np.isnan(results["pseudo_r2_pre"]).all()
+    assert np.isnan(results["mae_pre"]).all()
 
 
 def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:

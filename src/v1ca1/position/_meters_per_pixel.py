@@ -9,6 +9,9 @@ METERS_PER_PIXEL_BY_SESSION: dict[str, dict[str, float]] = {
     "L15": {
         "20241121": 0.00189,
     },
+    "L16": {
+        "20250302": 0.00189,
+    },
 }
 
 

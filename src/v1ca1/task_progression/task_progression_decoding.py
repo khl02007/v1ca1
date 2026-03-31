@@ -18,14 +18,14 @@ Primary time-series outputs are saved as pynapple-backed `.npz` files, because
 decoded and true trajectories are time-domain artifacts. Per-epoch decoding
 metrics, light-vs-dark comparisons, and binned error summaries are saved as
 parquet tables. The binned error plots can summarize either signed or absolute
-error, with either mean +/- std or median + IQR error bars. Light-vs-dark
-figures use fixed epochs `02_r1`, `04_r2`, and `06_r3` versus `08_r4`. A run
-log is written under
+error, with either mean +/- std or median + IQR error bars. The user must
+specify the dark epoch on the command line; if no light epochs are provided,
+the script uses every other valid run epoch. Only epochs with finite
+cleaned-DLC head position samples are analyzed. A run log is written under
 `analysis_path / "v1ca1_log"`.
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import Any
 
@@ -56,8 +56,6 @@ DEFAULT_SLIDING_WINDOW_SIZE_BINS = 4
 DEFAULT_RANDOM_STATE = 47
 DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ = 0.5
 DEFAULT_MIN_BIN_COUNT = 5
-DEFAULT_DARK_EPOCH = "08_r4"
-DEFAULT_LIGHT_EPOCHS = ("02_r1", "04_r2", "06_r3")
 SUMMARY_MODES = ("mean_std", "median_iqr")
 ERROR_MODES = ("signed", "absolute")
 CROSS_TRAJECTORY_DECODING_MAP = {
@@ -140,21 +138,30 @@ def _concatenate_tsds(tsds: list[Any], time_support: Any) -> Any:
 
 def get_light_dark_epochs(
     run_epochs: list[str],
-    dark_epoch: str = DEFAULT_DARK_EPOCH,
-    light_epochs: tuple[str, ...] = DEFAULT_LIGHT_EPOCHS,
+    dark_epoch: str,
+    light_epochs: tuple[str, ...] | None = None,
 ) -> tuple[tuple[str, ...], str]:
-    """Return validated fixed light and dark run epochs."""
+    """Return validated user-specified light and dark run epochs."""
     if not run_epochs:
         raise ValueError("No run epochs were found for this session.")
+    if light_epochs is None or len(light_epochs) == 0:
+        inferred_light_epochs = tuple(epoch for epoch in run_epochs if epoch != dark_epoch)
+        if not inferred_light_epochs:
+            raise ValueError(
+                "No light epochs remain after excluding the requested dark epoch."
+            )
+        light_epochs = inferred_light_epochs
+    elif dark_epoch in light_epochs:
+        raise ValueError("The dark epoch must not also appear in --light-epochs.")
 
     requested_epochs = [*light_epochs, dark_epoch]
     missing = [epoch for epoch in requested_epochs if epoch not in run_epochs]
     if missing:
         raise ValueError(
-            "Requested light/dark epochs were not found in run epochs "
+            "Requested light/dark epochs were not found in valid run epochs "
             f"{run_epochs!r}: {missing!r}"
         )
-    return light_epochs, dark_epoch
+    return tuple(dict.fromkeys(light_epochs)), dark_epoch
 
 
 def get_min_lap_count(trajectory_intervals: dict[str, Any]) -> int:
@@ -726,42 +733,15 @@ def save_comparison_tables(
     comparison_tables: dict[str, dict[str, pd.DataFrame]],
     save_dir: Path,
     suffix: str,
+    dark_epoch: str,
 ) -> list[Path]:
     """Save one parquet light-vs-dark comparison table per region and light epoch."""
     saved_paths: list[Path] = []
     for region, tables_by_light_epoch in comparison_tables.items():
         for light_epoch, table in tables_by_light_epoch.items():
-            dark_epoch = str(table["dark_epoch"].iloc[0]) if not table.empty else DEFAULT_DARK_EPOCH
             path = save_dir / f"{region}_{light_epoch}_{dark_epoch}_{suffix}.parquet"
             table.to_parquet(path)
             saved_paths.append(path)
-    return saved_paths
-
-
-def save_legacy_pickles(
-    true_place_by_region: dict[str, dict[str, Any]],
-    decoded_place_by_region: dict[str, dict[str, Any]],
-    true_tp_by_region: dict[str, dict[str, Any]],
-    decoded_tp_by_region: dict[str, dict[str, Any]],
-    true_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
-    decoded_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
-    save_dir: Path,
-) -> list[Path]:
-    """Write legacy nested pickle outputs for compatibility."""
-    saved_paths: list[Path] = []
-    outputs = {
-        "true_place.pkl": true_place_by_region,
-        "decoded_place.pkl": decoded_place_by_region,
-        "true_tp.pkl": true_tp_by_region,
-        "decoded_tp.pkl": decoded_tp_by_region,
-        "true_tp_cross_traj.pkl": true_tp_cross_by_region,
-        "decoded_tp_cross_traj.pkl": decoded_tp_cross_by_region,
-    }
-    for filename, payload in outputs.items():
-        path = save_dir / filename
-        with open(path, "wb") as file:
-            pickle.dump(payload, file)
-        saved_paths.append(path)
     return saved_paths
 
 
@@ -772,6 +752,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument("--dark-epoch", required=True, help="Epoch label to treat as dark")
+    parser.add_argument(
+        "--light-epochs",
+        nargs="+",
+        help="One or more epoch labels to treat as light. Default: all valid run epochs except --dark-epoch",
+    )
     parser.add_argument(
         "--data-root",
         type=Path,
@@ -824,11 +810,6 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--save-legacy-pickle",
-        action="store_true",
-        help="Also write the legacy nested pickle outputs for compatibility.",
-    )
-    parser.add_argument(
         "--error-mode",
         choices=ERROR_MODES,
         default="signed",
@@ -846,14 +827,24 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     """Run the task-progression decoding workflow for one dataset."""
     args = parse_arguments()
+    selected_run_epochs = (
+        list(dict.fromkeys([*args.light_epochs, args.dark_epoch]))
+        if args.light_epochs
+        else None
+    )
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
+        selected_run_epochs=selected_run_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    light_epochs, dark_epoch = get_light_dark_epochs(session["run_epochs"])
+    light_epochs, dark_epoch = get_light_dark_epochs(
+        session["run_epochs"],
+        dark_epoch=args.dark_epoch,
+        light_epochs=tuple(args.light_epochs) if args.light_epochs else None,
+    )
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     save_dir = analysis_path / "task_progression_decoding"
@@ -1201,11 +1192,13 @@ def main() -> None:
         light_dark_metric_tables,
         save_dir=save_dir,
         suffix="decoding_comparison",
+        dark_epoch=dark_epoch,
     )
     saved_light_dark_cross_metric_tables = save_comparison_tables(
         light_dark_cross_metric_tables,
         save_dir=save_dir,
         suffix="cross_trajectory_decoding_comparison",
+        dark_epoch=dark_epoch,
     )
 
     saved_binned_tables: list[Path] = []
@@ -1228,24 +1221,14 @@ def main() -> None:
                 table.to_parquet(path)
                 saved_binned_tables.append(path)
 
-    saved_legacy_pickles: list[Path] = []
-    if args.save_legacy_pickle:
-        saved_legacy_pickles = save_legacy_pickles(
-            true_place_by_region,
-            decoded_place_by_region,
-            true_tp_by_region,
-            decoded_tp_by_region,
-            true_tp_cross_by_region,
-            decoded_tp_cross_by_region,
-            save_dir=save_dir,
-        )
-
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.task_progression_decoding",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,
+            "dark_epoch": dark_epoch,
+            "light_epochs": list(light_epochs),
             "data_root": args.data_root,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -1253,11 +1236,8 @@ def main() -> None:
             "bin_size_s": args.bin_size_s,
             "sliding_window_size_bins": args.sliding_window_size_bins,
             "cross_traj_fr_threshold_hz": args.cross_traj_fr_threshold_hz,
-            "light_epochs": list(light_epochs),
-            "dark_epoch": dark_epoch,
             "error_mode": args.error_mode,
             "error_summary": args.error_summary,
-            "save_legacy_pickle": args.save_legacy_pickle,
             "random_state": DEFAULT_RANDOM_STATE,
         },
         outputs={
@@ -1273,7 +1253,6 @@ def main() -> None:
             "saved_binned_tables": saved_binned_tables,
             "saved_epoch_error_figures": saved_epoch_error_figures,
             "saved_light_dark_figures": saved_light_dark_figures,
-            "saved_legacy_pickles": saved_legacy_pickles,
         },
     )
     print(f"Saved run metadata to {log_path}")

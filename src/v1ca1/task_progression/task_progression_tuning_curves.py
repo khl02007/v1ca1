@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""Compute and save place and task-progression tuning curves for one session.
+"""Compute and save trajectory-resolved tuning curves for one session.
 
 This script loads one dataset through the shared task-progression session
-helpers, rebuilds the movement-restricted linear-position and combined
-task-progression coordinates for each run epoch, computes tuning curves for
-each region and run epoch, smooths those curves in the same way used by the
-encoding workflow, and saves the result as NetCDF-backed xarray outputs.
+helpers, rebuilds trajectory-specific task-progression coordinates for each
+run epoch, computes one place tuning curve per trajectory and one
+task-progression tuning curve per same-turn trajectory pair, and saves each
+curve as its own NetCDF-backed xarray output.
 
 Each saved file preserves one tuning curve as an xarray `DataArray`, written
 under `analysis_path / "task_progression_tuning_curves"`. Run metadata is
@@ -19,89 +19,193 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
 
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
-    build_combined_task_progression_bins,
-    build_linear_position_bins,
+    TRAJECTORY_TYPES,
+    TURN_TRAJECTORY_PAIRS,
+    build_task_progression_bins,
     get_analysis_path,
     prepare_task_progression_session,
 )
+from v1ca1.helper.wtrack import get_wtrack_total_length
 
 
-DEFAULT_SIGMA_BINS = 1.0
+def _extract_interval_bounds(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return aligned start and end arrays from one IntervalSet-like object."""
+    starts = np.asarray(intervals.start, dtype=float).ravel()
+    ends = np.asarray(intervals.end, dtype=float).ravel()
+    if starts.shape != ends.shape:
+        raise ValueError(
+            "IntervalSet start and end arrays must have matching shapes. "
+            f"Got {starts.shape} and {ends.shape}."
+        )
+    return starts, ends
 
 
-def smooth_pf_along_position_nan_aware(
-    pf: Any,
-    pos_dim: str,
-    sigma_bins: float,
+def _intervalset_is_empty(intervals: Any) -> bool:
+    """Return whether one IntervalSet contains no intervals."""
+    starts, _ends = _extract_interval_bounds(intervals)
+    return starts.size == 0
+
+
+def build_place_bins(
+    animal_name: str,
+    place_bin_size_cm: float = DEFAULT_PLACE_BIN_SIZE_CM,
+) -> np.ndarray:
+    """Return place-tuning bin edges for one single trajectory."""
+    if place_bin_size_cm <= 0:
+        raise ValueError("--place-bin-size-cm must be positive.")
+    total_length = get_wtrack_total_length(animal_name)
+    return np.arange(0.0, total_length + place_bin_size_cm, place_bin_size_cm)
+
+
+def build_place_coordinate(
+    task_progression_tsd: Any,
     *,
-    eps: float = 1e-12,
-    mode: str = "nearest",
+    total_length_cm: float,
 ) -> Any:
-    """Smooth a tuning curve without turning unsupported bins into zeros."""
-    axis = pf.get_axis_num(pos_dim)
-    values = np.asarray(pf.values, dtype=np.float64)
-
-    mask = np.isfinite(values)
-    filled = np.where(mask, values, 0.0)
-
-    numerator = gaussian_filter1d(filled, sigma=sigma_bins, axis=axis, mode=mode)
-    denominator = gaussian_filter1d(
-        mask.astype(np.float64),
-        sigma=sigma_bins,
-        axis=axis,
-        mode=mode,
-    )
-    smoothed = numerator / np.maximum(denominator, eps)
-    smoothed = np.where(denominator > eps, smoothed, np.nan)
-    return pf.copy(data=smoothed)
-
-
-def compute_tuning_curves_for_epoch(
-    spikes: Any,
-    linear_position: Any,
-    task_progression: Any,
-    movement_interval: Any,
-    position_bins: np.ndarray,
-    task_progression_bins: np.ndarray,
-    sigma_bins: float,
-) -> tuple[Any, Any]:
-    """Compute smoothed place and task-progression tuning curves for one epoch."""
+    """Convert one normalized task-progression Tsd into single-trajectory position."""
     import pynapple as nap
 
-    place_tuning = nap.compute_tuning_curves(
-        data=spikes,
-        features=linear_position,
-        bins=[position_bins],
-        epochs=movement_interval,
-        feature_names=["linpos"],
-    )
-    place_tuning = smooth_pf_along_position_nan_aware(
-        place_tuning,
-        pos_dim="linpos",
-        sigma_bins=sigma_bins,
+    return nap.Tsd(
+        t=np.asarray(task_progression_tsd.t, dtype=float),
+        d=np.asarray(task_progression_tsd.d, dtype=float) * total_length_cm,
+        time_support=task_progression_tsd.time_support,
+        time_units="s",
     )
 
-    task_progression_tuning = nap.compute_tuning_curves(
-        data=spikes,
-        features=task_progression,
-        bins=[task_progression_bins],
-        epochs=movement_interval,
-        feature_names=["tp"],
-    )
-    task_progression_tuning = smooth_pf_along_position_nan_aware(
-        task_progression_tuning,
-        pos_dim="tp",
-        sigma_bins=sigma_bins,
-    )
-    return place_tuning, task_progression_tuning
+
+def build_same_turn_task_progression(
+    task_progression_by_trajectory: dict[str, Any],
+    movement_interval: Any,
+    turn_type: str,
+) -> tuple[Any, Any]:
+    """Return one pooled same-turn Tsd and its paired-trajectory interval union."""
+    import pynapple as nap
+
+    trajectory_a, trajectory_b = TURN_TRAJECTORY_PAIRS[turn_type]
+    start_chunks: list[np.ndarray] = []
+    end_chunks: list[np.ndarray] = []
+    time_chunks: list[np.ndarray] = []
+    value_chunks: list[np.ndarray] = []
+    for trajectory_type in (trajectory_a, trajectory_b):
+        trajectory_epoch = task_progression_by_trajectory[trajectory_type].time_support.intersect(
+            movement_interval
+        )
+        if _intervalset_is_empty(trajectory_epoch):
+            continue
+        starts, ends = _extract_interval_bounds(trajectory_epoch)
+        start_chunks.append(starts)
+        end_chunks.append(ends)
+        restricted = task_progression_by_trajectory[trajectory_type].restrict(trajectory_epoch)
+        restricted_times = np.asarray(restricted.t, dtype=float)
+        if restricted_times.size == 0:
+            continue
+        time_chunks.append(restricted_times)
+        value_chunks.append(np.asarray(restricted.d, dtype=float))
+
+    if not start_chunks:
+        same_turn_interval = nap.IntervalSet(
+            start=np.array([], dtype=float),
+            end=np.array([], dtype=float),
+            time_units="s",
+        )
+    else:
+        starts = np.concatenate(start_chunks)
+        ends = np.concatenate(end_chunks)
+        order = np.argsort(starts)
+        same_turn_interval = nap.IntervalSet(
+            start=starts[order],
+            end=ends[order],
+            time_units="s",
+        )
+
+    if not time_chunks:
+        return nap.Tsd(
+            t=np.array([], dtype=float),
+            d=np.array([], dtype=float),
+            time_support=same_turn_interval,
+            time_units="s",
+        ), same_turn_interval
+
+    all_times = np.concatenate(time_chunks)
+    all_values = np.concatenate(value_chunks)
+    order = np.argsort(all_times)
+    return nap.Tsd(
+        t=all_times[order],
+        d=all_values[order],
+        time_support=same_turn_interval,
+        time_units="s",
+    ), same_turn_interval
+
+
+def compute_place_tuning_curves_for_epoch(
+    spikes: Any,
+    task_progression_by_trajectory: dict[str, Any],
+    movement_interval: Any,
+    position_bins: np.ndarray,
+    *,
+    animal_name: str,
+) -> dict[str, Any]:
+    """Compute one place tuning curve per trajectory for one epoch."""
+    import pynapple as nap
+
+    total_length_cm = get_wtrack_total_length(animal_name)
+    tuning_curves: dict[str, Any] = {}
+    for trajectory_type in TRAJECTORY_TYPES:
+        trajectory_epoch = task_progression_by_trajectory[trajectory_type].time_support.intersect(
+            movement_interval
+        )
+        if _intervalset_is_empty(trajectory_epoch):
+            continue
+        place_coordinate = build_place_coordinate(
+            task_progression_by_trajectory[trajectory_type],
+            total_length_cm=total_length_cm,
+        )
+        tuning_curves[trajectory_type] = nap.compute_tuning_curves(
+            data=spikes,
+            features=place_coordinate,
+            bins=[position_bins],
+            epochs=trajectory_epoch,
+            feature_names=["linpos"],
+        )
+    return tuning_curves
+
+
+def compute_task_progression_tuning_curves_for_epoch(
+    spikes: Any,
+    task_progression_by_trajectory: dict[str, Any],
+    movement_interval: Any,
+    task_progression_bins: np.ndarray,
+) -> dict[str, Any]:
+    """Compute one same-turn task-progression tuning curve per turn type."""
+    import pynapple as nap
+
+    tuning_curves: dict[str, Any] = {}
+    for turn_type in TURN_TRAJECTORY_PAIRS:
+        task_progression, same_turn_interval = build_same_turn_task_progression(
+            task_progression_by_trajectory,
+            movement_interval,
+            turn_type,
+        )
+        if _intervalset_is_empty(same_turn_interval):
+            continue
+        if len(np.asarray(task_progression.t, dtype=float)) == 0:
+            continue
+        tuning_curves[turn_type] = nap.compute_tuning_curves(
+            data=spikes,
+            features=task_progression,
+            bins=[task_progression_bins],
+            epochs=same_turn_interval,
+            feature_names=["tp"],
+        )
+    return tuning_curves
 
 
 def _make_netcdf_safe_attr_value(value: Any) -> Any:
@@ -138,6 +242,8 @@ def prepare_tuning_curve_for_save(
     region: str,
     epoch: str,
     model_name: str,
+    trajectory_type: str | None = None,
+    turn_type: str | None = None,
 ) -> Any:
     """Return one tuning curve with NetCDF-safe attrs for xarray export."""
     output = tuning_curve.rename("firing_rate_hz").copy()
@@ -154,6 +260,10 @@ def prepare_tuning_curve_for_save(
             "model_name": model_name,
         }
     )
+    if trajectory_type is not None:
+        output.attrs["trajectory_type"] = trajectory_type
+    if turn_type is not None:
+        output.attrs["turn_type"] = turn_type
     return output
 
 
@@ -161,13 +271,14 @@ def save_tuning_curves(
     tuning_curves: dict[str, dict[str, dict[str, Any]]],
     data_dir: Path,
 ) -> list[Path]:
-    """Write one NetCDF tuning curve per region, epoch, and model."""
+    """Write one NetCDF tuning curve per region, epoch, and saved curve name."""
     saved_paths: list[Path] = []
     for region, region_curves in tuning_curves.items():
-        for epoch, model_curves in region_curves.items():
-            for model_name, tuning_curve in model_curves.items():
-                path = data_dir / f"{region}_{epoch}_{model_name}_tuning_curves.nc"
+        for epoch, named_curves in region_curves.items():
+            for curve_name, tuning_curve in named_curves.items():
+                path = data_dir / f"{region}_{epoch}_{curve_name}_tuning_curves.nc"
                 tuning_curve.to_netcdf(path)
+                print(f"Saved {curve_name} tuning curve for {region} {epoch} to {path}")
                 saved_paths.append(path)
     return saved_paths
 
@@ -200,18 +311,16 @@ def parse_arguments() -> argparse.Namespace:
             f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
         ),
     )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in tuning-curve bins. Default: {DEFAULT_SIGMA_BINS}",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Compute and save place and task-progression tuning curves for one session."""
     args = parse_arguments()
+    print(
+        f"Loading task-progression session for animal={args.animal_name} date={args.date} "
+        f"from {args.data_root}"
+    )
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
@@ -219,47 +328,73 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
+    print(
+        f"Loaded session with {len(session['run_epochs'])} run epoch(s): "
+        f"{', '.join(session['run_epochs'])}"
+    )
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     data_dir = analysis_path / "task_progression_tuning_curves"
     data_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving tuning curves under {data_dir}")
 
-    position_bins = build_linear_position_bins(args.animal_name)
-    task_progression_bins = build_combined_task_progression_bins(args.animal_name)
+    position_bins = build_place_bins(args.animal_name)
+    task_progression_bins = build_task_progression_bins(args.animal_name)
+    print(
+        "Built tuning-curve bins: "
+        f"{len(position_bins) - 1} place bins, "
+        f"{len(task_progression_bins) - 1} task-progression bins"
+    )
 
     tuning_curves_by_region: dict[str, dict[str, dict[str, Any]]] = {region: {} for region in REGIONS}
     for region in REGIONS:
+        print(f"Computing tuning curves for region {region}")
         for epoch in session["run_epochs"]:
-            place_tuning, task_progression_tuning = compute_tuning_curves_for_epoch(
+            print(f"  Processing epoch {epoch}")
+            place_tuning_by_trajectory = compute_place_tuning_curves_for_epoch(
                 spikes=session["spikes_by_region"][region],
-                linear_position=session["linear_position_by_run"][epoch],
-                task_progression=session["task_progression_by_run"][epoch],
+                task_progression_by_trajectory=session["task_progression_by_trajectory"][epoch],
                 movement_interval=session["movement_by_run"][epoch],
                 position_bins=position_bins,
-                task_progression_bins=task_progression_bins,
-                sigma_bins=args.sigma_bins,
+                animal_name=args.animal_name,
             )
-            tuning_curves_by_region[region][epoch] = {
-                "place": prepare_tuning_curve_for_save(
+            task_progression_tuning_by_turn = compute_task_progression_tuning_curves_for_epoch(
+                spikes=session["spikes_by_region"][region],
+                task_progression_by_trajectory=session["task_progression_by_trajectory"][epoch],
+                movement_interval=session["movement_by_run"][epoch],
+                task_progression_bins=task_progression_bins,
+            )
+            tuning_curves_by_region[region][epoch] = {}
+            for trajectory_type, place_tuning in place_tuning_by_trajectory.items():
+                tuning_curves_by_region[region][epoch][
+                    f"place_{trajectory_type}"
+                ] = prepare_tuning_curve_for_save(
                     place_tuning,
                     animal_name=args.animal_name,
                     date=args.date,
                     region=region,
                     epoch=epoch,
                     model_name="place",
-                ),
-                "task_progression": prepare_tuning_curve_for_save(
+                    trajectory_type=trajectory_type,
+                )
+            for turn_type, task_progression_tuning in task_progression_tuning_by_turn.items():
+                tuning_curves_by_region[region][epoch][
+                    f"task_progression_{turn_type}"
+                ] = prepare_tuning_curve_for_save(
                     task_progression_tuning,
                     animal_name=args.animal_name,
                     date=args.date,
                     region=region,
                     epoch=epoch,
                     model_name="task_progression",
-                ),
-            }
+                    turn_type=turn_type,
+                )
 
+    print("Writing NetCDF outputs")
     saved_netcdf_paths = save_tuning_curves(tuning_curves_by_region, data_dir=data_dir)
+    print(f"Saved {len(saved_netcdf_paths)} NetCDF file(s)")
 
+    print("Writing run metadata log")
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.task_progression_tuning_curves",
@@ -269,7 +404,6 @@ def main() -> None:
             "data_root": args.data_root,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
-            "sigma_bins": args.sigma_bins,
         },
         outputs={
             "sources": session["sources"],

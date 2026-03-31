@@ -110,6 +110,20 @@ def _write_combined_cleaned_position(
     return output_path
 
 
+def _write_saved_ripple_output(
+    analysis_path: Path,
+    *,
+    rows: list[dict[str, object]],
+) -> Path:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+
+    output_path = analysis_path / "ripple" / "ripple_times.parquet"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(output_path, index=False)
+    return output_path
+
+
 def _stub_compute_or_load_ripple_lfp_cache(
     *,
     selected_epochs: list[str],
@@ -917,6 +931,300 @@ def test_get_ripple_times_filters_to_complete_speed_gated_epochs_by_default(
 
     assert result["available_epochs"] == ["01_r1", "02_r2", "03_r3"]
     assert result["selected_epochs"] == ["01_r1"]
+
+
+def test_get_ripple_times_runs_only_missing_epochs_from_saved_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    analysis_path = tmp_path / "RatA" / "20240101"
+    _write_ephys_npz(
+        analysis_path,
+        epoch_tags=["01_r1", "02_r2"],
+        epoch_segments=[
+            np.array([0.0, 0.001, 0.002], dtype=float),
+            np.array([10.0, 10.001, 10.002], dtype=float),
+        ],
+    )
+    _write_position_npz(
+        analysis_path,
+        epoch_tags=["01_r1", "02_r2"],
+        timestamps_position={
+            "01_r1": np.array([0.0, 0.1, 0.2], dtype=float),
+            "02_r2": np.array([10.0, 10.1, 10.2], dtype=float),
+        },
+    )
+    _write_combined_cleaned_position(
+        analysis_path,
+        rows=[
+            {
+                "epoch": "01_r1",
+                "frame": 0,
+                "frame_time_s": 0.0,
+                "head_x_cm": 1.0,
+                "head_y_cm": 2.0,
+            },
+            {
+                "epoch": "01_r1",
+                "frame": 1,
+                "frame_time_s": 0.1,
+                "head_x_cm": 3.0,
+                "head_y_cm": 4.0,
+            },
+            {
+                "epoch": "01_r1",
+                "frame": 2,
+                "frame_time_s": 0.2,
+                "head_x_cm": 5.0,
+                "head_y_cm": 6.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 0,
+                "frame_time_s": 10.0,
+                "head_x_cm": 7.0,
+                "head_y_cm": 8.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 1,
+                "frame_time_s": 10.1,
+                "head_x_cm": 9.0,
+                "head_y_cm": 10.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 2,
+                "frame_time_s": 10.2,
+                "head_x_cm": 11.0,
+                "head_y_cm": 12.0,
+            },
+        ],
+    )
+    _write_saved_ripple_output(
+        analysis_path,
+        rows=[
+            {
+                "start": 1.0,
+                "end": 1.1,
+                "epoch": "01_r1",
+            }
+        ],
+    )
+
+    observed_run_epochs: list[str] = []
+    observed_cache_epochs: list[str] = []
+
+    def _fake_compute_or_load_ripple_lfp_cache(
+        *,
+        selected_epochs: list[str],
+        channel_ids: list[int],
+        **_: object,
+    ) -> tuple[dict[str, object], str]:
+        observed_cache_epochs.extend(selected_epochs)
+        return _stub_compute_or_load_ripple_lfp_cache(
+            selected_epochs=selected_epochs,
+            channel_ids=channel_ids,
+        )
+
+    def _fake_detector(
+        *,
+        time: np.ndarray,
+        filtered_lfps: np.ndarray,
+        speed: np.ndarray,
+        sampling_frequency: float,
+        zscore_threshold: float,
+    ) -> pd.DataFrame:
+        observed_run_epochs.append("02_r2")
+        return pd.DataFrame({"start_time": [10.0], "end_time": [10.1]})
+
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "get_ripple_channels_for_session",
+        lambda animal_name, date: [1, 2],
+    )
+    monkeypatch.setattr(detect_ripples_module, "get_recording", lambda **_: object())
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "compute_or_load_ripple_lfp_cache",
+        _fake_compute_or_load_ripple_lfp_cache,
+    )
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "compute_speed",
+        lambda position, timestamps_position, position_offset: (
+            np.asarray(timestamps_position, dtype=float),
+            np.zeros(len(timestamps_position), dtype=float),
+        ),
+    )
+    monkeypatch.setattr(detect_ripples_module, "run_kay_ripple_detector", _fake_detector)
+
+    result = detect_ripples_module.get_ripple_times(
+        animal_name="RatA",
+        date="20240101",
+        data_root=tmp_path,
+        nwb_root=tmp_path,
+    )
+
+    assert result["selected_epochs"] == ["01_r1", "02_r2"]
+    assert result["run_epochs"] == ["02_r2"]
+    assert result["skipped_existing_output_epochs"] == ["01_r1"]
+    assert observed_cache_epochs == ["02_r2"]
+    assert observed_run_epochs == ["02_r2"]
+
+    interval_table = pd.read_parquet(result["interval_parquet_path"])
+    assert set(interval_table["epoch"]) == {"01_r1", "02_r2"}
+    epoch_groups = {
+        epoch: group.reset_index(drop=True)
+        for epoch, group in interval_table.groupby("epoch", sort=False)
+    }
+    assert np.allclose(epoch_groups["01_r1"]["start"], [1.0])
+    assert np.allclose(epoch_groups["01_r1"]["end"], [1.1])
+    assert np.allclose(epoch_groups["02_r2"]["start"], [10.0])
+    assert np.allclose(epoch_groups["02_r2"]["end"], [10.1])
+
+
+def test_get_ripple_times_overwrite_reruns_all_selected_epochs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    analysis_path = tmp_path / "RatA" / "20240101"
+    _write_ephys_npz(
+        analysis_path,
+        epoch_tags=["01_r1", "02_r2"],
+        epoch_segments=[
+            np.array([0.0, 0.001, 0.002], dtype=float),
+            np.array([10.0, 10.001, 10.002], dtype=float),
+        ],
+    )
+    _write_position_npz(
+        analysis_path,
+        epoch_tags=["01_r1", "02_r2"],
+        timestamps_position={
+            "01_r1": np.array([0.0, 0.1, 0.2], dtype=float),
+            "02_r2": np.array([10.0, 10.1, 10.2], dtype=float),
+        },
+    )
+    _write_combined_cleaned_position(
+        analysis_path,
+        rows=[
+            {
+                "epoch": "01_r1",
+                "frame": 0,
+                "frame_time_s": 0.0,
+                "head_x_cm": 1.0,
+                "head_y_cm": 2.0,
+            },
+            {
+                "epoch": "01_r1",
+                "frame": 1,
+                "frame_time_s": 0.1,
+                "head_x_cm": 3.0,
+                "head_y_cm": 4.0,
+            },
+            {
+                "epoch": "01_r1",
+                "frame": 2,
+                "frame_time_s": 0.2,
+                "head_x_cm": 5.0,
+                "head_y_cm": 6.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 0,
+                "frame_time_s": 10.0,
+                "head_x_cm": 7.0,
+                "head_y_cm": 8.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 1,
+                "frame_time_s": 10.1,
+                "head_x_cm": 9.0,
+                "head_y_cm": 10.0,
+            },
+            {
+                "epoch": "02_r2",
+                "frame": 2,
+                "frame_time_s": 10.2,
+                "head_x_cm": 11.0,
+                "head_y_cm": 12.0,
+            },
+        ],
+    )
+    _write_saved_ripple_output(
+        analysis_path,
+        rows=[
+            {"start": 1.0, "end": 1.1, "epoch": "01_r1"},
+            {"start": 2.0, "end": 2.1, "epoch": "02_r2"},
+        ],
+    )
+
+    observed_cache_epochs: list[str] = []
+    detector_calls = 0
+
+    def _fake_compute_or_load_ripple_lfp_cache(
+        *,
+        selected_epochs: list[str],
+        channel_ids: list[int],
+        **_: object,
+    ) -> tuple[dict[str, object], str]:
+        observed_cache_epochs.extend(selected_epochs)
+        return _stub_compute_or_load_ripple_lfp_cache(
+            selected_epochs=selected_epochs,
+            channel_ids=channel_ids,
+        )
+
+    def _fake_detector(
+        *,
+        time: np.ndarray,
+        filtered_lfps: np.ndarray,
+        speed: np.ndarray,
+        sampling_frequency: float,
+        zscore_threshold: float,
+    ) -> pd.DataFrame:
+        nonlocal detector_calls
+        detector_calls += 1
+        return pd.DataFrame({"start_time": [0.0], "end_time": [0.01]})
+
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "get_ripple_channels_for_session",
+        lambda animal_name, date: [1, 2],
+    )
+    monkeypatch.setattr(detect_ripples_module, "get_recording", lambda **_: object())
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "compute_or_load_ripple_lfp_cache",
+        _fake_compute_or_load_ripple_lfp_cache,
+    )
+    monkeypatch.setattr(
+        detect_ripples_module,
+        "compute_speed",
+        lambda position, timestamps_position, position_offset: (
+            np.asarray(timestamps_position, dtype=float),
+            np.zeros(len(timestamps_position), dtype=float),
+        ),
+    )
+    monkeypatch.setattr(detect_ripples_module, "run_kay_ripple_detector", _fake_detector)
+
+    result = detect_ripples_module.get_ripple_times(
+        animal_name="RatA",
+        date="20240101",
+        data_root=tmp_path,
+        nwb_root=tmp_path,
+        overwrite=True,
+    )
+
+    assert result["selected_epochs"] == ["01_r1", "02_r2"]
+    assert result["run_epochs"] == ["01_r1", "02_r2"]
+    assert result["skipped_existing_output_epochs"] == []
+    assert observed_cache_epochs == ["01_r1", "02_r2"]
+    assert detector_calls == 2
 
 
 def test_get_ripple_times_rejects_selected_epochs_missing_from_position_npz(

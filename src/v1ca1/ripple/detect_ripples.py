@@ -1000,6 +1000,59 @@ def normalize_ripple_table(result: Any, epoch: str) -> "pd.DataFrame":
     return dataframe
 
 
+def load_saved_ripple_tables_from_output(path: Path) -> dict[str, "pd.DataFrame"]:
+    """Load saved ripple tables from the flattened parquet output when present."""
+    import pandas as pd
+
+    if not path.exists():
+        return {}
+
+    flat_table = pd.read_parquet(path)
+    if flat_table.empty:
+        return {}
+
+    working_table = flat_table.copy()
+    rename_columns = {}
+    if "start" in working_table.columns and "start_time" not in working_table.columns:
+        rename_columns["start"] = "start_time"
+    if "end" in working_table.columns and "end_time" not in working_table.columns:
+        rename_columns["end"] = "end_time"
+    if rename_columns:
+        working_table = working_table.rename(columns=rename_columns)
+
+    if "epoch" not in working_table.columns:
+        raise ValueError(f"Ripple parquet output is missing the required 'epoch' column: {path}")
+
+    saved_tables: dict[str, pd.DataFrame] = {}
+    for epoch, group in working_table.groupby("epoch", sort=False):
+        saved_tables[str(epoch)] = normalize_ripple_table(
+            group.drop(columns="epoch").reset_index(drop=True),
+            epoch=str(epoch),
+        )
+    return saved_tables
+
+
+def plan_ripple_epoch_execution(
+    selected_epochs: list[str],
+    *,
+    interval_parquet_path: Path,
+    overwrite: bool,
+) -> tuple[list[str], dict[str, "pd.DataFrame"], list[str]]:
+    """Return the epochs to execute now plus preserved saved outputs."""
+    existing_tables = load_saved_ripple_tables_from_output(interval_parquet_path)
+    if overwrite:
+        preserved_tables = {
+            epoch: table
+            for epoch, table in existing_tables.items()
+            if epoch not in set(selected_epochs)
+        }
+        return list(selected_epochs), preserved_tables, []
+
+    skipped_epochs = [epoch for epoch in selected_epochs if epoch in existing_tables]
+    epochs_to_run = [epoch for epoch in selected_epochs if epoch not in existing_tables]
+    return epochs_to_run, existing_tables, skipped_epochs
+
+
 def detect_ripples_for_epoch(
     *,
     epoch: str,
@@ -1123,6 +1176,7 @@ def get_ripple_times(
 
     timestamps_position_by_epoch: dict[str, np.ndarray] = {}
     position_by_epoch: dict[str, np.ndarray] = {}
+    position_source = "not_loaded"
     if use_speed_gating:
         _position_epoch_tags, timestamps_position_by_epoch = load_position_timestamps_npz(
             analysis_path
@@ -1144,11 +1198,6 @@ def get_ripple_times(
                 "clean_dlc_position": available_clean_dlc_epochs,
             },
         )
-        position_by_epoch, position_source_path = load_clean_dlc_head_position(
-            analysis_path,
-            selected_epochs=selected_epochs,
-            timestamps_position_by_epoch=timestamps_position_by_epoch,
-        )
         position_timestamp_source = "npz"
         position_source = str(position_source_path)
     else:
@@ -1163,38 +1212,66 @@ def get_ripple_times(
     channel_ids = get_ripple_channels_for_session(animal_name=animal_name, date=date)
 
     output_paths = get_output_paths(analysis_path / "ripple", use_speed_gating=use_speed_gating)
-    recording = get_recording(animal_name=animal_name, date=date, nwb_root=nwb_root)
-    ripple_lfp_cache, lfp_cache_source = compute_or_load_ripple_lfp_cache(
-        cache_dir=output_paths["lfp_cache_dir"],
-        animal_name=animal_name,
-        date=date,
-        recording=recording,
-        selected_epochs=selected_epochs,
-        timestamps_by_epoch=timestamps_ephys_by_epoch,
-        timestamps_ephys_all=timestamps_ephys_all,
-        channel_ids=channel_ids,
-        enable_notch_filter=enable_notch_filter,
+    run_epochs, preserved_tables, skipped_existing_output_epochs = plan_ripple_epoch_execution(
+        selected_epochs,
+        interval_parquet_path=output_paths["interval_parquet"],
         overwrite=overwrite,
     )
-
-    updated_tables: dict[str, pd.DataFrame] = {}
-    for epoch in selected_epochs:
-        print(f"Detecting ripples for {animal_name} {date} {epoch}")
-        updated_tables[epoch] = detect_ripples_for_epoch(
-            epoch=epoch,
-            ripple_lfp_cache=ripple_lfp_cache,
-            position_by_epoch=position_by_epoch,
-            position_timestamps_by_epoch=timestamps_position_by_epoch,
-            position_offset=position_offset,
-            zscore_threshold=zscore_threshold,
-            use_speed_gating=use_speed_gating,
+    if skipped_existing_output_epochs:
+        print(
+            "Skipping epochs already present in saved ripple output: "
+            f"{skipped_existing_output_epochs!r}"
         )
 
-    flat_table = flatten_ripple_tables(updated_tables)
-    interval_parquet_path = save_ripple_interval_output(output_paths["interval_parquet"], flat_table)
+    if run_epochs and use_speed_gating:
+        position_by_epoch, position_source_path = load_clean_dlc_head_position(
+            analysis_path,
+            selected_epochs=run_epochs,
+            timestamps_position_by_epoch=timestamps_position_by_epoch,
+        )
+        position_source = str(position_source_path)
+
+    ripple_lfp_cache = initialize_lfp_cache(channel_ids, enable_notch_filter=enable_notch_filter)
+    lfp_cache_source = "not_used_existing_output"
+    updated_tables: dict[str, pd.DataFrame] = {}
+    if run_epochs:
+        recording = get_recording(animal_name=animal_name, date=date, nwb_root=nwb_root)
+        ripple_lfp_cache, lfp_cache_source = compute_or_load_ripple_lfp_cache(
+            cache_dir=output_paths["lfp_cache_dir"],
+            animal_name=animal_name,
+            date=date,
+            recording=recording,
+            selected_epochs=run_epochs,
+            timestamps_by_epoch=timestamps_ephys_by_epoch,
+            timestamps_ephys_all=timestamps_ephys_all,
+            channel_ids=channel_ids,
+            enable_notch_filter=enable_notch_filter,
+            overwrite=overwrite,
+        )
+
+        for epoch in run_epochs:
+            print(f"Detecting ripples for {animal_name} {date} {epoch}")
+            updated_tables[epoch] = detect_ripples_for_epoch(
+                epoch=epoch,
+                ripple_lfp_cache=ripple_lfp_cache,
+                position_by_epoch=position_by_epoch,
+                position_timestamps_by_epoch=timestamps_position_by_epoch,
+                position_offset=position_offset,
+                zscore_threshold=zscore_threshold,
+                use_speed_gating=use_speed_gating,
+            )
+    else:
+        print("All selected epochs already have saved ripple outputs. No epochs will be rerun.")
+
+    final_tables = dict(preserved_tables)
+    final_tables.update(updated_tables)
+    interval_parquet_path = output_paths["interval_parquet"]
+    if run_epochs or not interval_parquet_path.exists():
+        flat_table = flatten_ripple_tables(final_tables)
+        interval_parquet_path = save_ripple_interval_output(interval_parquet_path, flat_table)
 
     epoch_summaries = build_epoch_summaries(
-        selected_epochs=selected_epochs,
+        selected_epochs=run_epochs,
         ripple_lfp_cache=ripple_lfp_cache,
         ripple_tables_by_epoch=updated_tables,
         enable_notch_filter=enable_notch_filter,
@@ -1220,6 +1297,8 @@ def get_ripple_times(
         "lfp_cache_epoch_actions": dict(ripple_lfp_cache["epoch_cache_actions"]),
         "available_epochs": epoch_tags,
         "selected_epochs": selected_epochs,
+        "run_epochs": run_epochs,
+        "skipped_existing_output_epochs": skipped_existing_output_epochs,
         "epoch_summaries": epoch_summaries,
         "ripple_channels": channel_ids,
         "position_offset": int(position_offset),
@@ -1269,6 +1348,8 @@ def main() -> None:
             "lfp_cache_epoch_actions": result["lfp_cache_epoch_actions"],
             "available_epochs": result["available_epochs"],
             "selected_epochs": result["selected_epochs"],
+            "run_epochs": result["run_epochs"],
+            "skipped_existing_output_epochs": result["skipped_existing_output_epochs"],
             "epoch_summaries": result["epoch_summaries"],
         },
     )
