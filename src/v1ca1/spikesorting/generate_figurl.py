@@ -444,7 +444,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--probe-idx", type=int, required=True, help="Probe index")
     parser.add_argument("--shank-idx", type=int, required=True, help="Shank index")
     parser.add_argument(
-        "--analysis-root",
+        "--data-root",
         type=Path,
         default=DEFAULT_ANALYSIS_ROOT,
         help=f"Base directory for analysis output. Default: {DEFAULT_ANALYSIS_ROOT}",
@@ -477,7 +477,7 @@ def main() -> None:
         date=args.date,
         probe_idx=args.probe_idx,
         shank_idx=args.shank_idx,
-        analysis_root=args.analysis_root,
+        analysis_root=args.data_root,
         nwb_root=args.nwb_root,
         curation_base_uri=args.curation_base_uri,
     )

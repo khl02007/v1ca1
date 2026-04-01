@@ -348,7 +348,7 @@ def parse_arguments() -> argparse.Namespace:
         help="Recompute the sorting analyzer even if it already exists",
     )
     parser.add_argument(
-        "--analysis-root",
+        "--data-root",
         type=Path,
         default=DEFAULT_ANALYSIS_ROOT,
         help=f"Base directory for analysis output. Default: {DEFAULT_ANALYSIS_ROOT}",
@@ -379,7 +379,7 @@ def main() -> None:
         ms4_params=ms4_params,
         recompute_sorting=args.recompute_sorting,
         recompute_sorting_analyzer=args.recompute_sorting_analyzer,
-        analysis_root=args.analysis_root,
+        analysis_root=args.data_root,
         nwb_root=args.nwb_root,
     )
 

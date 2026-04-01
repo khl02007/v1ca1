@@ -20,6 +20,7 @@ from v1ca1.nwb.plot_voltage_snippet import (
     get_output_paths,
     main,
     order_shank_channels,
+    parse_arguments,
     plot_voltage_snippet,
     resolve_snippet_selection,
     validate_probe_shank_layout,
@@ -297,6 +298,7 @@ def test_compute_snippet_frame_bounds_validates_bounds() -> None:
 def test_resolve_snippet_selection_explicit_does_not_require_helper_outputs(tmp_path: Path) -> None:
     selection = resolve_snippet_selection(
         requested_start_time_s=0.05,
+        requested_epoch="02_r1",
         duration_s=0.050,
         sampling_frequency=1000.0,
         total_frames=2000,
@@ -324,6 +326,7 @@ def test_resolve_snippet_selection_uses_first_run_epoch_deterministically(tmp_pa
 
     selection = resolve_snippet_selection(
         requested_start_time_s=None,
+        requested_epoch=None,
         duration_s=0.050,
         sampling_frequency=1000.0,
         total_frames=500,
@@ -353,6 +356,47 @@ def test_resolve_snippet_selection_uses_first_run_epoch_deterministically(tmp_pa
     )
 
 
+def test_resolve_snippet_selection_uses_requested_epoch_deterministically(tmp_path: Path) -> None:
+    analysis_path = tmp_path / "analysis" / "animal" / "20240101"
+    timestamps_by_epoch = {
+        "01_s1": np.arange(0, 100, dtype=float) / 1000.0,
+        "02_r1": np.arange(100, 300, dtype=float) / 1000.0,
+        "03_s2": np.arange(300, 500, dtype=float) / 1000.0,
+    }
+    _write_timestamps_ephys_pickle(analysis_path, timestamps_by_epoch)
+
+    selection = resolve_snippet_selection(
+        requested_start_time_s=None,
+        requested_epoch="03_s2",
+        duration_s=0.050,
+        sampling_frequency=1000.0,
+        total_frames=500,
+        analysis_path=analysis_path,
+        random_seed=0,
+    )
+
+    duration_frames = compute_snippet_num_frames(
+        duration_s=0.050,
+        sampling_frequency=1000.0,
+        total_frames=500,
+    )
+    expected_epoch_start_index = int(
+        np.random.default_rng(0).integers(
+            0,
+            len(timestamps_by_epoch["03_s2"]) - duration_frames + 1,
+        )
+    )
+    assert selection["start_time_source"] == "requested_epoch_random"
+    assert selection["selected_run_epoch"] == "03_s2"
+    assert selection["epoch_timestamp_source"] == "pickle"
+    assert selection["epoch_relative_start_index"] == expected_epoch_start_index
+    assert selection["start_frame"] == 300 + expected_epoch_start_index
+    assert selection["end_frame"] == selection["start_frame"] + duration_frames
+    assert selection["resolved_start_time_s"] == pytest.approx(
+        timestamps_by_epoch["03_s2"][expected_epoch_start_index]
+    )
+
+
 def test_resolve_snippet_selection_changes_with_seed(tmp_path: Path) -> None:
     analysis_path = tmp_path / "analysis" / "animal" / "20240101"
     timestamps_by_epoch = {
@@ -363,6 +407,7 @@ def test_resolve_snippet_selection_changes_with_seed(tmp_path: Path) -> None:
 
     selection_seed_0 = resolve_snippet_selection(
         requested_start_time_s=None,
+        requested_epoch=None,
         duration_s=0.050,
         sampling_frequency=1000.0,
         total_frames=1300,
@@ -371,6 +416,7 @@ def test_resolve_snippet_selection_changes_with_seed(tmp_path: Path) -> None:
     )
     selection_seed_1 = resolve_snippet_selection(
         requested_start_time_s=None,
+        requested_epoch=None,
         duration_s=0.050,
         sampling_frequency=1000.0,
         total_frames=1300,
@@ -385,10 +431,33 @@ def test_resolve_snippet_selection_requires_helper_outputs_for_auto_mode(tmp_pat
     with pytest.raises(FileNotFoundError, match="Run `python -m v1ca1.helper.get_timestamps`"):
         resolve_snippet_selection(
             requested_start_time_s=None,
+            requested_epoch=None,
             duration_s=0.050,
             sampling_frequency=1000.0,
             total_frames=2000,
             analysis_path=tmp_path / "analysis",
+            random_seed=0,
+        )
+
+
+def test_resolve_snippet_selection_requires_requested_epoch_to_exist(tmp_path: Path) -> None:
+    analysis_path = tmp_path / "analysis" / "animal" / "20240101"
+    _write_timestamps_ephys_pickle(
+        analysis_path,
+        {
+            "01_s1": np.arange(0, 100, dtype=float) / 1000.0,
+            "02_r1": np.arange(100, 300, dtype=float) / 1000.0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="Requested epoch '03_s2' was not found"):
+        resolve_snippet_selection(
+            requested_start_time_s=None,
+            requested_epoch="03_s2",
+            duration_s=0.050,
+            sampling_frequency=1000.0,
+            total_frames=300,
+            analysis_path=analysis_path,
             random_seed=0,
         )
 
@@ -406,6 +475,7 @@ def test_resolve_snippet_selection_requires_run_epoch(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Could not infer any run epochs"):
         resolve_snippet_selection(
             requested_start_time_s=None,
+            requested_epoch=None,
             duration_s=0.050,
             sampling_frequency=1000.0,
             total_frames=300,
@@ -427,6 +497,7 @@ def test_resolve_snippet_selection_requires_long_enough_first_run_epoch(tmp_path
     with pytest.raises(ValueError, match="shorter than the requested snippet duration"):
         resolve_snippet_selection(
             requested_start_time_s=None,
+            requested_epoch=None,
             duration_s=0.050,
             sampling_frequency=1000.0,
             total_frames=120,
@@ -452,7 +523,8 @@ def test_plot_voltage_snippet_writes_two_pngs(tmp_path: Path) -> None:
         animal_name=animal_name,
         date=date,
         start_time_s=0.05,
-        duration_s=0.050,
+        broadband_duration_s=0.100,
+        spike_band_duration_s=0.050,
         analysis_root=analysis_root,
         nwb_root=nwb_root,
     )
@@ -463,17 +535,22 @@ def test_plot_voltage_snippet_writes_two_pngs(tmp_path: Path) -> None:
         animal_name=animal_name,
         date=date,
         start_time_s=0.05,
-        duration_s=0.050,
+        broadband_duration_s=0.100,
+        spike_band_duration_s=0.050,
         analysis_root=analysis_root,
     )
     assert raw_path == expected_raw_path
     assert filtered_path == expected_filtered_path
+    assert raw_path != filtered_path
     assert raw_path.exists()
     assert filtered_path.exists()
     assert raw_path.name.startswith(RAW_FIGURE_STEM)
     assert filtered_path.name.startswith(FILTERED_FIGURE_STEM)
     assert raw_path.suffix == ".png"
     assert filtered_path.suffix == ".png"
+    assert outputs["broadband_duration_s"] == pytest.approx(0.100)
+    assert outputs["spike_band_duration_s"] == pytest.approx(0.050)
+    assert outputs["selection_duration_s"] == pytest.approx(0.100)
 
     log_dir = analysis_root / animal_name / date / "v1ca1_log"
     assert not log_dir.exists()
@@ -500,6 +577,7 @@ def test_plot_voltage_snippet_auto_start_uses_resolved_time_in_outputs(tmp_path:
     _write_timestamps_ephys_pickle(analysis_path, timestamps_by_epoch)
     expected_selection = resolve_snippet_selection(
         requested_start_time_s=None,
+        requested_epoch=None,
         duration_s=0.050,
         sampling_frequency=20000.0,
         total_frames=4000,
@@ -511,7 +589,8 @@ def test_plot_voltage_snippet_auto_start_uses_resolved_time_in_outputs(tmp_path:
         animal_name=animal_name,
         date=date,
         start_time_s=None,
-        duration_s=0.050,
+        broadband_duration_s=0.050,
+        spike_band_duration_s=0.050,
         analysis_root=analysis_root,
         nwb_root=nwb_root,
         random_seed=0,
@@ -523,7 +602,8 @@ def test_plot_voltage_snippet_auto_start_uses_resolved_time_in_outputs(tmp_path:
         animal_name=animal_name,
         date=date,
         start_time_s=float(expected_selection["resolved_start_time_s"]),
-        duration_s=0.050,
+        broadband_duration_s=0.050,
+        spike_band_duration_s=0.050,
         analysis_root=analysis_root,
     )
     assert raw_path == expected_raw_path
@@ -538,6 +618,58 @@ def test_plot_voltage_snippet_auto_start_uses_resolved_time_in_outputs(tmp_path:
     assert outputs["selected_run_epoch"] == "02_r1"
     assert outputs["epoch_timestamp_source"] == "pickle"
     assert outputs["epoch_relative_start_index"] == expected_selection["epoch_relative_start_index"]
+
+
+def test_plot_voltage_snippet_auto_start_uses_helper_frame_index_for_absolute_timestamps(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("pynwb")
+    pytest.importorskip("spikeinterface.full")
+
+    animal_name = "animal"
+    date = "20240105"
+    analysis_root = tmp_path / "analysis"
+    analysis_path = analysis_root / animal_name / date
+    nwb_root = tmp_path / "raw"
+    nwb_root.mkdir(parents=True)
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+    _write_test_nwb(nwb_path)
+
+    absolute_offset_s = 2_567_123.0
+    timestamps_by_epoch = {
+        "01_s1": absolute_offset_s + np.arange(0, 1000, dtype=float) / 20000.0,
+        "02_r1": absolute_offset_s + np.arange(1000, 4000, dtype=float) / 20000.0,
+    }
+    _write_timestamps_ephys_pickle(analysis_path, timestamps_by_epoch)
+    expected_selection = resolve_snippet_selection(
+        requested_start_time_s=None,
+        requested_epoch=None,
+        duration_s=0.050,
+        sampling_frequency=20000.0,
+        total_frames=4000,
+        analysis_path=analysis_path,
+        random_seed=0,
+    )
+
+    outputs = plot_voltage_snippet(
+        animal_name=animal_name,
+        date=date,
+        start_time_s=None,
+        broadband_duration_s=0.050,
+        spike_band_duration_s=0.050,
+        analysis_root=analysis_root,
+        nwb_root=nwb_root,
+        random_seed=0,
+    )
+
+    assert outputs["start_frame"] == expected_selection["start_frame"]
+    assert outputs["end_frame"] == expected_selection["end_frame"]
+    assert outputs["resolved_start_time_s"] == pytest.approx(
+        float(expected_selection["resolved_start_time_s"])
+    )
+    assert outputs["raw_figure_path"].exists()
+    assert outputs["filtered_figure_path"].exists()
 
 
 def test_plot_voltage_snippet_accepts_repeated_channel_ids_across_probes(tmp_path: Path) -> None:
@@ -561,7 +693,8 @@ def test_plot_voltage_snippet_accepts_repeated_channel_ids_across_probes(tmp_pat
         animal_name=animal_name,
         date=date,
         start_time_s=0.05,
-        duration_s=0.050,
+        broadband_duration_s=0.050,
+        spike_band_duration_s=0.050,
         analysis_root=analysis_root,
         nwb_root=nwb_root,
     )
@@ -604,7 +737,11 @@ def test_main_writes_run_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             animal_name,
             "--date",
             date,
-            "--analysis-root",
+            "--broadband-duration-s",
+            "0.05",
+            "--spike-band-duration-s",
+            "0.05",
+            "--data-root",
             str(analysis_root),
             "--nwb-root",
             str(nwb_root),
@@ -617,6 +754,88 @@ def test_main_writes_run_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert len(log_paths) == 1
     log_record = json.loads(log_paths[0].read_text(encoding="utf-8"))
     assert log_record["parameters"]["requested_start_time_s"] is None
+    assert log_record["parameters"]["requested_epoch"] is None
+    assert str(log_record["parameters"]["data_root"]) == str(analysis_root)
+    assert log_record["parameters"]["broadband_duration_s"] == 0.05
+    assert log_record["parameters"]["spike_band_duration_s"] == 0.05
     assert log_record["parameters"]["random_seed"] == 0
     assert log_record["outputs"]["start_time_source"] == "first_run_epoch_random"
     assert log_record["outputs"]["raw_figure_path"].endswith(".png")
+
+
+def test_main_accepts_epoch_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("pynwb")
+    pytest.importorskip("spikeinterface.full")
+
+    animal_name = "animal"
+    date = "20240104"
+    analysis_root = tmp_path / "analysis"
+    analysis_path = analysis_root / animal_name / date
+    nwb_root = tmp_path / "raw"
+    nwb_root.mkdir(parents=True)
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+    _write_test_nwb(nwb_path)
+    _write_timestamps_ephys_pickle(
+        analysis_path,
+        {
+            "01_s1": np.arange(0, 1000, dtype=float) / 20000.0,
+            "02_r1": np.arange(1000, 2500, dtype=float) / 20000.0,
+            "03_s2": np.arange(2500, 4000, dtype=float) / 20000.0,
+        },
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "plot_voltage_snippet.py",
+            "--animal-name",
+            animal_name,
+            "--date",
+            date,
+            "--epoch",
+            "03_s2",
+            "--broadband-duration-s",
+            "0.05",
+            "--spike-band-duration-s",
+            "0.05",
+            "--data-root",
+            str(analysis_root),
+            "--nwb-root",
+            str(nwb_root),
+        ],
+    )
+    main()
+
+    log_dir = analysis_root / animal_name / date / "v1ca1_log"
+    log_paths = sorted(log_dir.glob("v1ca1_nwb_plot_voltage_snippet_*.json"))
+    assert len(log_paths) == 1
+    log_record = json.loads(log_paths[0].read_text(encoding="utf-8"))
+    assert str(log_record["parameters"]["data_root"]) == str(analysis_root)
+    assert log_record["parameters"]["broadband_duration_s"] == 0.05
+    assert log_record["parameters"]["spike_band_duration_s"] == 0.05
+    assert log_record["parameters"]["requested_epoch"] == "03_s2"
+    assert log_record["outputs"]["selected_run_epoch"] == "03_s2"
+    assert log_record["outputs"]["start_time_source"] == "requested_epoch_random"
+
+
+def test_parse_arguments_uses_separate_duration_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "plot_voltage_snippet.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240105",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.broadband_duration_s == pytest.approx(1.0)
+    assert args.spike_band_duration_s == pytest.approx(0.2)

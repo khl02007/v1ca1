@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import pickle
 
 import numpy as np
 import pandas as pd
@@ -170,78 +169,22 @@ def test_load_trajectory_time_bounds_prefers_parquet_and_preserves_empty_shapes(
         [[11.0, 12.0], [13.0, 14.0]],
     )
 
-
-def test_load_trajectory_intervals_falls_back_to_pickle(tmp_path) -> None:
-    nap = pytest.importorskip("pynapple")
-
-    trajectory_times = {
-        "02_r1": {
-            "left_to_center": np.array([[1.0, 2.0]]),
-            "center_to_left": np.empty((0, 2), dtype=float),
-            "right_to_center": np.array([[3.0, 4.0]]),
-            "center_to_right": np.empty((0, 2), dtype=float),
-        },
-        "04_r2": {
-            "left_to_center": np.empty((0, 2), dtype=float),
-            "center_to_left": np.array([[5.0, 6.0]]),
-            "right_to_center": np.empty((0, 2), dtype=float),
-            "center_to_right": np.array([[7.0, 8.0]]),
-        },
-    }
-    with open(tmp_path / "trajectory_times.pkl", "wb") as f:
-        pickle.dump(trajectory_times, f)
-
-    intervals_by_epoch, source = load_trajectory_intervals(
-        analysis_path=tmp_path,
-        run_epochs=["02_r1", "04_r2"],
-    )
-
-    assert source == "pickle"
-    assert isinstance(intervals_by_epoch["02_r1"]["left_to_center"], nap.IntervalSet)
-    assert np.allclose(intervals_by_epoch["02_r1"]["left_to_center"].start, [1.0])
-    assert np.allclose(intervals_by_epoch["02_r1"]["left_to_center"].end, [2.0])
-    assert np.allclose(intervals_by_epoch["02_r1"]["right_to_center"].start, [3.0])
-    assert np.allclose(intervals_by_epoch["04_r2"]["center_to_left"].start, [5.0])
-    assert np.allclose(intervals_by_epoch["04_r2"]["center_to_right"].end, [8.0])
-
-
-@pytest.mark.parametrize(
-    ("argv", "expected_save_pkl"),
-    [
-        (
-            [
-                "get_trajectory_times.py",
-                "--animal-name",
-                "animal",
-                "--date",
-                "20240101",
-            ],
-            False,
-        ),
-        (
-            [
-                "get_trajectory_times.py",
-                "--animal-name",
-                "animal",
-                "--date",
-                "20240101",
-                "--save-pkl",
-            ],
-            True,
-        ),
-    ],
-)
-def test_parse_arguments_save_pkl_flag(
+def test_parse_arguments_uses_expected_defaults(
     monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    expected_save_pkl: bool,
 ) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        argv,
+        [
+            "get_trajectory_times.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+        ],
     )
 
     args = parse_arguments()
 
-    assert args.save_pkl is expected_save_pkl
+    assert args.animal_name == "animal"
+    assert args.date == "20240101"

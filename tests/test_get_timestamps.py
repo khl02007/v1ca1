@@ -212,43 +212,41 @@ def test_get_timestamps_creates_missing_analysis_path(
     assert saved_paths == [expected_analysis_path]
 
 
-@pytest.mark.parametrize(
-    ("argv", "expected_save_pkl"),
-    [
-        (
-            [
-                "get_timestamps.py",
-                "--animal-name",
-                "animal",
-                "--date",
-                "20240101",
-            ],
-            False,
-        ),
-        (
-            [
-                "get_timestamps.py",
-                "--animal-name",
-                "animal",
-                "--date",
-                "20240101",
-                "--save-pkl",
-            ],
-            True,
-        ),
-    ],
-)
-def test_parse_arguments_save_pkl_flag(
+def test_parse_arguments_does_not_expose_save_pkl_flag(
     monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    expected_save_pkl: bool,
 ) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        argv,
+        [
+            "get_timestamps.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+        ],
     )
 
     args = parse_arguments()
 
-    assert args.save_pkl is expected_save_pkl
+    assert not hasattr(args, "save_pkl")
+
+
+def test_parse_arguments_rejects_save_pkl_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "get_timestamps.py",
+            "--animal-name",
+            "animal",
+            "--date",
+            "20240101",
+            "--save-pkl",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_arguments()

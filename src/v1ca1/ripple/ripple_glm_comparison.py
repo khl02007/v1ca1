@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Compare legacy and current ripple GLM inputs and outputs for one epoch."""
+"""Compare legacy and current ripple GLM inputs and ripple outputs for one epoch."""
 
 import argparse
 import json
@@ -18,16 +18,14 @@ from v1ca1.ripple.ripple_glm import (
     DEFAULT_MIN_SPIKES_PER_RIPPLE,
     DEFAULT_N_SHUFFLES_RIPPLE,
     DEFAULT_N_SPLITS,
-    DEFAULT_PRE_BUFFER_S,
-    DEFAULT_PRE_EXCLUDE_GUARD_S,
     DEFAULT_RIDGE_STRENGTH,
     DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_SHUFFLE_SEED,
     DEFAULT_TOL,
-    fit_ripple_glm_train_on_ripple_predict_pre,
+    fit_ripple_glm_train_on_ripple,
     format_ridge_strength_suffix,
+    format_ripple_selection_suffix,
     format_ripple_window_suffix,
-    make_preripple_ep,
     prepare_ripple_glm_session,
 )
 
@@ -84,31 +82,6 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RIPPLE_WINDOW_S,
         help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
-    )
-    parser.add_argument(
-        "--pre-window-s",
-        type=float,
-        help="Optional fixed pre-ripple window length in seconds. Defaults to --ripple-window-s.",
-    )
-    parser.add_argument(
-        "--pre-buffer-s",
-        type=float,
-        default=DEFAULT_PRE_BUFFER_S,
-        help=f"Gap between the pre window and ripple start in seconds. Default: {DEFAULT_PRE_BUFFER_S}",
-    )
-    parser.add_argument(
-        "--exclude-ripples",
-        action="store_true",
-        help="Exclude ripple intervals (plus the configured guard) from pre windows.",
-    )
-    parser.add_argument(
-        "--pre-exclude-guard-s",
-        type=float,
-        default=DEFAULT_PRE_EXCLUDE_GUARD_S,
-        help=(
-            "Guard width in seconds when excluding ripples from pre windows. "
-            f"Default: {DEFAULT_PRE_EXCLUDE_GUARD_S}"
-        ),
     )
     parser.add_argument(
         "--min-spikes-per-ripple",
@@ -181,12 +154,6 @@ def validate_arguments(args: argparse.Namespace) -> None:
     """Validate argument ranges for the comparison workflow."""
     if args.ripple_window_s <= 0:
         raise ValueError("--ripple-window-s must be positive.")
-    if args.pre_window_s is not None and args.pre_window_s <= 0:
-        raise ValueError("--pre-window-s must be positive when provided.")
-    if args.pre_buffer_s < 0:
-        raise ValueError("--pre-buffer-s must be non-negative.")
-    if args.pre_exclude_guard_s < 0:
-        raise ValueError("--pre-exclude-guard-s must be non-negative.")
     if args.min_spikes_per_ripple < 0:
         raise ValueError("--min-spikes-per-ripple must be non-negative.")
     if args.min_ca1_spikes_per_ripple < 0:
@@ -215,14 +182,10 @@ def ensure_epoch(session: dict[str, Any], epoch: str, *, label: str) -> None:
         raise ValueError(f"Epoch {epoch!r} is missing interval bounds in {label}.")
 
 
-def build_fit_parameters(args: argparse.Namespace, *, pre_window_s: float) -> dict[str, Any]:
+def build_fit_parameters(args: argparse.Namespace) -> dict[str, Any]:
     """Return the fit-parameter bundle shared across the comparison runs."""
     return {
         "ripple_window_s": float(args.ripple_window_s),
-        "pre_window_s": float(pre_window_s),
-        "pre_buffer_s": float(args.pre_buffer_s),
-        "exclude_ripples": bool(args.exclude_ripples),
-        "pre_exclude_guard_s": float(args.pre_exclude_guard_s),
         "min_spikes_per_ripple": float(args.min_spikes_per_ripple),
         "min_ca1_spikes_per_ripple": float(args.min_ca1_spikes_per_ripple),
         "n_splits": int(args.n_splits),
@@ -238,7 +201,6 @@ def default_legacy_output_path(
     analysis_path: Path,
     *,
     epoch: str,
-    exclude_ripples: bool,
     ripple_window_s: float,
     min_spikes_per_ripple: float,
     ridge_strength: float,
@@ -250,7 +212,7 @@ def default_legacy_output_path(
         / "glm_results_train_on_ripple"
         / (
             f"{epoch}_train_ripple_predict_ripple_and_pre_exclude_ripples_"
-            f"{exclude_ripples}_ripple_window_{ripple_window_s}"
+            f"False_ripple_window_{ripple_window_s}"
             f"_min_spikes_per_ripple_{min_spikes_per_ripple}"
             f"_ridge_strength_{ridge_strength}.npz"
         )
@@ -265,11 +227,13 @@ def default_current_output_path(
     ridge_strength: float,
 ) -> Path:
     """Return the default current .nc output path for one epoch."""
+    ripple_selection_suffix = format_ripple_selection_suffix(False)
     return (
         analysis_path
         / "ripple_glm"
         / (
             f"{epoch}_{format_ripple_window_suffix(ripple_window_s)}_"
+            f"{ripple_selection_suffix}_"
             f"{format_ridge_strength_suffix(ridge_strength)}_ripple_glm.nc"
         )
     )
@@ -321,28 +285,15 @@ def summarize_session_inputs(
     *,
     epoch: str,
     ripple_window_s: float | None,
-    pre_window_s: float | None,
-    pre_buffer_s: float,
-    exclude_ripples: bool,
-    pre_exclude_guard_s: float,
 ) -> dict[str, Any]:
-    """Summarize one session's ripple and pre-ripple inputs for one epoch."""
+    """Summarize one session's ripple inputs for one epoch."""
     ripple_table = session["ripple_tables"][epoch]
     ripple_ep = build_ripple_ep(ripple_table, ripple_window_s=ripple_window_s)
-    pre_ep = make_preripple_ep(
-        ripple_ep=ripple_ep,
-        epoch_ep=session["epoch_intervals"][epoch],
-        window_s=pre_window_s,
-        buffer_s=pre_buffer_s,
-        exclude_ripples=exclude_ripples,
-        exclude_ripple_guard_s=pre_exclude_guard_s,
-    )
     return {
         "analysis_path": str(session["analysis_path"]),
         "sources": session["sources"],
         "raw_ripple_rows": int(len(ripple_table)),
         "fixed_window_ripple_count": int(len(ripple_ep)),
-        "n_pre_windows_from_inputs": int(len(pre_ep)),
         "ripple_table_columns": [str(column_name) for column_name in ripple_table.columns],
     }
 
@@ -354,7 +305,7 @@ def run_current_fit(
     fit_parameters: dict[str, Any],
 ) -> dict[str, Any]:
     """Run the current ripple GLM fitter for one epoch."""
-    return fit_ripple_glm_train_on_ripple_predict_pre(
+    return fit_ripple_glm_train_on_ripple(
         epoch=epoch,
         spikes=session["spikes_by_region"],
         epoch_interval=session["epoch_intervals"][epoch],
@@ -364,10 +315,6 @@ def run_current_fit(
         n_shuffles_ripple=fit_parameters["n_shuffles_ripple"],
         shuffle_seed=fit_parameters["shuffle_seed"],
         ripple_window_s=fit_parameters["ripple_window_s"],
-        pre_window_s=fit_parameters["pre_window_s"],
-        pre_buffer_s=fit_parameters["pre_buffer_s"],
-        exclude_ripples=fit_parameters["exclude_ripples"],
-        pre_exclude_guard_s=fit_parameters["pre_exclude_guard_s"],
         n_splits=fit_parameters["n_splits"],
         ridge_strength=fit_parameters["ridge_strength"],
         maxiter=fit_parameters["maxiter"],
@@ -384,7 +331,7 @@ def metric_mean(values: np.ndarray) -> float | None:
 
 
 def build_metric_means(metric_arrays: dict[str, dict[str, np.ndarray]]) -> dict[str, Any]:
-    """Return compact metric means for ripple and pre outputs."""
+    """Return compact metric means for the available metric partitions."""
     return {
         partition_name: {
             metric_name: metric_mean(metric_values)
@@ -411,12 +358,6 @@ def normalize_result_from_fit(
             "devexp": np.asarray(results["devexp_ripple_folds"], dtype=float),
             "bits_per_spike": np.asarray(results["bits_per_spike_ripple_folds"], dtype=float),
         },
-        "pre": {
-            "pseudo_r2": np.asarray(results["pseudo_r2_pre"], dtype=float),
-            "mae": np.asarray(results["mae_pre"], dtype=float),
-            "devexp": np.asarray(results["devexp_pre"], dtype=float),
-            "bits_per_spike": np.asarray(results["bits_per_spike_pre"], dtype=float),
-        },
     }
     v1_unit_ids = np.asarray(results["v1_unit_ids"])
     ca1_unit_ids = np.asarray(results["ca1_unit_ids"])
@@ -427,7 +368,6 @@ def normalize_result_from_fit(
         "fit_parameters": dict(fit_parameters),
         "input_summary": dict(input_summary),
         "n_ripples": int(results["n_ripples"]),
-        "n_pre": int(results["n_pre"]),
         "n_v1_units": int(len(v1_unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "v1_unit_ids": v1_unit_ids,
@@ -453,12 +393,6 @@ def load_legacy_saved_output(
             "devexp": np.asarray(loaded["devexp_ripple_folds"], dtype=float),
             "bits_per_spike": np.asarray(loaded["bits_per_spike_ripple_folds"], dtype=float),
         },
-        "pre": {
-            "pseudo_r2": np.asarray(loaded["pseudo_r2_pre"], dtype=float),
-            "mae": np.asarray(loaded["mae_pre"], dtype=float),
-            "devexp": np.asarray(loaded["devexp_pre"], dtype=float),
-            "bits_per_spike": np.asarray(loaded["bits_per_spike_pre"], dtype=float),
-        },
     }
     saved_parameters = {
         "ripple_window_s": (
@@ -466,17 +400,6 @@ def load_legacy_saved_output(
             if np.asarray(loaded["ripple_window"]).dtype == object
             and loaded["ripple_window"].item() is None
             else float(np.asarray(loaded["ripple_window"]).reshape(-1)[0])
-        ),
-        "pre_window_s": (
-            None
-            if np.asarray(loaded["pre_window_s"]).dtype == object
-            and loaded["pre_window_s"].item() is None
-            else float(np.asarray(loaded["pre_window_s"]).reshape(-1)[0])
-        ),
-        "pre_buffer_s": float(np.asarray(loaded["pre_buffer_s"]).reshape(-1)[0]),
-        "exclude_ripples": bool(np.asarray(loaded["exclude_ripples"]).reshape(-1)[0]),
-        "pre_exclude_guard_s": float(
-            np.asarray(loaded["pre_exclude_guard_s"]).reshape(-1)[0]
         ),
         "min_spikes_per_ripple": float(
             np.asarray(loaded["min_spikes_per_ripple"]).reshape(-1)[0]
@@ -498,7 +421,6 @@ def load_legacy_saved_output(
         "fit_parameters": saved_parameters,
         "input_summary": dict(input_summary),
         "n_ripples": int(np.asarray(loaded["n_ripples"]).reshape(-1)[0]),
-        "n_pre": int(np.asarray(loaded["n_pre"]).reshape(-1)[0]),
         "n_v1_units": int(len(v1_unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "v1_unit_ids": v1_unit_ids,
@@ -534,12 +456,6 @@ def load_current_saved_output(
                 dtype=float,
             ),
         },
-        "pre": {
-            "pseudo_r2": np.asarray(dataset["pseudo_r2_pre"].values, dtype=float),
-            "mae": np.asarray(dataset["mae_pre"].values, dtype=float),
-            "devexp": np.asarray(dataset["devexp_pre"].values, dtype=float),
-            "bits_per_spike": np.asarray(dataset["bits_per_spike_pre"].values, dtype=float),
-        },
     }
     v1_unit_ids = np.asarray(dataset["unit"].values)
     ca1_unit_ids = np.asarray(dataset["ca1_unit_id"].values)
@@ -550,7 +466,6 @@ def load_current_saved_output(
         "fit_parameters": fit_parameters,
         "input_summary": dict(input_summary),
         "n_ripples": int(dataset.attrs["n_ripples"]),
-        "n_pre": int(dataset.attrs["n_pre_windows"]),
         "n_v1_units": int(len(v1_unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "v1_unit_ids": v1_unit_ids,
@@ -604,8 +519,6 @@ def compare_runs(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
         issues.append(
             f"n_ripples differs: {left['n_ripples']} vs {right['n_ripples']}"
         )
-    if left["n_pre"] != right["n_pre"]:
-        issues.append(f"n_pre differs: {left['n_pre']} vs {right['n_pre']}")
 
     left_v1_set = set(left_v1.tolist())
     right_v1_set = set(right_v1.tolist())
@@ -638,20 +551,14 @@ def compare_runs(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
         right_v1_index[unit_id.item() if hasattr(unit_id, "item") else unit_id]
         for unit_id in left_v1
     ]
-    metric_diffs: dict[str, Any] = {"ripple": {}, "pre": {}}
+    metric_diffs: dict[str, Any] = {"ripple": {}}
     for metric_name in METRIC_NAMES:
         left_ripple = np.asarray(left["metric_arrays"]["ripple"][metric_name], dtype=float)
         right_ripple = np.asarray(
             right["metric_arrays"]["ripple"][metric_name],
             dtype=float,
         )[:, aligned_right_indices]
-        left_pre = np.asarray(left["metric_arrays"]["pre"][metric_name], dtype=float)
-        right_pre = np.asarray(
-            right["metric_arrays"]["pre"][metric_name],
-            dtype=float,
-        )[aligned_right_indices]
         metric_diffs["ripple"][metric_name] = summarize_array_diff(left_ripple, right_ripple)
-        metric_diffs["pre"][metric_name] = summarize_array_diff(left_pre, right_pre)
 
     comparison["metric_diffs"] = metric_diffs
     return comparison
@@ -668,9 +575,7 @@ def build_report_entry(run: dict[str, Any]) -> dict[str, Any]:
         "sources": input_summary["sources"],
         "raw_ripple_rows": input_summary["raw_ripple_rows"],
         "fixed_window_ripple_count": input_summary["fixed_window_ripple_count"],
-        "n_pre_windows_from_inputs": input_summary["n_pre_windows_from_inputs"],
         "n_ripples": run["n_ripples"],
-        "n_pre": run["n_pre"],
         "n_v1_units": run["n_v1_units"],
         "n_ca1_units": run["n_ca1_units"],
         "v1_unit_ids": np.asarray(run["v1_unit_ids"]).tolist(),
@@ -702,8 +607,7 @@ def main() -> None:
         )
 
     legacy_date = args.legacy_date if args.legacy_date is not None else f"{args.date}_old"
-    pre_window_s = args.pre_window_s if args.pre_window_s is not None else args.ripple_window_s
-    fit_parameters = build_fit_parameters(args, pre_window_s=pre_window_s)
+    fit_parameters = build_fit_parameters(args)
 
     legacy_session = prepare_ripple_glm_session(
         animal_name=args.animal_name,
@@ -722,19 +626,11 @@ def main() -> None:
         legacy_session,
         epoch=args.epoch,
         ripple_window_s=fit_parameters["ripple_window_s"],
-        pre_window_s=fit_parameters["pre_window_s"],
-        pre_buffer_s=fit_parameters["pre_buffer_s"],
-        exclude_ripples=fit_parameters["exclude_ripples"],
-        pre_exclude_guard_s=fit_parameters["pre_exclude_guard_s"],
     )
     current_input_summary = summarize_session_inputs(
         current_session,
         epoch=args.epoch,
         ripple_window_s=fit_parameters["ripple_window_s"],
-        pre_window_s=fit_parameters["pre_window_s"],
-        pre_buffer_s=fit_parameters["pre_buffer_s"],
-        exclude_ripples=fit_parameters["exclude_ripples"],
-        pre_exclude_guard_s=fit_parameters["pre_exclude_guard_s"],
     )
 
     legacy_output_path = (
@@ -743,7 +639,6 @@ def main() -> None:
         else default_legacy_output_path(
             Path(legacy_input_summary["analysis_path"]),
             epoch=args.epoch,
-            exclude_ripples=fit_parameters["exclude_ripples"],
             ripple_window_s=fit_parameters["ripple_window_s"],
             min_spikes_per_ripple=fit_parameters["min_spikes_per_ripple"],
             ridge_strength=fit_parameters["ridge_strength"],

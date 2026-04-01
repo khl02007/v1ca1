@@ -28,14 +28,13 @@ series found in the NWB file.
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.helper.session import DEFAULT_NWB_ROOT, save_pickle_output
+from v1ca1.helper.session import DEFAULT_NWB_ROOT
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -242,15 +241,6 @@ def to_interval_array(intervals: list[list[float]]) -> np.ndarray:
     return np.asarray(intervals, dtype=float).reshape((-1, 2))
 
 
-def save_legacy_trajectory_pickle_output(
-    analysis_path: Path,
-    trajectory_times: dict[str, dict[str, np.ndarray]],
-) -> Path:
-    """Write the legacy nested trajectory pickle used by downstream scripts."""
-    output_path = analysis_path / "trajectory_times.pkl"
-    return save_pickle_output(output_path, trajectory_times)
-
-
 def save_trajectory_table_output(
     analysis_path: Path,
     trajectory_times: dict[str, dict[str, np.ndarray]],
@@ -343,7 +333,6 @@ def get_trajectory_times(
     date: str,
     data_root: Path = DEFAULT_DATA_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
-    save_pkl: bool = False,
 ) -> None:
     """Compute and save poke-defined trajectory intervals for one session."""
     import pynwb
@@ -390,11 +379,6 @@ def get_trajectory_times(
             trajectory_times=trajectory_times,
         ),
     }
-    if save_pkl:
-        outputs["trajectory_times_pickle_path"] = save_legacy_trajectory_pickle_output(
-            analysis_path=analysis_path,
-            trajectory_times=trajectory_times,
-        )
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -404,7 +388,6 @@ def get_trajectory_times(
             "date": date,
             "data_root": data_root,
             "nwb_root": nwb_root,
-            "save_pkl": save_pkl,
         },
         outputs=outputs,
     )
@@ -436,11 +419,6 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_NWB_ROOT,
         help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
     )
-    parser.add_argument(
-        "--save-pkl",
-        action="store_true",
-        help="Also write the legacy trajectory_times.pkl export alongside trajectory_times.parquet.",
-    )
     return parser.parse_args()
 
 
@@ -452,7 +430,6 @@ def main() -> None:
         date=args.date,
         data_root=args.data_root,
         nwb_root=args.nwb_root,
-        save_pkl=args.save_pkl,
     )
 
 

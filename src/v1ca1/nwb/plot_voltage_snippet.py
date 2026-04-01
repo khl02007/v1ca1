@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 
 DEFAULT_ANALYSIS_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_DURATION_S = 0.150
+DEFAULT_BROADBAND_DURATION_S = 1.0
+DEFAULT_SPIKE_BAND_DURATION_S = 0.2
 DEFAULT_RANDOM_SEED = 0
 EXPECTED_SHANK_COUNT = 4
 CHANNELS_PER_PROBE = 128
@@ -68,16 +69,24 @@ def get_output_paths(
     animal_name: str,
     date: str,
     start_time_s: float,
-    duration_s: float,
+    broadband_duration_s: float,
+    spike_band_duration_s: float,
     analysis_root: Path,
 ) -> tuple[Path, Path]:
     """Return the raw and filtered output figure paths for one snippet."""
     analysis_path = get_analysis_path(animal_name, date, analysis_root)
     fig_dir = analysis_path / "figs" / "nwb"
-    token = f"{format_seconds_for_filename(start_time_s)}_{format_duration_for_filename(duration_s)}"
+    raw_token = (
+        f"{format_seconds_for_filename(start_time_s)}_"
+        f"{format_duration_for_filename(broadband_duration_s)}"
+    )
+    filtered_token = (
+        f"{format_seconds_for_filename(start_time_s)}_"
+        f"{format_duration_for_filename(spike_band_duration_s)}"
+    )
     return (
-        fig_dir / f"{RAW_FIGURE_STEM}_{token}.png",
-        fig_dir / f"{FILTERED_FIGURE_STEM}_{token}.png",
+        fig_dir / f"{RAW_FIGURE_STEM}_{raw_token}.png",
+        fig_dir / f"{FILTERED_FIGURE_STEM}_{filtered_token}.png",
     )
 
 
@@ -278,7 +287,7 @@ def compute_snippet_num_frames(
 ) -> int:
     """Return the number of frames needed for one snippet duration."""
     if duration_s <= 0:
-        raise ValueError("--duration-s must be positive.")
+        raise ValueError("Snippet duration must be positive.")
     if sampling_frequency <= 0:
         raise ValueError("Recording sampling frequency must be positive.")
     if total_frames <= 0:
@@ -287,7 +296,7 @@ def compute_snippet_num_frames(
     duration_frames = int(round(duration_s * sampling_frequency))
     if duration_frames <= 0:
         raise ValueError(
-            "--duration-s is too short for the recording sampling frequency and "
+            "Snippet duration is too short for the recording sampling frequency and "
             "would select zero frames."
         )
     return duration_frames
@@ -295,6 +304,7 @@ def compute_snippet_num_frames(
 
 def resolve_snippet_selection(
     requested_start_time_s: float | None,
+    requested_epoch: str | None,
     duration_s: float,
     sampling_frequency: float,
     total_frames: int,
@@ -343,22 +353,33 @@ def resolve_snippet_selection(
             "session again or pass `--start-time-s` explicitly."
         ) from exc
 
-    try:
-        run_epochs = get_run_epochs(epoch_tags)
-    except ValueError as exc:
-        raise ValueError(
-            "Could not infer any run epochs from helper timestamp outputs under "
-            f"{analysis_path}. Available epoch tags: {epoch_tags!r}. "
-            "Pass `--start-time-s` explicitly if you want to bypass run-epoch selection."
-        ) from exc
+    if requested_epoch is not None:
+        if requested_epoch not in epoch_tags:
+            raise ValueError(
+                f"Requested epoch {requested_epoch!r} was not found under {analysis_path}. "
+                f"Available epoch tags: {epoch_tags!r}"
+            )
+        selected_epoch = requested_epoch
+        start_time_source = "requested_epoch_random"
+    else:
+        try:
+            run_epochs = get_run_epochs(epoch_tags)
+        except ValueError as exc:
+            raise ValueError(
+                "Could not infer any run epochs from helper timestamp outputs under "
+                f"{analysis_path}. Available epoch tags: {epoch_tags!r}. "
+                "Pass `--start-time-s` explicitly if you want to bypass run-epoch selection."
+            ) from exc
 
-    selected_run_epoch = run_epochs[0]
-    selected_run_epoch_position = epoch_tags.index(selected_run_epoch)
-    epoch_timestamps = np.asarray(timestamps_by_epoch[selected_run_epoch], dtype=float)
+        selected_epoch = run_epochs[0]
+        start_time_source = "first_run_epoch_random"
+
+    selected_epoch_position = epoch_tags.index(selected_epoch)
+    epoch_timestamps = np.asarray(timestamps_by_epoch[selected_epoch], dtype=float)
     if epoch_timestamps.size < duration_frames:
         raise ValueError(
-            "The first run epoch is shorter than the requested snippet duration: "
-            f"epoch {selected_run_epoch!r} has {epoch_timestamps.size} samples, but "
+            "The selected epoch is shorter than the requested snippet duration: "
+            f"epoch {selected_epoch!r} has {epoch_timestamps.size} samples, but "
             f"{duration_frames} are required."
         )
 
@@ -367,7 +388,7 @@ def resolve_snippet_selection(
     epoch_relative_start_index = int(rng.integers(0, max_epoch_start_index + 1))
     epoch_start_offset = sum(
         len(np.asarray(timestamps_by_epoch[epoch], dtype=float))
-        for epoch in epoch_tags[:selected_run_epoch_position]
+        for epoch in epoch_tags[:selected_epoch_position]
     )
     start_frame = int(epoch_start_offset + epoch_relative_start_index)
     end_frame = int(start_frame + duration_frames)
@@ -381,9 +402,9 @@ def resolve_snippet_selection(
     return {
         "requested_start_time_s": None,
         "resolved_start_time_s": float(epoch_timestamps[epoch_relative_start_index]),
-        "start_time_source": "first_run_epoch_random",
+        "start_time_source": start_time_source,
         "random_seed": int(random_seed),
-        "selected_run_epoch": str(selected_run_epoch),
+        "selected_run_epoch": str(selected_epoch),
         "epoch_timestamp_source": str(epoch_timestamp_source),
         "epoch_relative_start_index": epoch_relative_start_index,
         "start_frame": start_frame,
@@ -496,7 +517,9 @@ def plot_voltage_snippet(
     animal_name: str,
     date: str,
     start_time_s: float | None = None,
-    duration_s: float = DEFAULT_DURATION_S,
+    epoch: str | None = None,
+    broadband_duration_s: float = DEFAULT_BROADBAND_DURATION_S,
+    spike_band_duration_s: float = DEFAULT_SPIKE_BAND_DURATION_S,
     analysis_root: Path = DEFAULT_ANALYSIS_ROOT,
     nwb_root: Path = DEFAULT_NWB_ROOT,
     random_seed: int = DEFAULT_RANDOM_SEED,
@@ -527,28 +550,55 @@ def plot_voltage_snippet(
             f"{FILTER_FREQ_MAX_HZ} Hz vs Nyquist {sampling_frequency / 2.0:.3f} Hz."
         )
 
+    total_frames = int(recording.get_num_frames(segment_index=0))
+    selection_duration_s = max(broadband_duration_s, spike_band_duration_s)
     selection = resolve_snippet_selection(
         requested_start_time_s=start_time_s,
-        duration_s=duration_s,
+        requested_epoch=epoch,
+        duration_s=selection_duration_s,
         sampling_frequency=sampling_frequency,
-        total_frames=int(recording.get_num_frames(segment_index=0)),
+        total_frames=total_frames,
         analysis_path=analysis_path,
         random_seed=random_seed,
     )
     resolved_start_time_s = float(selection["resolved_start_time_s"])
     start_frame = int(selection["start_frame"])
-    end_frame = int(selection["end_frame"])
+    broadband_num_frames = compute_snippet_num_frames(
+        duration_s=broadband_duration_s,
+        sampling_frequency=sampling_frequency,
+        total_frames=total_frames,
+    )
+    spike_band_num_frames = compute_snippet_num_frames(
+        duration_s=spike_band_duration_s,
+        sampling_frequency=sampling_frequency,
+        total_frames=total_frames,
+    )
+    broadband_start_frame = start_frame
+    broadband_end_frame = int(broadband_start_frame + broadband_num_frames)
+    spike_band_start_frame = start_frame
+    spike_band_end_frame = int(spike_band_start_frame + spike_band_num_frames)
+    if broadband_end_frame > total_frames:
+        raise ValueError(
+            "Requested broadband snippet extends beyond the recording bounds: "
+            f"end frame {broadband_end_frame}, total frames {total_frames}."
+        )
+    if spike_band_end_frame > total_frames:
+        raise ValueError(
+            "Requested spike-band snippet extends beyond the recording bounds: "
+            f"end frame {spike_band_end_frame}, total frames {total_frames}."
+        )
     raw_output_path, filtered_output_path = get_output_paths(
         animal_name=animal_name,
         date=date,
         start_time_s=resolved_start_time_s,
-        duration_s=duration_s,
+        broadband_duration_s=broadband_duration_s,
+        spike_band_duration_s=spike_band_duration_s,
         analysis_root=analysis_root,
     )
     raw_traces = np.asarray(
         recording.get_traces(
-            start_frame=start_frame,
-            end_frame=end_frame,
+            start_frame=broadband_start_frame,
+            end_frame=broadband_end_frame,
             segment_index=0,
         ),
         dtype=float,
@@ -562,8 +612,8 @@ def plot_voltage_snippet(
     )
     filtered_traces = np.asarray(
         recording_filtered.get_traces(
-            start_frame=start_frame,
-            end_frame=end_frame,
+            start_frame=spike_band_start_frame,
+            end_frame=spike_band_end_frame,
             segment_index=0,
         ),
         dtype=float,
@@ -575,7 +625,7 @@ def plot_voltage_snippet(
         probe_indices=probe_indices,
         sampling_frequency=sampling_frequency,
         start_time_s=resolved_start_time_s,
-        duration_s=duration_s,
+        duration_s=broadband_duration_s,
         output_path=raw_output_path,
         filtered=False,
     )
@@ -585,7 +635,7 @@ def plot_voltage_snippet(
         probe_indices=probe_indices,
         sampling_frequency=sampling_frequency,
         start_time_s=resolved_start_time_s,
-        duration_s=duration_s,
+        duration_s=spike_band_duration_s,
         output_path=filtered_output_path,
         filtered=True,
     )
@@ -603,7 +653,12 @@ def plot_voltage_snippet(
         "epoch_timestamp_source": selection["epoch_timestamp_source"],
         "epoch_relative_start_index": selection["epoch_relative_start_index"],
         "start_frame": start_frame,
-        "end_frame": end_frame,
+        "end_frame": int(selection["end_frame"]),
+        "selection_duration_s": selection_duration_s,
+        "broadband_duration_s": broadband_duration_s,
+        "spike_band_duration_s": spike_band_duration_s,
+        "broadband_end_frame": broadband_end_frame,
+        "spike_band_end_frame": spike_band_end_frame,
         "sampling_frequency_hz": sampling_frequency,
         "probe_indices": probe_indices,
     }
@@ -621,18 +676,37 @@ def parse_arguments() -> argparse.Namespace:
         help="Recording date in YYYYMMDD format",
     )
     parser.add_argument(
-        "--start-time-s",
-        type=float,
+        "--epoch",
         help=(
-            "Snippet start time in seconds from the start of the recording. "
+            "Epoch tag to sample from when `--start-time-s` is omitted. "
             "If omitted, the script chooses a random chunk from the first run epoch."
         ),
     )
     parser.add_argument(
-        "--duration-s",
+        "--start-time-s",
         type=float,
-        default=DEFAULT_DURATION_S,
-        help=f"Snippet duration in seconds. Default: {DEFAULT_DURATION_S}",
+        help=(
+            "Snippet start time in seconds from the start of the recording. "
+            "If provided, this overrides `--epoch`."
+        ),
+    )
+    parser.add_argument(
+        "--broadband-duration-s",
+        type=float,
+        default=DEFAULT_BROADBAND_DURATION_S,
+        help=(
+            "Broadband snippet duration in seconds. "
+            f"Default: {DEFAULT_BROADBAND_DURATION_S}"
+        ),
+    )
+    parser.add_argument(
+        "--spike-band-duration-s",
+        type=float,
+        default=DEFAULT_SPIKE_BAND_DURATION_S,
+        help=(
+            "Spike-band snippet duration in seconds. "
+            f"Default: {DEFAULT_SPIKE_BAND_DURATION_S}"
+        ),
     )
     parser.add_argument(
         "--random-seed",
@@ -644,10 +718,10 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--analysis-root",
+        "--data-root",
         type=Path,
         default=DEFAULT_ANALYSIS_ROOT,
-        help=f"Base directory for analysis output. Default: {DEFAULT_ANALYSIS_ROOT}",
+        help=f"Base directory for session analysis data. Default: {DEFAULT_ANALYSIS_ROOT}",
     )
     parser.add_argument(
         "--nwb-root",
@@ -665,8 +739,10 @@ def main() -> None:
         animal_name=args.animal_name,
         date=args.date,
         start_time_s=args.start_time_s,
-        duration_s=args.duration_s,
-        analysis_root=args.analysis_root,
+        epoch=args.epoch,
+        broadband_duration_s=args.broadband_duration_s,
+        spike_band_duration_s=args.spike_band_duration_s,
+        analysis_root=args.data_root,
         nwb_root=args.nwb_root,
         random_seed=args.random_seed,
     )
@@ -677,8 +753,10 @@ def main() -> None:
             "animal_name": args.animal_name,
             "date": args.date,
             "requested_start_time_s": args.start_time_s,
-            "duration_s": args.duration_s,
-            "analysis_root": args.analysis_root,
+            "requested_epoch": args.epoch,
+            "broadband_duration_s": args.broadband_duration_s,
+            "spike_band_duration_s": args.spike_band_duration_s,
+            "data_root": args.data_root,
             "nwb_root": args.nwb_root,
             "random_seed": int(args.random_seed),
             "filter_freq_min_hz": FILTER_FREQ_MIN_HZ,

@@ -11,20 +11,24 @@ import pytest
 
 import v1ca1.ripple.ripple_glm as ripple_glm_module
 from v1ca1.ripple.ripple_glm import (
+    _build_ripple_sample_windows,
+    _count_spikes_in_windows,
     _format_nemos_solver_selection_message,
     _resolve_nemos_population_glm_solver,
     build_epoch_fit_dataset,
     build_metric_figure_data,
     empirical_p_values,
-    fit_ripple_glm_train_on_ripple_predict_pre,
+    fit_ripple_glm_train_on_ripple,
     get_epoch_skip_reason,
+    keep_single_ripple_windows,
     load_ripple_tables,
     load_ripple_tables_from_parquet_output,
     load_ripple_tables_from_interval_output,
     load_ripple_tables_from_legacy_pickle,
-    make_preripple_ep,
     parse_arguments,
+    remove_duplicate_ripples,
     save_epoch_figures,
+    validate_arguments,
 )
 
 
@@ -142,45 +146,104 @@ def test_load_ripple_tables_prefers_parquet_and_preserves_extra_columns(tmp_path
     assert np.allclose(loaded_tables["02_r1"]["mean_zscore"], [4.0])
 
 
-def test_make_preripple_ep_clips_to_epoch_bounds() -> None:
-    nap = pytest.importorskip("pynapple")
-
-    ripple_ep = nap.IntervalSet(start=[0.25], end=[0.35], time_units="s")
-    epoch_ep = nap.IntervalSet(start=[0.0], end=[2.0], time_units="s")
-
-    pre_ep = make_preripple_ep(
-        ripple_ep=ripple_ep,
-        epoch_ep=epoch_ep,
-        window_s=0.5,
-        buffer_s=0.1,
-        exclude_ripples=False,
+def test_remove_duplicate_ripples_uses_previous_kept_ripple() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [0.0, 0.05, 0.19, 0.26],
+            "end_time": [0.02, 0.07, 0.21, 0.28],
+        }
     )
 
-    assert np.allclose(pre_ep.start, [0.0])
-    assert np.allclose(pre_ep.end, [0.15])
-
-
-def test_make_preripple_ep_excludes_nearby_ripples() -> None:
-    nap = pytest.importorskip("pynapple")
-
-    ripple_ep = nap.IntervalSet(
-        start=[1.0, 1.15],
-        end=[1.1, 1.2],
-        time_units="s",
-    )
-    epoch_ep = nap.IntervalSet(start=[0.0], end=[3.0], time_units="s")
-
-    pre_ep = make_preripple_ep(
-        ripple_ep=ripple_ep,
-        epoch_ep=epoch_ep,
-        window_s=0.2,
-        buffer_s=0.0,
-        exclude_ripples=True,
-        exclude_ripple_guard_s=0.1,
+    filtered_table, keep_mask = remove_duplicate_ripples(
+        ripple_table,
+        ripple_window_s=0.2,
     )
 
-    assert np.allclose(pre_ep.start, [0.8])
-    assert np.allclose(pre_ep.end, [0.9])
+    assert np.array_equal(keep_mask, [True, False, False, True])
+    assert np.allclose(filtered_table["start_time"], [0.0, 0.26])
+    assert np.allclose(filtered_table["end_time"], [0.02, 0.28])
+
+
+def test_keep_single_ripple_windows_requires_bidirectional_isolation() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [0.0, 0.2, 0.39, 1.0],
+            "end_time": [0.02, 0.22, 0.41, 1.02],
+        }
+    )
+
+    filtered_table, keep_mask = keep_single_ripple_windows(
+        ripple_table,
+        ripple_window_s=0.2,
+    )
+
+    assert np.array_equal(keep_mask, [True, False, False, True])
+    assert np.allclose(filtered_table["start_time"], [0.0, 1.0])
+
+
+def test_validate_arguments_rejects_conflicting_ripple_selection_modes() -> None:
+    args = SimpleNamespace(
+        ripple_window_s=0.2,
+        remove_duplicate_ripples=True,
+        keep_single_ripple_windows=True,
+        min_spikes_per_ripple=0.1,
+        min_ca1_spikes_per_ripple=0.0,
+        n_splits=5,
+        n_shuffles_ripple=0,
+        ridge_strengths=[1e-1],
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_arguments(args)
+
+
+def test_build_ripple_sample_windows_preserves_overlapping_fixed_windows() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.05, 1.0],
+            "end_time": [1.2, 1.1],
+        }
+    )
+
+    starts, ends = _build_ripple_sample_windows(ripple_table, ripple_window_s=0.1)
+
+    assert np.allclose(starts, [1.0, 1.05])
+    assert np.allclose(ends, [1.1, 1.15])
+
+
+def test_count_spikes_in_windows_preserves_overlapping_rows() -> None:
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
+    class FakeTsGroup:
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
+
+        def keys(self):
+            return list(self._spikes_by_unit)
+
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
+
+    counts, unit_ids = _count_spikes_in_windows(
+        FakeTsGroup(
+            {
+                101: [1.01, 1.06, 1.20],
+                102: [1.03, 1.11],
+            }
+        ),
+        window_starts=np.array([1.0, 1.05], dtype=float),
+        window_ends=np.array([1.1, 1.15], dtype=float),
+    )
+
+    assert np.array_equal(unit_ids, [101, 102])
+    assert counts.shape == (2, 2)
+    assert np.allclose(counts, [[2.0, 1.0], [1.0, 1.0]])
 
 
 def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
@@ -191,7 +254,6 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         "ca1_unit_ids": np.array([101, 102, 103]),
         "coef_ca1_unit_ids": np.array([101, 103]),
         "n_ripples": 8,
-        "n_pre": 6,
         "pseudo_r2_ripple_folds": np.array([[0.2, 0.4], [0.4, 0.6]], dtype=float),
         "mae_ripple_folds": np.array([[0.3, 0.7], [0.5, 0.9]], dtype=float),
         "devexp_ripple_folds": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
@@ -224,10 +286,6 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
             ],
             dtype=float,
         ),
-        "pseudo_r2_pre": np.array([0.05, 0.06], dtype=float),
-        "mae_pre": np.array([0.4, 0.5], dtype=float),
-        "devexp_pre": np.array([0.02, 0.03], dtype=float),
-        "bits_per_spike_pre": np.array([0.15, 0.25], dtype=float),
         "coef_ca1_full_all": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
         "coef_intercept_full_all": np.array([0.5, 0.6], dtype=float),
     }
@@ -238,7 +296,14 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         date="20240611",
         epoch="01_s1",
         sources={"ripple_events": "pynapple"},
-        fit_parameters={"n_splits": 2, "ridge_strength": 0.1},
+        fit_parameters={
+            "n_splits": 2,
+            "ridge_strength": 0.1,
+            "ripple_selection_mode": "single",
+            "n_ripples_before_selection": 10,
+            "n_ripples_removed_by_selection": 2,
+            "n_ripples_after_selection": 8,
+        },
     )
 
     assert dataset.sizes["fold"] == 2
@@ -250,29 +315,35 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert np.array_equal(dataset["coef_ca1_unit_id"].values, [101, 103])
     assert dataset["pseudo_r2_ripple_folds"].dims == ("fold", "unit")
     assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
-    assert dataset["pseudo_r2_pre"].dims == ("unit",)
     assert dataset["coef_ca1_full_all"].dims == ("coef_source_unit", "unit")
     assert dataset["coef_intercept_full_all"].dims == ("unit",)
     assert np.allclose(dataset["coef_ca1_full_all"].values, [[0.1, 0.2], [0.3, 0.4]])
     assert np.allclose(dataset["coef_intercept_full_all"].values, [0.5, 0.6])
     assert np.allclose(dataset["ripple_pseudo_r2_mean"].values, [0.3, 0.5])
     assert np.allclose(dataset["ripple_mae_mean"].values, [0.4, 0.8])
-    assert np.allclose(dataset["bits_per_spike_pre"].values, [0.15, 0.25])
     assert np.allclose(dataset["ripple_pseudo_r2_p_value"].values, [1.0 / 3.0, 1.0])
     assert np.allclose(dataset["ripple_mae_p_value"].values, [1.0 / 3.0, 1.0])
     assert np.allclose(dataset["ripple_devexp_p_value"].values, [2.0 / 3.0, 1.0])
     assert np.allclose(dataset["ripple_bits_per_spike_p_value"].values, [1.0 / 3.0, 1.0])
     assert "ll_ripple_folds" not in dataset.data_vars
-    assert "ll_pre" not in dataset.data_vars
+    assert "pseudo_r2_pre" not in dataset.data_vars
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
-    assert dataset.attrs["schema_version"] == "2"
+    assert dataset.attrs["schema_version"] == "4"
+    assert dataset.attrs["ripple_selection_mode"] == "single"
+    assert dataset.attrs["n_ripples_before_selection"] == 10
+    assert dataset.attrs["n_ripples_removed_by_selection"] == 2
+    assert dataset.attrs["n_ripples_after_selection"] == 8
     assert dataset.attrs["coef_ca1_full_all_space"] == "preprocessed_predictor"
     assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
     assert json.loads(dataset.attrs["fit_parameters_json"]) == {
         "n_splits": 2,
         "ridge_strength": 0.1,
+        "ripple_selection_mode": "single",
+        "n_ripples_before_selection": 10,
+        "n_ripples_removed_by_selection": 2,
+        "n_ripples_after_selection": 8,
     }
     assert json.loads(dataset.attrs["coef_ca1_full_all_preprocess_json"]) == {
         "center": True,
@@ -282,19 +353,9 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     }
 
 
-def test_fit_ripple_glm_returns_full_fit_coefficients_without_pre_windows(
+def test_fit_ripple_glm_returns_full_fit_coefficients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeIntervalSet:
-        def __init__(self, start, end, time_units="s", tag="ripple") -> None:
-            self.start = np.asarray(start, dtype=float)
-            self.end = np.asarray(end, dtype=float)
-            self.time_units = time_units
-            self.tag = tag
-
-        def __len__(self) -> int:
-            return int(self.start.size)
-
     class FakePopulationGLM:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
@@ -315,19 +376,21 @@ def test_fit_ripple_glm_returns_full_fit_coefficients_without_pre_windows(
             X = np.asarray(X, dtype=float)
             return np.exp(X @ self.coef_ + self.intercept_[None, :])
 
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
     class FakeTsGroup:
-        def __init__(self, unit_ids: list[int], ripple_counts: np.ndarray, pre_counts: np.ndarray) -> None:
-            self._unit_ids = list(unit_ids)
-            self._ripple_counts = np.asarray(ripple_counts, dtype=float)
-            self._pre_counts = np.asarray(pre_counts, dtype=float)
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
 
         def keys(self):
-            return list(self._unit_ids)
+            return list(self._spikes_by_unit)
 
-        def count(self, ep) -> np.ndarray:
-            if getattr(ep, "tag", "ripple") == "pre":
-                return self._pre_counts
-            return self._ripple_counts
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
 
     monkeypatch.setitem(
         sys.modules,
@@ -337,49 +400,28 @@ def test_fit_ripple_glm_returns_full_fit_coefficients_without_pre_windows(
             glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
         ),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "pynapple",
-        SimpleNamespace(IntervalSet=FakeIntervalSet),
-    )
-    monkeypatch.setattr(
-        ripple_glm_module,
-        "make_preripple_ep",
-        lambda **kwargs: FakeIntervalSet([], [], time_units="s", tag="pre"),
-    )
     monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
 
     spikes = {
         "ca1": FakeTsGroup(
-            unit_ids=[101, 102, 103],
-            ripple_counts=np.array(
-                [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [1.0, 1.0, 0.0],
-                    [2.0, 0.0, 0.0],
-                ]
-            ),
-            pre_counts=np.empty((0, 3), dtype=float),
+            {
+                101: [1.01, 3.01, 3.03, 4.01, 4.05],
+                102: [2.01, 3.02],
+                103: [],
+            }
         ),
         "v1": FakeTsGroup(
-            unit_ids=[11, 12],
-            ripple_counts=np.array(
-                [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [1.0, 1.0],
-                    [2.0, 0.0],
-                ]
-            ),
-            pre_counts=np.empty((0, 2), dtype=float),
+            {
+                11: [1.01, 3.01, 3.03, 4.01, 4.05],
+                12: [2.01, 3.02],
+            }
         ),
     }
 
-    results = fit_ripple_glm_train_on_ripple_predict_pre(
+    results = fit_ripple_glm_train_on_ripple(
         epoch="01_s1",
         spikes=spikes,
-        epoch_interval=FakeIntervalSet([0.0], [10.0], time_units="s", tag="epoch"),
+        epoch_interval=SimpleNamespace(),
         ripple_table=pd.DataFrame(
             {
                 "start_time": [1.0, 2.0, 3.0, 4.0],
@@ -391,23 +433,91 @@ def test_fit_ripple_glm_returns_full_fit_coefficients_without_pre_windows(
         min_spikes_per_ripple=0.1,
         min_ca1_spikes_per_ripple=0.0,
         ripple_window_s=0.2,
-        pre_window_s=0.2,
-        pre_buffer_s=0.02,
-        exclude_ripples=False,
         ridge_strength=0.1,
         maxiter=20,
         tol=1e-4,
     )
 
-    assert results["n_pre"] == 0
+    assert results["n_ripples"] == 4
     assert np.array_equal(results["ca1_unit_ids"], [101, 102, 103])
     assert np.array_equal(results["coef_ca1_unit_ids"], [101, 102])
     assert results["coef_ca1_full_all"].shape == (2, 2)
     assert results["coef_intercept_full_all"].shape == (2,)
     assert np.allclose(results["coef_ca1_full_all"], [[1.0, 2.0], [3.0, 4.0]])
     assert np.allclose(results["coef_intercept_full_all"], [0.25, 0.5])
-    assert np.isnan(results["pseudo_r2_pre"]).all()
-    assert np.isnan(results["mae_pre"]).all()
+
+
+def test_fit_ripple_glm_preserves_overlapping_fixed_windows_in_fit_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePopulationGLM:
+        def __init__(self, **kwargs) -> None:
+            self.coef_ = np.empty((0, 0), dtype=float)
+            self.intercept_ = np.empty((0,), dtype=float)
+
+        def fit(self, X, y) -> None:
+            X = np.asarray(X, dtype=float)
+            y = np.asarray(y, dtype=float)
+            self.coef_ = np.ones((X.shape[1], y.shape[1]), dtype=float)
+            self.intercept_ = np.zeros(y.shape[1], dtype=float)
+
+        def predict(self, X) -> np.ndarray:
+            X = np.asarray(X, dtype=float)
+            return np.ones((X.shape[0], self.intercept_.size), dtype=float)
+
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
+    class FakeTsGroup:
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
+
+        def keys(self):
+            return list(self._spikes_by_unit)
+
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nemos",
+        SimpleNamespace(
+            __version__="0.2.6",
+            glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
+        ),
+    )
+    monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
+
+    spikes = {
+        "ca1": FakeTsGroup({101: [1.01, 1.06, 2.01, 2.07], 102: [1.03, 1.11, 2.03, 2.11]}),
+        "v1": FakeTsGroup({11: [1.02, 1.07, 2.02, 2.07], 12: [1.08, 2.08]}),
+    }
+
+    results = fit_ripple_glm_train_on_ripple(
+        epoch="02_r1",
+        spikes=spikes,
+        epoch_interval=SimpleNamespace(),
+        ripple_table=pd.DataFrame(
+            {
+                "start_time": [1.0, 1.05, 2.0, 2.05],
+                "end_time": [1.2, 1.25, 2.2, 2.25],
+            }
+        ),
+        n_splits=2,
+        n_shuffles_ripple=0,
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.1,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    assert results["n_ripples"] == 4
+    assert results["pseudo_r2_ripple_folds"].shape == (2, 2)
 
 
 def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:
@@ -420,13 +530,11 @@ def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:
             ],
             dtype=float,
         ),
-        "devexp_pre": np.array([0.05, 0.06], dtype=float),
     }
 
     figure_data = build_metric_figure_data(results, metric_name="devexp")
 
     assert np.allclose(figure_data["ripple_values"], [0.2, 0.3])
-    assert np.allclose(figure_data["pre_values"], [0.05, 0.06])
     assert np.allclose(figure_data["ripple_p_value"], [2.0 / 3.0, 1.0])
 
 
@@ -466,17 +574,35 @@ def test_parse_arguments_rejects_removed_save_legacy_npz_flag(monkeypatch) -> No
         parse_arguments()
 
 
-def test_save_epoch_figures_returns_four_metric_paths(monkeypatch, tmp_path) -> None:
+def test_parse_arguments_rejects_removed_pre_flags(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--pre-window-s",
+            "0.2",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_arguments()
+
+
+def test_save_epoch_figures_returns_one_combined_metric_path(monkeypatch, tmp_path) -> None:
     metric_calls: list[dict[str, object]] = []
 
-    def fake_plot_metric_summary(**kwargs):
+    def fake_plot_epoch_metric_summary(**kwargs):
         out_path = kwargs["out_path"]
         metric_calls.append(kwargs)
         return out_path
 
     monkeypatch.setattr(
-        "v1ca1.ripple.ripple_glm.plot_metric_summary",
-        fake_plot_metric_summary,
+        "v1ca1.ripple.ripple_glm.plot_epoch_metric_summary",
+        fake_plot_epoch_metric_summary,
     )
 
     results = {
@@ -488,10 +614,6 @@ def test_save_epoch_figures_returns_four_metric_paths(monkeypatch, tmp_path) -> 
         "devexp_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
         "bits_per_spike_ripple_folds": np.ones((2, 2), dtype=float),
         "bits_per_spike_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
-        "pseudo_r2_pre": np.ones(2, dtype=float),
-        "mae_pre": np.ones(2, dtype=float),
-        "devexp_pre": np.ones(2, dtype=float),
-        "bits_per_spike_pre": np.ones(2, dtype=float),
     }
 
     figure_paths = save_epoch_figures(
@@ -501,19 +623,21 @@ def test_save_epoch_figures_returns_four_metric_paths(monkeypatch, tmp_path) -> 
         date="20240611",
         epoch="01_s1",
         ripple_window_s=0.2,
+        ripple_selection_suffix="single",
         ridge_strength=1e-1,
     )
 
-    assert len(figure_paths) == 4
-    assert len(metric_calls) == 4
+    assert len(figure_paths) == 1
+    assert len(metric_calls) == 1
     assert all("ll" not in path.name for path in figure_paths)
-    assert any(path.name.endswith("devexp_summary.png") for path in figure_paths)
-    assert any(path.name.endswith("bits_per_spike_summary.png") for path in figure_paths)
-    pseudo_r2_call = next(call for call in metric_calls if call["metric_label"] == "Pseudo R^2")
-    assert np.allclose(pseudo_r2_call["ripple_values"], [1.0, 1.0])
-    assert np.allclose(pseudo_r2_call["pre_values"], [1.0, 1.0])
+    assert figure_paths[0].name.endswith("samplewise_metrics_summary.png")
+    assert "_samplewise_" in figure_paths[0].name
+    metric_panels = metric_calls[0]["metric_panels"]
+    assert len(metric_panels) == 4
+    pseudo_r2_panel = next(panel for panel in metric_panels if panel["metric_label"] == "Pseudo R^2")
+    assert np.allclose(pseudo_r2_panel["ripple_values"], [1.0, 1.0])
     assert np.allclose(
-        pseudo_r2_call["ripple_p_value"],
+        pseudo_r2_panel["ripple_p_value"],
         np.array([1.0, 1.0], dtype=float),
     )
 

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 """Fit ripple-triggered population GLMs for one session.
 
-This CLI fits the legacy CA1-to-V1 ripple population GLM workflow for one
+This CLI fits the modern CA1-to-V1 ripple population GLM workflow for one
 session, one epoch at a time. Each ripple window is converted into one sample
 whose predictors are CA1 unit spike counts and whose targets are V1 unit spike
-counts. The model is a ridge-regularized Poisson population GLM trained on
-ripple windows, evaluated on held-out ripple windows with contiguous
-cross-validation folds, and then applied to paired pre-ripple windows from the
-same epoch.
+counts. The model is a ridge-regularized Poisson population GLM trained and
+evaluated on ripple windows with contiguous cross-validation folds.
 
 Performance is summarized per V1 unit with pseudo-R^2, mean absolute error
 (MAE), deviance explained, and bits/spike. Ripple metrics also include an
@@ -19,13 +17,12 @@ standard deviations, and one-sided p-values.
 Successful fits are saved under the session analysis directory as one
 NetCDF-backed xarray dataset per epoch and ridge strength in `ripple_glm/`.
 Each dataset stores the raw ripple fold arrays, ripple shuffle arrays,
-pre-ripple metrics, per-unit ripple summary variables, unit IDs, full-fit CA1
-coefficient arrays with coefficient-aligned CA1 unit IDs, and fit metadata.
-The script also writes four summary figures per epoch and ridge strength in
-`figs/ripple_glm/`, one each for pseudo-R^2, MAE, deviance explained, and
-bits/spike. Each figure has a left panel with overlaid ripple and pre-ripple
-unit distributions plus compact boxplots, and a right panel with ripple effect
-size versus `-log10(shuffle p)`. A JSON run log is written under `v1ca1_log/`.
+per-unit ripple summary variables, unit IDs, full-fit CA1 coefficient arrays
+with coefficient-aligned CA1 unit IDs, and fit metadata. The script also
+writes one summary figure per epoch and ridge strength in `figs/ripple_glm/`.
+That figure contains one subplot each for pseudo-R^2, MAE, deviance explained,
+and bits/spike, with ripple effect size plotted versus `-log10(shuffle p)`.
+A JSON run log is written under `v1ca1_log/`.
 
 When this script instantiates `nemos.glm.PopulationGLM`, it selects the solver
 backend from the installed `nemos` version. For `nemos<=0.2.5`, it keeps the
@@ -68,8 +65,6 @@ TARGET_REGION = "v1"
 SOURCE_REGION = "ca1"
 
 DEFAULT_RIPPLE_WINDOW_S = 0.2
-DEFAULT_PRE_BUFFER_S = 0.02
-DEFAULT_PRE_EXCLUDE_GUARD_S = 0.05
 DEFAULT_MIN_SPIKES_PER_RIPPLE = 0.1
 DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE = 0.0
 DEFAULT_N_SPLITS = 5
@@ -79,6 +74,9 @@ DEFAULT_RIDGE_STRENGTH_SWEEP = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 DEFAULT_SHUFFLE_SEED = 45
 DEFAULT_MAXITER = 6000
 DEFAULT_TOL = 1e-7
+RIPPLE_SELECTION_MODE_ALL = "allripples"
+RIPPLE_SELECTION_MODE_DEDUPED = "deduped"
+RIPPLE_SELECTION_MODE_SINGLE = "single"
 
 HIGHER_IS_BETTER_BY_METRIC = {
     "pseudo_r2": True,
@@ -91,7 +89,6 @@ EMPIRICAL_P_VALUE_RTOL = 1e-12
 EMPIRICAL_P_VALUE_ATOL = 1e-12
 
 RIPPLE_FIGURE_COLOR = "#1f77b4"
-PRE_FIGURE_COLOR = "#d95f02"
 NEMOS_JAXOPT_SOLVER_MIN_VERSION = Version("0.2.6")
 NEMOS_LEGACY_SOLVER_NAME = "LBFGS"
 NEMOS_JAXOPT_SOLVER_NAME = "LBFGS[jaxopt]"
@@ -122,36 +119,20 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
     )
     parser.add_argument(
-        "--exclude-ripples-in-previous-window",
+        "--remove-duplicate-ripples",
         action="store_true",
         help=(
             "Drop any ripple whose start falls inside the configured ripple window "
-            "of the previous ripple, so fits use only isolated ripple starts."
+            "of the previous kept ripple, so nearby ripple clusters contribute "
+            "only one modeled window."
         ),
     )
     parser.add_argument(
-        "--pre-window-s",
-        type=float,
-        help="Optional fixed pre-ripple window length in seconds. Defaults to --ripple-window-s.",
-    )
-    parser.add_argument(
-        "--pre-buffer-s",
-        type=float,
-        default=DEFAULT_PRE_BUFFER_S,
-        help=f"Gap between the pre window and ripple start in seconds. Default: {DEFAULT_PRE_BUFFER_S}",
-    )
-    parser.add_argument(
-        "--exclude-ripples",
+        "--keep-single-ripple-windows",
         action="store_true",
-        help="Exclude ripple intervals (plus the configured guard) from pre windows.",
-    )
-    parser.add_argument(
-        "--pre-exclude-guard-s",
-        type=float,
-        default=DEFAULT_PRE_EXCLUDE_GUARD_S,
         help=(
-            "Guard width in seconds when excluding ripples from pre windows. "
-            f"Default: {DEFAULT_PRE_EXCLUDE_GUARD_S}"
+            "Keep only fixed ripple windows whose interior contains no other "
+            "ripple start times."
         ),
     )
     parser.add_argument(
@@ -236,14 +217,14 @@ def parse_arguments() -> argparse.Namespace:
 
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI argument ranges."""
+    if args.remove_duplicate_ripples and args.keep_single_ripple_windows:
+        raise ValueError(
+            "--remove-duplicate-ripples and --keep-single-ripple-windows are mutually "
+            "exclusive because they define different ripple-selection rules. "
+            "Choose only one."
+        )
     if args.ripple_window_s <= 0:
         raise ValueError("--ripple-window-s must be positive.")
-    if args.pre_window_s is not None and args.pre_window_s <= 0:
-        raise ValueError("--pre-window-s must be positive when provided.")
-    if args.pre_buffer_s < 0:
-        raise ValueError("--pre-buffer-s must be non-negative.")
-    if args.pre_exclude_guard_s < 0:
-        raise ValueError("--pre-exclude-guard-s must be non-negative.")
     if args.min_spikes_per_ripple < 0:
         raise ValueError("--min-spikes-per-ripple must be non-negative.")
     if args.min_ca1_spikes_per_ripple < 0:
@@ -369,16 +350,16 @@ def normalize_ripple_table(result: Any, epoch: str) -> pd.DataFrame:
     return dataframe
 
 
-def exclude_ripples_in_previous_window(
+def remove_duplicate_ripples(
     ripple_table: pd.DataFrame,
     *,
     ripple_window_s: float | None,
-) -> tuple[pd.DataFrame, int, int]:
-    """Drop ripples whose starts fall inside the previous ripple's analysis window."""
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Drop ripples whose starts fall inside the previous kept ripple's analysis window."""
     normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
     total_ripples = int(len(normalized_table))
     if total_ripples <= 1:
-        return normalized_table, 0, total_ripples
+        return normalized_table, np.ones(total_ripples, dtype=bool)
 
     starts = np.asarray(normalized_table["start_time"], dtype=float)
     ends = np.asarray(normalized_table["end_time"], dtype=float)
@@ -393,6 +374,7 @@ def exclude_ripples_in_previous_window(
         current_start = float(starts[ripple_index])
         if current_start < previous_window_end:
             keep[ripple_index] = False
+            continue
 
         previous_window_end = (
             float(ends[ripple_index])
@@ -401,8 +383,41 @@ def exclude_ripples_in_previous_window(
         )
 
     filtered_table = normalized_table.loc[keep].reset_index(drop=True)
-    removed_ripples = int(total_ripples - len(filtered_table))
-    return filtered_table, removed_ripples, total_ripples
+    return filtered_table, keep
+
+
+def keep_single_ripple_windows(
+    ripple_table: pd.DataFrame,
+    *,
+    ripple_window_s: float,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Keep only fixed windows whose interior contains exactly one ripple start."""
+    normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
+    total_ripples = int(len(normalized_table))
+    if total_ripples <= 1:
+        return normalized_table, np.ones(total_ripples, dtype=bool)
+
+    starts = np.asarray(normalized_table["start_time"], dtype=float)
+    keep = np.ones(total_ripples, dtype=bool)
+    window_s = float(ripple_window_s)
+
+    previous_gap = np.diff(starts, prepend=np.nan)
+    next_gap = np.diff(starts, append=np.nan)
+
+    keep[1:] &= previous_gap[1:] >= window_s
+    keep[:-1] &= next_gap[:-1] >= window_s
+
+    filtered_table = normalized_table.loc[keep].reset_index(drop=True)
+    return filtered_table, keep
+
+
+def resolve_ripple_selection_mode(args: argparse.Namespace) -> str:
+    """Return the configured ripple selection mode."""
+    if args.remove_duplicate_ripples:
+        return RIPPLE_SELECTION_MODE_DEDUPED
+    if args.keep_single_ripple_windows:
+        return RIPPLE_SELECTION_MODE_SINGLE
+    return RIPPLE_SELECTION_MODE_ALL
 
 
 def load_ripple_tables_from_parquet_output(path: Path) -> dict[str, pd.DataFrame]:
@@ -603,53 +618,6 @@ def build_epoch_intervals(
     return epoch_intervals
 
 
-def make_preripple_ep(
-    ripple_ep: "nap.IntervalSet",
-    epoch_ep: "nap.IntervalSet",
-    *,
-    window_s: float | None = None,
-    buffer_s: float = DEFAULT_PRE_BUFFER_S,
-    exclude_ripples: bool = False,
-    exclude_ripple_guard_s: float = DEFAULT_PRE_EXCLUDE_GUARD_S,
-) -> "nap.IntervalSet":
-    """Create the paired pre-ripple IntervalSet used by the legacy workflow."""
-    import pynapple as nap
-
-    r_start = np.asarray(ripple_ep.start, dtype=float)
-    r_end = np.asarray(ripple_ep.end, dtype=float)
-
-    if window_s is None:
-        duration = r_end - r_start
-    else:
-        duration = np.full_like(r_start, float(window_s))
-
-    pre_start = r_start - duration - float(buffer_s)
-    pre_end = r_start - float(buffer_s)
-
-    keep = pre_end > pre_start
-    pre_start = pre_start[keep]
-    pre_end = pre_end[keep]
-
-    if pre_start.size == 0:
-        return nap.IntervalSet(
-            start=np.array([], dtype=float),
-            end=np.array([], dtype=float),
-            time_units="s",
-        )
-
-    pre_ep = nap.IntervalSet(start=pre_start, end=pre_end, time_units="s").intersect(epoch_ep)
-
-    if exclude_ripples and len(pre_ep) > 0 and len(ripple_ep) > 0:
-        ripple_exclusion = nap.IntervalSet(
-            start=np.asarray(ripple_ep.start, dtype=float) - float(exclude_ripple_guard_s),
-            end=np.asarray(ripple_ep.end, dtype=float) + float(exclude_ripple_guard_s),
-            time_units="s",
-        ).intersect(epoch_ep)
-        pre_ep = pre_ep.set_diff(ripple_exclusion)
-
-    return pre_ep
-
-
 def poisson_ll_per_neuron(y: np.ndarray, lam: np.ndarray) -> np.ndarray:
     """Return per-neuron Poisson log-likelihood summed over samples."""
     lam = np.clip(np.asarray(lam, dtype=float), 1e-12, None)
@@ -811,6 +779,11 @@ def _clear_jax_caches() -> None:
     jax.clear_caches()
 
 
+def _print_progress(step_label: str, message: str) -> None:
+    """Print one compact progress message for long-running CLI work."""
+    print(f"[{step_label}] {message}")
+
+
 def _resolve_nemos_population_glm_solver(nmo: Any) -> tuple[str, str]:
     """Return the installed `nemos` version and matching `PopulationGLM` solver."""
     version_text = getattr(nmo, "__version__", None)
@@ -850,7 +823,47 @@ def _format_nemos_solver_selection_message(
     )
 
 
-def fit_ripple_glm_train_on_ripple_predict_pre(
+def _build_ripple_sample_windows(
+    ripple_table: pd.DataFrame,
+    *,
+    ripple_window_s: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one ordered `(start, end)` window per ripple row without merging overlaps."""
+    normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
+    ripple_starts = np.asarray(normalized_table["start_time"], dtype=float)
+    if ripple_window_s is None:
+        ripple_ends = np.asarray(normalized_table["end_time"], dtype=float)
+    else:
+        ripple_ends = ripple_starts + float(ripple_window_s)
+    return ripple_starts, ripple_ends
+
+
+def _count_spikes_in_windows(
+    spike_group: Any,
+    *,
+    window_starts: np.ndarray,
+    window_ends: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Count spikes per unit for overlapping windows while preserving one row per window."""
+    starts = np.asarray(window_starts, dtype=float).ravel()
+    ends = np.asarray(window_ends, dtype=float).ravel()
+    if starts.shape != ends.shape:
+        raise ValueError(
+            f"Window start/end arrays must have the same shape, got {starts.shape} and {ends.shape}."
+        )
+
+    unit_ids = np.asarray(list(spike_group.keys()))
+    counts = np.zeros((starts.size, unit_ids.size), dtype=np.float64)
+    for unit_index, unit_id in enumerate(unit_ids.tolist()):
+        spike_train = spike_group[unit_id]
+        spike_times = np.asarray(spike_train.t, dtype=float).ravel()
+        end_counts = np.searchsorted(spike_times, ends, side="left")
+        start_counts = np.searchsorted(spike_times, starts, side="left")
+        counts[:, unit_index] = end_counts - start_counts
+    return counts, unit_ids
+
+
+def fit_ripple_glm_train_on_ripple(
     epoch: str,
     *,
     spikes: dict[str, Any],
@@ -861,69 +874,50 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
     n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
-    pre_window_s: float | None = None,
-    pre_buffer_s: float = DEFAULT_PRE_BUFFER_S,
-    exclude_ripples: bool = False,
-    pre_exclude_guard_s: float = DEFAULT_PRE_EXCLUDE_GUARD_S,
     n_splits: int = DEFAULT_N_SPLITS,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
     maxiter: int = DEFAULT_MAXITER,
     tol: float = DEFAULT_TOL,
 ) -> dict[str, Any]:
-    """Fit the legacy ripple GLM workflow for one epoch."""
+    """Fit the ripple-only GLM workflow for one epoch."""
     import nemos as nmo
     nemos_version, solver_name = _resolve_nemos_population_glm_solver(nmo)
     print(_format_nemos_solver_selection_message(nemos_version, solver_name))
-    import pynapple as nap
 
     rng = np.random.default_rng(shuffle_seed)
-    ripple_starts = np.asarray(ripple_table["start_time"], dtype=float)
-    ripple_ends = np.asarray(ripple_table["end_time"], dtype=float)
-
-    if ripple_window_s is None:
-        ripple_ep = nap.IntervalSet(start=ripple_starts, end=ripple_ends, time_units="s")
-    else:
-        ripple_ep = nap.IntervalSet(
-            start=ripple_starts,
-            end=ripple_starts + float(ripple_window_s),
-            time_units="s",
-        )
-
-    pre_ep = make_preripple_ep(
-        ripple_ep=ripple_ep,
-        epoch_ep=epoch_interval,
-        window_s=pre_window_s,
-        buffer_s=pre_buffer_s,
-        exclude_ripples=exclude_ripples,
-        exclude_ripple_guard_s=pre_exclude_guard_s,
+    ripple_starts, ripple_ends = _build_ripple_sample_windows(
+        ripple_table,
+        ripple_window_s=ripple_window_s,
     )
 
-    X_r = np.asarray(spikes[SOURCE_REGION].count(ep=ripple_ep), dtype=np.float64)
-    y_r = np.asarray(spikes[TARGET_REGION].count(ep=ripple_ep), dtype=np.float64)
-    X_p = np.asarray(spikes[SOURCE_REGION].count(ep=pre_ep), dtype=np.float64)
-    y_p = np.asarray(spikes[TARGET_REGION].count(ep=pre_ep), dtype=np.float64)
+    _print_progress(epoch, "Counting CA1 and V1 spikes in ripple windows.")
+    X_r, ca1_unit_ids = _count_spikes_in_windows(
+        spikes[SOURCE_REGION],
+        window_starts=ripple_starts,
+        window_ends=ripple_ends,
+    )
+    y_r, v1_unit_ids = _count_spikes_in_windows(
+        spikes[TARGET_REGION],
+        window_starts=ripple_starts,
+        window_ends=ripple_ends,
+    )
 
-    n_ripples = int(X_r.shape[0])
-    n_pre = int(X_p.shape[0])
+    n_ripples = int(ripple_starts.size)
     skip_reason = get_epoch_skip_reason(n_ripples=n_ripples, n_splits=n_splits)
     if skip_reason is not None:
         raise ValueError(skip_reason)
 
-    for name, values in (("X_r", X_r), ("y_r", y_r), ("X_p", X_p), ("y_p", y_p)):
+    for name, values in (("X_r", X_r), ("y_r", y_r)):
         bad_value_info = _first_nonfinite_info(values)
         if bad_value_info is not None:
             raise ValueError(f"Non-finite values found in {name}: {bad_value_info}")
 
     keep_y = (y_r.sum(axis=0) / max(n_ripples, 1)) >= float(min_spikes_per_ripple)
     y_r = y_r[:, keep_y]
-    y_p = y_p[:, keep_y]
 
-    v1_unit_ids = np.asarray(list(spikes[TARGET_REGION].keys()))
     kept_v1_unit_ids = v1_unit_ids[keep_y]
     keep_x_ripple = (X_r.sum(axis=0) / max(n_ripples, 1)) >= float(min_ca1_spikes_per_ripple)
     X_r = X_r[:, keep_x_ripple]
-    X_p = X_p[:, keep_x_ripple]
-    ca1_unit_ids = np.asarray(list(spikes[SOURCE_REGION].keys()))
     kept_ca1_unit_ids = ca1_unit_ids[keep_x_ripple]
     n_cells = int(y_r.shape[1])
     n_ca1_cells = int(X_r.shape[1])
@@ -937,6 +931,10 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         raise ValueError(skip_reason)
 
     kfold = KFold(n_splits=n_splits, shuffle=False, random_state=None)
+    _print_progress(
+        epoch,
+        f"Running {n_splits}-fold CV with {n_shuffles_ripple} shuffle refits per fold.",
+    )
 
     def _alloc_metric_array() -> np.ndarray:
         return np.full((n_splits, n_cells), np.nan, dtype=np.float32)
@@ -967,6 +965,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         dtype=np.float32,
     )
     for fold_index, (train_idx, test_idx) in enumerate(kfold.split(X_r)):
+        _print_progress(epoch, f"Fold {fold_index + 1}/{n_splits}: fitting ripple model.")
         X_train_r = X_r[train_idx]
         X_test_r = X_r[test_idx]
         y_train_r = y_r[train_idx]
@@ -1007,6 +1006,11 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
             y_null_fit=y_train_r,
         ).astype(np.float32)
 
+        if n_shuffles_ripple > 0:
+            _print_progress(
+                epoch,
+                f"Fold {fold_index + 1}/{n_splits}: running shuffle refits.",
+            )
         for shuffle_index in range(n_shuffles_ripple):
             y_train_shuffled = shuffle_time_per_neuron(y_train_r, rng)
             glm_shuffle = nmo.glm.PopulationGLM(
@@ -1051,10 +1055,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
     if X_r_all_pp.shape[1] == 0:
         raise ValueError(f"Epoch {epoch!r}: all CA1 features were near-constant.")
 
-    pre_pseudo_r2 = np.full(n_cells, np.nan, dtype=np.float32)
-    pre_mae = np.full(n_cells, np.nan, dtype=np.float32)
-    pre_devexp = np.full(n_cells, np.nan, dtype=np.float32)
-    pre_bits_per_spike = np.full(n_cells, np.nan, dtype=np.float32)
+    _print_progress(epoch, "Fitting final full-data model for coefficient export.")
     coef_ca1_full_all = np.full((X_r_all_pp.shape[1], n_cells), np.nan, dtype=np.float32)
     coef_intercept_full_all = np.full(n_cells, np.nan, dtype=np.float32)
     coef_ca1_unit_ids = kept_ca1_unit_ids[keep_x_all]
@@ -1070,30 +1071,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         np.float32
     )
     coef_intercept_full_all = np.asarray(glm_all.intercept_, dtype=np.float32).reshape(-1)
-
-    if n_pre > 0:
-        X_p_kept = X_p[:, keep_x_all]
-        X_p_pp = (X_p_kept - mean_all[None, :]) / (std_all[None, :] + 1e-8)
-        X_p_pp /= np.sqrt(max(X_r_all_pp.shape[1], 1))
-        X_p_pp = np.clip(X_p_pp, -10.0, 10.0)
-        lam_pre = np.asarray(glm_all.predict(X_p_pp), dtype=np.float64)
-
-        pre_pseudo_r2 = mcfadden_pseudo_r2_per_neuron(y_p, lam_pre, y_p).astype(np.float32)
-        pre_mae = mae_per_neuron(y_p, lam_pre).astype(np.float32)
-        pre_devexp = deviance_explained_per_neuron(
-            y_test=y_p,
-            lam_test=lam_pre,
-            y_null_fit=y_p,
-        ).astype(np.float32)
-        pre_bits_per_spike = bits_per_spike_per_neuron(
-            y_test=y_p,
-            lam_test=lam_pre,
-            y_null_fit=y_p,
-        ).astype(np.float32)
-
-        del glm_all, lam_pre
-    else:
-        del glm_all
+    del glm_all
     _clear_jax_caches()
     gc.collect()
 
@@ -1105,12 +1083,7 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         "n_splits": int(n_splits),
         "n_shuffles_ripple": int(n_shuffles_ripple),
         "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
-        "pre_window_s": None if pre_window_s is None else float(pre_window_s),
-        "pre_buffer_s": float(pre_buffer_s),
-        "pre_exclude_guard_s": float(pre_exclude_guard_s),
-        "exclude_ripples": bool(exclude_ripples),
         "n_ripples": n_ripples,
-        "n_pre": n_pre,
         "n_cells": n_cells,
         "n_ca1_cells": n_ca1_cells,
         "v1_unit_ids": kept_v1_unit_ids,
@@ -1124,10 +1097,6 @@ def fit_ripple_glm_train_on_ripple_predict_pre(
         "mae_ripple_shuff_folds": mae_ripple_shuff,
         "devexp_ripple_shuff_folds": devexp_ripple_shuff,
         "bits_per_spike_ripple_shuff_folds": bits_per_spike_ripple_shuff,
-        "pseudo_r2_pre": pre_pseudo_r2,
-        "mae_pre": pre_mae,
-        "devexp_pre": pre_devexp,
-        "bits_per_spike_pre": pre_bits_per_spike,
         "coef_ca1_full_all": coef_ca1_full_all,
         "coef_intercept_full_all": coef_intercept_full_all,
     }
@@ -1172,9 +1141,15 @@ def format_ripple_window_suffix(ripple_window_s: float) -> str:
     return f"rw_{window_text.replace('.', 'p')}s"
 
 
-def format_ripple_selection_suffix(exclude_ripples_in_previous_window: bool) -> str:
+def format_ripple_selection_suffix(ripple_selection_mode: str) -> str:
     """Return a filesystem-friendly suffix describing ripple selection."""
-    return "isolated" if exclude_ripples_in_previous_window else "allripples"
+    if ripple_selection_mode == RIPPLE_SELECTION_MODE_ALL:
+        return RIPPLE_SELECTION_MODE_ALL
+    if ripple_selection_mode == RIPPLE_SELECTION_MODE_DEDUPED:
+        return RIPPLE_SELECTION_MODE_DEDUPED
+    if ripple_selection_mode == RIPPLE_SELECTION_MODE_SINGLE:
+        return RIPPLE_SELECTION_MODE_SINGLE
+    raise ValueError(f"Unknown ripple selection mode: {ripple_selection_mode!r}")
 
 
 def format_ridge_strength_suffix(ridge_strength: float) -> str:
@@ -1268,7 +1243,6 @@ def build_metric_figure_data(
     )
     return {
         "ripple_values": np.asarray(summary["real_mean"], dtype=float),
-        "pre_values": _as_1d_float(results[f"{metric_name}_pre"]),
         "ripple_p_value": np.asarray(summary["unit_p_value"], dtype=float),
     }
 
@@ -1300,7 +1274,7 @@ def build_epoch_fit_dataset(
     coef_intercept_full_all = _as_1d_float(results["coef_intercept_full_all"])
 
     attrs = {
-        "schema_version": "2",
+        "schema_version": "4",
         "animal_name": animal_name,
         "date": date,
         "epoch": epoch,
@@ -1308,7 +1282,10 @@ def build_epoch_fit_dataset(
         "target_region": TARGET_REGION,
         "model_direction": f"{SOURCE_REGION}_to_{TARGET_REGION}",
         "n_ripples": int(results["n_ripples"]),
-        "n_pre_windows": int(results["n_pre"]),
+        "ripple_selection_mode": str(fit_parameters["ripple_selection_mode"]),
+        "n_ripples_before_selection": int(fit_parameters["n_ripples_before_selection"]),
+        "n_ripples_removed_by_selection": int(fit_parameters["n_ripples_removed_by_selection"]),
+        "n_ripples_after_selection": int(fit_parameters["n_ripples_after_selection"]),
         "n_units": int(len(unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "sources_json": json.dumps(sources, sort_keys=True),
@@ -1334,7 +1311,6 @@ def build_epoch_fit_dataset(
     for metric_name in metric_names:
         ripple_folds = _as_2d_float(results[f"{metric_name}_ripple_folds"])
         ripple_shuffle_folds = _as_3d_float(results[f"{metric_name}_ripple_shuff_folds"])
-        pre_values = _as_1d_float(results[f"{metric_name}_pre"])
         ripple_summary = summarize_ripple_metric_against_shuffle(
             ripple_folds,
             ripple_shuffle_folds,
@@ -1346,7 +1322,6 @@ def build_epoch_fit_dataset(
             ("fold", "shuffle", "unit"),
             ripple_shuffle_folds,
         )
-        data_vars[f"{metric_name}_pre"] = (("unit",), pre_values)
         data_vars[f"ripple_{metric_name}_mean"] = (
             ("unit",),
             np.asarray(ripple_summary["real_mean"], dtype=float),
@@ -1391,163 +1366,86 @@ def _get_pyplot():
     return plt
 
 
-def _finite_values(values: Any) -> np.ndarray:
-    """Return only the finite values from an array-like input."""
-    array = np.asarray(values, dtype=float).ravel()
-    return array[np.isfinite(array)]
-
-
-def _metric_histogram_bins(ripple_values: np.ndarray, pre_values: np.ndarray) -> np.ndarray:
-    """Return shared histogram bins derived from ripple and pre values."""
-    finite_combined = np.concatenate([_finite_values(ripple_values), _finite_values(pre_values)])
-    if finite_combined.size == 0:
-        return np.linspace(0.0, 1.0, 31)
-
-    x_min = float(np.min(finite_combined))
-    x_max = float(np.max(finite_combined))
-    if x_min == x_max:
-        pad = max(abs(x_min) * 0.05, 0.5)
-        x_min -= pad
-        x_max += pad
-    return np.linspace(x_min, x_max, 31)
-
-
-def plot_metric_summary(
+def plot_metric_summary_axis(
     *,
+    ax: Any,
     ripple_values: Any,
-    pre_values: Any,
     ripple_p_value: Any,
-    animal_name: str,
-    date: str,
-    epoch: str,
-    ridge_strength: float,
     metric_label: str,
-    out_path: Path,
-) -> Path:
-    """Plot one metric-centric summary figure with distribution and significance panels."""
-    plt = _get_pyplot()
-
+) -> None:
+    """Plot one metric-centric scatter panel as effect size versus significance."""
     ripple_array = _as_1d_float(ripple_values)
-    pre_array = _as_1d_float(pre_values)
     p_value_array = _as_1d_float(ripple_p_value)
-
-    ripple_finite = _finite_values(ripple_array)
-    pre_finite = _finite_values(pre_array)
-    bins = _metric_histogram_bins(ripple_finite, pre_finite)
-    x_limits = (float(bins[0]), float(bins[-1]))
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5), constrained_layout=True)
-    hist_ax, sig_ax = axes
-
-    if ripple_finite.size:
-        hist_ax.hist(
-            ripple_finite,
-            bins=bins,
-            weights=np.full(ripple_finite.size, 1.0 / ripple_finite.size),
-            alpha=0.55,
-            color=RIPPLE_FIGURE_COLOR,
-            label="Ripple",
-            edgecolor="none",
-        )
-    if pre_finite.size:
-        hist_ax.hist(
-            pre_finite,
-            bins=bins,
-            weights=np.full(pre_finite.size, 1.0 / pre_finite.size),
-            alpha=0.55,
-            color=PRE_FIGURE_COLOR,
-            label="Pre",
-            edgecolor="none",
-        )
-    hist_ax.set_xlim(*x_limits)
-    hist_ax.set_xlabel(metric_label)
-    hist_ax.set_ylabel("Fraction of units")
-    hist_ax.set_title("Ripple vs pre distributions")
-    if ripple_finite.size or pre_finite.size:
-        hist_ax.legend(loc="upper right")
-
-    stats_text = (
-        f"Ripple n={ripple_finite.size}, mean={np.nanmean(ripple_array):.4f}\n"
-        f"Pre n={pre_finite.size}, mean={np.nanmean(pre_array):.4f}"
-    )
-    hist_ax.text(
-        0.02,
-        0.98,
-        stats_text,
-        transform=hist_ax.transAxes,
-        va="top",
-        ha="left",
-        fontsize=9,
-        family="monospace",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85),
-    )
-
-    box_ax = hist_ax.inset_axes([0.0, 0.82, 1.0, 0.18])
-    box_data: list[np.ndarray] = []
-    positions: list[int] = []
-    labels: list[str] = []
-    colors: list[str] = []
-    if ripple_finite.size:
-        box_data.append(ripple_finite)
-        positions.append(2)
-        labels.append("Ripple")
-        colors.append(RIPPLE_FIGURE_COLOR)
-    if pre_finite.size:
-        box_data.append(pre_finite)
-        positions.append(1)
-        labels.append("Pre")
-        colors.append(PRE_FIGURE_COLOR)
-    if box_data:
-        boxplot = box_ax.boxplot(
-            box_data,
-            vert=False,
-            positions=positions,
-            widths=0.5,
-            patch_artist=True,
-            manage_ticks=False,
-            showfliers=False,
-        )
-        for patch, color in zip(boxplot["boxes"], colors, strict=False):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.55)
-        for median in boxplot["medians"]:
-            median.set_color("black")
-            median.set_linewidth(1.3)
-        box_ax.set_yticks(positions, labels)
-        box_ax.set_xlim(*x_limits)
-    else:
-        box_ax.set_yticks([])
-    box_ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
-    for spine_name in ("top", "right", "bottom"):
-        box_ax.spines[spine_name].set_visible(False)
-    box_ax.set_facecolor("none")
+    sig_ax = ax
 
     valid = np.isfinite(ripple_array) & np.isfinite(p_value_array)
     if np.any(valid):
         effect_sizes = ripple_array[valid]
         neglog10_p = -np.log10(np.clip(p_value_array[valid], 1e-12, 1.0))
-        sig_ax.scatter(effect_sizes, neglog10_p, s=18, alpha=0.7, color=RIPPLE_FIGURE_COLOR)
-        sig_ax.axhline(-np.log10(0.05), linestyle="--", linewidth=1, color="black")
+        sig_ax.scatter(
+            effect_sizes,
+            neglog10_p,
+            s=18,
+            alpha=0.7,
+            color=RIPPLE_FIGURE_COLOR,
+            label="Units",
+        )
+        sig_ax.axhline(
+            -np.log10(0.05),
+            linestyle="--",
+            linewidth=1,
+            color="black",
+            label="p = 0.05",
+        )
         frac_sig = float(np.mean(p_value_array[valid] < 0.05))
         sig_ax.text(
+            0.02,
             0.98,
-            0.05,
-            f"frac p<0.05 = {frac_sig:.3f}",
+            f"n={int(np.sum(valid))}\nfrac p<0.05 = {frac_sig:.3f}",
             transform=sig_ax.transAxes,
-            ha="right",
-            va="bottom",
+            ha="left",
+            va="top",
             fontsize=10,
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8),
         )
     else:
         sig_ax.text(0.5, 0.5, "No finite ripple p-values", ha="center", va="center")
-        sig_ax.axhline(-np.log10(0.05), linestyle="--", linewidth=1, color="black")
+        sig_ax.axhline(
+            -np.log10(0.05),
+            linestyle="--",
+            linewidth=1,
+            color="black",
+            label="p = 0.05",
+        )
+    sig_ax.legend(loc="lower right")
     sig_ax.set_xlabel(f"Ripple {metric_label} (mean over folds)")
     sig_ax.set_ylabel(r"$-\log_{10}(p)$ (shuffle)")
     sig_ax.set_title("Ripple effect size vs significance")
 
+
+def plot_epoch_metric_summary(
+    *,
+    metric_panels: list[dict[str, Any]],
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ridge_strength: float,
+    out_path: Path,
+) -> Path:
+    """Plot all metric-centric scatter panels into one combined figure."""
+    plt = _get_pyplot()
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+
+    for ax, metric_panel in zip(axes.flat, metric_panels, strict=False):
+        plot_metric_summary_axis(
+            ax=ax,
+            ripple_values=metric_panel["ripple_values"],
+            ripple_p_value=metric_panel["ripple_p_value"],
+            metric_label=metric_panel["metric_label"],
+        )
+
     fig.suptitle(
-        f"{animal_name} {date} {epoch} {metric_label} ridge={ridge_strength:.1e}",
+        f"{animal_name} {date} {epoch} ripple metrics ridge={ridge_strength:.1e}",
         fontsize=14,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1567,7 +1465,7 @@ def save_epoch_figures(
     ripple_selection_suffix: str,
     ridge_strength: float,
 ) -> list[Path]:
-    """Save the configured epoch summary figures."""
+    """Save the configured epoch summary figure."""
     fig_dir.mkdir(parents=True, exist_ok=True)
     ripple_window_suffix = format_ripple_window_suffix(ripple_window_s)
     ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
@@ -1578,42 +1476,53 @@ def save_epoch_figures(
         ("bits_per_spike", "Bits/spike"),
     ]
 
-    figure_paths: list[Path] = []
+    metric_panels = []
     for metric_name, metric_label in metric_specs:
         metric_data = build_metric_figure_data(results, metric_name=metric_name)
-        figure_paths.append(
-            plot_metric_summary(
-                ripple_values=metric_data["ripple_values"],
-                pre_values=metric_data["pre_values"],
-                ripple_p_value=metric_data["ripple_p_value"],
-                animal_name=animal_name,
-                date=date,
-                epoch=epoch,
-                ridge_strength=ridge_strength,
-                metric_label=metric_label,
-                out_path=fig_dir
-                / (
-                    f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
-                    f"{ridge_strength_suffix}_{metric_name}_summary.png"
-                ),
-            )
+        metric_panels.append(
+            {
+                "metric_name": metric_name,
+                "metric_label": metric_label,
+                "ripple_values": metric_data["ripple_values"],
+                "ripple_p_value": metric_data["ripple_p_value"],
+            }
         )
-    return figure_paths
+
+    out_path = fig_dir / (
+        f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
+        f"{ridge_strength_suffix}_samplewise_metrics_summary.png"
+    )
+    return [
+        plot_epoch_metric_summary(
+            metric_panels=metric_panels,
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            ridge_strength=ridge_strength,
+            out_path=out_path,
+        )
+    ]
 
 
 def main() -> None:
     """Run the ripple GLM CLI."""
     args = parse_arguments()
     validate_arguments(args)
+    _print_progress("1/5", "Validated CLI arguments.")
     if args.cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
         print(f"Setting CUDA_VISIBLE_DEVICES={args.cuda_visible_devices!r} for ripple GLM.")
 
+    _print_progress(
+        "2/5",
+        f"Loading session data for {args.animal_name} {args.date}.",
+    )
     session = prepare_ripple_glm_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
     )
+    _print_progress("2/5", "Loaded spikes, ripple tables, and epoch intervals.")
     requested_epochs = validate_epochs(session["epoch_tags"], args.epochs)
     selected_epochs = restrict_epochs_to_ripple_event_epochs(
         requested_epochs,
@@ -1628,13 +1537,21 @@ def main() -> None:
             "epoch_intervals": session["epoch_intervals"],
         },
     )
+    _print_progress(
+        "3/5",
+        f"Selected {len(selected_epochs)} ripple event epoch(s): {selected_epochs!r}",
+    )
 
     analysis_path = session["analysis_path"]
     data_dir = analysis_path / "ripple_glm"
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir = analysis_path / "figs" / "ripple_glm"
-    pre_window_s = args.pre_window_s if args.pre_window_s is not None else args.ripple_window_s
     ridge_strengths = resolve_ridge_strengths(args)
+    ripple_selection_mode = resolve_ripple_selection_mode(args)
+    _print_progress(
+        "4/5",
+        f"Preparing outputs under {analysis_path} with ridge strengths {ridge_strengths!r}.",
+    )
     print(f"Sweeping ridge strengths: {ridge_strengths!r}")
     run_parameters = {
         "animal_name": args.animal_name,
@@ -1642,11 +1559,9 @@ def main() -> None:
         "data_root": str(args.data_root),
         "epochs": list(selected_epochs),
         "ripple_window_s": float(args.ripple_window_s),
-        "exclude_ripples_in_previous_window": bool(args.exclude_ripples_in_previous_window),
-        "pre_window_s": float(pre_window_s),
-        "pre_buffer_s": float(args.pre_buffer_s),
-        "exclude_ripples": bool(args.exclude_ripples),
-        "pre_exclude_guard_s": float(args.pre_exclude_guard_s),
+        "ripple_selection_mode": ripple_selection_mode,
+        "remove_duplicate_ripples": bool(args.remove_duplicate_ripples),
+        "keep_single_ripple_windows": bool(args.keep_single_ripple_windows),
         "min_spikes_per_ripple": float(args.min_spikes_per_ripple),
         "min_ca1_spikes_per_ripple": float(args.min_ca1_spikes_per_ripple),
         "n_splits": int(args.n_splits),
@@ -1662,17 +1577,24 @@ def main() -> None:
     saved_figures: list[Path] = []
     skipped_epochs: list[dict[str, Any]] = []
     ripple_window_suffix = format_ripple_window_suffix(args.ripple_window_s)
-    ripple_selection_suffix = format_ripple_selection_suffix(
-        args.exclude_ripples_in_previous_window
-    )
+    ripple_selection_suffix = format_ripple_selection_suffix(ripple_selection_mode)
 
-    if args.exclude_ripples_in_previous_window:
+    if ripple_selection_mode == RIPPLE_SELECTION_MODE_DEDUPED:
         print(
-            "Excluding ripples whose starts fall inside the configured ripple window "
-            "of the previous ripple."
+            "Removing duplicate ripples whose starts fall inside the configured "
+            "ripple window of the previous kept ripple."
         )
         print(
-            "Outputs for isolated-only fits will include "
+            "Outputs for duplicate-removed fits will include "
+            f"'{ripple_selection_suffix}' in their filenames."
+        )
+    elif ripple_selection_mode == RIPPLE_SELECTION_MODE_SINGLE:
+        print(
+            "Keeping only fixed ripple windows whose interior contains a single "
+            "ripple start."
+        )
+        print(
+            "Outputs for single-ripple-window fits will include "
             f"'{ripple_selection_suffix}' in their filenames."
         )
     else:
@@ -1682,29 +1604,42 @@ def main() -> None:
         )
 
     for epoch in selected_epochs:
+        _print_progress("5/5", f"Starting epoch {epoch}.")
         ripple_table = session["ripple_tables"][epoch].copy()
-        removed_ripples_in_previous_window = 0
-        total_ripples_before_previous_window_filter = int(len(ripple_table))
-        if args.exclude_ripples_in_previous_window:
-            ripple_table, removed_ripples_in_previous_window, total_ripples_before_previous_window_filter = (
-                exclude_ripples_in_previous_window(
-                    ripple_table,
-                    ripple_window_s=args.ripple_window_s,
-                )
+        total_ripples_before_selection = int(len(ripple_table))
+        removed_ripples_by_selection = 0
+        if ripple_selection_mode == RIPPLE_SELECTION_MODE_DEDUPED:
+            ripple_table, keep_mask = remove_duplicate_ripples(
+                ripple_table,
+                ripple_window_s=args.ripple_window_s,
             )
+            removed_ripples_by_selection = int(np.size(keep_mask) - np.sum(keep_mask))
             print(
-                f"{epoch}: removed {removed_ripples_in_previous_window} of "
-                f"{total_ripples_before_previous_window_filter} total ripples because they fell "
-                "inside the previous ripple's analysis window."
+                f"{epoch}: removed {removed_ripples_by_selection}, kept {len(ripple_table)}, "
+                f"total {total_ripples_before_selection} because they started inside the "
+                "previous kept ripple's analysis window."
+            )
+        elif ripple_selection_mode == RIPPLE_SELECTION_MODE_SINGLE:
+            ripple_table, keep_mask = keep_single_ripple_windows(
+                ripple_table,
+                ripple_window_s=args.ripple_window_s,
+            )
+            removed_ripples_by_selection = int(np.size(keep_mask) - np.sum(keep_mask))
+            print(
+                f"{epoch}: removed {removed_ripples_by_selection}, kept {len(ripple_table)}, "
+                f"total {total_ripples_before_selection} because another ripple start fell "
+                "inside the fixed analysis window."
             )
         for ridge_strength in ridge_strengths:
             ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
-            print(
-                "Fitting ripple GLM for "
-                f"{args.animal_name} {args.date} {epoch} with ridge_strength={ridge_strength:.1e}"
+            _print_progress(
+                epoch,
+                "Running fit for "
+                f"ridge_strength={ridge_strength:.1e} "
+                f"with {len(ripple_table)} modeled ripple(s).",
             )
             try:
-                results = fit_ripple_glm_train_on_ripple_predict_pre(
+                results = fit_ripple_glm_train_on_ripple(
                     epoch=epoch,
                     spikes=session["spikes_by_region"],
                     epoch_interval=session["epoch_intervals"][epoch],
@@ -1714,10 +1649,6 @@ def main() -> None:
                     n_shuffles_ripple=args.n_shuffles_ripple,
                     shuffle_seed=args.shuffle_seed,
                     ripple_window_s=args.ripple_window_s,
-                    pre_window_s=pre_window_s,
-                    pre_buffer_s=args.pre_buffer_s,
-                    exclude_ripples=args.exclude_ripples,
-                    pre_exclude_guard_s=args.pre_exclude_guard_s,
                     n_splits=args.n_splits,
                     ridge_strength=ridge_strength,
                     maxiter=args.maxiter,
@@ -1753,12 +1684,10 @@ def main() -> None:
 
             fit_parameters = dict(run_parameters)
             fit_parameters["ridge_strength"] = float(ridge_strength)
-            fit_parameters["n_ripples_before_previous_window_filter"] = int(
-                total_ripples_before_previous_window_filter
-            )
-            fit_parameters["n_ripples_removed_in_previous_window_filter"] = int(
-                removed_ripples_in_previous_window
-            )
+            fit_parameters["n_ripples_before_selection"] = int(total_ripples_before_selection)
+            fit_parameters["n_ripples_removed_by_selection"] = int(removed_ripples_by_selection)
+            fit_parameters["n_ripples_after_selection"] = int(len(ripple_table))
+            _print_progress(epoch, "Building xarray dataset for export.")
             fit_dataset = build_epoch_fit_dataset(
                 results,
                 animal_name=args.animal_name,
@@ -1771,11 +1700,13 @@ def main() -> None:
                 data_dir
                 / (
                     f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
-                    f"{ridge_strength_suffix}_ripple_glm.nc"
+                    f"{ridge_strength_suffix}_samplewise_ripple_glm.nc"
                 )
             )
+            _print_progress(epoch, f"Saving NetCDF to {result_path}.")
             fit_dataset.to_netcdf(result_path)
             saved_datasets.append(result_path)
+            _print_progress(epoch, "Saving summary figure.")
             saved_figures.extend(
                 save_epoch_figures(
                     results=results,
@@ -1788,6 +1719,7 @@ def main() -> None:
                     ridge_strength=ridge_strength,
                 )
             )
+            _print_progress(epoch, f"Finished ridge_strength={ridge_strength:.1e}.")
 
     if not saved_datasets:
         raise RuntimeError(
@@ -1804,11 +1736,9 @@ def main() -> None:
             "data_root": args.data_root,
             "epochs": selected_epochs,
             "ripple_window_s": args.ripple_window_s,
-            "exclude_ripples_in_previous_window": args.exclude_ripples_in_previous_window,
-            "pre_window_s": pre_window_s,
-            "pre_buffer_s": args.pre_buffer_s,
-            "exclude_ripples": args.exclude_ripples,
-            "pre_exclude_guard_s": args.pre_exclude_guard_s,
+            "ripple_selection_mode": ripple_selection_mode,
+            "remove_duplicate_ripples": args.remove_duplicate_ripples,
+            "keep_single_ripple_windows": args.keep_single_ripple_windows,
             "min_spikes_per_ripple": args.min_spikes_per_ripple,
             "min_ca1_spikes_per_ripple": args.min_ca1_spikes_per_ripple,
             "n_splits": args.n_splits,
@@ -1826,6 +1756,10 @@ def main() -> None:
             "saved_figures": saved_figures,
             "skipped_epochs": skipped_epochs,
         },
+    )
+    _print_progress(
+        "done",
+        f"Saved {len(saved_datasets)} dataset(s), {len(saved_figures)} figure(s), and run log.",
     )
     print(f"Saved run metadata to {log_path}")
 
