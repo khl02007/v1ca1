@@ -28,6 +28,17 @@ def _write_session_files(
     _write_pickle(analysis_path / "timestamps_position.pkl", timestamps_position)
 
 
+def _write_epoch_pickle_dir(
+    directory_path: Path,
+    values_by_epoch: dict[str, np.ndarray],
+    *,
+    prefix: str = "20240101_RatA",
+) -> None:
+    directory_path.mkdir(parents=True, exist_ok=True)
+    for epoch, values in values_by_epoch.items():
+        _write_pickle(directory_path / f"{prefix}_{epoch}.pkl", values)
+
+
 def _convert_session_pickles(
     analysis_path: Path,
     tmp_path: Path,
@@ -132,6 +143,165 @@ def test_convert_legacy_position_pickles_writes_only_epochs_present_in_position_
     assert combined["epoch"].tolist() == ["02_r1", "02_r1"]
     assert combined["frame"].tolist() == [0, 1]
     assert np.allclose(combined["frame_time_s"].to_numpy(dtype=float), timestamps_position["02_r1"])
+
+
+def test_convert_legacy_position_pickles_accepts_per_epoch_directories_and_mixed_inputs(
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    timestamps_position = {
+        "01_s1": np.array([0.0, 1.0], dtype=float),
+        "02_r1": np.array([10.0], dtype=float),
+        "03_s2": np.array([20.0, 21.0], dtype=float),
+    }
+    _write_session_files(analysis_path, timestamps_position=timestamps_position)
+    _write_pickle(
+        analysis_path / DEFAULT_POSITION_NAME,
+        {
+            "01_s1": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=float),
+            "03_s2": np.array([[5.0, 6.0], [7.0, 8.0]], dtype=float),
+        },
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "body_position",
+        {
+            "01_s1": np.array([[11.0, 12.0], [13.0, 14.0]], dtype=float),
+            "03_s2": np.array([[15.0, 16.0], [17.0, 18.0]], dtype=float),
+        },
+    )
+
+    output_path = convert_legacy_position_pickles(
+        animal_name="RatA",
+        date="20240101",
+        head_position_path=analysis_path / DEFAULT_POSITION_NAME,
+        body_position_path=analysis_path / "body_position",
+        data_root=tmp_path,
+    )
+
+    combined = pd.read_parquet(output_path)
+    assert combined["epoch"].tolist() == ["01_s1", "01_s1", "03_s2", "03_s2"]
+    assert np.allclose(
+        combined.loc[:, ["body_x_cm", "body_y_cm"]].to_numpy(dtype=float),
+        np.array([[11.0, 12.0], [13.0, 14.0], [15.0, 16.0], [17.0, 18.0]], dtype=float),
+    )
+
+
+def test_convert_legacy_position_pickles_accepts_directory_inputs_with_timestamp_epoch_subset(
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    timestamps_position = {
+        "01_s1": np.array([0.0], dtype=float),
+        "02_r1": np.array([1.0, 2.0], dtype=float),
+        "03_s2": np.array([3.0], dtype=float),
+    }
+    _write_session_files(analysis_path, timestamps_position=timestamps_position)
+    _write_epoch_pickle_dir(
+        analysis_path / "position",
+        {
+            "02_r1": np.array([[1.0, 10.0], [2.0, 20.0]], dtype=float),
+        },
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "body_position",
+        {
+            "02_r1": np.array([[3.0, 30.0], [4.0, 40.0]], dtype=float),
+        },
+    )
+
+    output_path = convert_legacy_position_pickles(
+        animal_name="RatA",
+        date="20240101",
+        head_position_path=analysis_path / "position",
+        body_position_path=analysis_path / "body_position",
+        data_root=tmp_path,
+    )
+
+    combined = pd.read_parquet(output_path)
+    assert combined["epoch"].tolist() == ["02_r1", "02_r1"]
+    assert np.allclose(combined["frame_time_s"].to_numpy(dtype=float), timestamps_position["02_r1"])
+
+
+def test_convert_legacy_position_pickles_rejects_ambiguous_directory_epoch_mapping(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("pandas")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    _write_session_files(
+        analysis_path,
+        timestamps_position={"01_s1": np.array([0.0], dtype=float), "1": np.array([1.0], dtype=float)},
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "position",
+        {
+            "01_s1": np.array([[1.0, 2.0]], dtype=float),
+        },
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "body_position",
+        {
+            "01_s1": np.array([[3.0, 4.0]], dtype=float),
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Could not map per-epoch position pickle to exactly one saved position epoch",
+    ):
+        convert_legacy_position_pickles(
+            animal_name="RatA",
+            date="20240101",
+            head_position_path=analysis_path / "position",
+            body_position_path=analysis_path / "body_position",
+            data_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("input_dirname", ["position", "body_position"])
+def test_convert_legacy_position_pickles_rejects_duplicate_directory_epoch_mappings(
+    tmp_path: Path,
+    input_dirname: str,
+) -> None:
+    pytest.importorskip("pandas")
+
+    analysis_path = tmp_path / "RatA" / "20240101"
+    _write_session_files(
+        analysis_path,
+        timestamps_position={"02_r1": np.array([0.0], dtype=float)},
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "position",
+        {
+            "02_r1": np.array([[1.0, 2.0]], dtype=float),
+        },
+    )
+    _write_epoch_pickle_dir(
+        analysis_path / "body_position",
+        {
+            "02_r1": np.array([[3.0, 4.0]], dtype=float),
+        },
+    )
+    duplicate_dir = analysis_path / input_dirname
+    _write_pickle(duplicate_dir / "duplicate_02_r1.pkl", np.array([[5.0, 6.0]], dtype=float))
+
+    with pytest.raises(
+        ValueError,
+        match="Found duplicate per-epoch position pickle mappings for one epoch",
+    ):
+        convert_legacy_position_pickles(
+            animal_name="RatA",
+            date="20240101",
+            head_position_path=analysis_path / "position",
+            body_position_path=analysis_path / "body_position",
+            data_root=tmp_path,
+        )
 
 
 @pytest.mark.parametrize("input_name", [DEFAULT_POSITION_NAME, DEFAULT_BODY_POSITION_NAME])

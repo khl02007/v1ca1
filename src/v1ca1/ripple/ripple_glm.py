@@ -943,6 +943,9 @@ def fit_ripple_glm_train_on_ripple(
     mae_ripple = _alloc_metric_array()
     devexp_ripple = _alloc_metric_array()
     bits_per_spike_ripple = _alloc_metric_array()
+    ripple_observed_count_oof = np.full((n_ripples, n_cells), np.nan, dtype=np.float32)
+    ripple_predicted_count_oof = np.full((n_ripples, n_cells), np.nan, dtype=np.float32)
+    ripple_fold_index = np.full(n_ripples, -1, dtype=np.int32)
 
     pseudo_r2_ripple_shuff = np.full(
         (n_splits, n_shuffles_ripple, n_cells),
@@ -1005,6 +1008,9 @@ def fit_ripple_glm_train_on_ripple(
             lam_test=lam_r,
             y_null_fit=y_train_r,
         ).astype(np.float32)
+        ripple_observed_count_oof[test_idx] = y_test_r.astype(np.float32)
+        ripple_predicted_count_oof[test_idx] = lam_r.astype(np.float32)
+        ripple_fold_index[test_idx] = int(fold_index)
 
         if n_shuffles_ripple > 0:
             _print_progress(
@@ -1097,6 +1103,11 @@ def fit_ripple_glm_train_on_ripple(
         "mae_ripple_shuff_folds": mae_ripple_shuff,
         "devexp_ripple_shuff_folds": devexp_ripple_shuff,
         "bits_per_spike_ripple_shuff_folds": bits_per_spike_ripple_shuff,
+        "ripple_window_start_s": ripple_starts.astype(np.float64),
+        "ripple_window_end_s": ripple_ends.astype(np.float64),
+        "ripple_fold_index": ripple_fold_index,
+        "ripple_observed_count_oof": ripple_observed_count_oof,
+        "ripple_predicted_count_oof": ripple_predicted_count_oof,
         "coef_ca1_full_all": coef_ca1_full_all,
         "coef_intercept_full_all": coef_intercept_full_all,
     }
@@ -1269,12 +1280,18 @@ def build_epoch_fit_dataset(
     ca1_unit_ids = np.asarray(results["ca1_unit_ids"])
     n_folds = int(_as_2d_float(results["pseudo_r2_ripple_folds"]).shape[0])
     n_shuffles = int(_as_3d_float(results["pseudo_r2_ripple_shuff_folds"]).shape[1])
+    n_samples = int(_as_1d_float(results["ripple_window_start_s"]).shape[0])
     coef_ca1_unit_ids = np.asarray(results["coef_ca1_unit_ids"])
     coef_ca1_full_all = _as_2d_float(results["coef_ca1_full_all"])
     coef_intercept_full_all = _as_1d_float(results["coef_intercept_full_all"])
+    ripple_window_start_s = _as_1d_float(results["ripple_window_start_s"])
+    ripple_window_end_s = _as_1d_float(results["ripple_window_end_s"])
+    ripple_fold_index = np.asarray(results["ripple_fold_index"], dtype=np.int32).ravel()
+    ripple_observed_count_oof = _as_2d_float(results["ripple_observed_count_oof"])
+    ripple_predicted_count_oof = _as_2d_float(results["ripple_predicted_count_oof"])
 
     attrs = {
-        "schema_version": "4",
+        "schema_version": "5",
         "animal_name": animal_name,
         "date": date,
         "epoch": epoch,
@@ -1305,6 +1322,11 @@ def build_epoch_fit_dataset(
     data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
         "ca1_unit_id": (("source_unit",), ca1_unit_ids),
         "coef_ca1_unit_id": (("coef_source_unit",), coef_ca1_unit_ids),
+        "ripple_window_start_s": (("sample",), ripple_window_start_s),
+        "ripple_window_end_s": (("sample",), ripple_window_end_s),
+        "ripple_fold_index": (("sample",), ripple_fold_index),
+        "ripple_observed_count_oof": (("sample", "unit"), ripple_observed_count_oof),
+        "ripple_predicted_count_oof": (("sample", "unit"), ripple_predicted_count_oof),
         "coef_ca1_full_all": (("coef_source_unit", "unit"), coef_ca1_full_all),
         "coef_intercept_full_all": (("unit",), coef_intercept_full_all),
     }
@@ -1346,6 +1368,7 @@ def build_epoch_fit_dataset(
     return xr.Dataset(
         data_vars=data_vars,
         coords={
+            "sample": np.arange(n_samples, dtype=int),
             "fold": np.arange(n_folds, dtype=int),
             "shuffle": np.arange(n_shuffles, dtype=int),
             "unit": unit_ids,
@@ -1399,12 +1422,12 @@ def plot_metric_summary_axis(
         )
         frac_sig = float(np.mean(p_value_array[valid] < 0.05))
         sig_ax.text(
-            0.02,
             0.98,
+            0.02,
             f"n={int(np.sum(valid))}\nfrac p<0.05 = {frac_sig:.3f}",
             transform=sig_ax.transAxes,
-            ha="left",
-            va="top",
+            ha="right",
+            va="bottom",
             fontsize=10,
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8),
         )
@@ -1417,7 +1440,6 @@ def plot_metric_summary_axis(
             color="black",
             label="p = 0.05",
         )
-    sig_ax.legend(loc="lower right")
     sig_ax.set_xlabel(f"Ripple {metric_label} (mean over folds)")
     sig_ax.set_ylabel(r"$-\log_{10}(p)$ (shuffle)")
     sig_ax.set_title("Ripple effect size vs significance")
@@ -1446,6 +1468,78 @@ def plot_epoch_metric_summary(
 
     fig.suptitle(
         f"{animal_name} {date} {epoch} ripple metrics ridge={ridge_strength:.1e}",
+        fontsize=14,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def plot_top_deviance_predicted_vs_observed(
+    *,
+    results: dict[str, Any],
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ridge_strength: float,
+    out_path: Path,
+) -> Path:
+    """Plot held-out observed versus predicted counts for top deviance-explained units."""
+    plt = _get_pyplot()
+    devexp = np.asarray(build_metric_figure_data(results, metric_name="devexp")["ripple_values"])
+    observed = _as_2d_float(results["ripple_observed_count_oof"])
+    predicted = _as_2d_float(results["ripple_predicted_count_oof"])
+    unit_ids = np.asarray(results["v1_unit_ids"])
+
+    finite_unit_indices = np.flatnonzero(np.isfinite(devexp))
+    top_unit_indices = finite_unit_indices[np.argsort(devexp[finite_unit_indices])[::-1][:10]]
+
+    fig, axes = plt.subplots(2, 5, figsize=(18, 7), constrained_layout=True)
+    axes_flat = axes.ravel()
+
+    if top_unit_indices.size == 0:
+        for ax in axes_flat:
+            ax.axis("off")
+        fig.text(0.5, 0.5, "No finite deviance explained values.", ha="center", va="center")
+    else:
+        for panel_index, ax in enumerate(axes_flat):
+            if panel_index >= top_unit_indices.size:
+                ax.axis("off")
+                continue
+
+            unit_index = int(top_unit_indices[panel_index])
+            observed_unit = observed[:, unit_index]
+            predicted_unit = predicted[:, unit_index]
+            valid = np.isfinite(observed_unit) & np.isfinite(predicted_unit)
+
+            if np.any(valid):
+                ax.scatter(
+                    observed_unit[valid],
+                    predicted_unit[valid],
+                    s=18,
+                    alpha=0.7,
+                    color=RIPPLE_FIGURE_COLOR,
+                )
+                max_value = float(
+                    max(
+                        np.nanmax(observed_unit[valid]),
+                        np.nanmax(predicted_unit[valid]),
+                        1.0,
+                    )
+                )
+                ax.plot([0.0, max_value], [0.0, max_value], linestyle="--", linewidth=1, color="black")
+                ax.set_xlim(0.0, max_value)
+                ax.set_ylim(0.0, max_value)
+            else:
+                ax.text(0.5, 0.5, "No finite held-out values", ha="center", va="center")
+
+            ax.set_title(f"V1 unit {int(unit_ids[unit_index])}\ndevexp={float(devexp[unit_index]):.3f}")
+            ax.set_xlabel("Observed spike count")
+            ax.set_ylabel("Predicted spike count")
+
+    fig.suptitle(
+        f"{animal_name} {date} {epoch} top devexp units ridge={ridge_strength:.1e}",
         fontsize=14,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1492,6 +1586,10 @@ def save_epoch_figures(
         f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
         f"{ridge_strength_suffix}_samplewise_metrics_summary.png"
     )
+    predicted_vs_observed_out_path = fig_dir / (
+        f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
+        f"{ridge_strength_suffix}_samplewise_top10_devexp_observed_vs_predicted.png"
+    )
     return [
         plot_epoch_metric_summary(
             metric_panels=metric_panels,
@@ -1500,7 +1598,15 @@ def save_epoch_figures(
             epoch=epoch,
             ridge_strength=ridge_strength,
             out_path=out_path,
-        )
+        ),
+        plot_top_deviance_predicted_vs_observed(
+            results=results,
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            ridge_strength=ridge_strength,
+            out_path=predicted_vs_observed_out_path,
+        ),
     ]
 
 

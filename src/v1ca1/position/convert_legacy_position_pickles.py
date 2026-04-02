@@ -1,4 +1,4 @@
-"""Convert legacy position pickles into the canonical combined parquet."""
+"""Convert legacy head/body position sources into the canonical combined parquet."""
 
 from __future__ import annotations
 
@@ -54,6 +54,59 @@ def _load_position_pickle_from_path(
     }
 
 
+def _match_epoch_from_filename(
+    input_path: Path,
+    epoch_tags: list[str],
+) -> str:
+    """Match one per-epoch pickle filename to exactly one known epoch tag."""
+    matched_epochs = [epoch for epoch in epoch_tags if input_path.stem.endswith(epoch)]
+    if len(matched_epochs) != 1:
+        raise ValueError(
+            "Could not map per-epoch position pickle to exactly one saved position epoch: "
+            f"{input_path}. Matched epochs: {matched_epochs!r}"
+        )
+    return matched_epochs[0]
+
+
+def _load_position_directory_from_path(
+    input_path: Path,
+    epoch_tags: list[str],
+) -> dict[str, np.ndarray]:
+    """Load one directory of per-epoch XY pickles keyed by the saved epoch tags."""
+    position_by_epoch: dict[str, np.ndarray] = {}
+    candidate_paths = sorted(input_path.glob("*.pkl"))
+    if not candidate_paths:
+        raise FileNotFoundError(f"No per-epoch position pickle files were found under {input_path}")
+
+    for candidate_path in candidate_paths:
+        epoch = _match_epoch_from_filename(candidate_path, epoch_tags)
+        if epoch in position_by_epoch:
+            raise ValueError(
+                "Found duplicate per-epoch position pickle mappings for one epoch: "
+                f"{epoch!r} in {input_path}"
+            )
+        with open(candidate_path, "rb") as file:
+            position_by_epoch[epoch] = coerce_position_array(pickle.load(file))
+
+    return position_by_epoch
+
+
+def _load_position_data_from_path(
+    input_path: Path,
+    epoch_tags: list[str],
+) -> dict[str, np.ndarray]:
+    """Load one position source from either a session pickle or per-epoch directory."""
+    input_path = Path(input_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Position file not found: {input_path}")
+    if input_path.is_dir():
+        return _load_position_directory_from_path(
+            input_path,
+            epoch_tags,
+        )
+    return _load_position_pickle_from_path(input_path)
+
+
 def _validate_epoch_subset(
     position_by_epoch: dict[str, np.ndarray],
     epoch_tags: list[str],
@@ -95,7 +148,7 @@ def convert_legacy_position_pickles(
     output_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     overwrite: bool = False,
 ) -> Path:
-    """Convert one session's legacy head/body pickles into one combined parquet."""
+    """Convert one session's legacy head/body position sources into one combined parquet."""
     import pandas as pd
 
     analysis_path = get_analysis_path(
@@ -112,11 +165,13 @@ def convert_legacy_position_pickles(
     body_position_path = Path(body_position_path)
 
     epoch_tags, timestamps_position, timestamp_source = load_position_timestamps(analysis_path)
-    head_position = _load_position_pickle_from_path(
+    head_position = _load_position_data_from_path(
         head_position_path,
+        epoch_tags,
     )
-    body_position = _load_position_pickle_from_path(
+    body_position = _load_position_data_from_path(
         body_position_path,
+        epoch_tags,
     )
 
     _validate_epoch_subset(
@@ -239,13 +294,13 @@ def parse_arguments() -> argparse.Namespace:
         "--head-position-path",
         type=Path,
         required=True,
-        help="Path to the legacy head-position pickle.",
+        help="Path to the legacy head-position pickle or directory of per-epoch pickles.",
     )
     parser.add_argument(
         "--body-position-path",
         type=Path,
         required=True,
-        help="Path to the legacy body-position pickle.",
+        help="Path to the legacy body-position pickle or directory of per-epoch pickles.",
     )
     parser.add_argument(
         "--output-dirname",

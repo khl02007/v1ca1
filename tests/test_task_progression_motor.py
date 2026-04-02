@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -148,6 +149,116 @@ class _FakePopulationGLM:
     ) -> np.ndarray:
         del design, score_type, aggregate_sample_scores
         return np.zeros(response.shape[1], dtype=float)
+
+
+class _FakeCvSelection:
+    """Minimal xarray-like selection result exposing `.values`."""
+
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = np.asarray(values, dtype=float)
+
+
+class _FakeCvPooled:
+    """Minimal xarray-like DataArray for pooled CV metric lookup."""
+
+    def __init__(self, metric_values: dict[str, np.ndarray]) -> None:
+        self._metric_values = {
+            key: np.asarray(values, dtype=float) for key, values in metric_values.items()
+        }
+
+    def sel(self, *, cv_metric: str) -> _FakeCvSelection:
+        return _FakeCvSelection(self._metric_values[cv_metric])
+
+
+class _FakeFitDataset:
+    """Minimal dataset wrapper used by histogram plotting tests."""
+
+    def __init__(self, metric_values: dict[str, np.ndarray]) -> None:
+        self._cv_pooled = _FakeCvPooled(metric_values)
+        self.attrs = {
+            "animal_name": "L14",
+            "date": "20240611",
+            "region": "v1",
+            "epoch": "run1",
+        }
+
+    def __getitem__(self, key: str) -> _FakeCvPooled:
+        if key != "cv_pooled":
+            raise KeyError(key)
+        return self._cv_pooled
+
+
+class _FakeAxis:
+    """Simple matplotlib axis stand-in that records histogram calls."""
+
+    def __init__(self) -> None:
+        self.transAxes = object()
+        self.hist_calls: list[dict[str, object]] = []
+        self.ylabel: str | None = None
+
+    def axvline(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    def set_title(self, title: str) -> None:
+        del title
+
+    def set_xlabel(self, label: str) -> None:
+        del label
+
+    def set_ylabel(self, label: str) -> None:
+        self.ylabel = label
+
+    def text(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    def legend(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    def hist(self, values, **kwargs) -> None:
+        self.hist_calls.append(
+            {
+                "values": np.asarray(values, dtype=float),
+                "kwargs": kwargs,
+            }
+        )
+
+
+class _FakeFigure:
+    """Simple matplotlib figure stand-in for save/close verification."""
+
+    def __init__(self) -> None:
+        self.savefig_calls: list[dict[str, object]] = []
+
+    def suptitle(self, title: str, fontsize: float) -> None:
+        del title, fontsize
+
+    def savefig(self, out_path: Path, dpi: int, bbox_inches: str) -> None:
+        self.savefig_calls.append(
+            {"out_path": out_path, "dpi": dpi, "bbox_inches": bbox_inches}
+        )
+
+
+class _FakePyplot(types.ModuleType):
+    """Minimal `matplotlib.pyplot` replacement for histogram plotting tests."""
+
+    def __init__(self) -> None:
+        super().__init__("matplotlib.pyplot")
+        self.subplots_calls: list[dict[str, object]] = []
+        self.closed_figures: list[_FakeFigure] = []
+        self.axes_grid = np.asarray(
+            [[_FakeAxis(), _FakeAxis()], [_FakeAxis(), _FakeAxis()]],
+            dtype=object,
+        )
+        self.figure = _FakeFigure()
+
+    def subplots(self, nrows: int, ncols: int, **kwargs):
+        self.subplots_calls.append(
+            {"nrows": nrows, "ncols": ncols, "kwargs": kwargs}
+        )
+        return self.figure, self.axes_grid
+
+    def close(self, fig: _FakeFigure) -> None:
+        self.closed_figures.append(fig)
 
 
 def _install_fake_jax(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,3 +479,66 @@ def test_fit_motor_task_progression_place_epoch_adds_hd_acc_spline_feature(
     ]
     assert fit_result["motor_standardization"] is None
     assert fit_result["coef"]["motor"]["coef_motor"].shape == (17, 2)
+
+
+def test_build_histogram_bin_edges_always_includes_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    bin_edges = module.build_histogram_bin_edges(np.asarray([0.2, 0.4, 0.9], dtype=float))
+
+    assert np.any(np.isclose(bin_edges, 0.0))
+    assert np.all(np.diff(bin_edges) > 0.0)
+
+
+def test_plot_log_likelihood_difference_histograms_uses_two_rows_and_no_outlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+    fake_pyplot = _FakePyplot()
+    fake_matplotlib = types.ModuleType("matplotlib")
+    fake_matplotlib.pyplot = fake_pyplot
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    fit_dataset = _FakeFitDataset(
+        {
+            "dll_motor_tp_vs_motor_bits_per_spike": np.asarray([0.1, 0.4, 0.8], dtype=float),
+            "dll_motor_place_vs_motor_bits_per_spike": np.asarray(
+                [0.2, 0.5, 0.7], dtype=float
+            ),
+            "dll_motor_tp_vs_tp_only_bits_per_spike": np.asarray(
+                [-0.3, 0.2, 0.6], dtype=float
+            ),
+            "dll_motor_place_vs_place_only_bits_per_spike": np.asarray(
+                [-0.4, -0.1, 0.3], dtype=float
+            ),
+        }
+    )
+
+    module.plot_log_likelihood_difference_histograms(
+        fit_dataset,
+        out_path=Path("/tmp/task_progression_motor_ll_hist.png"),
+    )
+
+    assert fake_pyplot.subplots_calls == [
+        {
+            "nrows": 2,
+            "ncols": 2,
+            "kwargs": {
+                "figsize": (12, 8.4),
+                "constrained_layout": True,
+                "sharey": True,
+            },
+        }
+    ]
+    assert fake_pyplot.axes_grid[0, 0].ylabel == "Minus Motor\nFraction of units"
+    assert fake_pyplot.axes_grid[1, 0].ylabel == "Minus TP / Place-only\nFraction of units"
+
+    for axis in fake_pyplot.axes_grid.ravel():
+        assert len(axis.hist_calls) == 1
+        hist_kwargs = axis.hist_calls[0]["kwargs"]
+        assert hist_kwargs["edgecolor"] == "none"
+        assert hist_kwargs["linewidth"] == 0.0
+        assert np.any(np.isclose(np.asarray(hist_kwargs["bins"], dtype=float), 0.0))

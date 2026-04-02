@@ -26,6 +26,7 @@ from v1ca1.ripple.ripple_glm import (
     load_ripple_tables_from_interval_output,
     load_ripple_tables_from_legacy_pickle,
     parse_arguments,
+    plot_metric_summary_axis,
     remove_duplicate_ripples,
     save_epoch_figures,
     validate_arguments,
@@ -254,6 +255,17 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         "ca1_unit_ids": np.array([101, 102, 103]),
         "coef_ca1_unit_ids": np.array([101, 103]),
         "n_ripples": 8,
+        "ripple_window_start_s": np.array([1.0, 2.0, 3.0], dtype=float),
+        "ripple_window_end_s": np.array([1.2, 2.2, 3.2], dtype=float),
+        "ripple_fold_index": np.array([0, 1, 0], dtype=int),
+        "ripple_observed_count_oof": np.array(
+            [[1.0, 0.0], [0.0, 2.0], [3.0, 1.0]],
+            dtype=float,
+        ),
+        "ripple_predicted_count_oof": np.array(
+            [[0.8, 0.1], [0.2, 1.8], [2.7, 1.2]],
+            dtype=float,
+        ),
         "pseudo_r2_ripple_folds": np.array([[0.2, 0.4], [0.4, 0.6]], dtype=float),
         "mae_ripple_folds": np.array([[0.3, 0.7], [0.5, 0.9]], dtype=float),
         "devexp_ripple_folds": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float),
@@ -306,17 +318,35 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         },
     )
 
+    assert dataset.sizes["sample"] == 3
     assert dataset.sizes["fold"] == 2
     assert dataset.sizes["shuffle"] == 2
     assert dataset.sizes["unit"] == 2
     assert dataset.sizes["coef_source_unit"] == 2
+    assert np.array_equal(dataset.coords["sample"].values, [0, 1, 2])
     assert np.array_equal(dataset.coords["unit"].values, [11, 12])
     assert np.array_equal(dataset["ca1_unit_id"].values, [101, 102, 103])
     assert np.array_equal(dataset["coef_ca1_unit_id"].values, [101, 103])
+    assert dataset["ripple_window_start_s"].dims == ("sample",)
+    assert dataset["ripple_window_end_s"].dims == ("sample",)
+    assert dataset["ripple_fold_index"].dims == ("sample",)
+    assert dataset["ripple_observed_count_oof"].dims == ("sample", "unit")
+    assert dataset["ripple_predicted_count_oof"].dims == ("sample", "unit")
     assert dataset["pseudo_r2_ripple_folds"].dims == ("fold", "unit")
     assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
     assert dataset["coef_ca1_full_all"].dims == ("coef_source_unit", "unit")
     assert dataset["coef_intercept_full_all"].dims == ("unit",)
+    assert np.allclose(dataset["ripple_window_start_s"].values, [1.0, 2.0, 3.0])
+    assert np.allclose(dataset["ripple_window_end_s"].values, [1.2, 2.2, 3.2])
+    assert np.array_equal(dataset["ripple_fold_index"].values, [0, 1, 0])
+    assert np.allclose(
+        dataset["ripple_observed_count_oof"].values,
+        [[1.0, 0.0], [0.0, 2.0], [3.0, 1.0]],
+    )
+    assert np.allclose(
+        dataset["ripple_predicted_count_oof"].values,
+        [[0.8, 0.1], [0.2, 1.8], [2.7, 1.2]],
+    )
     assert np.allclose(dataset["coef_ca1_full_all"].values, [[0.1, 0.2], [0.3, 0.4]])
     assert np.allclose(dataset["coef_intercept_full_all"].values, [0.5, 0.6])
     assert np.allclose(dataset["ripple_pseudo_r2_mean"].values, [0.3, 0.5])
@@ -330,7 +360,7 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
-    assert dataset.attrs["schema_version"] == "4"
+    assert dataset.attrs["schema_version"] == "5"
     assert dataset.attrs["ripple_selection_mode"] == "single"
     assert dataset.attrs["n_ripples_before_selection"] == 10
     assert dataset.attrs["n_ripples_removed_by_selection"] == 2
@@ -441,6 +471,13 @@ def test_fit_ripple_glm_returns_full_fit_coefficients(
     assert results["n_ripples"] == 4
     assert np.array_equal(results["ca1_unit_ids"], [101, 102, 103])
     assert np.array_equal(results["coef_ca1_unit_ids"], [101, 102])
+    assert np.allclose(results["ripple_window_start_s"], [1.0, 2.0, 3.0, 4.0])
+    assert np.allclose(results["ripple_window_end_s"], [1.2, 2.2, 3.2, 4.2])
+    assert np.array_equal(results["ripple_fold_index"], [0, 0, 1, 1])
+    assert results["ripple_observed_count_oof"].shape == (4, 2)
+    assert results["ripple_predicted_count_oof"].shape == (4, 2)
+    assert np.all(np.isfinite(results["ripple_observed_count_oof"]))
+    assert np.all(np.isfinite(results["ripple_predicted_count_oof"]))
     assert results["coef_ca1_full_all"].shape == (2, 2)
     assert results["coef_intercept_full_all"].shape == (2,)
     assert np.allclose(results["coef_ca1_full_all"], [[1.0, 2.0], [3.0, 4.0]])
@@ -538,6 +575,51 @@ def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:
     assert np.allclose(figure_data["ripple_p_value"], [2.0 / 3.0, 1.0])
 
 
+def test_plot_metric_summary_axis_moves_annotation_to_bottom_right_without_legend() -> None:
+    class FakeAxis:
+        def __init__(self) -> None:
+            self.transAxes = object()
+            self.text_calls: list[dict[str, object]] = []
+            self.legend_calls = 0
+
+        def scatter(self, *args, **kwargs) -> None:
+            return None
+
+        def axhline(self, *args, **kwargs) -> None:
+            return None
+
+        def text(self, x, y, text, **kwargs) -> None:
+            self.text_calls.append({"x": x, "y": y, "text": text, **kwargs})
+
+        def legend(self, *args, **kwargs) -> None:
+            self.legend_calls += 1
+
+        def set_xlabel(self, *args, **kwargs) -> None:
+            return None
+
+        def set_ylabel(self, *args, **kwargs) -> None:
+            return None
+
+        def set_title(self, *args, **kwargs) -> None:
+            return None
+
+    ax = FakeAxis()
+
+    plot_metric_summary_axis(
+        ax=ax,
+        ripple_values=np.array([0.2, 0.4], dtype=float),
+        ripple_p_value=np.array([0.01, 0.2], dtype=float),
+        metric_label="Pseudo R^2",
+    )
+
+    assert ax.legend_calls == 0
+    assert len(ax.text_calls) == 1
+    assert ax.text_calls[0]["x"] == pytest.approx(0.98)
+    assert ax.text_calls[0]["y"] == pytest.approx(0.02)
+    assert ax.text_calls[0]["ha"] == "right"
+    assert ax.text_calls[0]["va"] == "bottom"
+
+
 def test_empirical_p_values_treat_near_equal_shuffle_means_as_ties() -> None:
     observed = np.array([0.30000000000000004, 0.4], dtype=float)
     null_samples = np.array(
@@ -592,20 +674,33 @@ def test_parse_arguments_rejects_removed_pre_flags(monkeypatch) -> None:
         parse_arguments()
 
 
-def test_save_epoch_figures_returns_one_combined_metric_path(monkeypatch, tmp_path) -> None:
+def test_save_epoch_figures_returns_metric_and_prediction_paths(monkeypatch, tmp_path) -> None:
     metric_calls: list[dict[str, object]] = []
+    prediction_calls: list[dict[str, object]] = []
 
     def fake_plot_epoch_metric_summary(**kwargs):
         out_path = kwargs["out_path"]
         metric_calls.append(kwargs)
         return out_path
 
+    def fake_plot_top_deviance_predicted_vs_observed(**kwargs):
+        out_path = kwargs["out_path"]
+        prediction_calls.append(kwargs)
+        return out_path
+
     monkeypatch.setattr(
         "v1ca1.ripple.ripple_glm.plot_epoch_metric_summary",
         fake_plot_epoch_metric_summary,
     )
+    monkeypatch.setattr(
+        "v1ca1.ripple.ripple_glm.plot_top_deviance_predicted_vs_observed",
+        fake_plot_top_deviance_predicted_vs_observed,
+    )
 
     results = {
+        "v1_unit_ids": np.array([11, 12], dtype=int),
+        "ripple_observed_count_oof": np.ones((2, 2), dtype=float),
+        "ripple_predicted_count_oof": np.ones((2, 2), dtype=float),
         "pseudo_r2_ripple_folds": np.ones((2, 2), dtype=float),
         "pseudo_r2_ripple_shuff_folds": np.ones((2, 3, 2), dtype=float),
         "mae_ripple_folds": np.ones((2, 2), dtype=float),
@@ -627,11 +722,14 @@ def test_save_epoch_figures_returns_one_combined_metric_path(monkeypatch, tmp_pa
         ridge_strength=1e-1,
     )
 
-    assert len(figure_paths) == 1
+    assert len(figure_paths) == 2
     assert len(metric_calls) == 1
+    assert len(prediction_calls) == 1
     assert all("ll" not in path.name for path in figure_paths)
     assert figure_paths[0].name.endswith("samplewise_metrics_summary.png")
+    assert figure_paths[1].name.endswith("samplewise_top10_devexp_observed_vs_predicted.png")
     assert "_samplewise_" in figure_paths[0].name
+    assert "_samplewise_" in figure_paths[1].name
     metric_panels = metric_calls[0]["metric_panels"]
     assert len(metric_panels) == 4
     pseudo_r2_panel = next(panel for panel in metric_panels if panel["metric_label"] == "Pseudo R^2")

@@ -33,7 +33,6 @@ lap sampling and repeat construction in this navigation setting.
 
 import argparse
 import math
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
@@ -47,6 +46,8 @@ import track_linearization as tl
 
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
     build_movement_interval,
     build_speed_tsd,
     compute_movement_firing_rates,
@@ -54,7 +55,7 @@ from v1ca1.helper.session import (
     get_run_epochs,
     load_ephys_timestamps_all,
     load_epoch_tags,
-    load_position_data,
+    load_position_data_with_precedence,
     load_position_timestamps,
     load_spikes_by_region,
     load_trajectory_time_bounds,
@@ -91,6 +92,7 @@ DEFAULT_BOOTSTRAP_N_BIN_PERMS = 5
 DEFAULT_RANDOM_SEED = 47
 DEFAULT_GROUPMEAN_N_DRAWS = 5000
 DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
+DEFAULT_DARK_RATE_THRESHOLD_HZ = 0.5
 
 # Shape notation used throughout this module:
 #   R = number of disjoint repeat groups of laps
@@ -99,13 +101,6 @@ DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
 #   F[r, c, n] = tuning-curve value for neuron n in condition c for repeat group r
 # This mirrors the paper's repeat-by-stimulus formulation, but here conditions are
 # spatial bins and repeats are grouped laps rather than repeated image presentations.
-
-
-def _load_pickle(path: Path) -> Any:
-    """Load one pickle artifact from disk."""
-    with open(path, "rb") as file_pointer:
-        return pickle.load(file_pointer)
-
 
 def _get_default_run_epochs(run_epochs: list[str]) -> list[str]:
     """Return the current default subset of run epochs used by the legacy script."""
@@ -132,26 +127,35 @@ def select_run_epochs(
 def get_light_and_dark_epochs(
     run_epochs: list[str],
     light_epoch: str | None,
-    dark_epoch: str | None,
-) -> tuple[str, str]:
-    """Return validated light and dark epoch labels for one session."""
+    dark_epoch: str,
+) -> tuple[list[str], str]:
+    """Return validated light and dark epoch selections for one session."""
     if not run_epochs:
         raise ValueError("No run epochs were selected.")
 
-    selected_light_epoch = light_epoch or run_epochs[0]
-    selected_dark_epoch = dark_epoch or run_epochs[-1]
-    missing = [
-        epoch
-        for epoch in (selected_light_epoch, selected_dark_epoch)
-        if epoch not in run_epochs
-    ]
-    if missing:
+    if dark_epoch not in run_epochs:
         raise ValueError(
-            f"Requested epochs were not found in run epochs {run_epochs!r}: {missing!r}"
+            f"Requested dark epoch was not found in run epochs {run_epochs!r}: "
+            f"{dark_epoch!r}"
         )
-    if selected_light_epoch == selected_dark_epoch:
-        raise ValueError("Light and dark epochs must be different.")
-    return selected_light_epoch, selected_dark_epoch
+
+    if light_epoch is not None:
+        if light_epoch not in run_epochs:
+            raise ValueError(
+                f"Requested light epoch was not found in run epochs {run_epochs!r}: "
+                f"{light_epoch!r}"
+            )
+        if light_epoch == dark_epoch:
+            raise ValueError("Light and dark epochs must be different.")
+        selected_light_epochs = [light_epoch]
+    else:
+        selected_light_epochs = [epoch for epoch in run_epochs if epoch != dark_epoch]
+        if not selected_light_epochs:
+            raise ValueError(
+                "No light epochs remain after excluding the requested dark epoch."
+            )
+
+    return selected_light_epochs, dark_epoch
 
 
 def load_meme_session(
@@ -180,13 +184,41 @@ def load_meme_session(
             f"Ephys epochs: {epoch_list!r}; position epochs: {position_epoch_tags!r}"
         )
     timestamps_ephys_all_ptp, _ = load_ephys_timestamps_all(analysis_path)
-    position_dict = load_position_data(analysis_path, epoch_list)
-    run_epochs = get_run_epochs(epoch_list)
+    available_run_epochs = get_run_epochs(epoch_list)
+    position_dict_all, position_source = load_position_data_with_precedence(
+        analysis_path,
+        position_source="clean_dlc_head",
+        clean_dlc_input_dirname=DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+        clean_dlc_input_name=DEFAULT_CLEAN_DLC_POSITION_NAME,
+        validate_timestamps=True,
+    )
+    run_epochs: list[str] = []
+    skipped_run_epochs: list[dict[str, str]] = []
+    for epoch in available_run_epochs:
+        if epoch not in position_dict_all:
+            skipped_run_epochs.append(
+                {"epoch": epoch, "reason": f"head position missing from {position_source}"}
+            )
+            continue
+        position_xy = np.asarray(position_dict_all[epoch], dtype=float)
+        if not np.isfinite(position_xy).any():
+            skipped_run_epochs.append(
+                {"epoch": epoch, "reason": f"head position is all NaN in {position_source}"}
+            )
+            continue
+        run_epochs.append(epoch)
+
+    if not run_epochs:
+        raise ValueError(
+            "No run epochs have usable head position in the combined cleaned DLC "
+            f"position parquet {position_source}."
+        )
+
+    position_dict = {epoch: position_dict_all[epoch] for epoch in run_epochs}
     trajectory_times, _trajectory_source = load_trajectory_time_bounds(
         analysis_path,
         run_epochs,
     )
-    epoch_names = list(epoch_list[:-2])
     spikes_by_region = load_spikes_by_region(
         analysis_path,
         timestamps_ephys_all_ptp,
@@ -198,19 +230,19 @@ def load_meme_session(
             timestamps_position_dict[epoch],
             position_offset=position_offset,
         )
-        for epoch in epoch_names
+        for epoch in run_epochs
     }
     movement_by_epoch = {
         epoch: build_movement_interval(
             speed_by_epoch[epoch],
             speed_threshold_cm_s=speed_threshold_cm_s,
         )
-        for epoch in epoch_names
+        for epoch in run_epochs
     }
     movement_firing_rates_by_region = compute_movement_firing_rates(
         spikes_by_region,
         movement_by_epoch,
-        epoch_names,
+        run_epochs,
     )
     track_graphs_by_side: dict[str, Any] = {}
     edge_orders_by_side: dict[str, list[tuple[int, int]]] = {}
@@ -227,6 +259,8 @@ def load_meme_session(
         "analysis_path": analysis_path,
         "epoch_list": epoch_list,
         "run_epochs": run_epochs,
+        "skipped_run_epochs": skipped_run_epochs,
+        "position_source": position_source,
         "timestamps_position_dict": timestamps_position_dict,
         "position_dict": position_dict,
         "trajectory_times": trajectory_times,
@@ -425,7 +459,7 @@ def prepare_F(
       less noisy but still approximately independent
     - optional neuron filtering is based on dark-epoch movement firing rate,
       which keeps the cell inclusion rule fixed across compared epochs
-    - if ``lap_fraction < 1``, each bootstrap draw first subsamples laps before
+    - if ``lap_fraction < 1``, each lap-resampling draw first subsamples laps before
       constructing repeat groups
 
     The returned tensor therefore contains grouped estimates of noise-reduced
@@ -512,13 +546,14 @@ def prepare_F(
         lap_groups = _split_lap_indices_into_groups(selected_laps, n_groups, rng=rng)
 
         for g_inds in lap_groups:
+            g_inds = np.sort(g_inds)
             g_starts = traj_starts[traj][g_inds]
             g_ends = traj_ends[traj][g_inds]
             g_ep = nap.IntervalSet(start=g_starts, end=g_ends)
 
             # Restrict to movement so occupancy and firing rates reflect active
             # traversal of the track rather than immobility periods.
-            use_ep = g_ep.intersect(movement_epoch.time_support)
+            use_ep = g_ep.intersect(movement_epoch)
 
             # Tuning curve for one repeat group, shape (neurons, bins).
             tc = nap.compute_tuning_curves(
@@ -580,7 +615,7 @@ def prepare_F(
     # Apply a fixed inclusion rule based on dark-epoch movement firing rate so
     # light/dark comparisons are not driven by epoch-specific cell selection.
     if fr_dark_threshold is not None:
-        keep_neurons = np.asarray(fr_dark > fr_dark_threshold)
+        keep_neurons = np.asarray(fr_dark >= fr_dark_threshold)
         F = F[:, :, keep_neurons]
 
     # final safety
@@ -738,7 +773,7 @@ def meme_eigenmoments_and_pr_mc(
     return MemeMCResult(moments=moments, pr=pr, mc_moments=mc_moments, mc_pr=mc_pr)
 
 
-def bootstrap_meme_pr(
+def lap_subsample_meme_pr(
     session: dict[str, Any],
     epoch: str,
     region: str,
@@ -759,23 +794,24 @@ def bootstrap_meme_pr(
     ci: float = DEFAULT_BOOTSTRAP_CI,
     center: Literal["mean", "median"] = "mean",
 ) -> BootstrapPRResult:
-    """Estimate uncertainty in spatial MEME PR by resampling laps.
+    """Estimate uncertainty in spatial MEME PR by repeated lap subsampling.
 
-    The bootstrap unit here is the lap, because laps are the natural repeated
-    observations available in this dataset. Each bootstrap draw resamples laps,
-    rebuilds the grouped tuning-curve tensor ``F``, and reruns the full MEME
-    estimator. This quantifies uncertainty in the adapted spatial pipeline,
-    rather than uncertainty for the paper's original repeated-stimulus design.
+    The resampling unit here is the lap, because laps are the natural repeated
+    observations available in this dataset. Each draw subsamples laps without
+    replacement, rebuilds the grouped tuning-curve tensor ``F``, and reruns the
+    full MEME estimator. This quantifies uncertainty in the adapted spatial
+    pipeline, rather than uncertainty for the paper's original repeated-stimulus
+    design.
 
-    Concretely, for each trajectory in each bootstrap draw, the code:
+    Concretely, for each trajectory in each draw, the code:
     1. samples a fraction of laps without replacement
     2. repartitions those sampled laps into disjoint repeat groups
     3. recomputes grouped tuning curves and occupancy filtering
     4. reruns MEME and stores the resulting PR
 
-    The resulting bootstrap distribution therefore reflects uncertainty from
-    finite lap sampling and from the repeat-construction procedure itself, not
-    just from the final Monte Carlo eigenmoment calculation.
+    The resulting lap-subsampling distribution therefore reflects uncertainty
+    from finite lap sampling and from the repeat-construction procedure itself,
+    not just from the final Monte Carlo eigenmoment calculation.
     """
     rng = np.random.default_rng(random_seed)
     pr_samples = np.full((n_bootstraps,), np.nan, dtype=np.float64)
@@ -809,7 +845,8 @@ def bootstrap_meme_pr(
             pr_samples[b] = res_b.pr
         except ValueError as exc:
             print(
-                f"[bootstrap_meme_pr] skipping bootstrap {b} for {region} {epoch}: {exc}"
+                f"[lap_subsample_meme_pr] skipping subsample {b} "
+                f"for {region} {epoch}: {exc}"
             )
 
     summary = summarize_mc_pr(pr_samples, ci=ci, center=center)
@@ -819,6 +856,10 @@ def bootstrap_meme_pr(
         n_bootstraps=n_bootstraps,
         n_successful=summary.n_eff,
     )
+
+
+# Backward-compatible alias for older imports.
+bootstrap_meme_pr = lap_subsample_meme_pr
 
 
 def _meme_moments_from_pair(
@@ -894,8 +935,8 @@ def _meme_moments_from_pair(
 @dataclass(frozen=True)
 class NaiveSpectrumResult:
     """
-    Naive (sample) eigenspectrum + participation ratio computed directly
-    from a covariance matrix estimated from F.
+    Repeat-averaged covariance eigenspectrum + participation ratio computed
+    directly from a covariance matrix estimated from F.
 
     Attributes
     ----------
@@ -924,8 +965,8 @@ def naive_cov_eigs_and_pr(
     eps: float = 1e-12,
 ) -> NaiveSpectrumResult:
     """
-    Compute a naive neuron-by-neuron covariance from F and return its eigenspectrum
-    and participation ratio (PR).
+    Compute a covariance-based alternative dimensionality estimate from F and
+    return its eigenspectrum and participation ratio (PR).
 
     Parameters
     ----------
@@ -959,9 +1000,9 @@ def naive_cov_eigs_and_pr(
 
     Notes
     -----
-    - This is a direct sample-covariance baseline, included for comparison with
-      MEME. As in the paper's discussion of naive covariance-style estimators,
-      it is generally expected to be more noise-biased than MEME.
+    - This is a covariance/PCA-based alternative dimensionality estimate. When
+      used with ``mode="mean_repeat"``, it reflects the repeat-averaged tuning
+      map rather than the repeat-aware MEME estimator.
     - PR computed from eigenvalues is:
         $$
         \\mathrm{PR} = \\frac{(\\sum_i \\lambda_i)^2}{\\sum_i \\lambda_i^2}.
@@ -1329,12 +1370,12 @@ def plot_eigenspectrum_comparison(
     metric: Literal["eigenvalue", "variance_explained"] = "variance_explained",
     max_rank: int = 100,
 ) -> Path:
-    """Plot MEME and naive eigenspectra for visual comparison.
+    """Plot MEME and repeat-averaged PCA eigenspectra for visual comparison.
 
     These figures are intended as a geometry check: the MEME panel shows the
-    fitted signal eigenspectrum inferred from eigenmoments, while the naive
-    panel shows the direct sample eigenspectrum from the same grouped spatial
-    tuning data.
+    fitted signal eigenspectrum inferred from eigenmoments, while the
+    repeat-averaged PCA panel shows a covariance-based spectrum from the same
+    grouped spatial tuning data.
     """
 
     # Setup y-label
@@ -1372,7 +1413,7 @@ def plot_eigenspectrum_comparison(
             label=f"{epoch} (α={pl_fit.alpha:.2f})",
         )
 
-    # --- 2. NAIVE PLOTTING ---
+    # --- 2. REPEAT-AVERAGED PCA PLOTTING ---
     for epoch, eigenvalues in naive_eigenvalues.items():
         # Use full spectrum for total variance calculation
         full_evals = eigenvalues[:n_neurons]
@@ -1402,7 +1443,7 @@ def plot_eigenspectrum_comparison(
         a.set_xlim(1, limit)
 
     ax[0].set_title(f"MEME Estimation\n(First {limit} modes)")
-    ax[1].set_title(f"Naive PCA\n(First {limit} modes)")
+    ax[1].set_title(f"Repeat-averaged PCA\n(First {limit} modes)")
     ax[0].set_ylabel(ylabel)
 
     fig.suptitle(f"Region: {region} | Metric: {metric}")
@@ -1475,7 +1516,7 @@ def plot_broken_power_law_comparison(
         if pl_fit.k0 < limit:
             ax[0].axvline(pl_fit.k0, color=line.get_color(), linestyle=":", alpha=0.5)
 
-    # --- 2. NAIVE PLOTTING ---
+    # --- 2. REPEAT-AVERAGED PCA PLOTTING ---
     for epoch, eigenvalues in naive_eigenvalues.items():
         full_evals = eigenvalues[:n_neurons]
 
@@ -1502,7 +1543,7 @@ def plot_broken_power_law_comparison(
         a.set_xlim(1, limit)
 
     ax[0].set_title(f"MEME Estimation\n(Broken Power Law Fit)")
-    ax[1].set_title(f"Naive PCA\n(Sample Eigenspectrum)")
+    ax[1].set_title(f"Repeat-averaged PCA\n(Covariance Eigenspectrum)")
     ax[0].set_ylabel(ylabel)
 
     fig.suptitle(f"Region: {region} | Metric: {metric} | Broken Power Law")
@@ -1524,7 +1565,7 @@ def plot_pr(region, meme_pr, naive_pr, save_path) -> Path:
     # Sort epochs if needed, assuming they are strings they might need sorting logic
 
     ax.plot(epochs, list(meme_pr.values()), "-o", label="MEME")
-    ax.plot(epochs, list(naive_pr.values()), "-s", label="Naive")
+    ax.plot(epochs, list(naive_pr.values()), "-s", label="Repeat-averaged PCA")
 
     ax.set_ylabel("Participation Ratio")
     ax.set_title(f"Region: {region}")
@@ -1548,7 +1589,7 @@ def plot_pr_light_dark_epochwise(
     random_seed: int = 0,
     title_suffix: str = "",
 ):
-    """Plot per-epoch PR estimates with bootstrap uncertainty by condition.
+    """Plot per-epoch PR estimates with lap-subsampling uncertainty by condition.
 
     This summarizes the adapted MEME output at the epoch level rather than the
     eigenspectrum level, separating the selected light and dark epochs.
@@ -1595,11 +1636,11 @@ def plot_pr_light_dark_epochwise(
     ax.set_xticks([cond_x["dark"], cond_x["light"]])
     ax.set_xticklabels(["Dark", "Light"])
     ax.set_ylabel("Participation Ratio (PR)")
-    ax.set_title(f"{region}: PR by epoch with {ci:.0f}% CI{title_suffix}")
+    ax.set_title(f"{region}: PR by epoch with {ci:.0f}% interval{title_suffix}")
     ax.grid(True, alpha=0.25)
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_epochwise_ci{int(ci)}.png"
+    out = save_path / f"{region}_pr_light_vs_dark_epochwise_lap_subsampling_ci{int(ci)}.png"
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1715,7 +1756,7 @@ def plot_pr_light_dark_groupmeans(
     ax.set_xticks(xs)
     ax.set_xticklabels(["Dark (mean across epochs)", "Light (mean across epochs)"])
     ax.set_ylabel("Participation Ratio (PR)")
-    ax.set_title(f"{region}: mean PR Light vs Dark ({ci:.0f}% CI){title_suffix}")
+    ax.set_title(f"{region}: mean PR Light vs Dark ({ci:.0f}% interval){title_suffix}")
     ax.grid(True, alpha=0.25)
 
     # annotate delta
@@ -1730,7 +1771,7 @@ def plot_pr_light_dark_groupmeans(
     )
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_groupmean_ci{int(ci)}.png"
+    out = save_path / f"{region}_pr_light_vs_dark_groupmean_lap_subsampling_ci{int(ci)}.png"
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1742,7 +1783,7 @@ def get_region_dark_rate_threshold(region: str) -> float | None:
     """Return the dark-epoch firing-rate threshold used for neuron filtering."""
     if region not in DEFAULT_REGIONS:
         raise ValueError(f"Unsupported region: {region!r}")
-    return None
+    return DEFAULT_DARK_RATE_THRESHOLD_HZ
 
 
 def _stable_region_neuron_count(region_counts: dict[str, int], region: str) -> int:
@@ -1760,7 +1801,7 @@ def save_epoch_summary_tables(
     out_dir: Path,
     *,
     regions: list[str],
-    run_epochs: list[str],
+    analysis_epochs: list[str],
     epoch_to_condition: dict[str, str],
     n_neurons_by_region: dict[str, dict[str, int]],
     meme_pr: dict[str, dict[str, float]],
@@ -1772,38 +1813,38 @@ def save_epoch_summary_tables(
     """Write one parquet summary row per region and epoch.
 
     These parquet tables are compact analysis summaries. They record scalar
-    outputs of the MEME workflow for each region/epoch pair, not the full
+    outputs of the MEME workflow for each analyzed region/epoch pair, not the full
     vector-valued MEME objects such as all eigenmoments or full eigenspectra.
     """
     saved_paths: list[Path] = []
     for region in regions:
         fr_threshold = fr_dark_threshold_by_region[region]
-        for epoch in run_epochs:
+        for epoch in analysis_epochs:
             summary = meme_boot_summary[region][epoch]
             table = pd.DataFrame(
                 [
                     {
                         "region": region,
                         "epoch": epoch,
-                        "condition": epoch_to_condition[epoch],
+                        "condition": epoch_to_condition.get(epoch),
                         "n_neurons": n_neurons_by_region[region][epoch],
                         "meme_pr": meme_pr[region][epoch],
-                        "naive_pr": naive_pr[region][epoch],
-                        "bootstrap_pr_center": summary.pr_center,
-                        "bootstrap_pr_ci_low": summary.ci_low,
-                        "bootstrap_pr_ci_high": summary.ci_high,
-                        "bootstrap_pr_n_eff": summary.n_eff,
+                        "repeat_averaged_pca_pr": naive_pr[region][epoch],
+                        "lap_subsample_pr_center": summary.pr_center,
+                        "lap_subsample_pr_ci_low": summary.ci_low,
+                        "lap_subsample_pr_ci_high": summary.ci_high,
+                        "lap_subsample_pr_n_eff": summary.n_eff,
                         "fr_dark_threshold_hz": (
                             np.nan if fr_threshold is None else float(fr_threshold)
                         ),
                         "bin_size_cm": settings["bin_size_cm"],
                         "n_groups": settings["n_groups"],
-                        "lap_fraction": settings["bootstrap_lap_fraction"],
-                        "n_bootstraps": settings["n_bootstraps"],
+                        "lap_fraction": settings["lap_subsample_fraction"],
+                        "n_lap_subsamples": settings["n_lap_subsamples"],
                         "n_pairings_full": settings["full_n_pairings"],
                         "n_bin_perms_full": settings["full_n_bin_perms"],
-                        "n_pairings_bootstrap": settings["bootstrap_n_pairings"],
-                        "n_bin_perms_bootstrap": settings["bootstrap_n_bin_perms"],
+                        "n_pairings_lap_subsample": settings["lap_subsample_n_pairings"],
+                        "n_bin_perms_lap_subsample": settings["lap_subsample_n_bin_perms"],
                     }
                 ]
             )
@@ -1817,7 +1858,7 @@ def save_light_dark_comparison_tables(
     out_dir: Path,
     *,
     regions: list[str],
-    light_epoch: str,
+    light_epochs: list[str],
     dark_epoch: str,
     comparison_draws_by_region: dict[str, dict[str, ArrayF]],
     ci: float,
@@ -1826,12 +1867,13 @@ def save_light_dark_comparison_tables(
 ) -> list[Path]:
     """Write one light-vs-dark comparison parquet per region.
 
-    Each table stores scalar summaries of the grouped bootstrap draw
+    Each table stores scalar summaries of the grouped lap-subsampling draw
     distributions used for the light/dark PR figures. The goal is to preserve
-    the comparison results in a tabular, downstream-friendly format while
-    leaving high-dimensional intermediate arrays in the optional legacy pickles.
+    the comparison results in a tabular, downstream-friendly format.
     """
     saved_paths: list[Path] = []
+    light_epoch_value = light_epochs[0] if len(light_epochs) == 1 else None
+    light_epochs_label = ",".join(light_epochs)
     for region in regions:
         dark_draws = comparison_draws_by_region[region]["dark_draws"]
         light_draws = comparison_draws_by_region[region]["light_draws"]
@@ -1846,7 +1888,9 @@ def save_light_dark_comparison_tables(
                     "region": region,
                     "summary_kind": "dark",
                     "dark_epoch": dark_epoch,
-                    "light_epoch": light_epoch,
+                    "light_epoch": light_epoch_value,
+                    "light_epochs": light_epochs_label,
+                    "n_light_epochs": len(light_epochs),
                     "pr_center": dark_summary.pr_center,
                     "pr_ci_low": dark_summary.ci_low,
                     "pr_ci_high": dark_summary.ci_high,
@@ -1857,7 +1901,9 @@ def save_light_dark_comparison_tables(
                     "region": region,
                     "summary_kind": "light",
                     "dark_epoch": dark_epoch,
-                    "light_epoch": light_epoch,
+                    "light_epoch": light_epoch_value,
+                    "light_epochs": light_epochs_label,
+                    "n_light_epochs": len(light_epochs),
                     "pr_center": light_summary.pr_center,
                     "pr_ci_low": light_summary.ci_low,
                     "pr_ci_high": light_summary.ci_high,
@@ -1868,7 +1914,9 @@ def save_light_dark_comparison_tables(
                     "region": region,
                     "summary_kind": "light_minus_dark",
                     "dark_epoch": dark_epoch,
-                    "light_epoch": light_epoch,
+                    "light_epoch": light_epoch_value,
+                    "light_epochs": light_epochs_label,
+                    "n_light_epochs": len(light_epochs),
                     "pr_center": delta_summary.pr_center,
                     "pr_ci_low": delta_summary.ci_low,
                     "pr_ci_high": delta_summary.ci_high,
@@ -1881,42 +1929,6 @@ def save_light_dark_comparison_tables(
         table.to_parquet(path, index=False)
         saved_paths.append(path)
     return saved_paths
-
-
-def save_legacy_pickles(
-    out_dir: Path,
-    *,
-    meme_pr: dict[str, dict[str, float]],
-    meme_moments: dict[str, dict[str, ArrayF]],
-    meme_boot_pr: dict[str, dict[str, ArrayF]],
-    meme_boot_summary: dict[str, dict[str, PRSummary]],
-    naive_pr: dict[str, dict[str, float]],
-    naive_eigenvalues: dict[str, dict[str, ArrayF]],
-    settings: dict[str, Any],
-) -> dict[str, Path]:
-    """Write compatibility pickles that match the legacy artifact families."""
-    saved_paths = {
-        "meme_results_pickle": out_dir / "meme_results.pkl",
-        "naive_results_pickle": out_dir / "naive_results.pkl",
-    }
-    with open(saved_paths["meme_results_pickle"], "wb") as file_pointer:
-        pickle.dump(
-            {
-                "pr": meme_pr,
-                "moments": meme_moments,
-                "bootstrap_pr": meme_boot_pr,
-                "bootstrap_summary": meme_boot_summary,
-                "settings": settings,
-            },
-            file_pointer,
-        )
-    with open(saved_paths["naive_results_pickle"], "wb") as file_pointer:
-        pickle.dump(
-            {"pca_pr": naive_pr, "eigenvalues": naive_eigenvalues},
-            file_pointer,
-        )
-    return saved_paths
-
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the MEME signal-dimension workflow."""
@@ -1936,12 +1948,15 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dark-epoch",
-        default=DEFAULT_DARK_EPOCH,
-        help=f"Epoch label to treat as dark. Default: {DEFAULT_DARK_EPOCH}",
+        required=True,
+        help="Epoch label to treat as dark.",
     )
     parser.add_argument(
         "--light-epoch",
-        help="Optional run epoch label to treat as light. Defaults to the first selected run epoch.",
+        help=(
+            "Optional run epoch label to treat as light. If omitted, all selected "
+            "run epochs other than --dark-epoch are treated as light."
+        ),
     )
     parser.add_argument(
         "--regions",
@@ -1983,19 +1998,22 @@ def parse_arguments() -> argparse.Namespace:
         "--bootstrap-lap-fraction",
         type=float,
         default=DEFAULT_BOOTSTRAP_LAP_FRACTION,
-        help=f"Fraction of laps sampled in each bootstrap draw. Default: {DEFAULT_BOOTSTRAP_LAP_FRACTION}",
+        help=(
+            "Fraction of laps sampled in each lap-subsampling draw. "
+            f"Default: {DEFAULT_BOOTSTRAP_LAP_FRACTION}"
+        ),
     )
     parser.add_argument(
         "--n-bootstraps",
         type=int,
         default=DEFAULT_N_BOOTSTRAPS,
-        help=f"Number of bootstrap resamples. Default: {DEFAULT_N_BOOTSTRAPS}",
+        help=f"Number of lap-subsampling draws. Default: {DEFAULT_N_BOOTSTRAPS}",
     )
     parser.add_argument(
         "--bootstrap-ci",
         type=float,
         default=DEFAULT_BOOTSTRAP_CI,
-        help=f"Bootstrap confidence interval width in percent. Default: {DEFAULT_BOOTSTRAP_CI}",
+        help=f"Interval width in percent for lap subsampling. Default: {DEFAULT_BOOTSTRAP_CI}",
     )
     parser.add_argument(
         "--full-n-pairings",
@@ -2013,13 +2031,19 @@ def parse_arguments() -> argparse.Namespace:
         "--bootstrap-n-pairings",
         type=int,
         default=DEFAULT_BOOTSTRAP_N_PAIRINGS,
-        help=f"Number of Monte Carlo pairing draws inside bootstrap estimation. Default: {DEFAULT_BOOTSTRAP_N_PAIRINGS}",
+        help=(
+            "Number of Monte Carlo pairing draws inside lap-subsampling "
+            f"estimation. Default: {DEFAULT_BOOTSTRAP_N_PAIRINGS}"
+        ),
     )
     parser.add_argument(
         "--bootstrap-n-bin-perms",
         type=int,
         default=DEFAULT_BOOTSTRAP_N_BIN_PERMS,
-        help=f"Number of bin permutations inside bootstrap estimation. Default: {DEFAULT_BOOTSTRAP_N_BIN_PERMS}",
+        help=(
+            "Number of bin permutations inside lap-subsampling estimation. "
+            f"Default: {DEFAULT_BOOTSTRAP_N_BIN_PERMS}"
+        ),
     )
     parser.add_argument(
         "--random-seed",
@@ -2030,17 +2054,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help=f"Directory for saved parquet tables and optional pickles. Default: analysis_path / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
+        help=f"Directory for saved parquet tables. Default: analysis_path / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
     )
     parser.add_argument(
         "--fig-dir",
         type=Path,
         help=f"Directory for saved figures. Default: analysis_path / 'figs' / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
-    )
-    parser.add_argument(
-        "--save-legacy-pickle",
-        action="store_true",
-        help="Also write the legacy MEME and naive pickle outputs.",
     )
     return parser.parse_args()
 
@@ -2050,11 +2069,11 @@ def main() -> None:
 
     High-level workflow:
     1. load one session and derive movement- and trajectory-aware state
-    2. choose run epochs plus one light/dark comparison pair
+    2. choose run epochs plus one light/dark comparison set
     3. build grouped spatial tuning tensors ``F`` for each region and epoch
-    4. estimate MEME and naive participation ratios
-    5. bootstrap lap-level uncertainty
-    6. save figures, parquet summaries, optional legacy pickles, and a run log
+    4. estimate MEME and repeat-averaged PCA participation ratios
+    5. estimate lap-subsampling uncertainty
+    6. save figures, parquet summaries, and a run log
     """
     args = parse_arguments()
     session = load_meme_session(
@@ -2069,12 +2088,14 @@ def main() -> None:
         session["run_epochs"],
         args.run_epochs,
     )
-    light_epoch, dark_epoch = get_light_and_dark_epochs(
+    light_epochs, dark_epoch = get_light_and_dark_epochs(
         run_epochs,
         args.light_epoch,
         args.dark_epoch,
     )
-    epoch_to_condition = {light_epoch: "light", dark_epoch: "dark"}
+    analysis_epochs = [dark_epoch] + [epoch for epoch in light_epochs if epoch != dark_epoch]
+    epoch_to_condition = {epoch: "light" for epoch in light_epochs}
+    epoch_to_condition[dark_epoch] = "dark"
 
     analysis_path = session["analysis_path"]
     out_dir = args.output_dir or (analysis_path / DEFAULT_MEME_OUTPUT_DIRNAME)
@@ -2082,30 +2103,33 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    bootstrap_random_seed = args.random_seed + 1000
+    lap_subsample_random_seed = args.random_seed + 1000
     settings = {
         "animal_name": args.animal_name,
         "date": args.date,
         "data_root": args.data_root,
         "regions": list(args.regions),
         "run_epochs": run_epochs,
-        "light_epoch": light_epoch,
+        "analysis_epochs": analysis_epochs,
+        "position_source": session["position_source"],
+        "skipped_run_epochs": session["skipped_run_epochs"],
+        "light_epoch": args.light_epoch,
+        "light_epochs": light_epochs,
         "dark_epoch": dark_epoch,
         "speed_threshold_cm_s": args.speed_threshold_cm_s,
         "position_offset": args.position_offset,
         "bin_size_cm": args.bin_size_cm,
         "n_groups": args.n_groups,
         "min_occupancy_s": args.min_occupancy_s,
-        "bootstrap_lap_fraction": args.bootstrap_lap_fraction,
-        "n_bootstraps": args.n_bootstraps,
-        "bootstrap_ci": args.bootstrap_ci,
+        "lap_subsample_fraction": args.bootstrap_lap_fraction,
+        "n_lap_subsamples": args.n_bootstraps,
+        "lap_subsample_ci": args.bootstrap_ci,
         "full_n_pairings": args.full_n_pairings,
         "full_n_bin_perms": args.full_n_bin_perms,
-        "bootstrap_n_pairings": args.bootstrap_n_pairings,
-        "bootstrap_n_bin_perms": args.bootstrap_n_bin_perms,
+        "lap_subsample_n_pairings": args.bootstrap_n_pairings,
+        "lap_subsample_n_bin_perms": args.bootstrap_n_bin_perms,
         "random_seed": args.random_seed,
-        "bootstrap_random_seed": bootstrap_random_seed,
-        "save_legacy_pickle": args.save_legacy_pickle,
+        "lap_subsample_random_seed": lap_subsample_random_seed,
         "output_dir": out_dir,
         "fig_dir": fig_dir,
     }
@@ -2123,7 +2147,7 @@ def main() -> None:
     }
 
     # Figure families:
-    # - eigenspectrum comparison: MEME vs naive geometry
+    # - eigenspectrum comparison: MEME and repeat-averaged PCA geometry
     # - broken power law: qualitative inspection of spectrum shape
     # - PR figures: scalar dimensionality summaries across epochs and conditions
     saved_figures: list[Path] = []
@@ -2131,7 +2155,7 @@ def main() -> None:
         fr_dark_threshold = fr_dark_threshold_by_region[region]
         print(f"\n=== Processing Region: {region} ===")
 
-        for epoch in run_epochs:
+        for epoch in analysis_epochs:
             print(f"  -- Epoch: {epoch}")
             F = prepare_F(
                 session,
@@ -2157,7 +2181,7 @@ def main() -> None:
             meme_moments[region][epoch] = res.moments
             meme_pr[region][epoch] = res.pr
 
-            boot = bootstrap_meme_pr(
+            boot = lap_subsample_meme_pr(
                 session,
                 epoch=epoch,
                 region=region,
@@ -2173,7 +2197,7 @@ def main() -> None:
                 n_pairings=args.bootstrap_n_pairings,
                 n_bin_perms=args.bootstrap_n_bin_perms,
                 max_repeat_pairs=None,
-                random_seed=bootstrap_random_seed,
+                random_seed=lap_subsample_random_seed,
                 ci=args.bootstrap_ci,
                 center="mean",
             )
@@ -2247,7 +2271,7 @@ def main() -> None:
                 center="mean",
                 annotate=True,
                 random_seed=0,
-                title_suffix=" (bootstrap over laps)",
+                title_suffix=" (lap subsampling)",
             )
         )
         groupmean_path, dark_draws, light_draws, delta_draws = plot_pr_light_dark_groupmeans(
@@ -2259,7 +2283,7 @@ def main() -> None:
             center="mean",
             n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
             random_seed=0,
-            title_suffix=" (bootstrap over laps)",
+            title_suffix=" (lap subsampling)",
         )
         saved_figures.append(groupmean_path)
         comparison_draws_by_region[region] = {
@@ -2271,7 +2295,7 @@ def main() -> None:
     saved_epoch_tables = save_epoch_summary_tables(
         out_dir,
         regions=list(args.regions),
-        run_epochs=run_epochs,
+        analysis_epochs=analysis_epochs,
         epoch_to_condition=epoch_to_condition,
         n_neurons_by_region=n_neurons_by_region,
         meme_pr=meme_pr,
@@ -2283,7 +2307,7 @@ def main() -> None:
     saved_comparison_tables = save_light_dark_comparison_tables(
         out_dir,
         regions=list(args.regions),
-        light_epoch=light_epoch,
+        light_epochs=light_epochs,
         dark_epoch=dark_epoch,
         comparison_draws_by_region=comparison_draws_by_region,
         ci=args.bootstrap_ci,
@@ -2291,31 +2315,19 @@ def main() -> None:
         n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
     )
 
-    saved_legacy_pickles: dict[str, Path] = {}
-    if args.save_legacy_pickle:
-        saved_legacy_pickles = save_legacy_pickles(
-            out_dir,
-            meme_pr=meme_pr,
-            meme_moments=meme_moments,
-            meme_boot_pr=meme_boot_pr,
-            meme_boot_summary=meme_boot_summary,
-            naive_pr=naive_pr,
-            naive_eigenvalues=naive_eigenvalues,
-            settings=settings,
-        )
-
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.signal_dim.meme",
         parameters=settings,
         outputs={
             "run_epochs": run_epochs,
-            "light_epoch": light_epoch,
+            "analysis_epochs": analysis_epochs,
+            "light_epoch": args.light_epoch,
+            "light_epochs": light_epochs,
             "dark_epoch": dark_epoch,
             "saved_epoch_tables": saved_epoch_tables,
             "saved_comparison_tables": saved_comparison_tables,
             "saved_figures": saved_figures,
-            "saved_legacy_pickles": saved_legacy_pickles,
         },
     )
     print(f"Saved run metadata to {log_path}")

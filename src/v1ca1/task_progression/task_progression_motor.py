@@ -477,6 +477,27 @@ def build_tp_group_membership() -> np.ndarray:
     return membership
 
 
+def build_histogram_bin_edges(values: np.ndarray) -> np.ndarray:
+    """Return histogram bin edges with `0.0` included as an edge."""
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if values.size == 0:
+        raise ValueError("Histogram bin edges require at least one value.")
+
+    if np.allclose(values, values[0]):
+        half_width = max(0.1, abs(float(values[0])) * 0.1 + 0.1)
+        bin_edges = np.linspace(
+            float(values[0]) - half_width,
+            float(values[0]) + half_width,
+            16,
+        )
+    else:
+        bin_edges = np.histogram_bin_edges(values, bins="auto")
+
+    if not np.any(np.isclose(bin_edges, 0.0)):
+        bin_edges = np.sort(np.unique(np.concatenate([bin_edges, np.array([0.0])])))
+    return np.asarray(bin_edges, dtype=float)
+
+
 def build_fit_dataset(
     fit_result: dict[str, Any],
     *,
@@ -707,34 +728,38 @@ def plot_log_likelihood_difference_histograms(
     *,
     out_path: Path,
 ) -> Path:
-    """Save one 1x2 histogram summary of pooled CV log-likelihood differences."""
+    """Save one 2x2 histogram summary of pooled CV log-likelihood differences."""
     import matplotlib.pyplot as plt
 
     panel_specs = (
         (
-            "Task Progression",
+            "Minus Motor",
             (
                 (
+                    "Task Progression",
                     "dll_motor_tp_vs_motor_bits_per_spike",
                     "Motor + TP minus Motor",
                     "#4C72B0",
                 ),
                 (
-                    "dll_motor_tp_vs_tp_only_bits_per_spike",
-                    "Motor + TP minus TP-only",
-                    "#DD8452",
-                ),
-            ),
-        ),
-        (
-            "Place",
-            (
-                (
+                    "Place",
                     "dll_motor_place_vs_motor_bits_per_spike",
                     "Motor + Place minus Motor",
                     "#55A868",
                 ),
+            ),
+        ),
+        (
+            "Minus TP / Place-only",
+            (
                 (
+                    "Task Progression",
+                    "dll_motor_tp_vs_tp_only_bits_per_spike",
+                    "Motor + TP minus TP-only",
+                    "#DD8452",
+                ),
+                (
+                    "Place",
                     "dll_motor_place_vs_place_only_bits_per_spike",
                     "Motor + Place minus Place-only",
                     "#C44E52",
@@ -744,88 +769,65 @@ def plot_log_likelihood_difference_histograms(
     )
 
     fig, axes = plt.subplots(
-        1,
         2,
-        figsize=(12, 4.8),
+        2,
+        figsize=(12, 8.4),
         constrained_layout=True,
         sharey=True,
     )
 
-    for axis, (panel_title, distribution_specs) in zip(np.ravel(axes), panel_specs):
-        distribution_values: list[tuple[str, str, np.ndarray]] = []
-        combined_values: list[np.ndarray] = []
-        for metric_name, label, color in distribution_specs:
+    for row_index, (row_label, distribution_specs) in enumerate(panel_specs):
+        for axis, (panel_title, metric_name, label, color) in zip(
+            axes[row_index], distribution_specs
+        ):
             metric_values = np.asarray(
                 fit_dataset["cv_pooled"].sel(cv_metric=metric_name).values,
                 dtype=float,
             ).reshape(-1)
             finite_values = metric_values[np.isfinite(metric_values)]
-            distribution_values.append((label, color, finite_values))
-            if finite_values.size > 0:
-                combined_values.append(finite_values)
 
-        axis.axvline(0.0, color="0.2", linestyle="--", linewidth=1.0)
-        axis.set_title(panel_title)
-        axis.set_xlabel("Delta log-likelihood (bits/spike)")
-        axis.set_ylabel("Fraction of units")
+            axis.axvline(0.0, color="0.2", linestyle="--", linewidth=1.0)
+            axis.set_title(panel_title)
+            axis.set_xlabel("Delta log-likelihood (bits/spike)")
+            axis.set_ylabel(f"{row_label}\nFraction of units")
 
-        if not combined_values:
-            axis.text(
-                0.5,
-                0.5,
-                "No finite values",
-                ha="center",
-                va="center",
-                transform=axis.transAxes,
-            )
-            continue
-
-        combined = np.concatenate(combined_values)
-        if np.allclose(combined, combined[0]):
-            half_width = max(0.1, abs(float(combined[0])) * 0.1 + 0.1)
-            bin_edges = np.linspace(
-                float(combined[0]) - half_width,
-                float(combined[0]) + half_width,
-                16,
-            )
-        else:
-            bin_edges = np.histogram_bin_edges(combined, bins="auto")
-
-        stats_lines = []
-        for label, color, finite_values in distribution_values:
             if finite_values.size == 0:
-                stats_lines.append(f"{label}: n=0")
+                axis.text(
+                    0.5,
+                    0.5,
+                    "No finite values",
+                    ha="center",
+                    va="center",
+                    transform=axis.transAxes,
+                )
                 continue
 
+            bin_edges = build_histogram_bin_edges(finite_values)
             axis.hist(
                 finite_values,
                 bins=bin_edges,
                 weights=np.full(finite_values.shape, 1.0 / finite_values.size),
                 color=color,
                 alpha=0.55,
-                edgecolor="white",
-                linewidth=0.8,
+                edgecolor="none",
+                linewidth=0.0,
                 label=label,
             )
-            stats_lines.append(
+            axis.legend(loc="upper left", frameon=False)
+            axis.text(
+                0.98,
+                0.98,
                 (
                     f"{label}: n={finite_values.size}, "
                     f"mean={np.mean(finite_values):.3f}, "
                     f"median={np.median(finite_values):.3f}"
-                )
+                ),
+                ha="right",
+                va="top",
+                transform=axis.transAxes,
+                fontsize=9,
+                bbox={"facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
             )
-
-        axis.legend(loc="upper left", frameon=False)
-        axis.text(
-            0.98,
-            0.98,
-            "\n".join(stats_lines),
-            ha="right",
-            va="top",
-            transform=axis.transAxes,
-            fontsize=9,
-            bbox={"facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
-        )
 
     fig.suptitle(
         (
