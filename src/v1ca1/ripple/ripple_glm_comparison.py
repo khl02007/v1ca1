@@ -20,8 +20,10 @@ from v1ca1.ripple.ripple_glm import (
     DEFAULT_N_SPLITS,
     DEFAULT_RIDGE_STRENGTH,
     DEFAULT_RIPPLE_WINDOW_S,
+    DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     DEFAULT_SHUFFLE_SEED,
     DEFAULT_TOL,
+    RIPPLE_SELECTION_MODE_ALL,
     fit_ripple_glm_train_on_ripple,
     format_ridge_strength_suffix,
     format_ripple_selection_suffix,
@@ -82,6 +84,15 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RIPPLE_WINDOW_S,
         help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Offset in seconds applied to the ripple window relative to ripple start time. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
     )
     parser.add_argument(
         "--min-spikes-per-ripple",
@@ -154,6 +165,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
     """Validate argument ranges for the comparison workflow."""
     if args.ripple_window_s <= 0:
         raise ValueError("--ripple-window-s must be positive.")
+    if not np.isfinite(args.ripple_window_offset_s):
+        raise ValueError("--ripple-window-offset-s must be finite.")
     if args.min_spikes_per_ripple < 0:
         raise ValueError("--min-spikes-per-ripple must be non-negative.")
     if args.min_ca1_spikes_per_ripple < 0:
@@ -186,6 +199,7 @@ def build_fit_parameters(args: argparse.Namespace) -> dict[str, Any]:
     """Return the fit-parameter bundle shared across the comparison runs."""
     return {
         "ripple_window_s": float(args.ripple_window_s),
+        "ripple_window_offset_s": float(args.ripple_window_offset_s),
         "min_spikes_per_ripple": float(args.min_spikes_per_ripple),
         "min_ca1_spikes_per_ripple": float(args.min_ca1_spikes_per_ripple),
         "n_splits": int(args.n_splits),
@@ -224,17 +238,18 @@ def default_current_output_path(
     *,
     epoch: str,
     ripple_window_s: float,
+    ripple_window_offset_s: float,
     ridge_strength: float,
 ) -> Path:
     """Return the default current .nc output path for one epoch."""
-    ripple_selection_suffix = format_ripple_selection_suffix(False)
+    ripple_selection_suffix = format_ripple_selection_suffix(RIPPLE_SELECTION_MODE_ALL)
     return (
         analysis_path
         / "ripple_glm"
         / (
-            f"{epoch}_{format_ripple_window_suffix(ripple_window_s)}_"
+            f"{epoch}_{format_ripple_window_suffix(ripple_window_s, ripple_window_offset_s=ripple_window_offset_s)}_"
             f"{ripple_selection_suffix}_"
-            f"{format_ridge_strength_suffix(ridge_strength)}_ripple_glm.nc"
+            f"{format_ridge_strength_suffix(ridge_strength)}_samplewise_ripple_glm.nc"
         )
     )
 
@@ -244,6 +259,7 @@ def default_report_path(
     *,
     epoch: str,
     ripple_window_s: float,
+    ripple_window_offset_s: float,
     ridge_strength: float,
     legacy_date: str,
 ) -> Path:
@@ -253,14 +269,19 @@ def default_report_path(
         / "ripple_glm"
         / "comparison"
         / (
-            f"{epoch}_{format_ripple_window_suffix(ripple_window_s)}_"
+            f"{epoch}_{format_ripple_window_suffix(ripple_window_s, ripple_window_offset_s=ripple_window_offset_s)}_"
             f"{format_ridge_strength_suffix(ridge_strength)}_"
             f"legacy_{legacy_date}_comparison.json"
         )
     )
 
 
-def build_ripple_ep(ripple_table: Any, *, ripple_window_s: float | None) -> Any:
+def build_ripple_ep(
+    ripple_table: Any,
+    *,
+    ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+) -> Any:
     """Build the ripple IntervalSet using the same rules as the current fitter."""
     import pynapple as nap
 
@@ -271,8 +292,13 @@ def build_ripple_ep(ripple_table: Any, *, ripple_window_s: float | None) -> Any:
         ripple_starts = np.asarray(ripple_table["start"], dtype=float)
         ripple_ends = np.asarray(ripple_table["end"], dtype=float)
 
+    ripple_starts = ripple_starts + float(ripple_window_offset_s)
     if ripple_window_s is None:
-        return nap.IntervalSet(start=ripple_starts, end=ripple_ends, time_units="s")
+        return nap.IntervalSet(
+            start=ripple_starts,
+            end=ripple_ends + float(ripple_window_offset_s),
+            time_units="s",
+        )
     return nap.IntervalSet(
         start=ripple_starts,
         end=ripple_starts + float(ripple_window_s),
@@ -285,10 +311,15 @@ def summarize_session_inputs(
     *,
     epoch: str,
     ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> dict[str, Any]:
     """Summarize one session's ripple inputs for one epoch."""
     ripple_table = session["ripple_tables"][epoch]
-    ripple_ep = build_ripple_ep(ripple_table, ripple_window_s=ripple_window_s)
+    ripple_ep = build_ripple_ep(
+        ripple_table,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
     return {
         "analysis_path": str(session["analysis_path"]),
         "sources": session["sources"],
@@ -315,6 +346,7 @@ def run_current_fit(
         n_shuffles_ripple=fit_parameters["n_shuffles_ripple"],
         shuffle_seed=fit_parameters["shuffle_seed"],
         ripple_window_s=fit_parameters["ripple_window_s"],
+        ripple_window_offset_s=fit_parameters["ripple_window_offset_s"],
         n_splits=fit_parameters["n_splits"],
         ridge_strength=fit_parameters["ridge_strength"],
         maxiter=fit_parameters["maxiter"],
@@ -626,11 +658,13 @@ def main() -> None:
         legacy_session,
         epoch=args.epoch,
         ripple_window_s=fit_parameters["ripple_window_s"],
+        ripple_window_offset_s=fit_parameters["ripple_window_offset_s"],
     )
     current_input_summary = summarize_session_inputs(
         current_session,
         epoch=args.epoch,
         ripple_window_s=fit_parameters["ripple_window_s"],
+        ripple_window_offset_s=fit_parameters["ripple_window_offset_s"],
     )
 
     legacy_output_path = (
@@ -651,6 +685,7 @@ def main() -> None:
             Path(current_input_summary["analysis_path"]),
             epoch=args.epoch,
             ripple_window_s=fit_parameters["ripple_window_s"],
+            ripple_window_offset_s=fit_parameters["ripple_window_offset_s"],
             ridge_strength=fit_parameters["ridge_strength"],
         )
     )
@@ -661,6 +696,7 @@ def main() -> None:
             Path(current_input_summary["analysis_path"]),
             epoch=args.epoch,
             ripple_window_s=fit_parameters["ripple_window_s"],
+            ripple_window_offset_s=fit_parameters["ripple_window_offset_s"],
             ridge_strength=fit_parameters["ridge_strength"],
             legacy_date=legacy_date,
         )

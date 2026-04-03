@@ -65,6 +65,7 @@ TARGET_REGION = "v1"
 SOURCE_REGION = "ca1"
 
 DEFAULT_RIPPLE_WINDOW_S = 0.2
+DEFAULT_RIPPLE_WINDOW_OFFSET_S = 0.0
 DEFAULT_MIN_SPIKES_PER_RIPPLE = 0.1
 DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE = 0.0
 DEFAULT_N_SPLITS = 5
@@ -74,6 +75,8 @@ DEFAULT_RIDGE_STRENGTH_SWEEP = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 DEFAULT_SHUFFLE_SEED = 45
 DEFAULT_MAXITER = 6000
 DEFAULT_TOL = 1e-7
+DEFAULT_XLA_PREALLOCATE = "false"
+DEFAULT_XLA_MEM_FRACTION = "0.70"
 RIPPLE_SELECTION_MODE_ALL = "allripples"
 RIPPLE_SELECTION_MODE_DEDUPED = "deduped"
 RIPPLE_SELECTION_MODE_SINGLE = "single"
@@ -117,6 +120,17 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RIPPLE_WINDOW_S,
         help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Offset in seconds applied to each fixed ripple window relative to ripple "
+            "start time, so the modeled window becomes "
+            "[start + offset, start + ripple_window_s + offset]. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
     )
     parser.add_argument(
         "--remove-duplicate-ripples",
@@ -223,6 +237,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
             "exclusive because they define different ripple-selection rules. "
             "Choose only one."
         )
+    if not np.isfinite(args.ripple_window_offset_s):
+        raise ValueError("--ripple-window-offset-s must be finite.")
     if args.ripple_window_s <= 0:
         raise ValueError("--ripple-window-s must be positive.")
     if args.min_spikes_per_ripple < 0:
@@ -354,6 +370,7 @@ def remove_duplicate_ripples(
     ripple_table: pd.DataFrame,
     *,
     ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Drop ripples whose starts fall inside the previous kept ripple's analysis window."""
     normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
@@ -362,25 +379,23 @@ def remove_duplicate_ripples(
         return normalized_table, np.ones(total_ripples, dtype=bool)
 
     starts = np.asarray(normalized_table["start_time"], dtype=float)
-    ends = np.asarray(normalized_table["end_time"], dtype=float)
+    window_starts, window_ends = _build_ripple_sample_windows(
+        normalized_table,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
     keep = np.ones(total_ripples, dtype=bool)
 
-    previous_window_end = (
-        float(ends[0])
-        if ripple_window_s is None
-        else float(starts[0]) + float(ripple_window_s)
-    )
+    previous_window_start = float(window_starts[0])
+    previous_window_end = float(window_ends[0])
     for ripple_index in range(1, total_ripples):
         current_start = float(starts[ripple_index])
-        if current_start < previous_window_end:
+        if previous_window_start <= current_start < previous_window_end:
             keep[ripple_index] = False
             continue
 
-        previous_window_end = (
-            float(ends[ripple_index])
-            if ripple_window_s is None
-            else float(starts[ripple_index]) + float(ripple_window_s)
-        )
+        previous_window_start = float(window_starts[ripple_index])
+        previous_window_end = float(window_ends[ripple_index])
 
     filtered_table = normalized_table.loc[keep].reset_index(drop=True)
     return filtered_table, keep
@@ -390,6 +405,7 @@ def keep_single_ripple_windows(
     ripple_table: pd.DataFrame,
     *,
     ripple_window_s: float,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Keep only fixed windows whose interior contains exactly one ripple start."""
     normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
@@ -398,14 +414,24 @@ def keep_single_ripple_windows(
         return normalized_table, np.ones(total_ripples, dtype=bool)
 
     starts = np.asarray(normalized_table["start_time"], dtype=float)
-    keep = np.ones(total_ripples, dtype=bool)
-    window_s = float(ripple_window_s)
-
-    previous_gap = np.diff(starts, prepend=np.nan)
-    next_gap = np.diff(starts, append=np.nan)
-
-    keep[1:] &= previous_gap[1:] >= window_s
-    keep[:-1] &= next_gap[:-1] >= window_s
+    window_starts, window_ends = _build_ripple_sample_windows(
+        normalized_table,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
+    interval_counts = np.searchsorted(starts, window_ends, side="left") - np.searchsorted(
+        starts,
+        window_starts,
+        side="left",
+    )
+    self_inside = (window_starts <= starts) & (starts < window_ends)
+    previous_window_contains_current = np.zeros(total_ripples, dtype=bool)
+    previous_window_contains_current[1:] = (
+        (window_starts[:-1] <= starts[1:]) & (starts[1:] < window_ends[:-1])
+    )
+    keep = (interval_counts - self_inside.astype(np.int64) == 0) & (
+        ~previous_window_contains_current
+    )
 
     filtered_table = normalized_table.loc[keep].reset_index(drop=True)
     return filtered_table, keep
@@ -784,6 +810,14 @@ def _print_progress(step_label: str, message: str) -> None:
     print(f"[{step_label}] {message}")
 
 
+def configure_jax_environment(cuda_visible_devices: str | None) -> None:
+    """Configure JAX memory defaults before importing JAX/NEMOS."""
+    if cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", DEFAULT_XLA_PREALLOCATE)
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", DEFAULT_XLA_MEM_FRACTION)
+
+
 def _resolve_nemos_population_glm_solver(nmo: Any) -> tuple[str, str]:
     """Return the installed `nemos` version and matching `PopulationGLM` solver."""
     version_text = getattr(nmo, "__version__", None)
@@ -827,14 +861,18 @@ def _build_ripple_sample_windows(
     ripple_table: pd.DataFrame,
     *,
     ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return one ordered `(start, end)` window per ripple row without merging overlaps."""
     normalized_table = ripple_table.sort_values("start_time").reset_index(drop=True)
-    ripple_starts = np.asarray(normalized_table["start_time"], dtype=float)
+    ripple_anchor_starts = np.asarray(normalized_table["start_time"], dtype=float)
+    ripple_offset_s = float(ripple_window_offset_s)
+    ripple_starts = ripple_anchor_starts + ripple_offset_s
     if ripple_window_s is None:
-        ripple_ends = np.asarray(normalized_table["end_time"], dtype=float)
+        ripple_anchor_ends = np.asarray(normalized_table["end_time"], dtype=float)
+        ripple_ends = ripple_anchor_ends + ripple_offset_s
     else:
-        ripple_ends = ripple_starts + float(ripple_window_s)
+        ripple_ends = ripple_anchor_starts + ripple_offset_s + float(ripple_window_s)
     return ripple_starts, ripple_ends
 
 
@@ -863,31 +901,24 @@ def _count_spikes_in_windows(
     return counts, unit_ids
 
 
-def fit_ripple_glm_train_on_ripple(
+def _prepare_ripple_glm_epoch_inputs(
     epoch: str,
     *,
     spikes: dict[str, Any],
-    epoch_interval: "nap.IntervalSet",
     ripple_table: pd.DataFrame,
-    min_spikes_per_ripple: float = DEFAULT_MIN_SPIKES_PER_RIPPLE,
-    min_ca1_spikes_per_ripple: float = DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
-    n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
-    shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
-    ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
-    n_splits: int = DEFAULT_N_SPLITS,
-    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
-    maxiter: int = DEFAULT_MAXITER,
-    tol: float = DEFAULT_TOL,
+    min_spikes_per_ripple: float,
+    min_ca1_spikes_per_ripple: float,
+    ripple_window_s: float | None,
+    n_splits: int,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> dict[str, Any]:
-    """Fit the ripple-only GLM workflow for one epoch."""
-    import nemos as nmo
-    nemos_version, solver_name = _resolve_nemos_population_glm_solver(nmo)
-    print(_format_nemos_solver_selection_message(nemos_version, solver_name))
-
-    rng = np.random.default_rng(shuffle_seed)
+    """Build one epoch's ridge-independent ripple GLM design data."""
+    normalized_ripple_table = ripple_table.sort_values("start_time").reset_index(drop=True)
+    ripple_start_times = np.asarray(normalized_ripple_table["start_time"], dtype=float)
     ripple_starts, ripple_ends = _build_ripple_sample_windows(
-        ripple_table,
+        normalized_ripple_table,
         ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
     )
 
     _print_progress(epoch, "Counting CA1 and V1 spikes in ripple windows.")
@@ -914,11 +945,12 @@ def fit_ripple_glm_train_on_ripple(
 
     keep_y = (y_r.sum(axis=0) / max(n_ripples, 1)) >= float(min_spikes_per_ripple)
     y_r = y_r[:, keep_y]
-
     kept_v1_unit_ids = v1_unit_ids[keep_y]
+
     keep_x_ripple = (X_r.sum(axis=0) / max(n_ripples, 1)) >= float(min_ca1_spikes_per_ripple)
     X_r = X_r[:, keep_x_ripple]
     kept_ca1_unit_ids = ca1_unit_ids[keep_x_ripple]
+
     n_cells = int(y_r.shape[1])
     n_ca1_cells = int(X_r.shape[1])
     skip_reason = get_epoch_skip_reason(
@@ -930,7 +962,71 @@ def fit_ripple_glm_train_on_ripple(
     if skip_reason is not None:
         raise ValueError(skip_reason)
 
-    kfold = KFold(n_splits=n_splits, shuffle=False, random_state=None)
+    cv_splits = [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in KFold(
+            n_splits=n_splits,
+            shuffle=False,
+            random_state=None,
+        ).split(X_r)
+    ]
+    return {
+        "X_r": X_r,
+        "y_r": y_r,
+        "ca1_unit_ids": kept_ca1_unit_ids,
+        "v1_unit_ids": kept_v1_unit_ids,
+        "ripple_start_times": ripple_start_times.astype(np.float64),
+        "ripple_starts": ripple_starts.astype(np.float64),
+        "ripple_ends": ripple_ends.astype(np.float64),
+        "n_ripples": n_ripples,
+        "n_cells": n_cells,
+        "n_ca1_cells": n_ca1_cells,
+        "cv_splits": cv_splits,
+    }
+
+
+def _fit_ripple_glm_on_prepared_epoch(
+    epoch: str,
+    *,
+    prepared_epoch: dict[str, Any],
+    n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
+    shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
+    ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    maxiter: int = DEFAULT_MAXITER,
+    tol: float = DEFAULT_TOL,
+) -> dict[str, Any]:
+    """Fit the ripple GLM on a prepared epoch design matrix."""
+    configure_jax_environment(cuda_visible_devices=None)
+    import nemos as nmo
+
+    nemos_version, solver_name = _resolve_nemos_population_glm_solver(nmo)
+    print(_format_nemos_solver_selection_message(nemos_version, solver_name))
+
+    rng = np.random.default_rng(shuffle_seed)
+    X_r = np.asarray(prepared_epoch["X_r"], dtype=np.float64)
+    y_r = np.asarray(prepared_epoch["y_r"], dtype=np.float64)
+    kept_ca1_unit_ids = np.asarray(prepared_epoch["ca1_unit_ids"])
+    kept_v1_unit_ids = np.asarray(prepared_epoch["v1_unit_ids"])
+    ripple_start_times = np.asarray(prepared_epoch["ripple_start_times"], dtype=np.float64)
+    ripple_starts = np.asarray(prepared_epoch["ripple_starts"], dtype=np.float64)
+    ripple_ends = np.asarray(prepared_epoch["ripple_ends"], dtype=np.float64)
+    n_ripples = int(prepared_epoch["n_ripples"])
+    n_cells = int(prepared_epoch["n_cells"])
+    n_ca1_cells = int(prepared_epoch["n_ca1_cells"])
+    cv_splits = [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in prepared_epoch["cv_splits"]
+    ]
+    n_splits = len(cv_splits)
+
     _print_progress(
         epoch,
         f"Running {n_splits}-fold CV with {n_shuffles_ripple} shuffle refits per fold.",
@@ -967,7 +1063,7 @@ def fit_ripple_glm_train_on_ripple(
         np.nan,
         dtype=np.float32,
     )
-    for fold_index, (train_idx, test_idx) in enumerate(kfold.split(X_r)):
+    for fold_index, (train_idx, test_idx) in enumerate(cv_splits):
         _print_progress(epoch, f"Fold {fold_index + 1}/{n_splits}: fitting ripple model.")
         X_train_r = X_r[train_idx]
         X_test_r = X_r[test_idx]
@@ -1049,15 +1145,12 @@ def fit_ripple_glm_train_on_ripple(
             ).astype(np.float32)
 
             del glm_shuffle, y_train_shuffled, lam_r_shuffled
-            if (shuffle_index + 1) % 5 == 0:
-                _clear_jax_caches()
-                gc.collect()
 
         del glm, lam_r
         _clear_jax_caches()
         gc.collect()
 
-    X_r_all_pp, _, keep_x_all, mean_all, std_all = _preprocess_X_fit_apply(X_r, X_r)
+    X_r_all_pp, _, keep_x_all, _, _ = _preprocess_X_fit_apply(X_r, X_r)
     if X_r_all_pp.shape[1] == 0:
         raise ValueError(f"Epoch {epoch!r}: all CA1 features were near-constant.")
 
@@ -1084,11 +1177,12 @@ def fit_ripple_glm_train_on_ripple(
     results = {
         "epoch": epoch,
         "shuffle_seed": int(shuffle_seed),
-        "min_spikes_per_ripple": float(min_spikes_per_ripple),
-        "min_ca1_spikes_per_ripple": float(min_ca1_spikes_per_ripple),
+        "min_spikes_per_ripple": float(np.nan),
+        "min_ca1_spikes_per_ripple": float(np.nan),
         "n_splits": int(n_splits),
         "n_shuffles_ripple": int(n_shuffles_ripple),
         "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
+        "ripple_window_offset_s": float(ripple_window_offset_s),
         "n_ripples": n_ripples,
         "n_cells": n_cells,
         "n_ca1_cells": n_ca1_cells,
@@ -1103,14 +1197,59 @@ def fit_ripple_glm_train_on_ripple(
         "mae_ripple_shuff_folds": mae_ripple_shuff,
         "devexp_ripple_shuff_folds": devexp_ripple_shuff,
         "bits_per_spike_ripple_shuff_folds": bits_per_spike_ripple_shuff,
-        "ripple_window_start_s": ripple_starts.astype(np.float64),
-        "ripple_window_end_s": ripple_ends.astype(np.float64),
+        "ripple_start_time_s": ripple_start_times,
+        "ripple_window_start_s": ripple_starts,
+        "ripple_window_end_s": ripple_ends,
         "ripple_fold_index": ripple_fold_index,
         "ripple_observed_count_oof": ripple_observed_count_oof,
         "ripple_predicted_count_oof": ripple_predicted_count_oof,
         "coef_ca1_full_all": coef_ca1_full_all,
         "coef_intercept_full_all": coef_intercept_full_all,
     }
+    return results
+
+
+def fit_ripple_glm_train_on_ripple(
+    epoch: str,
+    *,
+    spikes: dict[str, Any],
+    epoch_interval: "nap.IntervalSet",
+    ripple_table: pd.DataFrame,
+    min_spikes_per_ripple: float = DEFAULT_MIN_SPIKES_PER_RIPPLE,
+    min_ca1_spikes_per_ripple: float = DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
+    n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
+    shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
+    ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    n_splits: int = DEFAULT_N_SPLITS,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    maxiter: int = DEFAULT_MAXITER,
+    tol: float = DEFAULT_TOL,
+) -> dict[str, Any]:
+    """Fit the ripple-only GLM workflow for one epoch."""
+    prepared_epoch = _prepare_ripple_glm_epoch_inputs(
+        epoch,
+        spikes=spikes,
+        ripple_table=ripple_table,
+        min_spikes_per_ripple=min_spikes_per_ripple,
+        min_ca1_spikes_per_ripple=min_ca1_spikes_per_ripple,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+        n_splits=n_splits,
+    )
+    results = _fit_ripple_glm_on_prepared_epoch(
+        epoch,
+        prepared_epoch=prepared_epoch,
+        n_shuffles_ripple=n_shuffles_ripple,
+        shuffle_seed=shuffle_seed,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+        ridge_strength=ridge_strength,
+        maxiter=maxiter,
+        tol=tol,
+    )
+    results["min_spikes_per_ripple"] = float(min_spikes_per_ripple)
+    results["min_ca1_spikes_per_ripple"] = float(min_ca1_spikes_per_ripple)
     return results
 
 
@@ -1146,10 +1285,32 @@ def nansem(values: np.ndarray, axis: int = 0) -> np.ndarray:
     return np.where(counts > 0, sd / np.sqrt(counts), np.nan)
 
 
-def format_ripple_window_suffix(ripple_window_s: float) -> str:
-    """Return a filesystem-friendly suffix for one ripple window length."""
-    window_text = f"{float(ripple_window_s):.6f}".rstrip("0").rstrip(".")
-    return f"rw_{window_text.replace('.', 'p')}s"
+def _format_window_suffix_value(value: float) -> str:
+    """Return one filesystem-friendly encoded float value."""
+    abs_text = f"{abs(float(value)):.6f}".rstrip("0").rstrip(".").replace(".", "p")
+    return f"m{abs_text}" if float(value) < 0 else abs_text
+
+
+def format_ripple_window_offset_suffix(ripple_window_offset_s: float) -> str:
+    """Return a filesystem-friendly suffix for one ripple-window offset."""
+    return f"off_{_format_window_suffix_value(ripple_window_offset_s)}s"
+
+
+def format_ripple_window_suffix(
+    ripple_window_s: float,
+    *,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+) -> str:
+    """Return a filesystem-friendly suffix for one ripple window setup."""
+    window_suffix = f"rw_{_format_window_suffix_value(ripple_window_s)}s"
+    if np.isclose(
+        float(ripple_window_offset_s),
+        DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        rtol=1e-12,
+        atol=1e-12,
+    ):
+        return window_suffix
+    return f"{window_suffix}_{format_ripple_window_offset_suffix(ripple_window_offset_s)}"
 
 
 def format_ripple_selection_suffix(ripple_selection_mode: str) -> str:
@@ -1284,6 +1445,9 @@ def build_epoch_fit_dataset(
     coef_ca1_unit_ids = np.asarray(results["coef_ca1_unit_ids"])
     coef_ca1_full_all = _as_2d_float(results["coef_ca1_full_all"])
     coef_intercept_full_all = _as_1d_float(results["coef_intercept_full_all"])
+    ripple_start_time_s = _as_1d_float(
+        results.get("ripple_start_time_s", results["ripple_window_start_s"])
+    )
     ripple_window_start_s = _as_1d_float(results["ripple_window_start_s"])
     ripple_window_end_s = _as_1d_float(results["ripple_window_end_s"])
     ripple_fold_index = np.asarray(results["ripple_fold_index"], dtype=np.int32).ravel()
@@ -1291,7 +1455,7 @@ def build_epoch_fit_dataset(
     ripple_predicted_count_oof = _as_2d_float(results["ripple_predicted_count_oof"])
 
     attrs = {
-        "schema_version": "5",
+        "schema_version": "6",
         "animal_name": animal_name,
         "date": date,
         "epoch": epoch,
@@ -1303,6 +1467,10 @@ def build_epoch_fit_dataset(
         "n_ripples_before_selection": int(fit_parameters["n_ripples_before_selection"]),
         "n_ripples_removed_by_selection": int(fit_parameters["n_ripples_removed_by_selection"]),
         "n_ripples_after_selection": int(fit_parameters["n_ripples_after_selection"]),
+        "ripple_window_s": float(fit_parameters["ripple_window_s"]),
+        "ripple_window_offset_s": float(
+            fit_parameters.get("ripple_window_offset_s", DEFAULT_RIPPLE_WINDOW_OFFSET_S)
+        ),
         "n_units": int(len(unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "sources_json": json.dumps(sources, sort_keys=True),
@@ -1322,6 +1490,7 @@ def build_epoch_fit_dataset(
     data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
         "ca1_unit_id": (("source_unit",), ca1_unit_ids),
         "coef_ca1_unit_id": (("coef_source_unit",), coef_ca1_unit_ids),
+        "ripple_start_time_s": (("sample",), ripple_start_time_s),
         "ripple_window_start_s": (("sample",), ripple_window_start_s),
         "ripple_window_end_s": (("sample",), ripple_window_end_s),
         "ripple_fold_index": (("sample",), ripple_fold_index),
@@ -1558,10 +1727,14 @@ def save_epoch_figures(
     ripple_window_s: float,
     ripple_selection_suffix: str,
     ridge_strength: float,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
 ) -> list[Path]:
     """Save the configured epoch summary figure."""
     fig_dir.mkdir(parents=True, exist_ok=True)
-    ripple_window_suffix = format_ripple_window_suffix(ripple_window_s)
+    ripple_window_suffix = format_ripple_window_suffix(
+        ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
     ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
     metric_specs = [
         ("pseudo_r2", "Pseudo R^2"),
@@ -1615,8 +1788,8 @@ def main() -> None:
     args = parse_arguments()
     validate_arguments(args)
     _print_progress("1/5", "Validated CLI arguments.")
+    configure_jax_environment(args.cuda_visible_devices)
     if args.cuda_visible_devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
         print(f"Setting CUDA_VISIBLE_DEVICES={args.cuda_visible_devices!r} for ripple GLM.")
 
     _print_progress(
@@ -1665,6 +1838,7 @@ def main() -> None:
         "data_root": str(args.data_root),
         "epochs": list(selected_epochs),
         "ripple_window_s": float(args.ripple_window_s),
+        "ripple_window_offset_s": float(args.ripple_window_offset_s),
         "ripple_selection_mode": ripple_selection_mode,
         "remove_duplicate_ripples": bool(args.remove_duplicate_ripples),
         "keep_single_ripple_windows": bool(args.keep_single_ripple_windows),
@@ -1682,7 +1856,10 @@ def main() -> None:
     saved_datasets: list[Path] = []
     saved_figures: list[Path] = []
     skipped_epochs: list[dict[str, Any]] = []
-    ripple_window_suffix = format_ripple_window_suffix(args.ripple_window_s)
+    ripple_window_suffix = format_ripple_window_suffix(
+        args.ripple_window_s,
+        ripple_window_offset_s=args.ripple_window_offset_s,
+    )
     ripple_selection_suffix = format_ripple_selection_suffix(ripple_selection_mode)
 
     if ripple_selection_mode == RIPPLE_SELECTION_MODE_DEDUPED:
@@ -1718,6 +1895,7 @@ def main() -> None:
             ripple_table, keep_mask = remove_duplicate_ripples(
                 ripple_table,
                 ripple_window_s=args.ripple_window_s,
+                ripple_window_offset_s=args.ripple_window_offset_s,
             )
             removed_ripples_by_selection = int(np.size(keep_mask) - np.sum(keep_mask))
             print(
@@ -1729,6 +1907,7 @@ def main() -> None:
             ripple_table, keep_mask = keep_single_ripple_windows(
                 ripple_table,
                 ripple_window_s=args.ripple_window_s,
+                ripple_window_offset_s=args.ripple_window_offset_s,
             )
             removed_ripples_by_selection = int(np.size(keep_mask) - np.sum(keep_mask))
             print(
@@ -1736,6 +1915,26 @@ def main() -> None:
                 f"total {total_ripples_before_selection} because another ripple start fell "
                 "inside the fixed analysis window."
             )
+        try:
+            prepared_epoch = _prepare_ripple_glm_epoch_inputs(
+                epoch,
+                spikes=session["spikes_by_region"],
+                ripple_table=ripple_table,
+                min_spikes_per_ripple=args.min_spikes_per_ripple,
+                min_ca1_spikes_per_ripple=args.min_ca1_spikes_per_ripple,
+                ripple_window_s=args.ripple_window_s,
+                ripple_window_offset_s=args.ripple_window_offset_s,
+                n_splits=args.n_splits,
+            )
+        except ValueError as exc:
+            skipped_epochs.append(
+                {
+                    "epoch": epoch,
+                    "reason": str(exc),
+                }
+            )
+            print(f"Skipping {args.animal_name} {args.date} {epoch}: {exc}")
+            continue
         for ridge_strength in ridge_strengths:
             ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
             _print_progress(
@@ -1745,21 +1944,19 @@ def main() -> None:
                 f"with {len(ripple_table)} modeled ripple(s).",
             )
             try:
-                results = fit_ripple_glm_train_on_ripple(
-                    epoch=epoch,
-                    spikes=session["spikes_by_region"],
-                    epoch_interval=session["epoch_intervals"][epoch],
-                    ripple_table=ripple_table,
-                    min_spikes_per_ripple=args.min_spikes_per_ripple,
-                    min_ca1_spikes_per_ripple=args.min_ca1_spikes_per_ripple,
+                results = _fit_ripple_glm_on_prepared_epoch(
+                    epoch,
+                    prepared_epoch=prepared_epoch,
                     n_shuffles_ripple=args.n_shuffles_ripple,
                     shuffle_seed=args.shuffle_seed,
                     ripple_window_s=args.ripple_window_s,
-                    n_splits=args.n_splits,
+                    ripple_window_offset_s=args.ripple_window_offset_s,
                     ridge_strength=ridge_strength,
                     maxiter=args.maxiter,
                     tol=args.tol,
                 )
+                results["min_spikes_per_ripple"] = float(args.min_spikes_per_ripple)
+                results["min_ca1_spikes_per_ripple"] = float(args.min_ca1_spikes_per_ripple)
             except ValueError as exc:
                 skipped_epochs.append(
                     {
@@ -1821,6 +2018,7 @@ def main() -> None:
                     date=args.date,
                     epoch=epoch,
                     ripple_window_s=args.ripple_window_s,
+                    ripple_window_offset_s=args.ripple_window_offset_s,
                     ripple_selection_suffix=ripple_selection_suffix,
                     ridge_strength=ridge_strength,
                 )
@@ -1842,6 +2040,7 @@ def main() -> None:
             "data_root": args.data_root,
             "epochs": selected_epochs,
             "ripple_window_s": args.ripple_window_s,
+            "ripple_window_offset_s": args.ripple_window_offset_s,
             "ripple_selection_mode": ripple_selection_mode,
             "remove_duplicate_ripples": args.remove_duplicate_ripples,
             "keep_single_ripple_windows": args.keep_single_ripple_windows,

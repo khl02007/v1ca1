@@ -13,7 +13,9 @@ import v1ca1.ripple.ripple_glm as ripple_glm_module
 from v1ca1.ripple.ripple_glm import (
     _build_ripple_sample_windows,
     _count_spikes_in_windows,
+    _fit_ripple_glm_on_prepared_epoch,
     _format_nemos_solver_selection_message,
+    _prepare_ripple_glm_epoch_inputs,
     _resolve_nemos_population_glm_solver,
     build_epoch_fit_dataset,
     build_metric_figure_data,
@@ -165,6 +167,24 @@ def test_remove_duplicate_ripples_uses_previous_kept_ripple() -> None:
     assert np.allclose(filtered_table["end_time"], [0.02, 0.28])
 
 
+def test_remove_duplicate_ripples_uses_shifted_window_bounds() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.0, 1.2, 1.8],
+            "end_time": [1.02, 1.22, 1.82],
+        }
+    )
+
+    filtered_table, keep_mask = remove_duplicate_ripples(
+        ripple_table,
+        ripple_window_s=0.2,
+        ripple_window_offset_s=0.5,
+    )
+
+    assert np.array_equal(keep_mask, [True, True, False])
+    assert np.allclose(filtered_table["start_time"], [1.0, 1.2])
+
+
 def test_keep_single_ripple_windows_requires_bidirectional_isolation() -> None:
     ripple_table = pd.DataFrame(
         {
@@ -180,6 +200,24 @@ def test_keep_single_ripple_windows_requires_bidirectional_isolation() -> None:
 
     assert np.array_equal(keep_mask, [True, False, False, True])
     assert np.allclose(filtered_table["start_time"], [0.0, 1.0])
+
+
+def test_keep_single_ripple_windows_uses_shifted_window_bounds() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [0.8, 1.0, 1.4],
+            "end_time": [0.82, 1.02, 1.42],
+        }
+    )
+
+    filtered_table, keep_mask = keep_single_ripple_windows(
+        ripple_table,
+        ripple_window_s=0.2,
+        ripple_window_offset_s=-0.2,
+    )
+
+    assert np.array_equal(keep_mask, [True, False, True])
+    assert np.allclose(filtered_table["start_time"], [0.8, 1.4])
 
 
 def test_validate_arguments_rejects_conflicting_ripple_selection_modes() -> None:
@@ -212,6 +250,24 @@ def test_build_ripple_sample_windows_preserves_overlapping_fixed_windows() -> No
 
     assert np.allclose(starts, [1.0, 1.05])
     assert np.allclose(ends, [1.1, 1.15])
+
+
+def test_build_ripple_sample_windows_applies_offset() -> None:
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.0, 1.05],
+            "end_time": [1.2, 1.25],
+        }
+    )
+
+    starts, ends = _build_ripple_sample_windows(
+        ripple_table,
+        ripple_window_s=0.1,
+        ripple_window_offset_s=-0.05,
+    )
+
+    assert np.allclose(starts, [0.95, 1.0])
+    assert np.allclose(ends, [1.05, 1.1])
 
 
 def test_count_spikes_in_windows_preserves_overlapping_rows() -> None:
@@ -255,8 +311,9 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         "ca1_unit_ids": np.array([101, 102, 103]),
         "coef_ca1_unit_ids": np.array([101, 103]),
         "n_ripples": 8,
-        "ripple_window_start_s": np.array([1.0, 2.0, 3.0], dtype=float),
-        "ripple_window_end_s": np.array([1.2, 2.2, 3.2], dtype=float),
+        "ripple_start_time_s": np.array([1.0, 2.0, 3.0], dtype=float),
+        "ripple_window_start_s": np.array([1.05, 2.05, 3.05], dtype=float),
+        "ripple_window_end_s": np.array([1.25, 2.25, 3.25], dtype=float),
         "ripple_fold_index": np.array([0, 1, 0], dtype=int),
         "ripple_observed_count_oof": np.array(
             [[1.0, 0.0], [0.0, 2.0], [3.0, 1.0]],
@@ -311,6 +368,8 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         fit_parameters={
             "n_splits": 2,
             "ridge_strength": 0.1,
+            "ripple_window_s": 0.2,
+            "ripple_window_offset_s": 0.05,
             "ripple_selection_mode": "single",
             "n_ripples_before_selection": 10,
             "n_ripples_removed_by_selection": 2,
@@ -327,6 +386,7 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert np.array_equal(dataset.coords["unit"].values, [11, 12])
     assert np.array_equal(dataset["ca1_unit_id"].values, [101, 102, 103])
     assert np.array_equal(dataset["coef_ca1_unit_id"].values, [101, 103])
+    assert dataset["ripple_start_time_s"].dims == ("sample",)
     assert dataset["ripple_window_start_s"].dims == ("sample",)
     assert dataset["ripple_window_end_s"].dims == ("sample",)
     assert dataset["ripple_fold_index"].dims == ("sample",)
@@ -336,8 +396,9 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
     assert dataset["coef_ca1_full_all"].dims == ("coef_source_unit", "unit")
     assert dataset["coef_intercept_full_all"].dims == ("unit",)
-    assert np.allclose(dataset["ripple_window_start_s"].values, [1.0, 2.0, 3.0])
-    assert np.allclose(dataset["ripple_window_end_s"].values, [1.2, 2.2, 3.2])
+    assert np.allclose(dataset["ripple_start_time_s"].values, [1.0, 2.0, 3.0])
+    assert np.allclose(dataset["ripple_window_start_s"].values, [1.05, 2.05, 3.05])
+    assert np.allclose(dataset["ripple_window_end_s"].values, [1.25, 2.25, 3.25])
     assert np.array_equal(dataset["ripple_fold_index"].values, [0, 1, 0])
     assert np.allclose(
         dataset["ripple_observed_count_oof"].values,
@@ -360,16 +421,20 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
-    assert dataset.attrs["schema_version"] == "5"
+    assert dataset.attrs["schema_version"] == "6"
     assert dataset.attrs["ripple_selection_mode"] == "single"
     assert dataset.attrs["n_ripples_before_selection"] == 10
     assert dataset.attrs["n_ripples_removed_by_selection"] == 2
     assert dataset.attrs["n_ripples_after_selection"] == 8
+    assert dataset.attrs["ripple_window_s"] == pytest.approx(0.2)
+    assert dataset.attrs["ripple_window_offset_s"] == pytest.approx(0.05)
     assert dataset.attrs["coef_ca1_full_all_space"] == "preprocessed_predictor"
     assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
     assert json.loads(dataset.attrs["fit_parameters_json"]) == {
         "n_splits": 2,
         "ridge_strength": 0.1,
+        "ripple_window_s": 0.2,
+        "ripple_window_offset_s": 0.05,
         "ripple_selection_mode": "single",
         "n_ripples_before_selection": 10,
         "n_ripples_removed_by_selection": 2,
@@ -471,6 +536,8 @@ def test_fit_ripple_glm_returns_full_fit_coefficients(
     assert results["n_ripples"] == 4
     assert np.array_equal(results["ca1_unit_ids"], [101, 102, 103])
     assert np.array_equal(results["coef_ca1_unit_ids"], [101, 102])
+    assert results["ripple_window_offset_s"] == pytest.approx(0.0)
+    assert np.allclose(results["ripple_start_time_s"], [1.0, 2.0, 3.0, 4.0])
     assert np.allclose(results["ripple_window_start_s"], [1.0, 2.0, 3.0, 4.0])
     assert np.allclose(results["ripple_window_end_s"], [1.2, 2.2, 3.2, 4.2])
     assert np.array_equal(results["ripple_fold_index"], [0, 0, 1, 1])
@@ -555,6 +622,298 @@ def test_fit_ripple_glm_preserves_overlapping_fixed_windows_in_fit_path(
 
     assert results["n_ripples"] == 4
     assert results["pseudo_r2_ripple_folds"].shape == (2, 2)
+
+
+def test_prepared_epoch_fit_matches_public_wrapper_without_shuffles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePopulationGLM:
+        def __init__(self, **kwargs) -> None:
+            self.coef_ = np.empty((0, 0), dtype=float)
+            self.intercept_ = np.empty((0,), dtype=float)
+
+        def fit(self, X, y) -> None:
+            X = np.asarray(X, dtype=float)
+            y = np.asarray(y, dtype=float)
+            row_weights = np.arange(1, X.shape[0] + 1, dtype=float)[:, None]
+            weighted_signal = np.sum(y * row_weights, axis=0) / float(np.sum(row_weights))
+            feature_scale = (np.arange(X.shape[1], dtype=float) + 1.0)[:, None]
+            self.coef_ = feature_scale * weighted_signal[None, :]
+            self.intercept_ = weighted_signal / 10.0
+
+        def predict(self, X) -> np.ndarray:
+            X = np.asarray(X, dtype=float)
+            linear = np.clip(X @ self.coef_ + self.intercept_[None, :], -10.0, 10.0)
+            return np.exp(linear)
+
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
+    class FakeTsGroup:
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
+
+        def keys(self):
+            return list(self._spikes_by_unit)
+
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
+
+    def assert_core_outputs_equal(left: dict[str, object], right: dict[str, object]) -> None:
+        scalar_keys = [
+            "epoch",
+            "shuffle_seed",
+            "n_splits",
+            "n_shuffles_ripple",
+            "ripple_window_s",
+            "ripple_window_offset_s",
+            "n_ripples",
+            "n_cells",
+            "n_ca1_cells",
+        ]
+        array_keys = [
+            "ripple_start_time_s",
+            "ripple_window_start_s",
+            "ripple_window_end_s",
+            "v1_unit_ids",
+            "ca1_unit_ids",
+            "coef_ca1_unit_ids",
+            "ripple_fold_index",
+            "ripple_observed_count_oof",
+            "ripple_predicted_count_oof",
+            "pseudo_r2_ripple_folds",
+            "mae_ripple_folds",
+            "devexp_ripple_folds",
+            "bits_per_spike_ripple_folds",
+            "pseudo_r2_ripple_shuff_folds",
+            "mae_ripple_shuff_folds",
+            "devexp_ripple_shuff_folds",
+            "bits_per_spike_ripple_shuff_folds",
+            "coef_ca1_full_all",
+            "coef_intercept_full_all",
+        ]
+
+        for key in scalar_keys:
+            assert left[key] == right[key]
+        for key in array_keys:
+            assert np.array_equal(np.asarray(left[key]), np.asarray(right[key]))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nemos",
+        SimpleNamespace(
+            __version__="0.2.6",
+            glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
+        ),
+    )
+    monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
+
+    spikes = {
+        "ca1": FakeTsGroup(
+            {
+                101: [1.01, 1.06, 2.01, 3.01, 3.08, 4.03, 4.09],
+                102: [1.03, 2.07, 3.02, 3.05, 4.01],
+                103: [2.02, 4.08],
+            }
+        ),
+        "v1": FakeTsGroup(
+            {
+                11: [1.02, 1.05, 2.01, 3.02, 4.04, 4.07],
+                12: [1.08, 2.04, 3.01, 3.09, 4.02],
+            }
+        ),
+    }
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.0, 2.0, 3.0, 4.0],
+            "end_time": [1.2, 2.2, 3.2, 4.2],
+        }
+    )
+
+    prepared_epoch = _prepare_ripple_glm_epoch_inputs(
+        "01_s1",
+        spikes=spikes,
+        ripple_table=ripple_table,
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        n_splits=2,
+    )
+    prepared_results = _fit_ripple_glm_on_prepared_epoch(
+        "01_s1",
+        prepared_epoch=prepared_epoch,
+        n_shuffles_ripple=0,
+        shuffle_seed=45,
+        ripple_window_s=0.2,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+    wrapper_results = fit_ripple_glm_train_on_ripple(
+        epoch="01_s1",
+        spikes=spikes,
+        epoch_interval=SimpleNamespace(),
+        ripple_table=ripple_table,
+        n_splits=2,
+        n_shuffles_ripple=0,
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    assert_core_outputs_equal(prepared_results, wrapper_results)
+
+
+def test_prepared_epoch_fit_matches_public_wrapper_with_shuffles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePopulationGLM:
+        def __init__(self, **kwargs) -> None:
+            self.coef_ = np.empty((0, 0), dtype=float)
+            self.intercept_ = np.empty((0,), dtype=float)
+
+        def fit(self, X, y) -> None:
+            X = np.asarray(X, dtype=float)
+            y = np.asarray(y, dtype=float)
+            row_weights = np.arange(1, X.shape[0] + 1, dtype=float)[:, None]
+            weighted_signal = np.sum(y * row_weights, axis=0) / float(np.sum(row_weights))
+            feature_scale = (np.arange(X.shape[1], dtype=float) + 1.0)[:, None]
+            self.coef_ = feature_scale * weighted_signal[None, :]
+            self.intercept_ = weighted_signal / 10.0
+
+        def predict(self, X) -> np.ndarray:
+            X = np.asarray(X, dtype=float)
+            linear = np.clip(X @ self.coef_ + self.intercept_[None, :], -10.0, 10.0)
+            return np.exp(linear)
+
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
+    class FakeTsGroup:
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
+
+        def keys(self):
+            return list(self._spikes_by_unit)
+
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
+
+    def assert_core_outputs_equal(left: dict[str, object], right: dict[str, object]) -> None:
+        scalar_keys = [
+            "epoch",
+            "shuffle_seed",
+            "n_splits",
+            "n_shuffles_ripple",
+            "ripple_window_s",
+            "ripple_window_offset_s",
+            "n_ripples",
+            "n_cells",
+            "n_ca1_cells",
+        ]
+        array_keys = [
+            "ripple_start_time_s",
+            "ripple_window_start_s",
+            "ripple_window_end_s",
+            "v1_unit_ids",
+            "ca1_unit_ids",
+            "coef_ca1_unit_ids",
+            "ripple_fold_index",
+            "ripple_observed_count_oof",
+            "ripple_predicted_count_oof",
+            "pseudo_r2_ripple_folds",
+            "mae_ripple_folds",
+            "devexp_ripple_folds",
+            "bits_per_spike_ripple_folds",
+            "pseudo_r2_ripple_shuff_folds",
+            "mae_ripple_shuff_folds",
+            "devexp_ripple_shuff_folds",
+            "bits_per_spike_ripple_shuff_folds",
+            "coef_ca1_full_all",
+            "coef_intercept_full_all",
+        ]
+
+        for key in scalar_keys:
+            assert left[key] == right[key]
+        for key in array_keys:
+            assert np.array_equal(np.asarray(left[key]), np.asarray(right[key]))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nemos",
+        SimpleNamespace(
+            __version__="0.2.6",
+            glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
+        ),
+    )
+    monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
+
+    spikes = {
+        "ca1": FakeTsGroup(
+            {
+                101: [1.01, 1.06, 2.01, 3.01, 3.08, 4.03, 4.09],
+                102: [1.03, 2.07, 3.02, 3.05, 4.01],
+                103: [2.02, 4.08],
+            }
+        ),
+        "v1": FakeTsGroup(
+            {
+                11: [1.02, 1.05, 2.01, 3.02, 4.04, 4.07],
+                12: [1.08, 2.04, 3.01, 3.09, 4.02],
+            }
+        ),
+    }
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.0, 2.0, 3.0, 4.0],
+            "end_time": [1.2, 2.2, 3.2, 4.2],
+        }
+    )
+
+    prepared_epoch = _prepare_ripple_glm_epoch_inputs(
+        "01_s1",
+        spikes=spikes,
+        ripple_table=ripple_table,
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        n_splits=2,
+    )
+    prepared_results = _fit_ripple_glm_on_prepared_epoch(
+        "01_s1",
+        prepared_epoch=prepared_epoch,
+        n_shuffles_ripple=3,
+        shuffle_seed=45,
+        ripple_window_s=0.2,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+    wrapper_results = fit_ripple_glm_train_on_ripple(
+        epoch="01_s1",
+        spikes=spikes,
+        epoch_interval=SimpleNamespace(),
+        ripple_table=ripple_table,
+        n_splits=2,
+        n_shuffles_ripple=3,
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    assert_core_outputs_equal(prepared_results, wrapper_results)
 
 
 def test_build_metric_figure_data_uses_ripple_shuffle_p_values() -> None:

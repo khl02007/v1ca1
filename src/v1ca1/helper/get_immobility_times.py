@@ -2,16 +2,16 @@ from __future__ import annotations
 
 """Compute movement and immobility intervals for one session.
 
-This script loads per-epoch position arrays and position timestamps from the
-analysis folder, computes speed for each epoch, uses pynapple thresholding to
-define movement periods, and defines immobility as the complement of movement
-within the full epoch interval.
+This script loads per-epoch position timestamps plus cleaned DLC head position
+from the analysis folder, selects only epochs with usable head position,
+computes speed for each selected epoch, uses pynapple thresholding to define
+movement periods, and defines immobility as the complement of movement within
+the full epoch interval.
 
-By default it writes root-level pynapple `IntervalSet` files
-(`run_times.npz` and `immobility_times.npz`). The pynapple files store
-the full epoch label as metadata on each interval row. The script prefers
-`timestamps_position.npz` when available and readable, and otherwise falls back
-to `timestamps_position.pkl`.
+The canonical outputs are root-level parquet tables (`run_times.parquet` and
+`immobility_times.parquet`) with one row per interval and columns `start`,
+`end`, and `epoch`. The script prefers `timestamps_position.npz` when
+available and readable, and otherwise falls back to `timestamps_position.pkl`.
 """
 
 import argparse
@@ -23,6 +23,8 @@ import pandas as pd
 
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
     DEFAULT_DATA_ROOT,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_SIGMA_S,
@@ -32,9 +34,8 @@ from v1ca1.helper.session import (
     coerce_position_array,
     get_analysis_path,
     get_position_sampling_rate,
-    load_position_data,
+    load_position_data_with_precedence,
     load_position_timestamps,
-    save_pickle_output,
 )
 
 if TYPE_CHECKING:
@@ -66,44 +67,47 @@ def compute_movement_and_immobility_intervals(
     return movement_ep, immobility_ep
 
 
-def intervalset_to_dataframe(intervals: "nap.IntervalSet") -> pd.DataFrame:
-    """Convert a pynapple IntervalSet to the legacy dataframe layout."""
-    start = np.asarray(intervals.start, dtype=float)
-    end = np.asarray(intervals.end, dtype=float)
-    return pd.DataFrame(
-        {
-            "start_time": start,
-            "end_time": end,
-            "duration": end - start,
-        }
-    )
+def has_any_finite_position(position_xy: np.ndarray | None) -> bool:
+    """Return whether one XY position array contains at least one finite sample."""
+    if position_xy is None:
+        return False
+    position_array = np.asarray(position_xy, dtype=float)
+    return position_array.size > 0 and np.isfinite(position_array).any()
 
 
-def save_legacy_interval_pickle_output(
+def select_epochs_with_usable_head_position(
+    epoch_tags: list[str],
+    *,
+    position_by_epoch: dict[str, np.ndarray],
+    position_source: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Return epochs with usable head position plus skipped-epoch reasons."""
+    usable_epochs: list[str] = []
+    skipped_epochs: list[dict[str, str]] = []
+    for epoch in epoch_tags:
+        head_position = position_by_epoch.get(epoch)
+        if head_position is None:
+            skipped_epochs.append(
+                {"epoch": epoch, "reason": f"head position missing from {position_source}"}
+            )
+            continue
+        if not has_any_finite_position(head_position):
+            skipped_epochs.append(
+                {"epoch": epoch, "reason": f"head position is all NaN in {position_source}"}
+            )
+            continue
+        usable_epochs.append(epoch)
+    return usable_epochs, skipped_epochs
+
+
+def save_interval_table_output(
     analysis_path: Path,
-    state_name: str,
+    *,
+    output_name: str,
     intervals_by_epoch: dict[str, "nap.IntervalSet"],
 ) -> Path:
-    """Write one root-level pickle mapping each epoch to its legacy dataframe."""
-    output_path = analysis_path / f"{state_name}.pkl"
-    serializable = {
-        epoch: intervalset_to_dataframe(intervals)
-        for epoch, intervals in intervals_by_epoch.items()
-    }
-    return save_pickle_output(output_path, serializable)
-
-
-def save_pynapple_interval_output(
-    analysis_path: Path,
-    state_name: str,
-    intervals_by_epoch: dict[str, "nap.IntervalSet"],
-) -> Path:
-    """Write one root-level IntervalSet with epoch metadata for one state."""
-    import pynapple as nap
-
-    starts: list[np.ndarray] = []
-    ends: list[np.ndarray] = []
-    epochs: list[str] = []
+    """Write one canonical parquet table of interval rows."""
+    rows: list[dict[str, float | str]] = []
 
     for epoch, intervals in intervals_by_epoch.items():
         start_array = np.asarray(intervals.start, dtype=float)
@@ -112,25 +116,26 @@ def save_pynapple_interval_output(
             continue
         if start_array.shape != end_array.shape:
             raise ValueError(
-                f"Mismatched start/end interval arrays for {state_name!r} in epoch {epoch!r}."
+                f"Mismatched start/end interval arrays for {output_name!r} in epoch {epoch!r}."
+            )
+        for start, end in zip(start_array.tolist(), end_array.tolist(), strict=True):
+            rows.append(
+                {
+                    "start": float(start),
+                    "end": float(end),
+                    "epoch": str(epoch),
+                }
             )
 
-        starts.append(start_array)
-        ends.append(end_array)
-        epochs.extend([str(epoch)] * start_array.shape[0])
+    interval_table = pd.DataFrame.from_records(rows, columns=["start", "end", "epoch"])
+    if not interval_table.empty:
+        interval_table = interval_table.sort_values(
+            by=["start", "end", "epoch"],
+            kind="stable",
+        ).reset_index(drop=True)
 
-    if starts:
-        all_starts = np.concatenate(starts).astype(float, copy=False)
-        all_ends = np.concatenate(ends).astype(float, copy=False)
-    else:
-        all_starts = np.array([], dtype=float)
-        all_ends = np.array([], dtype=float)
-
-    interval_set = nap.IntervalSet(start=all_starts, end=all_ends, time_units="s")
-    interval_set.set_info(epoch=epochs)
-
-    output_path = analysis_path / f"{state_name}.npz"
-    interval_set.save(output_path)
+    output_path = analysis_path / f"{output_name}.parquet"
+    interval_table.to_parquet(output_path, index=False)
     return output_path
 
 
@@ -140,7 +145,6 @@ def get_immobility_times(
     data_root: Path = DEFAULT_DATA_ROOT,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    save_pkl: bool = False,
 ) -> None:
     """Compute and save movement and immobility intervals for one session."""
     if position_offset < 0:
@@ -155,7 +159,25 @@ def get_immobility_times(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
     epoch_tags, timestamps_position, timestamp_source = load_position_timestamps(analysis_path)
-    position_dict = load_position_data(analysis_path, epoch_tags)
+    position_dict, position_source = load_position_data_with_precedence(
+        analysis_path,
+        position_source="clean_dlc_head",
+        clean_dlc_input_dirname=DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+        clean_dlc_input_name=DEFAULT_CLEAN_DLC_POSITION_NAME,
+        validate_timestamps=True,
+    )
+    selected_epochs, skipped_epochs = select_epochs_with_usable_head_position(
+        epoch_tags,
+        position_by_epoch=position_dict,
+        position_source=position_source,
+    )
+    if skipped_epochs:
+        print(f"Skipping epochs without usable head position: {skipped_epochs!r}")
+    if not selected_epochs:
+        raise ValueError(
+            "No epochs have usable head position in the combined cleaned DLC position parquet. "
+            f"Checked {position_source}."
+        )
 
     print(f"Processing {animal_name} {date}.")
 
@@ -163,7 +185,7 @@ def get_immobility_times(
     immobility_intervals: dict[str, "nap.IntervalSet"] = {}
     epoch_summaries: dict[str, dict[str, float]] = {}
 
-    for epoch in epoch_tags:
+    for epoch in selected_epochs:
         speed_tsd = build_speed_tsd(
             position=position_dict[epoch],
             timestamps_position=timestamps_position[epoch],
@@ -186,30 +208,21 @@ def get_immobility_times(
 
     outputs: dict[str, Any] = {
         "timestamps_position_source": timestamp_source,
-        "epochs": epoch_tags,
+        "position_source": position_source,
+        "selected_epochs": selected_epochs,
+        "skipped_epochs_unusable_head_position": skipped_epochs,
         "epoch_summaries": epoch_summaries,
-        "run_times_pynapple_path": save_pynapple_interval_output(
+        "run_times_path": save_interval_table_output(
             analysis_path=analysis_path,
-            state_name="run_times",
+            output_name="run_times",
             intervals_by_epoch=run_intervals,
         ),
-        "immobility_times_pynapple_path": save_pynapple_interval_output(
+        "immobility_times_path": save_interval_table_output(
             analysis_path=analysis_path,
-            state_name="immobility_times",
+            output_name="immobility_times",
             intervals_by_epoch=immobility_intervals,
         ),
     }
-    if save_pkl:
-        outputs["run_times_pickle_path"] = save_legacy_interval_pickle_output(
-            analysis_path=analysis_path,
-            state_name="run_times",
-            intervals_by_epoch=run_intervals,
-        )
-        outputs["immobility_times_pickle_path"] = save_legacy_interval_pickle_output(
-            analysis_path=analysis_path,
-            state_name="immobility_times",
-            intervals_by_epoch=immobility_intervals,
-        )
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -221,7 +234,6 @@ def get_immobility_times(
             "position_offset": position_offset,
             "speed_threshold_cm_s": speed_threshold_cm_s,
             "speed_sigma_s": DEFAULT_SPEED_SIGMA_S,
-            "save_pkl": save_pkl,
         },
         outputs=outputs,
     )
@@ -247,11 +259,6 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_DATA_ROOT,
         help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
     )
-    parser.add_argument(
-        "--save-pkl",
-        action="store_true",
-        help="Also write compatibility pickle exports alongside the default .npz outputs.",
-    )
     return parser.parse_args()
 
 
@@ -262,7 +269,6 @@ def main() -> None:
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
-        save_pkl=args.save_pkl,
     )
 
 
