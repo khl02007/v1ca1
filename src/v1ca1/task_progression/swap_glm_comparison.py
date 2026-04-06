@@ -8,9 +8,9 @@ left/right arm stimuli are swapped.
 
 Supported models:
 
-- `visual`: separate dark and light fields, analogous to `sep`
+- `visual`: separate dark and light fields, analogous to `independent_light_field`
 - `task`: dark field plus segment-specific light gain, analogous to
-  `mult_per_segment`
+  `segment_bump_gain`
 """
 
 import argparse

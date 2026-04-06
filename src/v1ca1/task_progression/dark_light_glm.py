@@ -10,13 +10,13 @@ combination.
 
 Supported model families:
 
-- `mult`: shared place field with spline gain modulation in light
-- `mult_per_segment`: shared place field with segment-anchored raised-cosine gain
-- `mult_fewer_gain_splines`: shared place field with fewer gain splines than dark-field splines
-- `mult_per_segment_scalar`: shared place field with one scalar gain per segment
-- `mult_per_segment_overlap`: segment-anchored raised-cosine gain with overlap
-- `add_jax`: additive-in-rate light component fit with JAX/JAXopt when available
-- `sep`: separate dark and light place fields
+- `dense_gain`: shared place field with spline gain modulation in light
+- `segment_bump_gain`: shared place field with segment-anchored raised-cosine gain
+- `reduced_dense_gain`: shared place field with fewer gain splines than dark-field splines
+- `segment_scalar_gain`: shared place field with one scalar gain per segment
+- `overlapping_segment_bump_gain`: segment-anchored raised-cosine gain with overlap
+- `additive_light`: additive-in-rate light component fit with JAX/JAXopt when available
+- `independent_light_field`: separate dark and light place fields
 """
 
 import argparse
@@ -75,16 +75,15 @@ except ModuleNotFoundError:
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
 DEFAULT_RIDGES = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
-DEFAULT_LIGHT_EPOCHS = ("02_r1", "04_r2", "06_r3")
 DEFAULT_DARK_EPOCH = "08_r4"
 DEFAULT_MODEL_FAMILIES = (
-    "mult",
-    "mult_per_segment",
-    "mult_fewer_gain_splines",
-    "mult_per_segment_scalar",
-    "mult_per_segment_overlap",
-    "add_jax",
-    "sep",
+    "dense_gain",
+    "segment_bump_gain",
+    "reduced_dense_gain",
+    "segment_scalar_gain",
+    "overlapping_segment_bump_gain",
+    "additive_light",
+    "independent_light_field",
 )
 DEFAULT_SEED = 47
 DEFAULT_GAIN_OVERLAP_FRAC = 0.05
@@ -166,11 +165,7 @@ def select_light_dark_pairs(
     selected_light_epochs = (
         list(light_epochs)
         if light_epochs
-        else [
-            epoch
-            for epoch in DEFAULT_LIGHT_EPOCHS
-            if epoch not in selected_dark_epochs
-        ]
+        else [epoch for epoch in epoch_pool if epoch not in selected_dark_epochs]
     )
     missing_defaults = [
         epoch
@@ -256,6 +251,13 @@ def _zscore_train_apply(
     mean = float(np.mean(values[train_idx]))
     std = float(np.std(values[train_idx]) + eps)
     return (values[train_idx] - mean) / std, (values[test_idx] - mean) / std, mean, std
+
+
+def _as_interval_set(interval_like: Any) -> Any:
+    """Return an IntervalSet whether the input is one directly or via `time_support`."""
+    if hasattr(interval_like, "time_support"):
+        return interval_like.time_support
+    return interval_like
 
 
 def _coef_feat_by_unit(model: PopulationGLM, n_features: int) -> np.ndarray:
@@ -728,7 +730,7 @@ def _prepare_dark_light_fit_inputs(
         trajectory_interval = trajectory_ep_by_epoch[epoch][traj_name]
         if restrict_ep_by_epoch is not None:
             trajectory_interval = trajectory_interval.intersect(
-                restrict_ep_by_epoch[epoch].time_support
+                _as_interval_set(restrict_ep_by_epoch[epoch])
             )
 
         counts = selected_spikes.count(bin_size_s, ep=trajectory_interval)
@@ -1719,7 +1721,7 @@ def _fit_additive_rate_batched_jax(
     """Fit the additive-in-rate light component with JAX and optional JAXopt."""
     if jax is None:
         raise ModuleNotFoundError(
-            "The `add_jax` model family requires `jax`, but it is not installed in this environment."
+            "The `additive_light` model family requires `jax`, but it is not installed in this environment."
         )
 
     y_j = jnp.asarray(y, dtype=jnp.float32)
@@ -2547,7 +2549,7 @@ def build_family_dataset(
         "add_basis": np.arange(add_basis_count, dtype=int),
         "cv_metric": np.asarray(CV_METRIC_NAMES, dtype=str),
     }
-    if family_name in {"mult", "mult_fewer_gain_splines"}:
+    if family_name in {"dense_gain", "reduced_dense_gain"}:
         gain_basis_count = int(
             np.asarray(first["coef_light_gain_spline_full_all"]).shape[0]
         )
@@ -2560,7 +2562,7 @@ def build_family_dataset(
                 "coef_light_gain_spline_full_all",
             ),
         )
-    elif family_name in {"mult_per_segment", "mult_per_segment_overlap"}:
+    elif family_name in {"segment_bump_gain", "overlapping_segment_bump_gain"}:
         segment_basis_count = int(
             np.asarray(first["coef_segment_bump_gain_full_all"]).shape[0]
         )
@@ -2573,7 +2575,7 @@ def build_family_dataset(
                 "coef_segment_bump_gain_full_all",
             ),
         )
-    elif family_name == "mult_per_segment_scalar":
+    elif family_name == "segment_scalar_gain":
         segment_basis_count = int(
             np.asarray(first["coef_segment_scalar_gain_full_all"]).shape[0]
         )
@@ -2586,7 +2588,7 @@ def build_family_dataset(
                 "coef_segment_scalar_gain_full_all",
             ),
         )
-    elif family_name == "sep":
+    elif family_name == "independent_light_field":
         data_vars["coef_place_light_full_all"] = (
             ("trajectory", "ridge", "place_basis", "unit"),
             _stack_family_array(
@@ -2723,13 +2725,13 @@ def parse_arguments() -> argparse.Namespace:
         "--n-splines-gain",
         type=int,
         default=6,
-        help="Number of spline basis functions for `mult_fewer_gain_splines`. Default: 6",
+        help="Number of spline basis functions for `reduced_dense_gain`. Default: 6",
     )
     parser.add_argument(
         "--spline-order-gain",
         type=int,
         default=4,
-        help="Spline order for `mult_fewer_gain_splines`. Default: 4",
+        help="Spline order for `reduced_dense_gain`. Default: 4",
     )
     speed_group = parser.add_mutually_exclusive_group()
     speed_group.add_argument(
@@ -2780,7 +2782,7 @@ def parse_arguments() -> argparse.Namespace:
         "--gain-overlap-frac",
         type=float,
         default=DEFAULT_GAIN_OVERLAP_FRAC,
-        help=f"Overlap fraction for `mult_per_segment_overlap`. Default: {DEFAULT_GAIN_OVERLAP_FRAC}",
+        help=f"Overlap fraction for `overlapping_segment_bump_gain`. Default: {DEFAULT_GAIN_OVERLAP_FRAC}",
     )
     return parser.parse_args()
 
@@ -2823,34 +2825,34 @@ def _fit_model_family(
         "spline_order_speed": args.spline_order_speed,
         "speed_bounds": None if args.speed_bounds is None else tuple(args.speed_bounds),
     }
-    if family_name == "mult":
+    if family_name == "dense_gain":
         return fit_shared_place_light_mod_nemos_per_traj(**common_kwargs)
-    if family_name == "mult_per_segment":
+    if family_name == "segment_bump_gain":
         return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
             **common_kwargs,
             segment_edges=segment_edges,
             gain_overlap_frac=0.0,
         )
-    if family_name == "mult_fewer_gain_splines":
+    if family_name == "reduced_dense_gain":
         return fit_shared_place_light_mod_nemos_per_traj_gain_splines(
             **common_kwargs,
             n_splines_gain=args.n_splines_gain,
             spline_order_gain=args.spline_order_gain,
         )
-    if family_name == "mult_per_segment_scalar":
+    if family_name == "segment_scalar_gain":
         return fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
             **common_kwargs,
             segment_edges=segment_edges,
         )
-    if family_name == "mult_per_segment_overlap":
+    if family_name == "overlapping_segment_bump_gain":
         return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
             **common_kwargs,
             segment_edges=segment_edges,
             gain_overlap_frac=args.gain_overlap_frac,
         )
-    if family_name == "add_jax":
+    if family_name == "additive_light":
         return fit_true_additive_rate_poisson_fast_per_traj(**common_kwargs)
-    if family_name == "sep":
+    if family_name == "independent_light_field":
         return fit_separate_dark_light_fields_nemos_per_traj(**common_kwargs)
     raise ValueError(f"Unknown model family: {family_name}")
 
@@ -2859,6 +2861,9 @@ def main() -> None:
     """Run the modernized dark/light task-progression GLM workflow."""
     args = parse_arguments()
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    print(f"Loading session for {args.animal_name} {args.date}.")
+    if args.cuda_visible_devices is not None:
+        print(f"Using CUDA_VISIBLE_DEVICES={args.cuda_visible_devices}.")
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
@@ -2873,6 +2878,14 @@ def main() -> None:
         light_epochs=args.light_epochs,
         dark_epochs=args.dark_epochs,
     )
+    print(
+        "Using run epochs: "
+        + ", ".join(str(epoch) for epoch in selected_epochs)
+    )
+    print(
+        "Fitting light/dark pairs: "
+        + ", ".join(f"{light} vs {dark}" for light, dark in epoch_pairs)
+    )
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
@@ -2882,6 +2895,10 @@ def main() -> None:
         derive_default_segment_edges(args.animal_name)
         if args.segment_edges is None
         else _validate_segment_edges(args.segment_edges)
+    )
+    print(
+        "Using segment edges: "
+        + ", ".join(f"{edge:.4f}" for edge in np.asarray(segment_edges, dtype=float))
     )
     data_dir = analysis_path / "task_progression_dark_light"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -2895,8 +2912,10 @@ def main() -> None:
     speed_by_run = session["speed_by_run"] if args.use_speed else None
 
     for region in args.regions:
+        print(f"Preparing region {region.upper()}.")
         spikes_region = session["spikes_by_region"][region]
         for light_epoch, dark_epoch in epoch_pairs:
+            print(f"  Pair {light_epoch} vs {dark_epoch}.")
             dark_epoch_rates = np.asarray(
                 movement_firing_rates[region][dark_epoch],
                 dtype=float,
@@ -2914,16 +2933,31 @@ def main() -> None:
                         "threshold_hz": region_thresholds[region],
                     }
                 )
+                print(
+                    f"    Skipping pair: no {region.upper()} units passed the "
+                    f"dark-epoch threshold ({region_thresholds[region]:.3f} Hz)."
+                )
                 continue
 
             selected_dark_rates = dark_epoch_rates[unit_mask]
+            print(
+                f"    Selected {int(unit_mask.sum())} {region.upper()} units above "
+                f"{region_thresholds[region]:.3f} Hz in {dark_epoch}."
+            )
             for family_name in args.model_families:
+                print(
+                    f"    Fitting {family_name} across {len(TRAJECTORY_TYPES)} "
+                    f"trajectories and {len(args.ridges)} ridge value(s)."
+                )
                 family_results: dict[str, dict[float, dict[str, Any]]] = {
                     trajectory: {} for trajectory in TRAJECTORY_TYPES
                 }
                 family_failed = False
                 for trajectory in TRAJECTORY_TYPES:
                     for ridge in args.ridges:
+                        print(
+                            f"      {trajectory}: ridge={float(ridge):.3g}"
+                        )
                         try:
                             family_results[trajectory][float(ridge)] = _fit_model_family(
                                 family_name,
@@ -2953,12 +2987,17 @@ def main() -> None:
                                     "error": str(exc),
                                 }
                             )
+                            print(
+                                f"      Failed on {trajectory} at ridge={float(ridge):.3g}: "
+                                f"{exc}"
+                            )
                             family_failed = True
                             break
                     if family_failed:
                         break
 
                 if family_failed:
+                    print(f"    Skipping dataset write for {family_name} after fit failure.")
                     continue
 
                 fit_parameters = {
@@ -3002,6 +3041,7 @@ def main() -> None:
                 )
                 dataset.to_netcdf(result_path)
                 saved_datasets.append(result_path)
+                print(f"    Saved dataset to {result_path}.")
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -3045,6 +3085,8 @@ def main() -> None:
 
     if saved_datasets:
         print(f"Saved {len(saved_datasets)} NetCDF fit dataset(s) to {data_dir}")
+    if skipped_fits:
+        print(f"Skipped {len(skipped_fits)} fit item(s); see run log for details.")
     print(f"Saved run metadata to {log_path}")
 
 

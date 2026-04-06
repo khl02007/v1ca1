@@ -105,7 +105,7 @@ src/v1ca1/task_progression/decoding_comparison.py
 src/v1ca1/task_progression/encoding_comparison.py
 src/v1ca1/task_progression/motor.py
 src/v1ca1/task_progression/mutual_info.py
-src/v1ca1/task_progression/swap_gain_comparison.py
+src/v1ca1/task_progression/segment_coefficient_comparison.py
 src/v1ca1/task_progression/swap_glm_comparison.py
 src/v1ca1/task_progression/tuning_analysis.py
 src/v1ca1/topology/__init__.py

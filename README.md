@@ -56,7 +56,7 @@ Modernized scripts that are relatively self-contained and worth treating as the 
   - `src/v1ca1/task_progression/motor.py`
   - `src/v1ca1/task_progression/dark_light_glm.py`
   - `src/v1ca1/task_progression/swap_glm_comparison.py`
-  - `src/v1ca1/task_progression/swap_gain_comparison.py`
+  - `src/v1ca1/task_progression/segment_coefficient_comparison.py`
 - Signal dimension:
   - `src/v1ca1/signal_dim/meme.py`
 

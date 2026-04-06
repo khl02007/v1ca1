@@ -23,7 +23,7 @@ def _fake_result(
     module,
     *,
     speed_outputs: dict[str, object],
-    family_name: str = "mult",
+    family_name: str = "dense_gain",
 ) -> dict[str, object]:
     n_units = 2
     result = {
@@ -57,11 +57,11 @@ def _fake_result(
         "dark_hz_grid": np.full((5, n_units), 1.0, dtype=float),
         "light_hz_grid": np.full((5, n_units), 2.0, dtype=float),
     }
-    if family_name == "mult":
+    if family_name == "dense_gain":
         result["coef_light_gain_spline_full_all"] = np.full((2, n_units), 0.25)
-    elif family_name == "sep":
+    elif family_name == "independent_light_field":
         result["coef_place_light_full_all"] = np.full((3, n_units), 0.75)
-    elif family_name == "mult_per_segment_scalar":
+    elif family_name == "segment_scalar_gain":
         result["coef_segment_scalar_gain_full_all"] = np.full((3, n_units), 0.25)
         result["segment_edges"] = np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float)
         result["gain_basis"] = "segment_scalar"
@@ -127,6 +127,49 @@ def test_format_speed_outputs_linear_preserves_scalar_coefficients(
     assert np.isfinite(outputs["speed_mean"])
     assert np.isfinite(outputs["speed_std"])
     assert outputs["coef_speed_basis_base_all"].shape == (1, 2)
+
+
+def test_select_light_dark_pairs_defaults_to_all_nondark_selected_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+
+    pairs = module.select_light_dark_pairs(
+        ["02_r1", "04_r2", "06_r3", "08_r4", "10_r5"],
+        selected_epochs=["04_r2", "06_r3", "08_r4", "10_r5"],
+        light_epochs=None,
+        dark_epochs=["08_r4"],
+    )
+
+    assert pairs == [
+        ("04_r2", "08_r4"),
+        ("06_r3", "08_r4"),
+        ("10_r5", "08_r4"),
+    ]
+
+
+def test_as_interval_set_accepts_intervalset_and_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+
+    class _FakeIntervalSet:
+        pass
+
+    class _FakeWrapper:
+        def __init__(self, time_support):
+            self.time_support = time_support
+
+    interval = _FakeIntervalSet()
+
+    assert module._as_interval_set(interval) is interval
+    assert module._as_interval_set(_FakeWrapper(interval)) is interval
 
 
 def test_make_speed_design_train_test_uses_training_bounds_for_bspline(
@@ -220,14 +263,14 @@ def test_build_family_dataset_includes_speed_basis_schema(
             0.1: _fake_result(
                 module,
                 speed_outputs=speed_outputs,
-                family_name="mult",
+                family_name="dense_gain",
             )
         }
         for trajectory in module.TRAJECTORY_TYPES
     }
 
     dataset = module.build_family_dataset(
-        family_name="mult",
+        family_name="dense_gain",
         results_by_traj=results_by_traj,
         ridge_values=[0.1],
         animal_name="L14",
@@ -284,14 +327,14 @@ def test_build_family_dataset_sep_uses_explicit_dark_and_light_fields(
             0.1: _fake_result(
                 module,
                 speed_outputs=speed_outputs,
-                family_name="sep",
+                family_name="independent_light_field",
             )
         }
         for trajectory in module.TRAJECTORY_TYPES
     }
 
     dataset = module.build_family_dataset(
-        family_name="sep",
+        family_name="independent_light_field",
         results_by_traj=results_by_traj,
         ridge_values=[0.1],
         animal_name="L14",
@@ -336,14 +379,14 @@ def test_build_family_dataset_scalar_gain_uses_segment_basis_coord(
             0.1: _fake_result(
                 module,
                 speed_outputs=speed_outputs,
-                family_name="mult_per_segment_scalar",
+                family_name="segment_scalar_gain",
             )
         }
         for trajectory in module.TRAJECTORY_TYPES
     }
 
     dataset = module.build_family_dataset(
-        family_name="mult_per_segment_scalar",
+        family_name="segment_scalar_gain",
         results_by_traj=results_by_traj,
         ridge_values=[0.1],
         animal_name="L14",
