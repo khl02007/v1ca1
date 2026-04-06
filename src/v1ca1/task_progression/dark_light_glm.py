@@ -956,15 +956,15 @@ def _standard_result_dict(
     coef_place_x_light_base_all: np.ndarray,
     coef_speed_base_all: np.ndarray,
     coef_intercept_full_all: np.ndarray,
-    coef_place_full_all: np.ndarray,
+    coef_place_dark_full_all: np.ndarray,
     coef_light_full_all: np.ndarray,
-    coef_place_x_light_full_all: np.ndarray,
     coef_speed_full_all: np.ndarray,
     coef_add_intercept_full_all: np.ndarray,
     coef_add_place_full_all: np.ndarray,
     grid_tp: np.ndarray,
     dark_hz_grid: np.ndarray,
     light_hz_grid: np.ndarray,
+    family_specific_full_coef: dict[str, np.ndarray] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the shared result schema used across all model families."""
@@ -994,11 +994,8 @@ def _standard_result_dict(
         ),
         "coef_speed_base_all": np.asarray(coef_speed_base_all, dtype=float),
         "coef_intercept_full_all": np.asarray(coef_intercept_full_all, dtype=float),
-        "coef_place_full_all": np.asarray(coef_place_full_all, dtype=float),
+        "coef_place_dark_full_all": np.asarray(coef_place_dark_full_all, dtype=float),
         "coef_light_full_all": np.asarray(coef_light_full_all, dtype=float),
-        "coef_place_x_light_full_all": np.asarray(
-            coef_place_x_light_full_all, dtype=float
-        ),
         "coef_speed_full_all": np.asarray(coef_speed_full_all, dtype=float),
         "coef_add_intercept_full_all": np.asarray(
             coef_add_intercept_full_all, dtype=float
@@ -1008,6 +1005,13 @@ def _standard_result_dict(
         "dark_hz_grid": np.asarray(dark_hz_grid, dtype=float),
         "light_hz_grid": np.asarray(light_hz_grid, dtype=float),
     }
+    if family_specific_full_coef:
+        result.update(
+            {
+                name: np.asarray(values, dtype=float)
+                for name, values in family_specific_full_coef.items()
+            }
+        )
     if extra:
         result.update(extra)
     return result
@@ -1128,15 +1132,17 @@ def fit_shared_place_light_mod_nemos_per_traj(
         coef_place_x_light_base_all=nan_basis,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
-        coef_place_full_all=coef_place_full,
+        coef_place_dark_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
-        coef_place_x_light_full_all=coef_place_x_light_full,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_basis,
         grid_tp=grid,
         dark_hz_grid=np.exp(dark_lin) / bin_size_s,
         light_hz_grid=np.exp(light_lin) / bin_size_s,
+        family_specific_full_coef={
+            "coef_light_gain_spline_full_all": coef_place_x_light_full,
+        },
     )
 
 
@@ -1275,15 +1281,17 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_gain(
         coef_place_x_light_base_all=nan_gain,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
-        coef_place_full_all=coef_place_full,
+        coef_place_dark_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
-        coef_place_x_light_full_all=coef_gain_full,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
         dark_hz_grid=np.exp(dark_lin) / bin_size_s,
         light_hz_grid=np.exp(light_lin) / bin_size_s,
+        family_specific_full_coef={
+            "coef_segment_bump_gain_full_all": coef_gain_full,
+        },
         extra={
             "gain_basis": "segment_raised_cosine",
             "segment_edges": gain_edges,
@@ -1423,15 +1431,17 @@ def fit_shared_place_light_mod_nemos_per_traj_gain_splines(
         coef_place_x_light_base_all=nan_gain,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
-        coef_place_full_all=coef_place_full,
+        coef_place_dark_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
-        coef_place_x_light_full_all=coef_gain_full,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
         dark_hz_grid=np.exp(dark_lin) / bin_size_s,
         light_hz_grid=np.exp(light_lin) / bin_size_s,
+        family_specific_full_coef={
+            "coef_light_gain_spline_full_all": coef_gain_full,
+        },
         extra={
             "gain_basis": "cyclic_bspline",
             "n_splines_gain": int(n_splines_gain),
@@ -1489,7 +1499,7 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         p_all,
         segment_edges,
         pos_bounds=pos_bounds,
-        drop_first=True,
+        drop_first=False,
     )
     n_dark_basis = dark_basis.shape[1]
     n_gain_basis = segment_basis.shape[1]
@@ -1540,7 +1550,7 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         grid,
         gain_edges,
         pos_bounds=pos_bounds,
-        drop_first=True,
+        drop_first=False,
     )
     speed_ref_effect = _speed_reference_effect(
         speed_transform_all,
@@ -1568,15 +1578,17 @@ def fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
         coef_place_x_light_base_all=nan_dark,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
-        coef_place_full_all=coef_place_full,
+        coef_place_dark_full_all=coef_place_full,
         coef_light_full_all=coef_light_full,
-        coef_place_x_light_full_all=coef_gain_full,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_dark,
         grid_tp=grid,
         dark_hz_grid=np.exp(dark_lin) / bin_size_s,
         light_hz_grid=np.exp(light_lin) / bin_size_s,
+        family_specific_full_coef={
+            "coef_segment_scalar_gain_full_all": coef_gain_full,
+        },
         extra={
             "gain_basis": "segment_scalar",
             "segment_edges": gain_edges,
@@ -2145,9 +2157,8 @@ def fit_true_additive_rate_poisson_fast_per_traj(
         coef_place_x_light_base_all=nan_basis,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=theta0_all,
-        coef_place_full_all=beta_all,
+        coef_place_dark_full_all=beta_all,
         coef_light_full_all=nan_u,
-        coef_place_x_light_full_all=nan_basis,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=phi0_all,
         coef_add_place_full_all=delta_all,
@@ -2279,15 +2290,17 @@ def fit_separate_dark_light_fields_nemos_per_traj(
         coef_place_x_light_base_all=nan_basis,
         coef_speed_base_all=speed_outputs["coef_speed_base_all"],
         coef_intercept_full_all=cv_result["intercept_full"],
-        coef_place_full_all=coef_place_dark,
+        coef_place_dark_full_all=coef_place_dark,
         coef_light_full_all=coef_light_full,
-        coef_place_x_light_full_all=coef_place_change,
         coef_speed_full_all=speed_outputs["coef_speed_full_all"],
         coef_add_intercept_full_all=nan_u,
         coef_add_place_full_all=nan_basis,
         grid_tp=grid,
         dark_hz_grid=np.exp(dark_lin) / bin_size_s,
         light_hz_grid=np.exp(light_lin) / bin_size_s,
+        family_specific_full_coef={
+            "coef_place_light_full_all": coef_place_light,
+        },
     )
 
 
@@ -2348,12 +2361,12 @@ def build_family_dataset(
     unit_ids = np.asarray(first["unit_ids"])
     tp_grid = np.asarray(first["grid_tp"], dtype=float)
     place_basis_count = int(np.asarray(first["coef_place_base_all"]).shape[0])
-    light_mod_basis_count = int(np.asarray(first["coef_place_x_light_full_all"]).shape[0])
+    light_mod_basis_count = int(np.asarray(first["coef_place_x_light_base_all"]).shape[0])
     add_basis_count = int(np.asarray(first["coef_add_place_full_all"]).shape[0])
     speed_basis_count = int(np.asarray(first["coef_speed_basis_full_all"]).shape[0])
 
     attrs = {
-        "schema_version": "1",
+        "schema_version": "2",
         "animal_name": animal_name,
         "date": date,
         "region": region,
@@ -2384,58 +2397,206 @@ def build_family_dataset(
                 else first[optional_key]
             )
 
-    dataset = xr.Dataset(
-        data_vars={
-            "dark_movement_firing_rate_hz": ("unit", np.asarray(dark_movement_firing_rates, dtype=float)),
-            "speed_feature_mode": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_feature_mode")),
-            "n_speed_features": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "n_speed_features")),
-            "speed_basis": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_basis")),
-            "speed_spline_order": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_spline_order")),
-            "speed_basis_bounds": (("trajectory", "ridge", "speed_bound"), _stack_family_array(results_by_traj, ridge_values, "speed_basis_bounds")),
-            "speed_reference_value": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_reference_value")),
-            "speed_mean": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_mean")),
-            "speed_std": (("trajectory", "ridge"), _stack_family_array(results_by_traj, ridge_values, "speed_std")),
-            "spike_sum_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "spike_sum_cv")),
-            "ll_base_sum_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_base_sum_cv")),
-            "ll_full_sum_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_full_sum_cv")),
-            "dLL_sum_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "dLL_sum_cv")),
-            "ll_base_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_base_per_spike_cv")),
-            "ll_full_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_full_per_spike_cv")),
-            "dll_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "dll_per_spike_cv")),
-            "ll_base_bits_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_base_bits_per_spike_cv")),
-            "ll_full_bits_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "ll_full_bits_per_spike_cv")),
-            "dll_bits_per_spike_cv": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "dll_bits_per_spike_cv")),
-            "coef_intercept_base_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_intercept_base_all")),
-            "coef_place_base_all": (("trajectory", "ridge", "place_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_base_all")),
-            "coef_light_base_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_light_base_all")),
-            "coef_place_x_light_base_all": (("trajectory", "ridge", "light_mod_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_x_light_base_all")),
-            "coef_speed_base_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_base_all")),
-            "coef_speed_basis_base_all": (("trajectory", "ridge", "speed_basis_feature", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_base_all")),
-            "coef_intercept_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_intercept_full_all")),
-            "coef_place_full_all": (("trajectory", "ridge", "place_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_full_all")),
-            "coef_light_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_light_full_all")),
-            "coef_place_x_light_full_all": (("trajectory", "ridge", "light_mod_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_place_x_light_full_all")),
-            "coef_speed_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_full_all")),
-            "coef_speed_basis_full_all": (("trajectory", "ridge", "speed_basis_feature", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_full_all")),
-            "coef_add_intercept_full_all": (("trajectory", "ridge", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_add_intercept_full_all")),
-            "coef_add_place_full_all": (("trajectory", "ridge", "add_basis", "unit"), _stack_family_array(results_by_traj, ridge_values, "coef_add_place_full_all")),
-            "dark_hz_grid": (("trajectory", "ridge", "tp_grid", "unit"), _stack_family_array(results_by_traj, ridge_values, "dark_hz_grid")),
-            "light_hz_grid": (("trajectory", "ridge", "tp_grid", "unit"), _stack_family_array(results_by_traj, ridge_values, "light_hz_grid")),
-        },
-        coords={
-            "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
-            "ridge": np.asarray(ridge_values, dtype=float),
-            "unit": unit_ids,
-            "tp_grid": tp_grid,
-            "place_basis": np.arange(place_basis_count, dtype=int),
-            "light_mod_basis": np.arange(light_mod_basis_count, dtype=int),
-            "speed_basis_feature": np.arange(speed_basis_count, dtype=int),
-            "speed_bound": np.asarray(["lower", "upper"], dtype=str),
-            "add_basis": np.arange(add_basis_count, dtype=int),
-            "cv_metric": np.asarray(CV_METRIC_NAMES, dtype=str),
-        },
-        attrs=attrs,
-    )
+    data_vars: dict[str, tuple[tuple[str, ...] | str, np.ndarray]] = {
+        "dark_movement_firing_rate_hz": (
+            "unit",
+            np.asarray(dark_movement_firing_rates, dtype=float),
+        ),
+        "speed_feature_mode": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_feature_mode"),
+        ),
+        "n_speed_features": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "n_speed_features"),
+        ),
+        "speed_basis": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_basis"),
+        ),
+        "speed_spline_order": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_spline_order"),
+        ),
+        "speed_basis_bounds": (
+            ("trajectory", "ridge", "speed_bound"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_basis_bounds"),
+        ),
+        "speed_reference_value": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_reference_value"),
+        ),
+        "speed_mean": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_mean"),
+        ),
+        "speed_std": (
+            ("trajectory", "ridge"),
+            _stack_family_array(results_by_traj, ridge_values, "speed_std"),
+        ),
+        "spike_sum_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "spike_sum_cv"),
+        ),
+        "ll_base_sum_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_base_sum_cv"),
+        ),
+        "ll_full_sum_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_full_sum_cv"),
+        ),
+        "dLL_sum_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "dLL_sum_cv"),
+        ),
+        "ll_base_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_base_per_spike_cv"),
+        ),
+        "ll_full_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_full_per_spike_cv"),
+        ),
+        "dll_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "dll_per_spike_cv"),
+        ),
+        "ll_base_bits_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_base_bits_per_spike_cv"),
+        ),
+        "ll_full_bits_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "ll_full_bits_per_spike_cv"),
+        ),
+        "dll_bits_per_spike_cv": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "dll_bits_per_spike_cv"),
+        ),
+        "coef_intercept_base_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_intercept_base_all"),
+        ),
+        "coef_place_base_all": (
+            ("trajectory", "ridge", "place_basis", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_place_base_all"),
+        ),
+        "coef_light_base_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_light_base_all"),
+        ),
+        "coef_place_x_light_base_all": (
+            ("trajectory", "ridge", "light_mod_basis", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_place_x_light_base_all"),
+        ),
+        "coef_speed_base_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_speed_base_all"),
+        ),
+        "coef_speed_basis_base_all": (
+            ("trajectory", "ridge", "speed_basis_feature", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_base_all"),
+        ),
+        "coef_intercept_full_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_intercept_full_all"),
+        ),
+        "coef_place_dark_full_all": (
+            ("trajectory", "ridge", "place_basis", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_place_dark_full_all"),
+        ),
+        "coef_light_full_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_light_full_all"),
+        ),
+        "coef_speed_full_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_speed_full_all"),
+        ),
+        "coef_speed_basis_full_all": (
+            ("trajectory", "ridge", "speed_basis_feature", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_speed_basis_full_all"),
+        ),
+        "coef_add_intercept_full_all": (
+            ("trajectory", "ridge", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_add_intercept_full_all"),
+        ),
+        "coef_add_place_full_all": (
+            ("trajectory", "ridge", "add_basis", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "coef_add_place_full_all"),
+        ),
+        "dark_hz_grid": (
+            ("trajectory", "ridge", "tp_grid", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "dark_hz_grid"),
+        ),
+        "light_hz_grid": (
+            ("trajectory", "ridge", "tp_grid", "unit"),
+            _stack_family_array(results_by_traj, ridge_values, "light_hz_grid"),
+        ),
+    }
+    coords: dict[str, np.ndarray] = {
+        "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
+        "ridge": np.asarray(ridge_values, dtype=float),
+        "unit": unit_ids,
+        "tp_grid": tp_grid,
+        "place_basis": np.arange(place_basis_count, dtype=int),
+        "light_mod_basis": np.arange(light_mod_basis_count, dtype=int),
+        "speed_basis_feature": np.arange(speed_basis_count, dtype=int),
+        "speed_bound": np.asarray(["lower", "upper"], dtype=str),
+        "add_basis": np.arange(add_basis_count, dtype=int),
+        "cv_metric": np.asarray(CV_METRIC_NAMES, dtype=str),
+    }
+    if family_name in {"mult", "mult_fewer_gain_splines"}:
+        gain_basis_count = int(
+            np.asarray(first["coef_light_gain_spline_full_all"]).shape[0]
+        )
+        coords["gain_basis_feature"] = np.arange(gain_basis_count, dtype=int)
+        data_vars["coef_light_gain_spline_full_all"] = (
+            ("trajectory", "ridge", "gain_basis_feature", "unit"),
+            _stack_family_array(
+                results_by_traj,
+                ridge_values,
+                "coef_light_gain_spline_full_all",
+            ),
+        )
+    elif family_name in {"mult_per_segment", "mult_per_segment_overlap"}:
+        segment_basis_count = int(
+            np.asarray(first["coef_segment_bump_gain_full_all"]).shape[0]
+        )
+        coords["segment_basis"] = np.arange(segment_basis_count, dtype=int)
+        data_vars["coef_segment_bump_gain_full_all"] = (
+            ("trajectory", "ridge", "segment_basis", "unit"),
+            _stack_family_array(
+                results_by_traj,
+                ridge_values,
+                "coef_segment_bump_gain_full_all",
+            ),
+        )
+    elif family_name == "mult_per_segment_scalar":
+        segment_basis_count = int(
+            np.asarray(first["coef_segment_scalar_gain_full_all"]).shape[0]
+        )
+        coords["segment_basis"] = np.arange(segment_basis_count, dtype=int)
+        data_vars["coef_segment_scalar_gain_full_all"] = (
+            ("trajectory", "ridge", "segment_basis", "unit"),
+            _stack_family_array(
+                results_by_traj,
+                ridge_values,
+                "coef_segment_scalar_gain_full_all",
+            ),
+        )
+    elif family_name == "sep":
+        data_vars["coef_place_light_full_all"] = (
+            ("trajectory", "ridge", "place_basis", "unit"),
+            _stack_family_array(
+                results_by_traj,
+                ridge_values,
+                "coef_place_light_full_all",
+            ),
+        )
+
+    dataset = xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
     dataset.attrs["min_dark_firing_rate_hz"] = float(min_dark_firing_rate_hz)
     if "segment_edges" in first:
         segment_edges = np.asarray(first["segment_edges"], dtype=float)
@@ -2844,7 +3005,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_dark_light",
+        script_name="v1ca1.task_progression.dark_light_glm",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,

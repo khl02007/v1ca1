@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 
-MODULE_NAME = "v1ca1.task_progression.task_progression_motor"
+MODULE_NAME = "v1ca1.task_progression.motor"
 
 
 class _FakeInterpolated:
@@ -306,7 +306,7 @@ def _install_fake_pynapple(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _reload_motor_module(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(sys, "argv", ["task_progression_motor.py"])
+    monkeypatch.setattr(sys, "argv", ["motor.py"])
     _install_fake_jax(monkeypatch)
     _install_fake_nemos(monkeypatch)
     _install_fake_position_tools(monkeypatch)

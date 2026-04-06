@@ -3,7 +3,7 @@ from __future__ import annotations
 """Compare segment-wise visual-gain swap consistency across light epochs.
 
 This module modernizes the legacy visual-gain field correlation workflow to use
-NetCDF outputs from `v1ca1.task_progression.task_progression_dark_light`. It
+NetCDF outputs from `v1ca1.task_progression.dark_light_glm`. It
 loads one session's dark/light fit datasets for two light epochs and one shared
 dark epoch, reconstructs per-segment visual-gain effects for matching units,
 computes legacy left-vs-right swap-consistency statistics for outbound and
@@ -38,7 +38,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare task-progression visual-gain swap consistency across two "
-            "light epochs using NetCDF outputs from task_progression_dark_light."
+            "light epochs using NetCDF outputs from dark_light_glm."
         )
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
@@ -88,7 +88,7 @@ def parse_arguments() -> argparse.Namespace:
         "--input-dir",
         type=Path,
         help=(
-            "Directory containing task_progression_dark_light NetCDF files. "
+            "Directory containing dark_light_glm NetCDF files. "
             "Default: analysis_path / 'task_progression_dark_light'"
         ),
     )
@@ -168,7 +168,7 @@ def _load_fit_dataset(
         import xarray as xr
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "xarray is required to load task_progression_dark_light NetCDF files."
+            "xarray is required to load dark_light_glm NetCDF files."
         ) from exc
 
     dataset = xr.load_dataset(path)
@@ -211,10 +211,10 @@ def _load_fit_dataset(
             "this script."
         )
 
-    required_vars = (
+    required_vars = [
         "coef_light_full_all",
-        "coef_place_x_light_full_all",
-    )
+        _segment_gain_var_name(dataset),
+    ]
     missing_vars = [name for name in required_vars if name not in dataset]
     if missing_vars:
         raise ValueError(f"Dataset {path} is missing required variables: {missing_vars}")
@@ -297,6 +297,16 @@ def _segment_metadata(dataset) -> tuple[np.ndarray, str]:
     return segment_edges, gain_basis
 
 
+def _segment_gain_var_name(dataset) -> str:
+    """Return the saved segment-gain coefficient variable name for one dataset."""
+    _, gain_basis = _segment_metadata(dataset)
+    if gain_basis == "segment_raised_cosine":
+        return "coef_segment_bump_gain_full_all"
+    if gain_basis == "segment_scalar":
+        return "coef_segment_scalar_gain_full_all"
+    raise ValueError(f"Unsupported gain_basis {gain_basis!r}.")
+
+
 def _segment_effect(
     dataset,
     *,
@@ -313,7 +323,7 @@ def _segment_effect(
         dtype=float,
     )
     gamma = np.asarray(
-        dataset["coef_place_x_light_full_all"]
+        dataset[_segment_gain_var_name(dataset)]
         .sel(trajectory=trajectory, ridge=ridge_used)
         .values,
         dtype=float,
@@ -325,24 +335,18 @@ def _segment_effect(
 
     if gain_basis == "segment_scalar":
         n_segments = segment_edges.size - 1
-        if gamma.shape[0] != n_segments - 1:
+        if gamma.shape[0] != n_segments:
             raise ValueError(
-                "segment_scalar datasets must store one interaction coefficient for "
-                f"each non-reference segment. Got gamma.shape[0]={gamma.shape[0]} and "
-                f"{n_segments} segments."
+                "segment_scalar datasets must store one interaction coefficient per "
+                f"segment. Got gamma.shape[0]={gamma.shape[0]} and {n_segments} "
+                "segments."
             )
         if seg_idx < 0 or seg_idx >= n_segments:
             raise ValueError(f"seg_idx={seg_idx} out of range for n_segments={n_segments}.")
         if include_global_light:
-            if seg_idx == 0:
-                effect = global_light
-            else:
-                effect = global_light + gamma[seg_idx - 1, :]
+            effect = global_light + gamma[seg_idx, :]
         else:
-            if seg_idx == 0:
-                effect = np.zeros_like(global_light)
-            else:
-                effect = gamma[seg_idx - 1, :]
+            effect = gamma[seg_idx, :]
         return unit_ids, np.asarray(effect, dtype=float), segment_edges
 
     n_segments = segment_edges.size - 1
@@ -451,16 +455,13 @@ def _segment_edges_for_direction(dataset, *, direction: str) -> np.ndarray:
 
     first_ridge = float(np.asarray(dataset.coords["ridge"].values, dtype=float)[0])
     gamma = np.asarray(
-        dataset["coef_place_x_light_full_all"]
+        dataset[_segment_gain_var_name(dataset)]
         .sel(trajectory=trajectory, ridge=first_ridge)
         .values,
         dtype=float,
     )
     n_segments = segment_edges.size - 1
-    if gain_basis == "segment_scalar":
-        expected_basis = n_segments - 1
-    else:
-        expected_basis = n_segments
+    expected_basis = n_segments
     if gamma.shape[0] != expected_basis:
         raise ValueError(
             f"Dataset layout for trajectory {trajectory!r} is not compatible with "
@@ -799,7 +800,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_visual_gain_correlation",
+        script_name="v1ca1.task_progression.swap_gain_comparison",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,

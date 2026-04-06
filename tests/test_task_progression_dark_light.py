@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 
-MODULE_NAME = "v1ca1.task_progression.task_progression_dark_light"
+MODULE_NAME = "v1ca1.task_progression.dark_light_glm"
 
 
 def _reload_dark_light_module(
@@ -23,9 +23,10 @@ def _fake_result(
     module,
     *,
     speed_outputs: dict[str, object],
+    family_name: str = "mult",
 ) -> dict[str, object]:
     n_units = 2
-    return {
+    result = {
         "unit_ids": np.asarray([11, 12], dtype=int),
         "has_speed": True,
         **speed_outputs,
@@ -48,15 +49,26 @@ def _fake_result(
         "coef_light_base_all": np.asarray([0.3, 0.4]),
         "coef_place_x_light_base_all": np.full((2, n_units), np.nan),
         "coef_intercept_full_all": np.asarray([0.2, 0.3]),
-        "coef_place_full_all": np.full((3, n_units), 2.0, dtype=float),
+        "coef_place_dark_full_all": np.full((3, n_units), 2.0, dtype=float),
         "coef_light_full_all": np.asarray([0.4, 0.5]),
-        "coef_place_x_light_full_all": np.full((2, n_units), 0.25, dtype=float),
         "coef_add_intercept_full_all": np.full((n_units,), np.nan),
         "coef_add_place_full_all": np.full((0, n_units), np.nan),
         "grid_tp": np.linspace(0.0, 1.0, 5),
         "dark_hz_grid": np.full((5, n_units), 1.0, dtype=float),
         "light_hz_grid": np.full((5, n_units), 2.0, dtype=float),
     }
+    if family_name == "mult":
+        result["coef_light_gain_spline_full_all"] = np.full((2, n_units), 0.25)
+    elif family_name == "sep":
+        result["coef_place_light_full_all"] = np.full((3, n_units), 0.75)
+    elif family_name == "mult_per_segment_scalar":
+        result["coef_segment_scalar_gain_full_all"] = np.full((3, n_units), 0.25)
+        result["segment_edges"] = np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float)
+        result["gain_basis"] = "segment_scalar"
+        result["n_splines_gain"] = 3
+    else:
+        raise ValueError(f"Unsupported fake family_name={family_name!r}")
+    return result
 
 
 def test_cuda_visible_devices_is_preparsed_before_normal_argparse(
@@ -67,7 +79,7 @@ def test_cuda_visible_devices_is_preparsed_before_normal_argparse(
     module = _reload_dark_light_module(
         monkeypatch,
         [
-            "task_progression_dark_light.py",
+            "dark_light_glm.py",
             "--cuda-visible-devices",
             "0,1",
             "--animal-name",
@@ -94,7 +106,7 @@ def test_format_speed_outputs_linear_preserves_scalar_coefficients(
 ) -> None:
     module = _reload_dark_light_module(
         monkeypatch,
-        ["task_progression_dark_light.py"],
+        ["dark_light_glm.py"],
     )
     transform = module._fit_speed_feature_transform(
         np.asarray([1.0, 2.0, 4.0]),
@@ -122,7 +134,7 @@ def test_make_speed_design_train_test_uses_training_bounds_for_bspline(
 ) -> None:
     module = _reload_dark_light_module(
         monkeypatch,
-        ["task_progression_dark_light.py"],
+        ["dark_light_glm.py"],
     )
     if module.BSplineEval is None:
         pytest.skip("nemos is required for bspline speed-feature tests")
@@ -151,7 +163,7 @@ def test_format_speed_outputs_bspline_stores_basis_coefficients_only(
 ) -> None:
     module = _reload_dark_light_module(
         monkeypatch,
-        ["task_progression_dark_light.py"],
+        ["dark_light_glm.py"],
     )
     transform = {
         "mode": "bspline",
@@ -186,7 +198,7 @@ def test_build_family_dataset_includes_speed_basis_schema(
     pytest.importorskip("xarray")
     module = _reload_dark_light_module(
         monkeypatch,
-        ["task_progression_dark_light.py"],
+        ["dark_light_glm.py"],
     )
     speed_outputs = module._format_speed_outputs(
         transform={
@@ -204,7 +216,13 @@ def test_build_family_dataset_includes_speed_basis_schema(
         n_units=2,
     )
     results_by_traj = {
-        trajectory: {0.1: _fake_result(module, speed_outputs=speed_outputs)}
+        trajectory: {
+            0.1: _fake_result(
+                module,
+                speed_outputs=speed_outputs,
+                family_name="mult",
+            )
+        }
         for trajectory in module.TRAJECTORY_TYPES
     }
 
@@ -236,5 +254,115 @@ def test_build_family_dataset_includes_speed_basis_schema(
         "speed_basis_feature",
         "unit",
     )
+    assert "coef_light_gain_spline_full_all" in dataset
+    assert dataset["coef_light_gain_spline_full_all"].dims == (
+        "trajectory",
+        "ridge",
+        "gain_basis_feature",
+        "unit",
+    )
     assert dataset.sizes["speed_basis_feature"] == 4
     assert list(dataset.coords["speed_bound"].values) == ["lower", "upper"]
+
+
+def test_build_family_dataset_sep_uses_explicit_dark_and_light_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("xarray")
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+    speed_outputs = module._format_speed_outputs(
+        transform=module._empty_speed_feature_transform(),
+        coef_speed_basis_base=np.full((0, 2), np.nan),
+        coef_speed_basis_full=np.full((0, 2), np.nan),
+        n_units=2,
+    )
+    results_by_traj = {
+        trajectory: {
+            0.1: _fake_result(
+                module,
+                speed_outputs=speed_outputs,
+                family_name="sep",
+            )
+        }
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    dataset = module.build_family_dataset(
+        family_name="sep",
+        results_by_traj=results_by_traj,
+        ridge_values=[0.1],
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        light_epoch="02_r1",
+        dark_epoch="08_r4",
+        dark_movement_firing_rates=np.asarray([1.0, 2.0]),
+        min_dark_firing_rate_hz=0.5,
+        sources={"analysis_path": "/tmp/example"},
+        fit_parameters={},
+    )
+
+    assert "coef_place_dark_full_all" in dataset
+    assert "coef_place_light_full_all" in dataset
+    assert "coef_place_full_all" not in dataset
+    assert "coef_place_x_light_full_all" not in dataset
+    assert dataset["coef_place_light_full_all"].dims == (
+        "trajectory",
+        "ridge",
+        "place_basis",
+        "unit",
+    )
+
+
+def test_build_family_dataset_scalar_gain_uses_segment_basis_coord(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("xarray")
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+    speed_outputs = module._format_speed_outputs(
+        transform=module._empty_speed_feature_transform(),
+        coef_speed_basis_base=np.full((0, 2), np.nan),
+        coef_speed_basis_full=np.full((0, 2), np.nan),
+        n_units=2,
+    )
+    results_by_traj = {
+        trajectory: {
+            0.1: _fake_result(
+                module,
+                speed_outputs=speed_outputs,
+                family_name="mult_per_segment_scalar",
+            )
+        }
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    dataset = module.build_family_dataset(
+        family_name="mult_per_segment_scalar",
+        results_by_traj=results_by_traj,
+        ridge_values=[0.1],
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        light_epoch="02_r1",
+        dark_epoch="08_r4",
+        dark_movement_firing_rates=np.asarray([1.0, 2.0]),
+        min_dark_firing_rate_hz=0.5,
+        sources={"analysis_path": "/tmp/example"},
+        fit_parameters={},
+    )
+
+    assert "coef_segment_scalar_gain_full_all" in dataset
+    assert dataset["coef_segment_scalar_gain_full_all"].dims == (
+        "trajectory",
+        "ridge",
+        "segment_basis",
+        "unit",
+    )
+    assert dataset.sizes["segment_basis"] == 3
+    assert "segment_edges" in dataset

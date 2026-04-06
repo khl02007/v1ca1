@@ -1747,7 +1747,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_motor",
+        script_name="v1ca1.task_progression.motor",
         parameters={
             "cuda_visible_devices": args.cuda_visible_devices,
             "animal_name": args.animal_name,

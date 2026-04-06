@@ -898,7 +898,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_encoding",
+        script_name="v1ca1.task_progression.encoding_comparison",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,

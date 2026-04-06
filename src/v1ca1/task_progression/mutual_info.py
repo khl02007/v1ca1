@@ -451,7 +451,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_mi",
+        script_name="v1ca1.task_progression.mutual_info",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 This CLI pools CA1 and V1 spikes within one requested state, computes
 target-rate-normalized cross-correlograms with pynapple, and summarizes the
-strongest signal-window feature for each CA1-V1 pair. The primary outputs are:
+strongest feature across the computed lag range for each CA1-V1 pair. The
+primary outputs are:
 
 - one parquet summary table with one row per retained CA1-V1 pair
 - one NetCDF-backed `xarray.Dataset` storing the normalized xcorr tensor with
@@ -34,17 +35,21 @@ from v1ca1.helper.session import (
     get_analysis_path,
     load_epoch_tags,
     load_ephys_timestamps_all,
+    load_ephys_timestamps_by_epoch,
     load_spikes_by_region,
 )
-from v1ca1.ripple.ripple_glm import load_ripple_tables
+from v1ca1.ripple.ripple_glm import (
+    DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    _format_window_suffix_value,
+    format_ripple_window_suffix,
+    load_ripple_tables,
+)
 
 
 STATE_CHOICES = ("ripple", "run", "immobility", "sleep")
 POOLED_EPOCH_SENTINEL = "pooled"
 DEFAULT_BIN_SIZE_S = 0.005
 DEFAULT_MAX_LAG_S = 0.5
-DEFAULT_SIGNAL_WINDOW_START_S = -0.2
-DEFAULT_SIGNAL_WINDOW_END_S = 0.2
 DEFAULT_MIN_STATE_SPIKES = 30
 DEFAULT_EXTREMUM_HALF_WIDTH_BINS = 1
 DEFAULT_DISPLAY_VMAX = 5.0
@@ -54,7 +59,7 @@ DATASET_FILENAME = "xcorr.nc"
 OVERVIEW_FIGURE_FILENAME = "overview.png"
 CA1_HEATMAP_DIRNAME = "ca1_heatmaps"
 PAIR_STATUS_VALID = "valid"
-PAIR_STATUS_NO_SIGNAL_BINS = "no_signal_bins"
+PAIR_STATUS_NO_FINITE_BINS = "no_finite_bins"
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -99,21 +104,25 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Maximum absolute lag in seconds. Default: {DEFAULT_MAX_LAG_S}",
     )
     parser.add_argument(
-        "--signal-window-start-s",
+        "--ripple-window-s",
         type=float,
-        default=DEFAULT_SIGNAL_WINDOW_START_S,
+        default=None,
         help=(
-            "Signal-window start in seconds used to find the strongest structured "
-            f"feature. Default: {DEFAULT_SIGNAL_WINDOW_START_S}"
+            "Optional fixed ripple window length in seconds. When set for "
+            "--state ripple, both CA1 and V1 spikes are restricted to "
+            "[ripple_start + ripple_window_offset_s, ripple_start + "
+            "ripple_window_offset_s + ripple_window_s]. Default: use the "
+            "detected ripple intervals."
         ),
     )
     parser.add_argument(
-        "--signal-window-end-s",
+        "--ripple-window-offset-s",
         type=float,
-        default=DEFAULT_SIGNAL_WINDOW_END_S,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
         help=(
-            "Signal-window end in seconds used to find the strongest structured "
-            f"feature. Default: {DEFAULT_SIGNAL_WINDOW_END_S}"
+            "Offset in seconds applied to the optional fixed ripple window "
+            "relative to ripple start. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
         ),
     )
     parser.add_argument(
@@ -130,7 +139,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_EXTREMUM_HALF_WIDTH_BINS,
         help=(
-            "Half-width in lag bins used to average around the strongest signal-window "
+            "Half-width in lag bins used to average around the strongest "
             f"extremum. Default: {DEFAULT_EXTREMUM_HALF_WIDTH_BINS}"
         ),
     )
@@ -159,13 +168,27 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--bin-size-s must be positive.")
     if args.max_lag_s <= 0:
         raise ValueError("--max-lag-s must be positive.")
-    if args.signal_window_start_s >= args.signal_window_end_s:
-        raise ValueError("--signal-window-start-s must be less than --signal-window-end-s.")
-    if args.signal_window_start_s < -args.max_lag_s or args.signal_window_end_s > args.max_lag_s:
-        raise ValueError(
-            "Signal window must lie within the plotted lag range "
-            f"[-{args.max_lag_s}, {args.max_lag_s}]."
-        )
+    if args.ripple_window_s is not None and args.ripple_window_s <= 0:
+        raise ValueError("--ripple-window-s must be positive.")
+    if not np.isfinite(args.ripple_window_offset_s):
+        raise ValueError("--ripple-window-offset-s must be finite.")
+    if args.state != "ripple":
+        if args.ripple_window_s is not None or not np.isclose(
+            float(args.ripple_window_offset_s),
+            DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+            rtol=1e-12,
+            atol=1e-12,
+        ):
+            raise ValueError(
+                "--ripple-window-s and --ripple-window-offset-s are supported only for --state ripple."
+            )
+    elif args.ripple_window_s is None and not np.isclose(
+        float(args.ripple_window_offset_s),
+        DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        rtol=1e-12,
+        atol=1e-12,
+    ):
+        raise ValueError("--ripple-window-offset-s requires --ripple-window-s.")
     if args.min_state_spikes < 0:
         raise ValueError("--min-state-spikes must be non-negative.")
     if args.extremum_half_width_bins < 0:
@@ -226,6 +249,42 @@ def _interval_rows_to_table(table: pd.DataFrame) -> pd.DataFrame:
         drop=True
     )
     return interval_table
+
+
+def _get_ripple_anchor_starts(ripple_table: pd.DataFrame) -> np.ndarray:
+    """Return ripple start times from one saved ripple table."""
+    if "start_time" in ripple_table.columns:
+        return np.asarray(ripple_table["start_time"], dtype=float)
+    if "start" in ripple_table.columns:
+        return np.asarray(ripple_table["start"], dtype=float)
+    raise ValueError(
+        "Expected ripple table to contain either 'start_time' or 'start' columns. "
+        f"Found {list(ripple_table.columns)!r}."
+    )
+
+
+def merge_interval_rows(interval_rows: pd.DataFrame) -> pd.DataFrame:
+    """Merge overlapping interval rows and return canonical start/end columns."""
+    table = _interval_rows_to_table(interval_rows)
+    if table.empty:
+        return table
+
+    starts = table["start"].to_numpy(dtype=float)
+    ends = table["end"].to_numpy(dtype=float)
+    order = np.argsort(starts, kind="stable")
+    starts = starts[order]
+    ends = ends[order]
+
+    merged_starts = [float(starts[0])]
+    merged_ends = [float(ends[0])]
+    for start, end in zip(starts[1:], ends[1:], strict=True):
+        if float(start) <= merged_ends[-1]:
+            merged_ends[-1] = max(merged_ends[-1], float(end))
+        else:
+            merged_starts.append(float(start))
+            merged_ends.append(float(end))
+
+    return pd.DataFrame({"start": merged_starts, "end": merged_ends})
 
 
 def _load_interval_rows_from_npz(path: Path) -> tuple[dict[str, pd.DataFrame], str]:
@@ -361,6 +420,52 @@ def load_state_interval_tables(
         return _load_interval_rows_from_legacy_dir(legacy_dir)
 
     raise ValueError(f"Unsupported state {state!r}. Expected one of {STATE_CHOICES!r}.")
+
+
+def build_fixed_ripple_window_tables(
+    analysis_path: Path,
+    *,
+    ripple_window_s: float,
+    ripple_window_offset_s: float,
+    timestamps_by_epoch: dict[str, np.ndarray],
+) -> tuple[dict[str, pd.DataFrame], str, dict[str, dict[str, int]]]:
+    """Build merged fixed ripple-start-aligned interval rows for each epoch."""
+    ripple_tables, source = load_ripple_tables(analysis_path)
+
+    intervals_by_epoch: dict[str, pd.DataFrame] = {}
+    metadata_by_epoch: dict[str, dict[str, int]] = {}
+    for epoch, ripple_table in ripple_tables.items():
+        epoch_key = str(epoch)
+        if epoch_key not in timestamps_by_epoch:
+            raise ValueError(
+                f"Could not find ephys timestamps for ripple epoch {epoch_key!r}."
+            )
+
+        epoch_timestamps = np.asarray(timestamps_by_epoch[epoch_key], dtype=float).ravel()
+        if epoch_timestamps.size == 0:
+            raise ValueError(f"Epoch {epoch_key!r} has no ephys timestamps.")
+
+        ripple_starts = _get_ripple_anchor_starts(ripple_table)
+        window_starts = ripple_starts + float(ripple_window_offset_s)
+        window_ends = ripple_starts + float(ripple_window_offset_s) + float(ripple_window_s)
+
+        epoch_start = float(epoch_timestamps[0])
+        epoch_end = float(epoch_timestamps[-1])
+        clipped_starts = np.maximum(window_starts, epoch_start)
+        clipped_ends = np.minimum(window_ends, epoch_end)
+        clipped_rows = pd.DataFrame({"start": clipped_starts, "end": clipped_ends})
+        clipped_rows = clipped_rows.loc[clipped_rows["end"] > clipped_rows["start"]].reset_index(
+            drop=True
+        )
+        merged_rows = merge_interval_rows(clipped_rows)
+        intervals_by_epoch[epoch_key] = merged_rows
+        metadata_by_epoch[epoch_key] = {
+            "original_ripple_count": int(len(ripple_table)),
+            "clipped_window_count": int(len(clipped_rows)),
+            "merged_interval_count": int(len(merged_rows)),
+        }
+
+    return intervals_by_epoch, source, metadata_by_epoch
 
 
 def resolve_epoch_groups(
@@ -539,45 +644,27 @@ def xcorr_frame_to_tensor(
     return lag_times, tensor
 
 
-def build_window_mask(
-    lag_times: np.ndarray,
-    window: tuple[float, float],
-) -> np.ndarray:
-    """Return the inclusive lag mask for one closed interval."""
-    lag_array = np.asarray(lag_times, dtype=float)
-    start, end = float(window[0]), float(window[1])
-    return (lag_array >= start) & (lag_array <= end)
-
-
 def summarize_pair_curve(
     *,
     xcorr_curve: np.ndarray,
     lag_times: np.ndarray,
-    signal_mask: np.ndarray,
     extremum_half_width_bins: int,
 ) -> dict[str, Any]:
-    """Return one pair's strongest signal-window feature from normalized xcorr."""
+    """Return one pair's strongest feature from normalized xcorr."""
     xcorr_array = np.asarray(xcorr_curve, dtype=float).reshape(-1)
     lag_array = np.asarray(lag_times, dtype=float).reshape(-1)
 
-    signal_indices = np.flatnonzero(signal_mask)
-    if signal_indices.size == 0:
+    finite_indices = np.flatnonzero(np.isfinite(xcorr_array))
+    if finite_indices.size == 0:
         return {
-            "status": PAIR_STATUS_NO_SIGNAL_BINS,
+            "status": PAIR_STATUS_NO_FINITE_BINS,
             "peak_lag_s": np.nan,
             "peak_norm_xcorr": np.nan,
         }
 
-    signal_values = xcorr_array[signal_indices]
-    if not np.any(np.isfinite(signal_values)):
-        return {
-            "status": PAIR_STATUS_NO_SIGNAL_BINS,
-            "peak_lag_s": np.nan,
-            "peak_norm_xcorr": np.nan,
-        }
-
-    local_extremum_index = int(np.nanargmax(signal_values))
-    peak_index = int(signal_indices[local_extremum_index])
+    finite_values = xcorr_array[finite_indices]
+    local_extremum_index = int(np.nanargmax(finite_values))
+    peak_index = int(finite_indices[local_extremum_index])
     neighborhood_start = max(0, peak_index - int(extremum_half_width_bins))
     neighborhood_end = min(len(xcorr_array), peak_index + int(extremum_half_width_bins) + 1)
     neighborhood = xcorr_array[neighborhood_start:neighborhood_end]
@@ -597,19 +684,15 @@ def build_pair_summary_table(
     ca1_spike_counts: np.ndarray,
     v1_spike_counts: np.ndarray,
     lag_times: np.ndarray,
-    signal_window: tuple[float, float],
     extremum_half_width_bins: int,
 ) -> pd.DataFrame:
     """Return one summary row per retained CA1-V1 pair."""
-    signal_mask = build_window_mask(lag_times, signal_window)
-
     rows: list[dict[str, Any]] = []
     for ca1_index, ca1_unit_id in enumerate(ca1_unit_ids.tolist()):
         for v1_index, v1_unit_id in enumerate(v1_unit_ids.tolist()):
             summary = summarize_pair_curve(
                 xcorr_curve=xcorr[ca1_index, v1_index],
                 lag_times=lag_times,
-                signal_mask=signal_mask,
                 extremum_half_width_bins=extremum_half_width_bins,
             )
             rows.append(
@@ -743,14 +826,84 @@ def save_session_overview_figure(
     return out_path
 
 
-def get_output_dir(analysis_path: Path, state: str, epoch_group_label: str) -> Path:
+def _append_path_parts(base_path: Path, parts: list[str]) -> Path:
+    """Append ordered string path parts onto one base path."""
+    out_path = base_path
+    for part in parts:
+        out_path = out_path / part
+    return out_path
+
+
+def format_xcorr_settings_suffix(*, max_lag_s: float, bin_size_s: float) -> str:
+    """Return a filesystem-friendly suffix for one xcorr lag/bin setting."""
+    return (
+        f"ml_{_format_window_suffix_value(max_lag_s)}s_"
+        f"bs_{_format_window_suffix_value(bin_size_s)}s"
+    )
+
+
+def get_state_output_parts(
+    state: str,
+    *,
+    ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+) -> list[str]:
+    """Return path parts encoding the state and optional ripple window setup."""
+    parts = [state]
+    if state == "ripple" and ripple_window_s is not None:
+        parts.append(
+            format_ripple_window_suffix(
+                float(ripple_window_s),
+                ripple_window_offset_s=float(ripple_window_offset_s),
+            )
+        )
+    return parts
+
+
+def get_output_dir(
+    analysis_path: Path,
+    state: str,
+    epoch_group_label: str,
+    *,
+    max_lag_s: float,
+    bin_size_s: float,
+    ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+) -> Path:
     """Return the structured state- and epoch-group-specific output directory."""
-    return analysis_path / "xcorr" / DEFAULT_OUTPUT_DIRNAME / state / epoch_group_label
+    return _append_path_parts(
+        analysis_path / "xcorr" / DEFAULT_OUTPUT_DIRNAME,
+        get_state_output_parts(
+            state,
+            ripple_window_s=ripple_window_s,
+            ripple_window_offset_s=ripple_window_offset_s,
+        )
+        + [format_xcorr_settings_suffix(max_lag_s=max_lag_s, bin_size_s=bin_size_s)]
+        + [epoch_group_label],
+    )
 
 
-def get_figure_dir(analysis_path: Path, state: str, epoch_group_label: str) -> Path:
+def get_figure_dir(
+    analysis_path: Path,
+    state: str,
+    epoch_group_label: str,
+    *,
+    max_lag_s: float,
+    bin_size_s: float,
+    ripple_window_s: float | None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+) -> Path:
     """Return the structured state- and epoch-group-specific figure directory."""
-    return analysis_path / "figs" / "xcorr" / DEFAULT_OUTPUT_DIRNAME / state / epoch_group_label
+    return _append_path_parts(
+        analysis_path / "figs" / "xcorr" / DEFAULT_OUTPUT_DIRNAME,
+        get_state_output_parts(
+            state,
+            ripple_window_s=ripple_window_s,
+            ripple_window_offset_s=ripple_window_offset_s,
+        )
+        + [format_xcorr_settings_suffix(max_lag_s=max_lag_s, bin_size_s=bin_size_s)]
+        + [epoch_group_label],
+    )
 
 
 def summarize_counts(pair_summary: pd.DataFrame) -> dict[str, int]:
@@ -763,6 +916,11 @@ def summarize_counts(pair_summary: pd.DataFrame) -> dict[str, int]:
     }
 
 
+def _format_seconds(value_s: float) -> str:
+    """Return one concise human-readable seconds string."""
+    return f"{float(value_s):.3f}s"
+
+
 def _screen_xcorr_for_epoch_group(
     *,
     analysis_path: Path,
@@ -771,14 +929,15 @@ def _screen_xcorr_for_epoch_group(
     state: str,
     interval_source: str,
     intervals_by_epoch: dict[str, pd.DataFrame],
+    interval_metadata_by_epoch: dict[str, dict[str, int]] | None,
     timestamps_source: str,
     spikes_by_region: dict[str, Any],
     epoch_group_label: str,
     selected_epochs: list[str],
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     max_lag_s: float = DEFAULT_MAX_LAG_S,
-    signal_window_start_s: float = DEFAULT_SIGNAL_WINDOW_START_S,
-    signal_window_end_s: float = DEFAULT_SIGNAL_WINDOW_END_S,
+    ripple_window_s: float | None = None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     min_state_spikes: int = DEFAULT_MIN_STATE_SPIKES,
     extremum_half_width_bins: int = DEFAULT_EXTREMUM_HALF_WIDTH_BINS,
     display_vmax: float = DEFAULT_DISPLAY_VMAX,
@@ -792,7 +951,20 @@ def _screen_xcorr_for_epoch_group(
     for epoch in selected_epochs:
         interval_rows = intervals_by_epoch.get(epoch, pd.DataFrame(columns=["start", "end"]))
         print(f"  epoch {epoch}: {len(interval_rows)} intervals")
+        if interval_metadata_by_epoch is not None and epoch in interval_metadata_by_epoch:
+            epoch_metadata = interval_metadata_by_epoch[epoch]
+            print(
+                "    fixed ripple windows: "
+                f"{epoch_metadata['original_ripple_count']} original ripples, "
+                f"{epoch_metadata['clipped_window_count']} clipped windows, "
+                f"{epoch_metadata['merged_interval_count']} merged intervals"
+            )
     state_intervals = build_state_intervalset(intervals_by_epoch, selected_epochs)
+    print(
+        "State support built: "
+        f"{len(state_intervals)} merged intervals spanning "
+        f"{_format_seconds(state_intervals.tot_length())} total."
+    )
 
     ca1_filter = build_unit_spike_count_table(
         spikes_by_region["ca1"],
@@ -815,14 +987,32 @@ def _screen_xcorr_for_epoch_group(
         f"{min_state_spikes} spikes in the selected state."
     )
 
-    output_dir = get_output_dir(analysis_path, state, epoch_group_label)
+    output_dir = get_output_dir(
+        analysis_path,
+        state,
+        epoch_group_label,
+        max_lag_s=max_lag_s,
+        bin_size_s=bin_size_s,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    figure_dir = get_figure_dir(analysis_path, state, epoch_group_label)
+    figure_dir = get_figure_dir(
+        analysis_path,
+        state,
+        epoch_group_label,
+        max_lag_s=max_lag_s,
+        bin_size_s=bin_size_s,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+    )
     figure_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / SUMMARY_FILENAME
     dataset_path = output_dir / DATASET_FILENAME
     overview_path = figure_dir / OVERVIEW_FIGURE_FILENAME
     heatmap_dir = figure_dir / CA1_HEATMAP_DIRNAME
+    print(f"Data outputs will be saved under {output_dir}.")
+    print(f"Figure outputs will be saved under {figure_dir}.")
 
     outputs: dict[str, Any] = {
         "output_dir": output_dir,
@@ -832,6 +1022,8 @@ def _screen_xcorr_for_epoch_group(
         "selected_epochs": selected_epochs,
         "state_interval_count": int(len(state_intervals)),
         "state_total_duration_s": float(state_intervals.tot_length()),
+        "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
+        "ripple_window_offset_s": float(ripple_window_offset_s),
         "ca1_unit_filter_path": output_dir / "ca1_unit_filter.parquet",
         "v1_unit_filter_path": output_dir / "v1_unit_filter.parquet",
         "xcorr_summary_path": summary_path,
@@ -840,11 +1032,15 @@ def _screen_xcorr_for_epoch_group(
         "ca1_heatmap_dir": heatmap_dir,
         "ca1_heatmap_paths": [],
     }
+    if interval_metadata_by_epoch is not None:
+        outputs["interval_metadata_by_epoch"] = {
+            epoch: interval_metadata_by_epoch[epoch]
+            for epoch in selected_epochs
+            if epoch in interval_metadata_by_epoch
+        }
 
     ca1_filter.to_parquet(outputs["ca1_unit_filter_path"], index=False)
     v1_filter.to_parquet(outputs["v1_unit_filter_path"], index=False)
-
-    signal_window = (signal_window_start_s, signal_window_end_s)
 
     if kept_ca1_units.size == 0 or kept_v1_units.size == 0:
         print("No retained units remain after filtering; writing empty summary outputs.")
@@ -883,7 +1079,8 @@ def _screen_xcorr_for_epoch_group(
                 "selected_epochs": selected_epochs,
                 "bin_size_s": bin_size_s,
                 "max_lag_s": max_lag_s,
-                "signal_window_s": list(signal_window),
+                "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
+                "ripple_window_offset_s": float(ripple_window_offset_s),
                 "min_state_spikes": min_state_spikes,
                 "extremum_half_width_bins": extremum_half_width_bins,
                 "display_vmax": display_vmax,
@@ -909,9 +1106,10 @@ def _screen_xcorr_for_epoch_group(
     )
     lag_times, xcorr_values = xcorr_frame_to_tensor(xcorr, kept_ca1_units, kept_v1_units)
     print(f"Computed normalized xcorr tensor with shape {xcorr_values.shape}.")
+    print("Summarizing the strongest normalized xcorr feature across the full lag range.")
     print(
-        "Summarizing the strongest normalized xcorr feature inside signal window "
-        f"{signal_window!r}."
+        "Heatmaps will use clipped normalized xcorr values from 0 to "
+        f"{display_vmax:.3f}. A value of 1 corresponds to baseline firing rate."
     )
 
     pair_summary = build_pair_summary_table(
@@ -925,7 +1123,6 @@ def _screen_xcorr_for_epoch_group(
             dtype=int
         ),
         lag_times=lag_times,
-        signal_window=signal_window,
         extremum_half_width_bins=extremum_half_width_bins,
     )
     pair_summary.to_parquet(summary_path, index=False)
@@ -940,8 +1137,10 @@ def _screen_xcorr_for_epoch_group(
             "epoch_group_label": epoch_group_label,
             "bin_size_s": float(bin_size_s),
             "max_lag_s": float(max_lag_s),
-            "signal_window_start_s": float(signal_window[0]),
-            "signal_window_end_s": float(signal_window[1]),
+            "ripple_window_s": (
+                np.nan if ripple_window_s is None else float(ripple_window_s)
+            ),
+            "ripple_window_offset_s": float(ripple_window_offset_s),
             "min_state_spikes": int(min_state_spikes),
             "extremum_half_width_bins": int(extremum_half_width_bins),
             "display_vmax": float(display_vmax),
@@ -1049,7 +1248,8 @@ def _screen_xcorr_for_epoch_group(
             "selected_epochs": selected_epochs,
             "bin_size_s": bin_size_s,
             "max_lag_s": max_lag_s,
-            "signal_window_s": list(signal_window),
+            "ripple_window_s": None if ripple_window_s is None else float(ripple_window_s),
+            "ripple_window_offset_s": float(ripple_window_offset_s),
             "min_state_spikes": min_state_spikes,
             "extremum_half_width_bins": extremum_half_width_bins,
             "display_vmax": display_vmax,
@@ -1069,8 +1269,8 @@ def screen_xcorr_for_session(
     epochs: list[str] | None = None,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     max_lag_s: float = DEFAULT_MAX_LAG_S,
-    signal_window_start_s: float = DEFAULT_SIGNAL_WINDOW_START_S,
-    signal_window_end_s: float = DEFAULT_SIGNAL_WINDOW_END_S,
+    ripple_window_s: float | None = None,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     min_state_spikes: int = DEFAULT_MIN_STATE_SPIKES,
     extremum_half_width_bins: int = DEFAULT_EXTREMUM_HALF_WIDTH_BINS,
     display_vmax: float = DEFAULT_DISPLAY_VMAX,
@@ -1082,8 +1282,45 @@ def screen_xcorr_for_session(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
 
     print(f"Processing {animal_name} {date} state={state}.")
+    print(
+        "Analysis settings: "
+        f"bin_size_s={bin_size_s}, "
+        f"max_lag_s={max_lag_s}, "
+        f"min_state_spikes={min_state_spikes}, "
+        f"extremum_half_width_bins={extremum_half_width_bins}, "
+        f"display_vmax={display_vmax}."
+    )
     epoch_tags, _epoch_source = load_epoch_tags(analysis_path)
-    intervals_by_epoch, interval_source = load_state_interval_tables(analysis_path, state)
+    interval_metadata_by_epoch: dict[str, dict[str, int]] | None = None
+    if state == "ripple" and ripple_window_s is not None:
+        _ephys_epoch_tags, timestamps_by_epoch, timestamps_by_epoch_source = load_ephys_timestamps_by_epoch(
+            analysis_path
+        )
+        print(
+            "Loaded per-epoch ephys timestamps from "
+            f"{timestamps_by_epoch_source} to build fixed ripple windows."
+        )
+        intervals_by_epoch, interval_source, interval_metadata_by_epoch = build_fixed_ripple_window_tables(
+            analysis_path,
+            ripple_window_s=float(ripple_window_s),
+            ripple_window_offset_s=float(ripple_window_offset_s),
+            timestamps_by_epoch=timestamps_by_epoch,
+        )
+        ripple_window_suffix = format_ripple_window_suffix(
+            float(ripple_window_s),
+            ripple_window_offset_s=float(ripple_window_offset_s),
+        )
+        print(
+            "Using fixed ripple windows "
+            f"{ripple_window_suffix}: intervals are built from "
+            "[ripple_start + offset, ripple_start + offset + ripple_window_s] "
+            "and merged after clipping to epoch bounds."
+        )
+        interval_source = f"fixed_ripple_windows[{interval_source}]"
+    else:
+        intervals_by_epoch, interval_source = load_state_interval_tables(analysis_path, state)
+        if state == "ripple":
+            print("Using detected ripple intervals directly (no fixed ripple window override).")
     epoch_groups = resolve_epoch_groups(epoch_tags, intervals_by_epoch, epochs)
     analysis_mode = (
         "pooled"
@@ -1118,14 +1355,15 @@ def screen_xcorr_for_session(
             state=state,
             interval_source=interval_source,
             intervals_by_epoch=intervals_by_epoch,
+            interval_metadata_by_epoch=interval_metadata_by_epoch,
             timestamps_source=timestamps_source,
             spikes_by_region=spikes_by_region,
             epoch_group_label=epoch_group_label,
             selected_epochs=selected_epochs,
             bin_size_s=bin_size_s,
             max_lag_s=max_lag_s,
-            signal_window_start_s=signal_window_start_s,
-            signal_window_end_s=signal_window_end_s,
+            ripple_window_s=ripple_window_s,
+            ripple_window_offset_s=ripple_window_offset_s,
             min_state_spikes=min_state_spikes,
             extremum_half_width_bins=extremum_half_width_bins,
             display_vmax=display_vmax,
@@ -1151,8 +1389,8 @@ def main(argv: list[str] | None = None) -> None:
         epochs=args.epochs,
         bin_size_s=args.bin_size_s,
         max_lag_s=args.max_lag_s,
-        signal_window_start_s=args.signal_window_start_s,
-        signal_window_end_s=args.signal_window_end_s,
+        ripple_window_s=args.ripple_window_s,
+        ripple_window_offset_s=args.ripple_window_offset_s,
         min_state_spikes=args.min_state_spikes,
         extremum_half_width_bins=args.extremum_half_width_bins,
         display_vmax=args.display_vmax,

@@ -26,7 +26,7 @@ All analysis code currently lives under `src/v1ca1`:
 - `src/v1ca1/sleep`: sleep-focused analyses and utilities.
 - `src/v1ca1/nwb`: NWB-related utilities and workflows.
 - `src/v1ca1/xcorr`: auto/cross-correlogram analyses.
-- `src/v1ca1/task_progression`: task progression tuning, MI, encoding, decoding, GLM, and visual-gain workflows; archival scripts now live under `src/v1ca1/task_progression/legacy`.
+- `src/v1ca1/task_progression`: task progression tuning, MI, encoding, decoding, GLM, and visual-gain workflows.
 - `src/v1ca1/communication_subspace`: cross-area latent subspace analyses.
 - `src/v1ca1/signal_dim`: signal-dimensionality analyses such as MEME.
 - `src/v1ca1/topology`: topology-oriented analyses.
@@ -48,13 +48,15 @@ Modernized scripts that are relatively self-contained and worth treating as the 
   - `src/v1ca1/ripple/detect_ripples.py`
   - `src/v1ca1/ripple/ripple_glm.py`
 - Task progression:
-  - `src/v1ca1/task_progression/task_progression_tuning.py`
-  - `src/v1ca1/task_progression/task_progression_mi.py`
-  - `src/v1ca1/task_progression/task_progression_encoding.py`
-  - `src/v1ca1/task_progression/task_progression_decoding.py`
-  - `src/v1ca1/task_progression/task_progression_motor.py`
-  - `src/v1ca1/task_progression/task_progression_dark_light.py`
-  - `src/v1ca1/task_progression/task_progression_visual_gain_correlation.py`
+  - `src/v1ca1/task_progression/tuning_analysis.py`
+  - `src/v1ca1/task_progression/compute_tuning_curves.py`
+  - `src/v1ca1/task_progression/mutual_info.py`
+  - `src/v1ca1/task_progression/encoding_comparison.py`
+  - `src/v1ca1/task_progression/decoding_comparison.py`
+  - `src/v1ca1/task_progression/motor.py`
+  - `src/v1ca1/task_progression/dark_light_glm.py`
+  - `src/v1ca1/task_progression/swap_glm_comparison.py`
+  - `src/v1ca1/task_progression/swap_gain_comparison.py`
 - Signal dimension:
   - `src/v1ca1/signal_dim/meme.py`
 
@@ -193,7 +195,7 @@ emits both the legacy detector pickle and modern interval `.npz` output for the
 selected detector mode, and records the chosen ripple channels in the run log.
 
 ```bash
-PYTHONPATH=src python src/v1ca1/task_progression/task_progression_motor.py \
+PYTHONPATH=src python src/v1ca1/task_progression/motor.py \
   --animal-name L14 \
   --date 20240611 \
   --regions v1 ca1 \

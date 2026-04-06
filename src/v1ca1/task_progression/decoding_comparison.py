@@ -1223,7 +1223,7 @@ def main() -> None:
 
     log_path = write_run_log(
         analysis_path=analysis_path,
-        script_name="v1ca1.task_progression.task_progression_decoding",
+        script_name="v1ca1.task_progression.decoding_comparison",
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,
