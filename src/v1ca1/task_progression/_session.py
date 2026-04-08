@@ -48,6 +48,74 @@ if TYPE_CHECKING:
     import xarray as xr
 
 
+TP_TRANSFER_FAMILY_ORDER = (
+    "same_turn_cross_arm",
+    "opposite_turn_same_arm",
+    "opposite_turn_same_arm_flipped",
+)
+
+
+def _trajectory_turn_type(trajectory_type: str) -> str:
+    """Return the left/right turn label for one trajectory type."""
+    for turn_type, trajectories in TURN_TRAJECTORY_PAIRS.items():
+        if trajectory_type in trajectories:
+            return turn_type
+    raise ValueError(f"Unknown trajectory type {trajectory_type!r}.")
+
+
+def build_tp_transfer_pair_specs() -> tuple[dict[str, Any], ...]:
+    """Return directed TP transfer pairs for all configured transfer families."""
+    pair_specs: list[dict[str, Any]] = []
+
+    for turn_type, (trajectory_a, trajectory_b) in TURN_TRAJECTORY_PAIRS.items():
+        for source_trajectory, target_trajectory in (
+            (trajectory_a, trajectory_b),
+            (trajectory_b, trajectory_a),
+        ):
+            pair_specs.append(
+                {
+                    "transfer_family": "same_turn_cross_arm",
+                    "source_trajectory": source_trajectory,
+                    "target_trajectory": target_trajectory,
+                    "source_turn_type": turn_type,
+                    "turn_type": turn_type,
+                    "flip_tuning_curve": False,
+                }
+            )
+
+    for source_trajectory, target_trajectory in (
+        ("center_to_left", "left_to_center"),
+        ("left_to_center", "center_to_left"),
+        ("center_to_right", "right_to_center"),
+        ("right_to_center", "center_to_right"),
+    ):
+        pair_specs.append(
+            {
+                "transfer_family": "opposite_turn_same_arm",
+                "source_trajectory": source_trajectory,
+                "target_trajectory": target_trajectory,
+                "source_turn_type": _trajectory_turn_type(source_trajectory),
+                "turn_type": _trajectory_turn_type(target_trajectory),
+                "flip_tuning_curve": False,
+            }
+        )
+        pair_specs.append(
+            {
+                "transfer_family": "opposite_turn_same_arm_flipped",
+                "source_trajectory": source_trajectory,
+                "target_trajectory": target_trajectory,
+                "source_turn_type": _trajectory_turn_type(source_trajectory),
+                "turn_type": _trajectory_turn_type(target_trajectory),
+                "flip_tuning_curve": True,
+            }
+        )
+
+    return tuple(pair_specs)
+
+
+TP_TRANSFER_PAIR_SPECS = build_tp_transfer_pair_specs()
+
+
 
 def build_task_progression_by_trajectory(
     animal_name: str,
@@ -178,6 +246,59 @@ def build_task_progression(
         )
         time_chunks.append(np.asarray(task_progression.t, dtype=float))
         value_chunks.append(np.asarray(task_progression.d, dtype=float))
+
+    if not time_chunks:
+        return nap.Tsd(t=np.array([], dtype=float), d=np.array([], dtype=float), time_units="s")
+
+    all_times = np.concatenate(time_chunks)
+    all_values = np.concatenate(value_chunks)
+    order = np.argsort(all_times)
+    return nap.Tsd(
+        t=all_times[order],
+        d=all_values[order],
+        time_support=movement_interval,
+        time_units="s",
+    )
+
+
+def build_generalized_task_progression(
+    animal_name: str,
+    position: np.ndarray,
+    timestamps_position: np.ndarray,
+    trajectory_intervals: dict[str, "nap.IntervalSet"],
+    movement_interval: "nap.IntervalSet",
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+) -> "nap.Tsd":
+    """Build the one-branch task-progression coordinate shared by all trajectories."""
+    import pynapple as nap
+    import track_linearization as tl
+
+    epoch_position = position[position_offset:]
+    epoch_timestamps = np.asarray(timestamps_position[position_offset:], dtype=float)
+    total_length_per_trajectory = get_wtrack_total_length(animal_name)
+    time_chunks: list[np.ndarray] = []
+    value_chunks: list[np.ndarray] = []
+
+    for trajectory_type in TRAJECTORY_TYPES:
+        track_graph, edge_order = _get_track_graph_for_trajectory(
+            animal_name,
+            trajectory_type,
+        )
+        position_df = tl.get_linearized_position(
+            position=epoch_position,
+            track_graph=track_graph,
+            edge_order=edge_order,
+            edge_spacing=0,
+        )
+        generalized_task_progression = nap.Tsd(
+            t=epoch_timestamps,
+            d=np.asarray(position_df["linear_position"], dtype=float)
+            / total_length_per_trajectory,
+            time_support=trajectory_intervals[trajectory_type],
+            time_units="s",
+        )
+        time_chunks.append(np.asarray(generalized_task_progression.t, dtype=float))
+        value_chunks.append(np.asarray(generalized_task_progression.d, dtype=float))
 
     if not time_chunks:
         return nap.Tsd(t=np.array([], dtype=float), d=np.array([], dtype=float), time_units="s")
@@ -347,6 +468,7 @@ def prepare_task_progression_session(
     task_progression_by_trajectory: dict[str, dict[str, Any]] = {}
     linear_position_by_run: dict[str, Any] = {}
     task_progression_by_run: dict[str, Any] = {}
+    generalized_task_progression_by_run: dict[str, Any] = {}
     for epoch in run_epochs:
         all_epoch_by_run[epoch] = build_epoch_interval(
             timestamps_position[epoch],
@@ -384,6 +506,14 @@ def prepare_task_progression_session(
             movement_by_run[epoch],
             position_offset=position_offset,
         )
+        generalized_task_progression_by_run[epoch] = build_generalized_task_progression(
+            animal_name,
+            position_by_epoch[epoch],
+            timestamps_position[epoch],
+            trajectory_intervals[epoch],
+            movement_by_run[epoch],
+            position_offset=position_offset,
+        )
 
     return {
         "analysis_path": analysis_path,
@@ -402,6 +532,7 @@ def prepare_task_progression_session(
         "task_progression_by_trajectory": task_progression_by_trajectory,
         "linear_position_by_run": linear_position_by_run,
         "task_progression_by_run": task_progression_by_run,
+        "generalized_task_progression_by_run": generalized_task_progression_by_run,
         "sources": {
             "epoch_tags": epoch_source,
             "timestamps_position": position_timestamp_source,

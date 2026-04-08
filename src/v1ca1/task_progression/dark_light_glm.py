@@ -131,13 +131,14 @@ def select_run_epochs(
     """Return requested run epochs, defaulting to all available run epochs."""
     if not requested_epochs:
         return list(run_epochs)
-    missing_epochs = [epoch for epoch in requested_epochs if epoch not in run_epochs]
+    selected_epochs = list(dict.fromkeys(requested_epochs))
+    missing_epochs = [epoch for epoch in selected_epochs if epoch not in run_epochs]
     if missing_epochs:
         raise ValueError(
             f"Requested epochs were not found in available run epochs {run_epochs!r}: "
             f"{missing_epochs!r}"
         )
-    return list(requested_epochs)
+    return selected_epochs
 
 
 def select_light_dark_pairs(
@@ -160,10 +161,10 @@ def select_light_dark_pairs(
             )
 
     selected_dark_epochs = (
-        list(dark_epochs) if dark_epochs else [DEFAULT_DARK_EPOCH]
+        list(dict.fromkeys(dark_epochs)) if dark_epochs else [DEFAULT_DARK_EPOCH]
     )
     selected_light_epochs = (
-        list(light_epochs)
+        list(dict.fromkeys(light_epochs))
         if light_epochs
         else [epoch for epoch in epoch_pool if epoch not in selected_dark_epochs]
     )

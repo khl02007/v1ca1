@@ -407,6 +407,53 @@ def test_compute_motor_covariates_includes_hd_acc_and_matches_velocity_gradient(
     assert np.allclose(covariates["hd_acc"], np.gradient(covariates["hd_vel"], dt))
 
 
+def test_select_run_epochs_deduplicates_requested_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    selected_epochs = module.select_run_epochs(
+        ["run1", "run2", "run3"],
+        ["run2", "run1", "run2"],
+    )
+
+    assert selected_epochs == ["run2", "run1"]
+
+
+def test_select_epochs_with_usable_position_data_uses_clean_dlc_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+    analysis_path = Path("/tmp/example_session")
+    clean_dlc_path = (
+        analysis_path
+        / module.DEFAULT_CLEAN_DLC_POSITION_DIRNAME
+        / module.DEFAULT_CLEAN_DLC_POSITION_NAME
+    )
+
+    monkeypatch.setattr(module, "load_epoch_tags", lambda path: (["run1", "run2"], "pynapple"))
+    monkeypatch.setattr(module, "get_run_epochs", lambda epoch_tags: list(epoch_tags))
+    monkeypatch.setattr(
+        module,
+        "load_clean_dlc_position_data",
+        lambda path, input_dirname, input_name, validate_timestamps: (
+            ["run1"],
+            {"run1": np.asarray([[1.0, 2.0]], dtype=float)},
+            {"run1": np.asarray([[3.0, 4.0]], dtype=float)},
+        ),
+    )
+
+    usable_epochs, skipped_epochs = module.select_epochs_with_usable_position_data(
+        analysis_path,
+        ["run1", "run2", "run2"],
+    )
+
+    assert usable_epochs == ["run1"]
+    assert skipped_epochs == [
+        {"epoch": "run2", "reason": f"head position missing from {clean_dlc_path}; body position missing from {clean_dlc_path}"}
+    ]
+
+
 def test_fit_motor_task_progression_place_epoch_adds_hd_acc_zscore_feature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

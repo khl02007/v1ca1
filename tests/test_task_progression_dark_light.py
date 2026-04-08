@@ -151,6 +151,45 @@ def test_select_light_dark_pairs_defaults_to_all_nondark_selected_epochs(
     ]
 
 
+def test_select_run_epochs_deduplicates_requested_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+
+    selected_epochs = module.select_run_epochs(
+        ["02_r1", "04_r2", "06_r3"],
+        ["04_r2", "02_r1", "04_r2"],
+    )
+
+    assert selected_epochs == ["04_r2", "02_r1"]
+
+
+def test_select_light_dark_pairs_deduplicates_light_and_dark_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_dark_light_module(
+        monkeypatch,
+        ["dark_light_glm.py"],
+    )
+
+    pairs = module.select_light_dark_pairs(
+        ["02_r1", "04_r2", "06_r3", "08_r4"],
+        selected_epochs=["02_r1", "04_r2", "06_r3", "08_r4"],
+        light_epochs=["02_r1", "04_r2", "02_r1"],
+        dark_epochs=["08_r4", "08_r4", "06_r3"],
+    )
+
+    assert pairs == [
+        ("02_r1", "08_r4"),
+        ("02_r1", "06_r3"),
+        ("04_r2", "08_r4"),
+        ("04_r2", "06_r3"),
+    ]
+
+
 def test_as_interval_set_accepts_intervalset_and_wrapper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

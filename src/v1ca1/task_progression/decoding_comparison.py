@@ -11,8 +11,8 @@ It then runs two decoding workflows on movement-restricted data:
 - within-epoch cross-validated decoding of combined task progression
 
 It also keeps the cross-trajectory task-progression decoder, where tuning
-curves fit on one trajectory are used to decode the paired same-turn
-trajectory.
+curves fit on one trajectory are used to decode directed transfer pairs across
+the configured transfer families.
 
 Primary time-series outputs are saved as pynapple-backed `.npz` files, because
 decoded and true trajectories are time-domain artifacts. Per-epoch decoding
@@ -40,6 +40,8 @@ from v1ca1.task_progression._session import (
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
+    TP_TRANSFER_FAMILY_ORDER,
+    TP_TRANSFER_PAIR_SPECS,
     TRAJECTORY_TYPES,
     build_combined_task_progression_bins,
     build_linear_position_bins,
@@ -58,12 +60,34 @@ DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ = 0.5
 DEFAULT_MIN_BIN_COUNT = 5
 SUMMARY_MODES = ("mean_std", "median_iqr")
 ERROR_MODES = ("signed", "absolute")
-CROSS_TRAJECTORY_DECODING_MAP = {
-    "center_to_left": "right_to_center",
-    "right_to_center": "center_to_left",
-    "center_to_right": "left_to_center",
-    "left_to_center": "center_to_right",
-}
+
+
+def _cross_trajectory_pair_key(
+    transfer_family: str,
+    encoding_trajectory: str,
+    decoding_trajectory: str,
+) -> tuple[str, str, str]:
+    """Return the canonical key for one directed cross-trajectory decode."""
+    return transfer_family, encoding_trajectory, decoding_trajectory
+
+
+def _cross_trajectory_pair_suffix(
+    transfer_family: str,
+    encoding_trajectory: str,
+    decoding_trajectory: str,
+) -> str:
+    """Return the filename suffix for one directed cross-trajectory decode."""
+    return f"{transfer_family}_{encoding_trajectory}_to_{decoding_trajectory}"
+
+
+def _format_transfer_family_label(transfer_family: str) -> str:
+    """Return a human-readable label for one transfer family."""
+    labels = {
+        "same_turn_cross_arm": "same turn, cross arm",
+        "opposite_turn_same_arm": "opposite turn, same arm",
+        "opposite_turn_same_arm_flipped": "opposite turn, same arm, flipped",
+    }
+    return labels.get(transfer_family, transfer_family.replace("_", " "))
 
 
 def _intervalset_to_arrays(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -111,6 +135,20 @@ def _make_empty_tsd(time_support: Any | None = None) -> Any:
         d=np.array([], dtype=float),
         **kwargs,
     )
+
+
+def _flip_tuning_curves_along_position_axis(tuning_curves: Any) -> Any:
+    """Return one tuning-curve object with its non-unit axis reversed in place."""
+    position_dims = [dim for dim in tuning_curves.dims if dim != "unit"]
+    if len(position_dims) != 1:
+        raise ValueError(
+            "Expected one non-unit tuning-curve dimension for TP decoding, "
+            f"got dims={tuple(tuning_curves.dims)!r}."
+        )
+
+    axis = tuning_curves.get_axis_num(position_dims[0])
+    values = np.flip(np.asarray(tuning_curves.values, dtype=float), axis=axis)
+    return tuning_curves.copy(data=values)
 
 
 def _concatenate_tsds(tsds: list[Any], time_support: Any) -> Any:
@@ -310,23 +348,35 @@ def decode_task_cross_trajectory(
     active_unit_ids: list[Any],
     bin_size_s: float,
     sliding_window_size_bins: int,
-) -> tuple[dict[tuple[str, str], Any], dict[tuple[str, str], Any]]:
-    """Decode one trajectory using task-progression tuning from the paired turn."""
+) -> tuple[dict[tuple[str, str, str], Any], dict[tuple[str, str, str], Any]]:
+    """Decode directed cross-trajectory transfer pairs with task-progression tuning."""
     import pynapple as nap
 
-    true_by_pair: dict[tuple[str, str], Any] = {}
-    decoded_by_pair: dict[tuple[str, str], Any] = {}
+    true_by_pair: dict[tuple[str, str, str], Any] = {}
+    decoded_by_pair: dict[tuple[str, str, str], Any] = {}
     if not active_unit_ids:
-        for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
-            key = (encoding_trajectory, decoding_trajectory)
+        for pair_spec in TP_TRANSFER_PAIR_SPECS:
+            key = _cross_trajectory_pair_key(
+                pair_spec["transfer_family"],
+                pair_spec["source_trajectory"],
+                pair_spec["target_trajectory"],
+            )
             empty = _make_empty_tsd()
             true_by_pair[key] = empty
             decoded_by_pair[key] = empty
         return true_by_pair, decoded_by_pair
 
     selected_spikes = _subset_spikes(spikes, active_unit_ids)
-    for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
-        key = (encoding_trajectory, decoding_trajectory)
+    for pair_spec in TP_TRANSFER_PAIR_SPECS:
+        transfer_family = pair_spec["transfer_family"]
+        encoding_trajectory = pair_spec["source_trajectory"]
+        decoding_trajectory = pair_spec["target_trajectory"]
+        flip_tuning_curve = bool(pair_spec.get("flip_tuning_curve", False))
+        key = _cross_trajectory_pair_key(
+            transfer_family,
+            encoding_trajectory,
+            decoding_trajectory,
+        )
         train_epoch = trajectory_intervals[encoding_trajectory].intersect(movement_interval)
         test_epoch = trajectory_intervals[decoding_trajectory].intersect(movement_interval)
         if float(train_epoch.tot_length()) <= 0.0 or float(test_epoch.tot_length()) <= 0.0:
@@ -340,6 +390,8 @@ def decode_task_cross_trajectory(
             bins=[bins],
             epochs=train_epoch,
         )
+        if flip_tuning_curve:
+            tuning_curves = _flip_tuning_curves_along_position_axis(tuning_curves)
         decoded, _ = nap.decode_bayes(
             tuning_curves=tuning_curves,
             data=selected_spikes,
@@ -644,9 +696,10 @@ def plot_epoch_error_profiles(
 
 
 def plot_cross_trajectory_epoch_error_profiles(
-    summaries_by_epoch: dict[str, dict[tuple[str, str], pd.DataFrame]],
+    summaries_by_epoch: dict[str, dict[tuple[str, str, str], pd.DataFrame]],
     *,
     epoch_order: list[str],
+    transfer_family: str,
     encoding_trajectory: str,
     decoding_trajectory: str,
     title: str,
@@ -656,7 +709,11 @@ def plot_cross_trajectory_epoch_error_profiles(
     save_path: Path,
 ) -> None:
     """Plot epoch-wise cross-trajectory decoding-error profiles for one trajectory pair."""
-    key = (encoding_trajectory, decoding_trajectory)
+    key = _cross_trajectory_pair_key(
+        transfer_family,
+        encoding_trajectory,
+        decoding_trajectory,
+    )
     plot_epoch_error_profiles(
         {epoch: summaries_by_epoch[epoch][key] for epoch in epoch_order},
         epoch_order=epoch_order,
@@ -690,16 +747,24 @@ def save_within_epoch_tsds(
 
 
 def save_cross_trajectory_tsds(
-    true_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
-    decoded_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]],
+    true_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]],
+    decoded_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]],
     save_dir: Path,
 ) -> list[Path]:
     """Save cross-trajectory decoded and true task-progression Tsds as `.npz` files."""
     saved_paths: list[Path] = []
     for region, values_by_epoch in true_by_region.items():
         for epoch, values_by_pair in values_by_epoch.items():
-            for (encoding_trajectory, decoding_trajectory), true_tsd in values_by_pair.items():
-                suffix = f"{encoding_trajectory}_to_{decoding_trajectory}"
+            for (
+                transfer_family,
+                encoding_trajectory,
+                decoding_trajectory,
+            ), true_tsd in values_by_pair.items():
+                suffix = _cross_trajectory_pair_suffix(
+                    transfer_family,
+                    encoding_trajectory,
+                    decoding_trajectory,
+                )
                 true_path = save_dir / f"{region}_{epoch}_{suffix}_true_tp_cross_traj.npz"
                 true_tsd.save(true_path)
                 saved_paths.append(true_path)
@@ -708,7 +773,11 @@ def save_cross_trajectory_tsds(
                     save_dir / f"{region}_{epoch}_{suffix}_decoded_tp_cross_traj.npz"
                 )
                 decoded_by_region[region][epoch][
-                    (encoding_trajectory, decoding_trajectory)
+                    (
+                        transfer_family,
+                        encoding_trajectory,
+                        decoding_trajectory,
+                    )
                 ].save(decoded_path)
                 saved_paths.append(decoded_path)
     return saved_paths
@@ -752,6 +821,14 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--regions",
+        "--region",
+        nargs="+",
+        choices=REGIONS,
+        default=list(REGIONS),
+        help=f"Regions to fit. Default: {' '.join(REGIONS)}",
+    )
     parser.add_argument("--dark-epoch", required=True, help="Epoch label to treat as dark")
     parser.add_argument(
         "--light-epochs",
@@ -827,6 +904,7 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     """Run the task-progression decoding workflow for one dataset."""
     args = parse_arguments()
+    selected_regions = tuple(args.regions)
     selected_run_epochs = (
         list(dict.fromkeys([*args.light_epochs, args.dark_epoch]))
         if args.light_epochs
@@ -836,6 +914,7 @@ def main() -> None:
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
+        regions=selected_regions,
         selected_run_epochs=selected_run_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -865,28 +944,30 @@ def main() -> None:
         session["run_epochs"],
     )
 
-    true_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
-    decoded_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
-    true_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
-    decoded_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in REGIONS}
-    true_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]] = {
-        region: {} for region in REGIONS
+    true_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in selected_regions}
+    decoded_place_by_region: dict[str, dict[str, Any]] = {region: {} for region in selected_regions}
+    true_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in selected_regions}
+    decoded_tp_by_region: dict[str, dict[str, Any]] = {region: {} for region in selected_regions}
+    true_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]] = {
+        region: {} for region in selected_regions
     }
-    decoded_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str], Any]]] = {
-        region: {} for region in REGIONS
+    decoded_tp_cross_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]] = {
+        region: {} for region in selected_regions
     }
-    epoch_metric_tables: dict[str, dict[str, pd.DataFrame]] = {region: {} for region in REGIONS}
+    epoch_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in selected_regions
+    }
     epoch_cross_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
-        region: {} for region in REGIONS
+        region: {} for region in selected_regions
     }
     epoch_binned_tables: dict[str, dict[str, dict[str, pd.DataFrame]]] = {
-        region: {} for region in REGIONS
+        region: {} for region in selected_regions
     }
-    epoch_cross_binned_tables: dict[str, dict[str, dict[tuple[str, str], pd.DataFrame]]] = {
-        region: {} for region in REGIONS
+    epoch_cross_binned_tables: dict[str, dict[str, dict[tuple[str, str, str], pd.DataFrame]]] = {
+        region: {} for region in selected_regions
     }
 
-    for region in REGIONS:
+    for region in selected_regions:
         active_unit_ids = _get_active_unit_ids(
             session["spikes_by_region"][region],
             movement_firing_rates[region][dark_epoch],
@@ -980,10 +1061,18 @@ def main() -> None:
                 ]
             )
             cross_rows: list[dict[str, Any]] = []
-            for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
-                key = (encoding_trajectory, decoding_trajectory)
+            for pair_spec in TP_TRANSFER_PAIR_SPECS:
+                transfer_family = pair_spec["transfer_family"]
+                encoding_trajectory = pair_spec["source_trajectory"]
+                decoding_trajectory = pair_spec["target_trajectory"]
+                key = _cross_trajectory_pair_key(
+                    transfer_family,
+                    encoding_trajectory,
+                    decoding_trajectory,
+                )
                 cross_rows.append(
                     {
+                        "transfer_family": transfer_family,
                         "encoding_trajectory": encoding_trajectory,
                         "decoding_trajectory": decoding_trajectory,
                         "n_units": len(active_unit_ids),
@@ -996,21 +1085,21 @@ def main() -> None:
             epoch_cross_metric_tables[region][epoch] = pd.DataFrame(cross_rows)
 
     light_dark_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
-        region: {} for region in REGIONS
+        region: {} for region in selected_regions
     }
     light_dark_cross_metric_tables: dict[str, dict[str, pd.DataFrame]] = {
-        region: {} for region in REGIONS
+        region: {} for region in selected_regions
     }
     binned_comparison_tables: dict[str, dict[str, dict[str, pd.DataFrame]]] = {
-        region: {} for region in REGIONS
+        region: {} for region in selected_regions
     }
-    cross_binned_comparison_tables: dict[str, dict[str, dict[tuple[str, str], pd.DataFrame]]] = {
-        region: {} for region in REGIONS
+    cross_binned_comparison_tables: dict[str, dict[str, dict[tuple[str, str, str], pd.DataFrame]]] = {
+        region: {} for region in selected_regions
     }
     saved_epoch_error_figures: list[Path] = []
     saved_light_dark_figures: list[Path] = []
 
-    for region in REGIONS:
+    for region in selected_regions:
         for model_name, xlabel in (
             ("place", "Linear position"),
             ("task_progression", "Task progression"),
@@ -1030,18 +1119,27 @@ def main() -> None:
             )
             saved_epoch_error_figures.append(figure_path)
 
-        for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
+        for pair_spec in TP_TRANSFER_PAIR_SPECS:
+            transfer_family = pair_spec["transfer_family"]
+            encoding_trajectory = pair_spec["source_trajectory"]
+            decoding_trajectory = pair_spec["target_trajectory"]
+            family_label = _format_transfer_family_label(transfer_family)
             figure_path = (
                 fig_dir
-                / f"{region}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_epoch.png"
+                / (
+                    f"{region}_"
+                    f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
+                    "_tp_cross_traj_error_by_epoch.png"
+                )
             )
             plot_cross_trajectory_epoch_error_profiles(
                 epoch_cross_binned_tables[region],
                 epoch_order=session["run_epochs"],
+                transfer_family=transfer_family,
                 encoding_trajectory=encoding_trajectory,
                 decoding_trajectory=decoding_trajectory,
                 title=(
-                    f"{region.upper()} tp cross-traj error by epoch: "
+                    f"{region.upper()} tp cross-traj error by epoch: {family_label}, "
                     f"{encoding_trajectory} -> {decoding_trajectory}"
                 ),
                 xlabel="Task progression",
@@ -1068,7 +1166,11 @@ def main() -> None:
                 dark_cross_metrics,
                 light_epoch=light_epoch,
                 dark_epoch=dark_epoch,
-                join_columns=["encoding_trajectory", "decoding_trajectory"],
+                join_columns=[
+                    "transfer_family",
+                    "encoding_trajectory",
+                    "decoding_trajectory",
+                ],
             )
 
             binned_comparison_tables[region][light_epoch] = {}
@@ -1107,8 +1209,16 @@ def main() -> None:
                 saved_light_dark_figures.append(figure_path)
 
             cross_binned_comparison_tables[region][light_epoch] = {}
-            for encoding_trajectory, decoding_trajectory in CROSS_TRAJECTORY_DECODING_MAP.items():
-                key = (encoding_trajectory, decoding_trajectory)
+            for pair_spec in TP_TRANSFER_PAIR_SPECS:
+                transfer_family = pair_spec["transfer_family"]
+                encoding_trajectory = pair_spec["source_trajectory"]
+                decoding_trajectory = pair_spec["target_trajectory"]
+                family_label = _format_transfer_family_label(transfer_family)
+                key = _cross_trajectory_pair_key(
+                    transfer_family,
+                    encoding_trajectory,
+                    decoding_trajectory,
+                )
                 light_summary = epoch_cross_binned_tables[region][light_epoch][key]
                 dark_summary = epoch_cross_binned_tables[region][dark_epoch][key]
                 comparison = build_binned_error_comparison_table(
@@ -1120,12 +1230,16 @@ def main() -> None:
                 cross_binned_comparison_tables[region][light_epoch][key] = comparison
                 figure_path = (
                     fig_dir
-                    / f"{region}_{light_epoch}_{dark_epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_de.png"
+                    / (
+                        f"{region}_{light_epoch}_{dark_epoch}_"
+                        f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
+                        "_tp_cross_traj_de.png"
+                    )
                 )
                 plot_binned_error_comparison(
                     comparison,
                     title=(
-                        f"{region.upper()} tp cross-traj error: "
+                        f"{region.upper()} tp cross-traj error: {family_label}, "
                         f"{encoding_trajectory} -> {decoding_trajectory}"
                     ),
                     xlabel="Task progression",
@@ -1181,10 +1295,18 @@ def main() -> None:
                 saved_epoch_binned_tables.append(path)
     for region, tables_by_epoch in epoch_cross_binned_tables.items():
         for epoch, tables_by_pair in tables_by_epoch.items():
-            for (encoding_trajectory, decoding_trajectory), table in tables_by_pair.items():
+            for (
+                transfer_family,
+                encoding_trajectory,
+                decoding_trajectory,
+            ), table in tables_by_pair.items():
                 path = (
                     save_dir
-                    / f"{region}_{epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_position.parquet"
+                    / (
+                        f"{region}_{epoch}_"
+                        f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
+                        "_tp_cross_traj_error_by_position.parquet"
+                    )
                 )
                 table.to_parquet(path)
                 saved_epoch_binned_tables.append(path)
@@ -1213,10 +1335,18 @@ def main() -> None:
                 saved_binned_tables.append(path)
     for region, tables_by_light_epoch in cross_binned_comparison_tables.items():
         for light_epoch, tables_by_pair in tables_by_light_epoch.items():
-            for (encoding_trajectory, decoding_trajectory), table in tables_by_pair.items():
+            for (
+                transfer_family,
+                encoding_trajectory,
+                decoding_trajectory,
+            ), table in tables_by_pair.items():
                 path = (
                     save_dir
-                    / f"{region}_{light_epoch}_{dark_epoch}_{encoding_trajectory}_to_{decoding_trajectory}_tp_cross_traj_error_by_position.parquet"
+                    / (
+                        f"{region}_{light_epoch}_{dark_epoch}_"
+                        f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
+                        "_tp_cross_traj_error_by_position.parquet"
+                    )
                 )
                 table.to_parquet(path)
                 saved_binned_tables.append(path)
@@ -1227,6 +1357,7 @@ def main() -> None:
         parameters={
             "animal_name": args.animal_name,
             "date": args.date,
+            "regions": list(selected_regions),
             "dark_epoch": dark_epoch,
             "light_epochs": list(light_epochs),
             "data_root": args.data_root,
@@ -1244,6 +1375,8 @@ def main() -> None:
             "sources": session["sources"],
             "run_epochs": session["run_epochs"],
             "min_lap_counts": min_lap_counts,
+            "tp_transfer_family_order": TP_TRANSFER_FAMILY_ORDER,
+            "tp_transfer_pair_specs": [dict(pair_spec) for pair_spec in TP_TRANSFER_PAIR_SPECS],
             "saved_npz_paths": saved_npz_paths,
             "saved_epoch_metric_tables": saved_epoch_metric_tables,
             "saved_epoch_cross_metric_tables": saved_epoch_cross_metric_tables,

@@ -48,10 +48,11 @@ from nemos.basis import BSplineEval
 from nemos.glm import PopulationGLM
 
 from v1ca1.helper.session import (
+    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+    DEFAULT_CLEAN_DLC_POSITION_NAME,
     get_run_epochs,
-    load_body_position_data_with_precedence,
+    load_clean_dlc_position_data,
     load_epoch_tags,
-    load_position_data_with_precedence,
 )
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
@@ -106,14 +107,16 @@ def select_run_epochs(
 ) -> list[str]:
     """Return the requested run epochs, defaulting to all available run epochs."""
     if not requested_epochs:
-        return run_epochs
+        return list(run_epochs)
 
-    missing_epochs = [epoch for epoch in requested_epochs if epoch not in run_epochs]
+    selected_epochs = list(dict.fromkeys(requested_epochs))
+
+    missing_epochs = [epoch for epoch in selected_epochs if epoch not in run_epochs]
     if missing_epochs:
         raise ValueError(
             f"Requested epochs were not found in available run epochs {run_epochs!r}: {missing_epochs!r}"
         )
-    return requested_epochs
+    return selected_epochs
 
 
 def has_any_finite_position(position_xy: np.ndarray | None) -> bool:
@@ -128,26 +131,32 @@ def select_epochs_with_usable_position_data(
     analysis_path: Path,
     requested_epochs: list[str] | None,
 ) -> tuple[list[str], list[dict[str, str]]]:
-    """Return run epochs with usable head/body position plus skipped-epoch reasons."""
+    """Return run epochs with usable cleaned-DLC head/body position plus skip reasons."""
     epoch_tags, _epoch_source = load_epoch_tags(analysis_path)
     requested_run_epochs = select_run_epochs(get_run_epochs(epoch_tags), requested_epochs)
-    position_by_epoch, position_source = load_position_data_with_precedence(
+    clean_dlc_path = (
+        analysis_path
+        / DEFAULT_CLEAN_DLC_POSITION_DIRNAME
+        / DEFAULT_CLEAN_DLC_POSITION_NAME
+    )
+    epoch_order, position_by_epoch, body_position_by_epoch = load_clean_dlc_position_data(
         analysis_path,
+        input_dirname=DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
+        input_name=DEFAULT_CLEAN_DLC_POSITION_NAME,
         validate_timestamps=True,
     )
-    body_position_by_epoch, body_position_source = (
-        load_body_position_data_with_precedence(
-            analysis_path,
-            validate_timestamps=True,
-        )
-    )
+    position_source = str(clean_dlc_path)
+    body_position_source = str(clean_dlc_path)
+    available_clean_dlc_epochs = {str(epoch) for epoch in epoch_order}
 
     usable_epochs: list[str] = []
     skipped_epochs: list[dict[str, str]] = []
     for epoch in requested_run_epochs:
         reasons: list[str] = []
-        head_position = position_by_epoch.get(epoch)
-        body_position = body_position_by_epoch.get(epoch)
+        head_position = position_by_epoch.get(epoch) if epoch in available_clean_dlc_epochs else None
+        body_position = (
+            body_position_by_epoch.get(epoch) if epoch in available_clean_dlc_epochs else None
+        )
         if head_position is None:
             reasons.append(f"head position missing from {position_source}")
         elif not has_any_finite_position(head_position):
