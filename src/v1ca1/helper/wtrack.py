@@ -48,6 +48,36 @@ _WTRACK_DIRECTION_BY_TRAJECTORY = {
 }
 
 _WTRACK_GEOMETRY_BY_ANIMAL = {
+    "L12": {
+        "dx": 7.0,
+        "dy": 9.0,
+        "long_segment_length": 65.0,
+        "short_segment_length": 21.5,
+        "node_positions_right": np.array(
+            [
+                (59.5, 86.5),
+                (59.5, 21.5),
+                (52.5, 12.5),
+                (31.0, 12.5),
+                (24.0, 21.5),
+                (24.0, 86.5),
+            ]
+        ),
+        "node_positions_left": np.array(
+            [
+                (59.5, 86.5),
+                (59.5, 21.5),
+                (66.5, 12.5),
+                (88.0, 12.5),
+                (95.0, 21.5),
+                (95.0, 86.5),
+            ]
+        ),
+        "edges_from_center": np.array([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]),
+        "edges_to_center": np.array([(5, 4), (4, 3), (3, 2), (2, 1), (1, 0)]),
+        "edge_order_from_center": [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+        "edge_order_to_center": [(5, 4), (4, 3), (3, 2), (2, 1), (1, 0)],
+    },
     "L14": {
         "dx": 9.5,
         "dy": 9.0,
