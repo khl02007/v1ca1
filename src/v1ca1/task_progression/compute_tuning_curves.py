@@ -31,6 +31,7 @@ from v1ca1.task_progression._session import (
     TURN_TRAJECTORY_PAIRS,
     build_task_progression_bins,
     get_analysis_path,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
 )
 from v1ca1.helper.wtrack import get_wtrack_total_length
@@ -334,7 +335,7 @@ def main() -> None:
     )
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
-    data_dir = analysis_path / "task_progression_tuning_curves"
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving tuning curves under {data_dir}")
 

@@ -68,6 +68,8 @@ from v1ca1.task_progression._session import (
     build_combined_task_progression_bins,
     build_linear_position_bins,
     get_analysis_path,
+    get_task_progression_figure_dir,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
 )
 
@@ -1369,8 +1371,8 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    data_dir = analysis_path / "task_progression_encoding"
-    fig_dir = analysis_path / "figs" / "task_progression_encoding"
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
+    fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 

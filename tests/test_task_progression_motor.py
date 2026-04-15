@@ -420,6 +420,26 @@ def test_select_run_epochs_deduplicates_requested_epochs(
     assert selected_epochs == ["run2", "run1"]
 
 
+def test_get_task_progression_figure_dir_uses_task_progression_and_script_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    figure_dir = module.get_task_progression_figure_dir(Path("/tmp/example_session"), "motor")
+
+    assert figure_dir == Path("/tmp/example_session/figs/task_progression/motor")
+
+
+def test_get_task_progression_output_dir_uses_task_progression_and_script_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    output_dir = module.get_task_progression_output_dir(Path("/tmp/example_session"), "motor")
+
+    assert output_dir == Path("/tmp/example_session/task_progression/motor")
+
+
 def test_select_epochs_with_usable_position_data_uses_clean_dlc_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

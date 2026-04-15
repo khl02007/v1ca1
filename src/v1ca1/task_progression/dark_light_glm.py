@@ -42,6 +42,7 @@ from v1ca1.task_progression._session import (
     TRAJECTORY_TYPES,
     compute_movement_firing_rates,
     get_analysis_path,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
 )
 
@@ -75,7 +76,6 @@ except ModuleNotFoundError:
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
 DEFAULT_RIDGES = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
-DEFAULT_DARK_EPOCH = "08_r4"
 DEFAULT_MODEL_FAMILIES = (
     "dense_gain",
     "segment_bump_gain",
@@ -124,72 +124,44 @@ def _require_scipy() -> None:
         )
 
 
-def select_run_epochs(
-    run_epochs: list[str],
-    requested_epochs: list[str] | None,
-) -> list[str]:
-    """Return requested run epochs, defaulting to all available run epochs."""
-    if not requested_epochs:
-        return list(run_epochs)
-    selected_epochs = list(dict.fromkeys(requested_epochs))
-    missing_epochs = [epoch for epoch in selected_epochs if epoch not in run_epochs]
-    if missing_epochs:
-        raise ValueError(
-            f"Requested epochs were not found in available run epochs {run_epochs!r}: "
-            f"{missing_epochs!r}"
-        )
-    return selected_epochs
-
-
 def select_light_dark_pairs(
     run_epochs: list[str],
     *,
-    selected_epochs: list[str],
+    dark_epoch: str,
     light_epochs: list[str] | None,
-    dark_epochs: list[str] | None,
 ) -> list[tuple[str, str]]:
     """Return validated `(light_epoch, dark_epoch)` pairs to fit."""
-    epoch_pool = selected_epochs or run_epochs
-    for epoch_list, label in ((light_epochs, "light"), (dark_epochs, "dark")):
-        if epoch_list is None:
-            continue
-        missing = [epoch for epoch in epoch_list if epoch not in epoch_pool]
-        if missing:
-            raise ValueError(
-                f"Requested {label} epochs were not found in the selected run epochs "
-                f"{epoch_pool!r}: {missing!r}"
-            )
-
-    selected_dark_epochs = (
-        list(dict.fromkeys(dark_epochs)) if dark_epochs else [DEFAULT_DARK_EPOCH]
-    )
-    selected_light_epochs = (
-        list(dict.fromkeys(light_epochs))
-        if light_epochs
-        else [epoch for epoch in epoch_pool if epoch not in selected_dark_epochs]
-    )
-    missing_defaults = [
-        epoch
-        for epoch in selected_light_epochs + selected_dark_epochs
-        if epoch not in epoch_pool
-    ]
-    if missing_defaults:
+    epoch_pool = list(run_epochs)
+    if dark_epoch not in epoch_pool:
         raise ValueError(
-            "Default light/dark epochs were not found in the selected run epochs. "
-            f"Selected run epochs: {epoch_pool!r}; missing defaults: {missing_defaults!r}"
+            "Requested dark epoch was not found in the valid run epochs. "
+            f"Valid run epochs: {epoch_pool!r}; dark_epoch: {dark_epoch!r}"
+        )
+    if light_epochs is not None:
+        selected_light_epochs = list(dict.fromkeys(light_epochs))
+        missing_light_epochs = [
+            epoch for epoch in selected_light_epochs if epoch not in epoch_pool
+        ]
+        if missing_light_epochs:
+            raise ValueError(
+                "Requested light epochs were not found in the valid run epochs. "
+                f"Valid run epochs: {epoch_pool!r}; missing: {missing_light_epochs!r}"
+            )
+    else:
+        selected_light_epochs = [epoch for epoch in epoch_pool if epoch != dark_epoch]
+
+    invalid_light_epochs = [
+        epoch for epoch in selected_light_epochs if epoch == dark_epoch
+    ]
+    if invalid_light_epochs:
+        raise ValueError(
+            "Light epochs must differ from the requested dark epoch. "
+            f"dark_epoch={dark_epoch!r}; invalid light epochs: {invalid_light_epochs!r}"
         )
     if not selected_light_epochs:
-        raise ValueError("No light epochs remain after applying the selected dark epochs.")
+        raise ValueError("No light epochs remain after excluding the requested dark epoch.")
 
-    pairs: list[tuple[str, str]] = []
-    for light_epoch in selected_light_epochs:
-        for dark_epoch in selected_dark_epochs:
-            if light_epoch == dark_epoch:
-                continue
-            pairs.append((light_epoch, dark_epoch))
-    if not pairs:
-        raise ValueError("No distinct light/dark epoch pairs were selected.")
-    return pairs
+    return [(light_epoch, dark_epoch) for light_epoch in selected_light_epochs]
 
 
 def derive_default_segment_edges(animal_name: str) -> np.ndarray:
@@ -2637,19 +2609,14 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Regions to fit. Default: {' '.join(REGIONS)}",
     )
     parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Specific run epoch labels to consider before choosing light/dark pairs.",
-    )
-    parser.add_argument(
         "--light-epochs",
         nargs="+",
         help="Explicit run epoch labels to use as light epochs.",
     )
     parser.add_argument(
-        "--dark-epochs",
-        nargs="+",
-        help="Explicit run epoch labels to use as dark epochs.",
+        "--dark-epoch",
+        required=True,
+        help="Run epoch label to use as the dark epoch.",
     )
     parser.add_argument(
         "--position-offset",
@@ -2872,16 +2839,14 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    selected_epochs = select_run_epochs(session["run_epochs"], args.epochs)
     epoch_pairs = select_light_dark_pairs(
         session["run_epochs"],
-        selected_epochs=selected_epochs,
+        dark_epoch=args.dark_epoch,
         light_epochs=args.light_epochs,
-        dark_epochs=args.dark_epochs,
     )
     print(
-        "Using run epochs: "
-        + ", ".join(str(epoch) for epoch in selected_epochs)
+        "Using valid run epochs: "
+        + ", ".join(str(epoch) for epoch in session["run_epochs"])
     )
     print(
         "Fitting light/dark pairs: "
@@ -2901,7 +2866,7 @@ def main() -> None:
         "Using segment edges: "
         + ", ".join(f"{edge:.4f}" for edge in np.asarray(segment_edges, dtype=float))
     )
-    data_dir = analysis_path / "task_progression_dark_light"
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     region_thresholds = {
@@ -3053,9 +3018,8 @@ def main() -> None:
             "data_root": args.data_root,
             "cuda_visible_devices": args.cuda_visible_devices,
             "regions": args.regions,
-            "epochs": selected_epochs,
             "light_epochs": args.light_epochs,
-            "dark_epochs": args.dark_epochs,
+            "dark_epoch": args.dark_epoch,
             "epoch_pairs": epoch_pairs,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,

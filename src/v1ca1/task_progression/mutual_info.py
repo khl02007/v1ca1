@@ -37,7 +37,11 @@ from v1ca1.task_progression._session import (
     build_linear_position_bins,
     compute_movement_firing_rates,
     get_analysis_path,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
+)
+from v1ca1.task_progression.tuning_analysis import (
+    circular_shift_unit_spikes_on_movement_axis,
 )
 TuningCurvesByRegion = dict[str, dict[str, Any]]
 MetricsByRegion = dict[str, dict[str, pd.DataFrame]]
@@ -131,19 +135,20 @@ def compute_shuffled_si(
         index=list(spikes.keys()),
         columns=["bits/sec", "bits/spike"],
     )
-    duration = float(epoch.end[0] - epoch.start[0])
-    if duration <= min_shift_s:
+    movement_duration = float(movement_epoch.tot_length())
+    if movement_duration <= 2.0 * float(min_shift_s):
         raise ValueError(
-            "Epoch is too short for shuffle-based MI estimation. "
-            f"Epoch duration: {duration:.2f} s, min_shift_s: {min_shift_s:.2f} s."
+            "Movement epoch is too short for movement-axis shuffle-based MI estimation. "
+            f"Movement duration: {movement_duration:.2f} s, min_shift_s: {min_shift_s:.2f} s."
         )
 
-    spikes_to_shift = spikes.restrict(epoch)
+    rng = np.random.default_rng()
     for _ in range(n_shuffles):
-        shifted_spikes = nap.shift_timestamps(
-            spikes_to_shift,
-            min_shift=min_shift_s,
-            max_shift=duration - min_shift_s,
+        shifted_spikes = circular_shift_spikes_on_movement_axis(
+            spikes,
+            movement_epoch,
+            rng=rng,
+            min_shift_s=min_shift_s,
         )
         shuffled_tuning_curve = nap.compute_tuning_curves(
             data=shifted_spikes,
@@ -154,6 +159,36 @@ def compute_shuffled_si(
         shuffled_si = nap.compute_mutual_information(shuffled_tuning_curve)
         shuffled_accumulator += shuffled_si.fillna(0)
     return shuffled_accumulator / n_shuffles
+
+
+def circular_shift_spikes_on_movement_axis(
+    spikes: Any,
+    movement_epoch: Any,
+    *,
+    rng: np.random.Generator,
+    min_shift_s: float,
+) -> Any:
+    """Circularly shift each unit independently on the concatenated movement axis."""
+    import pynapple as nap
+
+    movement_duration = float(movement_epoch.tot_length())
+    if movement_duration <= 2.0 * float(min_shift_s):
+        raise ValueError(
+            "Movement epoch is too short for movement-axis circular shuffling. "
+            f"Movement duration: {movement_duration:.2f} s, min_shift_s: {min_shift_s:.2f} s."
+        )
+
+    min_shift_fraction = float(min_shift_s) / movement_duration
+    shifted_spikes = {
+        unit: circular_shift_unit_spikes_on_movement_axis(
+            spikes[unit],
+            movement_epoch,
+            rng=rng,
+            min_shift_fraction=min_shift_fraction,
+        )
+        for unit in spikes.keys()
+    }
+    return nap.TsGroup(shifted_spikes, time_units="s")
 
 
 def compute_raw_tuning_and_mi(
@@ -401,7 +436,7 @@ def main() -> None:
         load_body_position=False,
     )
 
-    data_dir = analysis_path / "task_progression_mi"
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     linear_position_bins = build_linear_position_bins(

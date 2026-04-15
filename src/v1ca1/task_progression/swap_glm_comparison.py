@@ -36,6 +36,8 @@ from v1ca1.task_progression._session import (
     build_task_progression_bins,
     compute_movement_firing_rates,
     get_analysis_path,
+    get_task_progression_figure_dir,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
 )
 
@@ -3085,8 +3087,8 @@ def main() -> None:
         session["movement_by_run"],
         session["run_epochs"],
     )
-    data_dir = analysis_path / "task_progression_model_comparison"
-    fig_dir = analysis_path / "figs" / "task_progression_model_comparison"
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
+    fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 

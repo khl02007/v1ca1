@@ -1,34 +1,18 @@
 from __future__ import annotations
 
-"""Compare same-turn task-progression tuning similarity across trajectories.
+"""Quantify per-epoch task-progression tuning similarity across trajectories.
 
-This script loads one session's spike trains, per-epoch position timestamps,
-XY position samples, and trajectory intervals; rebuilds movement intervals and
-trajectory-specific task-progression coordinates; computes within-epoch tuning
-curve similarity for the same-turn trajectory pairs; and then compares those
-similarity scores across one light epoch and one dark epoch for left, right,
-and pooled similarity.
+This workflow treats within-epoch trajectory-pair similarity as the primary
+analysis product. For each selected run epoch and region, it computes direct
+same-turn and same-arm similarity scores for each sufficiently active unit,
+adds pooled within-family summaries, and writes one long-form parquet table
+plus summary figures. Optionally, it also estimates per-unit significance for
+the direct pairwise rows using circular spike-time shifts on the concatenated
+movement axis.
 
-The similarity metric is configurable at the command line and can be one of:
-
-- `correlation`
-- `absolute_overlap`
-- `shape_overlap`
-
-Outputs are written under the analysis directory in metric-specific parquet
-tables and scatter plots. The saved tables are per-unit summary outputs rather
-than time series, so parquet is the preferred format here: rows are units,
-columns hold summary values such as within-epoch similarity or light-vs-dark
-comparison scores. In this repository, pynapple-backed `.npz` outputs are a
-better fit for time-domain artifacts such as timestamps, intervals, spikes, or
-continuous time series. Run metadata is also recorded under
-`analysis_path / "v1ca1_log"`.
-
-Optionally, the script can also estimate per-unit significance for within-epoch
-left- and right-turn similarity using circular spike-time shifts on the
-concatenated movement axis. When enabled, raw empirical p-values, BH-FDR
-q-values, and null summary statistics are appended to the within-epoch tables,
-and one significance scatter figure is saved per region/turn/epoch table.
+An optional secondary comparison mode can then compare the same similarity
+labels across two explicit epochs. Those comparison outputs are saved
+separately from the per-epoch products.
 """
 
 import argparse
@@ -45,13 +29,12 @@ from v1ca1.task_progression._session import (
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
-    TURN_TRAJECTORY_PAIRS,
     build_task_progression_bins,
     compute_movement_firing_rates,
     compute_trajectory_task_progression_tuning_curves,
     get_analysis_path,
-    get_run_epochs,
-    load_epoch_tags,
+    get_task_progression_figure_dir,
+    get_task_progression_output_dir,
     prepare_task_progression_session,
 )
 
@@ -61,6 +44,81 @@ DEFAULT_N_SHUFFLES = 1000
 DEFAULT_SHUFFLE_SEED = 47
 DEFAULT_MIN_SHIFT_FRACTION = 0.1
 P_VALUE_THRESHOLD = 0.05
+SIGNIFICANCE_COLUMNS = (
+    "p_value",
+    "q_value",
+    "null_mean",
+    "null_std",
+    "null_median",
+    "null_ge_count",
+    "n_shuffles",
+    "n_null_valid",
+)
+DIRECT_COMPARISON_SPECS = (
+    {
+        "comparison_family": "same_turn",
+        "comparison_label": "left_turn",
+        "side": "left",
+        "trajectory_a": "center_to_left",
+        "trajectory_b": "right_to_center",
+        "flip_trajectory_b": False,
+    },
+    {
+        "comparison_family": "same_turn",
+        "comparison_label": "right_turn",
+        "side": "right",
+        "trajectory_a": "center_to_right",
+        "trajectory_b": "left_to_center",
+        "flip_trajectory_b": False,
+    },
+    {
+        "comparison_family": "same_arm",
+        "comparison_label": "left_arm",
+        "side": "left",
+        "trajectory_a": "center_to_left",
+        "trajectory_b": "left_to_center",
+        "flip_trajectory_b": True,
+    },
+    {
+        "comparison_family": "same_arm",
+        "comparison_label": "right_arm",
+        "side": "right",
+        "trajectory_a": "center_to_right",
+        "trajectory_b": "right_to_center",
+        "flip_trajectory_b": True,
+    },
+)
+POOLED_COMPARISON_SPECS = (
+    {
+        "comparison_family": "same_turn",
+        "comparison_label": "pooled_same_turn",
+    },
+    {
+        "comparison_family": "same_arm",
+        "comparison_label": "pooled_same_arm",
+    },
+)
+DIRECT_COMPARISON_LABELS = tuple(
+    spec["comparison_label"] for spec in DIRECT_COMPARISON_SPECS
+)
+POOLED_COMPARISON_LABELS = tuple(
+    spec["comparison_label"] for spec in POOLED_COMPARISON_SPECS
+)
+COMPARISON_LABEL_ORDER = (
+    "left_turn",
+    "right_turn",
+    "left_arm",
+    "right_arm",
+    "pooled_same_turn",
+    "pooled_same_arm",
+)
+SIDE_TO_DIRECT_LABELS = {
+    "left": ("left_turn", "left_arm"),
+    "right": ("right_turn", "right_arm"),
+}
+LABEL_TO_SPEC = {
+    spec["comparison_label"]: spec for spec in DIRECT_COMPARISON_SPECS
+}
 
 
 def interpolate_nans(values: np.ndarray) -> np.ndarray:
@@ -106,7 +164,9 @@ def _intervalset_to_arrays(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
     return starts[order], ends[order]
 
 
-def _movement_interval_axis(intervals: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+def _movement_interval_axis(
+    intervals: Any,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Return concatenated-axis metadata for one movement IntervalSet."""
     starts, ends = _intervalset_to_arrays(intervals)
     durations = ends - starts
@@ -165,16 +225,16 @@ def _make_shuffle_rng(
     *,
     region: str,
     epoch: str,
-    turn_type: str,
+    comparison_label: str,
     unit: int,
 ) -> np.random.Generator:
-    """Return a deterministic RNG for one region/epoch/turn/unit combination."""
+    """Return a deterministic RNG for one region/epoch/comparison/unit combination."""
     seed_sequence = np.random.SeedSequence(
         [
             int(base_seed) & 0xFFFFFFFF,
             _stable_seed_component(region),
             _stable_seed_component(epoch),
-            _stable_seed_component(turn_type),
+            _stable_seed_component(comparison_label),
             _stable_seed_component(unit),
         ]
     )
@@ -224,32 +284,6 @@ def circular_shift_unit_spikes_on_movement_axis(
     return nap.Ts(t=shifted_times, time_units="s")
 
 
-def compute_unit_turn_similarity(
-    unit: int,
-    unit_spikes: Any,
-    task_progression_by_trajectory: dict[str, Any],
-    movement_interval: Any,
-    turn_type: str,
-    bins: np.ndarray,
-    similarity_metric: str,
-) -> float:
-    """Compute one unit's same-turn similarity score for one epoch."""
-    import pynapple as nap
-
-    tuning_curves = compute_trajectory_task_progression_tuning_curves(
-        nap.TsGroup({unit: unit_spikes}, time_units="s"),
-        task_progression_by_trajectory,
-        movement_interval,
-        bins=bins,
-    )
-    trajectory_a, trajectory_b = TURN_TRAJECTORY_PAIRS[turn_type]
-    return compute_similarity_score(
-        tuning_curves[trajectory_a].sel(unit=unit).values,
-        tuning_curves[trajectory_b].sel(unit=unit).values,
-        similarity_metric=similarity_metric,
-    )
-
-
 def compute_empirical_p_value(
     observed_score: float,
     null_scores: np.ndarray,
@@ -280,114 +314,6 @@ def compute_q_values(p_values: pd.Series) -> pd.Series:
     )[1]
     q_values.loc[p_values.index[valid]] = adjusted
     return q_values
-
-
-def annotate_turn_similarity_significance(
-    similarity_table: pd.DataFrame,
-    *,
-    region: str,
-    epoch: str,
-    turn_type: str,
-    spikes: Any,
-    task_progression_by_trajectory: dict[str, Any],
-    movement_interval: Any,
-    bins: np.ndarray,
-    similarity_metric: str,
-    n_shuffles: int,
-    shuffle_seed: int,
-) -> pd.DataFrame:
-    """Append per-unit circular-shift significance columns to one within-epoch table."""
-    annotated = similarity_table.copy()
-    if annotated.empty:
-        for column in (
-            "p_value",
-            "q_value",
-            "null_mean",
-            "null_std",
-            "null_median",
-            "null_ge_count",
-            "n_shuffles",
-            "n_null_valid",
-        ):
-            annotated[column] = pd.Series(dtype=float)
-        return annotated
-
-    rows: list[dict[str, float | int]] = []
-    for unit in annotated.index.to_numpy():
-        rng = _make_shuffle_rng(
-            shuffle_seed,
-            region=region,
-            epoch=epoch,
-            turn_type=turn_type,
-            unit=int(unit),
-        )
-        observed_score = float(annotated.at[unit, "similarity"])
-        unit_spikes = spikes[int(unit)]
-        null_scores = np.full(int(n_shuffles), np.nan, dtype=float)
-
-        for shuffle_index in range(int(n_shuffles)):
-            shifted_unit_spikes = circular_shift_unit_spikes_on_movement_axis(
-                unit_spikes,
-                movement_interval,
-                rng=rng,
-            )
-            null_scores[shuffle_index] = compute_unit_turn_similarity(
-                int(unit),
-                shifted_unit_spikes,
-                task_progression_by_trajectory,
-                movement_interval,
-                turn_type=turn_type,
-                bins=bins,
-                similarity_metric=similarity_metric,
-            )
-
-        p_value, ge_count = compute_empirical_p_value(observed_score, null_scores)
-        valid_null_scores = null_scores[np.isfinite(null_scores)]
-        rows.append(
-            {
-                "unit": int(unit),
-                "p_value": p_value,
-                "null_mean": float(np.mean(valid_null_scores))
-                if valid_null_scores.size
-                else np.nan,
-                "null_std": float(np.std(valid_null_scores))
-                if valid_null_scores.size
-                else np.nan,
-                "null_median": float(np.median(valid_null_scores))
-                if valid_null_scores.size
-                else np.nan,
-                "null_ge_count": ge_count,
-                "n_shuffles": int(n_shuffles),
-                "n_null_valid": int(valid_null_scores.size),
-            }
-        )
-
-    significance_df = pd.DataFrame(rows).set_index("unit").sort_index()
-    significance_df["q_value"] = compute_q_values(significance_df["p_value"])
-    return annotated.join(significance_df, how="left")
-
-
-def get_light_and_dark_epochs(
-    run_epochs: list[str],
-    light_epoch: str | None,
-    dark_epoch: str | None,
-) -> tuple[str, str]:
-    """Return validated light and dark epoch labels for one session."""
-    if not run_epochs:
-        raise ValueError("No run epochs were found for this session.")
-
-    selected_light_epoch = light_epoch or run_epochs[0]
-    selected_dark_epoch = dark_epoch or run_epochs[-1]
-    missing = [
-        epoch
-        for epoch in (selected_light_epoch, selected_dark_epoch)
-        if epoch not in run_epochs
-    ]
-    if missing:
-        raise ValueError(
-            f"Requested epochs were not found in run epochs {run_epochs!r}: {missing!r}"
-        )
-    return selected_light_epoch, selected_dark_epoch
 
 
 def compute_similarity_score(
@@ -431,76 +357,15 @@ def compute_similarity_score(
     raise ValueError(f"Unsupported similarity metric: {similarity_metric!r}")
 
 
-def compute_turn_similarity(
-    tuning_curves_by_trajectory: dict[str, Any],
-    turn_type: str,
-    dark_epoch_firing_rates: pd.Series,
-    firing_rate_threshold_hz: float,
-    similarity_metric: str,
-) -> pd.DataFrame:
-    """Compute within-epoch same-turn similarity for all active units."""
-    trajectory_a, trajectory_b = TURN_TRAJECTORY_PAIRS[turn_type]
-    tuning_curve_a = tuning_curves_by_trajectory[trajectory_a]
-    tuning_curve_b = tuning_curves_by_trajectory[trajectory_b]
-
-    units_a = np.asarray(tuning_curve_a.coords["unit"].values)
-    units_b = np.asarray(tuning_curve_b.coords["unit"].values)
-    common_units = np.intersect1d(units_a, units_b)
-
-    rows: list[dict[str, float | int | str]] = []
-    for unit in common_units:
-        rate = dark_epoch_firing_rates.get(unit, np.nan)
-        if not np.isfinite(rate) or float(rate) <= firing_rate_threshold_hz:
-            continue
-
-        score = compute_similarity_score(
-            tuning_curve_a.sel(unit=unit).values,
-            tuning_curve_b.sel(unit=unit).values,
-            similarity_metric=similarity_metric,
-        )
-        if np.isfinite(score):
-            rows.append({"unit": unit, "similarity": float(score), "turn_type": turn_type})
-
-    if not rows:
-        return pd.DataFrame(columns=["similarity", "turn_type"], index=pd.Index([], name="unit"))
-    return pd.DataFrame(rows).set_index("unit")
+def _flip_curve_if_requested(curve: np.ndarray, *, should_flip: bool) -> np.ndarray:
+    """Return one tuning curve, optionally reversed along the task axis."""
+    array = np.asarray(curve, dtype=float)
+    if should_flip:
+        return np.asarray(array[::-1], dtype=float)
+    return array
 
 
-def compute_pooled_similarity(
-    left_similarity: pd.DataFrame,
-    right_similarity: pd.DataFrame,
-) -> pd.DataFrame:
-    """Pool left and right similarity by taking the per-unit maximum."""
-    joined = pd.concat(
-        [
-            left_similarity["similarity"].rename("left_similarity"),
-            right_similarity["similarity"].rename("right_similarity"),
-        ],
-        axis=1,
-    )
-    joined["similarity"] = joined.max(axis=1, skipna=True)
-    joined = joined.dropna(subset=["similarity"])
-    joined["turn_type"] = "pooled"
-    return joined
-
-
-def join_epoch_similarity(
-    light_similarity: pd.DataFrame,
-    dark_similarity: pd.DataFrame,
-) -> pd.DataFrame:
-    """Join light-epoch and dark-epoch similarity tables on shared units."""
-    joined = pd.concat(
-        [
-            light_similarity["similarity"].rename("light_similarity"),
-            dark_similarity["similarity"].rename("dark_similarity"),
-        ],
-        axis=1,
-        join="inner",
-    )
-    return joined.dropna()
-
-
-def get_metric_axis_limits(similarity_metric: str) -> tuple[float, float]:
+def get_similarity_axis_limits(similarity_metric: str) -> tuple[float, float]:
     """Return axis limits appropriate for the requested similarity metric."""
     if similarity_metric == "correlation":
         return -1.0, 1.0
@@ -518,274 +383,674 @@ def get_similarity_axis_label(similarity_metric: str) -> str:
     return "Similarity"
 
 
-def plot_similarity_scatter(
-    similarity_comparison: pd.DataFrame,
-    region: str,
-    turn_label: str,
-    light_epoch: str,
-    dark_epoch: str,
-    similarity_metric: str,
-    fig_path: Path,
-) -> None:
-    """Save one light-vs-dark similarity scatter plot."""
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(
-        similarity_comparison["light_similarity"],
-        similarity_comparison["dark_similarity"],
-        alpha=0.5,
-        s=24,
-        color="tab:purple",
+def _empty_similarity_table() -> pd.DataFrame:
+    """Return an empty long-form similarity table with the expected schema."""
+    return pd.DataFrame(
+        {
+            "unit": pd.Series(dtype=int),
+            "region": pd.Series(dtype=str),
+            "epoch": pd.Series(dtype=str),
+            "comparison_family": pd.Series(dtype=str),
+            "comparison_label": pd.Series(dtype=str),
+            "side": pd.Series(dtype=object),
+            "trajectory_a": pd.Series(dtype=object),
+            "trajectory_b": pd.Series(dtype=object),
+            "flip_trajectory_b": pd.Series(dtype=object),
+            "firing_rate_hz": pd.Series(dtype=float),
+            "similarity": pd.Series(dtype=float),
+        }
     )
 
-    axis_min, axis_max = get_metric_axis_limits(similarity_metric)
-    ax.plot([axis_min, axis_max], [axis_min, axis_max], "k--", linewidth=1)
-    ax.set_xlim(axis_min, axis_max)
-    ax.set_ylim(axis_min, axis_max)
-    ax.set_xlabel(f"{light_epoch} similarity")
-    ax.set_ylabel(f"{dark_epoch} similarity")
-    ax.set_title(f"{region.upper()} {turn_label} ({similarity_metric})")
 
-    plt.tight_layout()
-    plt.savefig(fig_path, dpi=300)
-    plt.close(fig)
+def _empty_comparison_table() -> pd.DataFrame:
+    """Return an empty long-form comparison table with the expected schema."""
+    return pd.DataFrame(
+        {
+            "unit": pd.Series(dtype=int),
+            "region": pd.Series(dtype=str),
+            "epoch_a": pd.Series(dtype=str),
+            "epoch_b": pd.Series(dtype=str),
+            "comparison_family": pd.Series(dtype=str),
+            "comparison_label": pd.Series(dtype=str),
+            "side": pd.Series(dtype=object),
+            "trajectory_a": pd.Series(dtype=object),
+            "trajectory_b": pd.Series(dtype=object),
+            "flip_trajectory_b": pd.Series(dtype=object),
+            "similarity_epoch_a": pd.Series(dtype=float),
+            "similarity_epoch_b": pd.Series(dtype=float),
+            "delta_similarity": pd.Series(dtype=float),
+        }
+    )
 
 
-def plot_similarity_significance_scatter(
+def deduplicate_requested_epochs(selected_epochs: list[str] | None) -> list[str] | None:
+    """Return a requested epoch list with duplicates removed while preserving order."""
+    if selected_epochs is None:
+        return None
+    return list(dict.fromkeys(selected_epochs))
+
+
+def resolve_compare_epochs(
+    compare_epochs: list[str] | None,
+    analyzed_epochs: list[str],
+) -> tuple[str, str] | None:
+    """Validate and return the optional epoch pair used for cross-epoch comparison."""
+    if compare_epochs is None:
+        return None
+    if len(compare_epochs) != 2:
+        raise ValueError("--compare-epochs must provide exactly two epoch labels.")
+
+    epoch_a, epoch_b = (str(compare_epochs[0]), str(compare_epochs[1]))
+    if epoch_a == epoch_b:
+        raise ValueError("--compare-epochs must name two distinct epochs.")
+
+    missing = [epoch for epoch in (epoch_a, epoch_b) if epoch not in analyzed_epochs]
+    if missing:
+        raise ValueError(
+            "Comparison epochs must already be part of the analyzed epoch set. "
+            f"Analyzed epochs: {analyzed_epochs!r}; missing: {missing!r}"
+        )
+    return epoch_a, epoch_b
+
+
+def compute_unit_pair_similarity(
+    unit: int,
+    unit_spikes: Any,
+    task_progression_by_trajectory: dict[str, Any],
+    movement_interval: Any,
+    bins: np.ndarray,
+    similarity_metric: str,
+    *,
+    trajectory_a: str,
+    trajectory_b: str,
+    flip_trajectory_b: bool,
+) -> float:
+    """Compute one unit's direct pairwise similarity score for one epoch."""
+    import pynapple as nap
+
+    tuning_curves = compute_trajectory_task_progression_tuning_curves(
+        nap.TsGroup({int(unit): unit_spikes}, time_units="s"),
+        task_progression_by_trajectory,
+        movement_interval,
+        bins=bins,
+    )
+    curve_a = np.asarray(tuning_curves[trajectory_a].sel(unit=unit).values, dtype=float)
+    curve_b = _flip_curve_if_requested(
+        tuning_curves[trajectory_b].sel(unit=unit).values,
+        should_flip=bool(flip_trajectory_b),
+    )
+    return compute_similarity_score(
+        curve_a,
+        curve_b,
+        similarity_metric=similarity_metric,
+    )
+
+
+def compute_epoch_similarity_table(
+    *,
+    region: str,
+    epoch: str,
+    tuning_curves_by_trajectory: dict[str, Any],
+    epoch_firing_rates: pd.Series,
+    firing_rate_threshold_hz: float,
+    similarity_metric: str,
+) -> pd.DataFrame:
+    """Compute one long-form per-epoch similarity table for one region."""
+    rows: list[dict[str, Any]] = []
+    for spec in DIRECT_COMPARISON_SPECS:
+        trajectory_a = str(spec["trajectory_a"])
+        trajectory_b = str(spec["trajectory_b"])
+        tuning_curve_a = tuning_curves_by_trajectory[trajectory_a]
+        tuning_curve_b = tuning_curves_by_trajectory[trajectory_b]
+
+        units_a = np.asarray(tuning_curve_a.coords["unit"].values, dtype=int)
+        units_b = np.asarray(tuning_curve_b.coords["unit"].values, dtype=int)
+        common_units = np.intersect1d(units_a, units_b)
+
+        for unit in common_units:
+            firing_rate_hz = float(epoch_firing_rates.get(int(unit), np.nan))
+            if not np.isfinite(firing_rate_hz) or firing_rate_hz <= firing_rate_threshold_hz:
+                continue
+
+            curve_a = np.asarray(tuning_curve_a.sel(unit=unit).values, dtype=float)
+            curve_b = _flip_curve_if_requested(
+                tuning_curve_b.sel(unit=unit).values,
+                should_flip=bool(spec["flip_trajectory_b"]),
+            )
+            similarity = compute_similarity_score(
+                curve_a,
+                curve_b,
+                similarity_metric=similarity_metric,
+            )
+            if not np.isfinite(similarity):
+                continue
+
+            rows.append(
+                {
+                    "unit": int(unit),
+                    "region": region,
+                    "epoch": epoch,
+                    "comparison_family": str(spec["comparison_family"]),
+                    "comparison_label": str(spec["comparison_label"]),
+                    "side": str(spec["side"]),
+                    "trajectory_a": trajectory_a,
+                    "trajectory_b": trajectory_b,
+                    "flip_trajectory_b": bool(spec["flip_trajectory_b"]),
+                    "firing_rate_hz": firing_rate_hz,
+                    "similarity": float(similarity),
+                }
+            )
+
+    if not rows:
+        return _empty_similarity_table()
+
+    table = pd.DataFrame(rows)
+    table["comparison_label"] = pd.Categorical(
+        table["comparison_label"],
+        categories=COMPARISON_LABEL_ORDER,
+        ordered=True,
+    )
+    return table.sort_values(
+        ["unit", "comparison_label"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def append_pooled_similarity_rows(similarity_table: pd.DataFrame) -> pd.DataFrame:
+    """Append pooled same-turn and same-arm rows using the per-unit max rule."""
+    if similarity_table.empty:
+        return similarity_table.copy()
+
+    pooled_rows: list[dict[str, Any]] = []
+    direct = similarity_table[
+        similarity_table["comparison_label"].isin(DIRECT_COMPARISON_LABELS)
+    ].copy()
+    if direct.empty:
+        return similarity_table.copy()
+
+    for pooled_spec in POOLED_COMPARISON_SPECS:
+        family = str(pooled_spec["comparison_family"])
+        family_rows = direct[direct["comparison_family"] == family]
+        if family_rows.empty:
+            continue
+
+        grouped = family_rows.groupby("unit", sort=True, observed=False)
+        for unit, unit_rows in grouped:
+            valid_similarity = pd.to_numeric(unit_rows["similarity"], errors="coerce")
+            if not np.isfinite(valid_similarity.to_numpy(dtype=float)).any():
+                continue
+            pooled_rows.append(
+                {
+                    "unit": int(unit),
+                    "region": str(unit_rows["region"].iloc[0]),
+                    "epoch": str(unit_rows["epoch"].iloc[0]),
+                    "comparison_family": family,
+                    "comparison_label": str(pooled_spec["comparison_label"]),
+                    "side": None,
+                    "trajectory_a": None,
+                    "trajectory_b": None,
+                    "flip_trajectory_b": None,
+                    "firing_rate_hz": float(
+                        pd.to_numeric(unit_rows["firing_rate_hz"], errors="coerce").max()
+                    ),
+                    "similarity": float(valid_similarity.max()),
+                }
+            )
+
+    if not pooled_rows:
+        return similarity_table.copy()
+
+    combined = pd.concat(
+        [similarity_table, pd.DataFrame(pooled_rows)],
+        axis=0,
+        ignore_index=True,
+    )
+    combined["comparison_label"] = pd.Categorical(
+        combined["comparison_label"],
+        categories=COMPARISON_LABEL_ORDER,
+        ordered=True,
+    )
+    return combined.sort_values(
+        ["unit", "comparison_label"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def annotate_pairwise_similarity_significance(
     similarity_table: pd.DataFrame,
     *,
     region: str,
     epoch: str,
-    turn_type: str,
+    spikes: Any,
+    task_progression_by_trajectory: dict[str, Any],
+    movement_interval: Any,
+    bins: np.ndarray,
+    similarity_metric: str,
+    n_shuffles: int,
+    shuffle_seed: int,
+) -> pd.DataFrame:
+    """Append per-unit significance to the direct pairwise rows in one epoch table."""
+    annotated = similarity_table.copy()
+    for column in SIGNIFICANCE_COLUMNS:
+        annotated[column] = np.nan
+
+    if annotated.empty:
+        return annotated
+
+    direct_mask = annotated["comparison_label"].isin(DIRECT_COMPARISON_LABELS)
+    direct_rows = annotated.loc[direct_mask].copy()
+    if direct_rows.empty:
+        return annotated
+
+    result_rows: list[dict[str, Any]] = []
+    for row_index, row in direct_rows.iterrows():
+        unit = int(row["unit"])
+        comparison_label = str(row["comparison_label"])
+        rng = _make_shuffle_rng(
+            shuffle_seed,
+            region=region,
+            epoch=epoch,
+            comparison_label=comparison_label,
+            unit=unit,
+        )
+        observed_score = float(row["similarity"])
+        unit_spikes = spikes[unit]
+        null_scores = np.full(int(n_shuffles), np.nan, dtype=float)
+
+        for shuffle_index in range(int(n_shuffles)):
+            shifted_unit_spikes = circular_shift_unit_spikes_on_movement_axis(
+                unit_spikes,
+                movement_interval,
+                rng=rng,
+            )
+            null_scores[shuffle_index] = compute_unit_pair_similarity(
+                unit,
+                shifted_unit_spikes,
+                task_progression_by_trajectory,
+                movement_interval,
+                bins,
+                similarity_metric,
+                trajectory_a=str(row["trajectory_a"]),
+                trajectory_b=str(row["trajectory_b"]),
+                flip_trajectory_b=bool(row["flip_trajectory_b"]),
+            )
+
+        p_value, ge_count = compute_empirical_p_value(observed_score, null_scores)
+        valid_null_scores = null_scores[np.isfinite(null_scores)]
+        result_rows.append(
+            {
+                "row_index": int(row_index),
+                "p_value": p_value,
+                "null_mean": float(np.mean(valid_null_scores))
+                if valid_null_scores.size
+                else np.nan,
+                "null_std": float(np.std(valid_null_scores))
+                if valid_null_scores.size
+                else np.nan,
+                "null_median": float(np.median(valid_null_scores))
+                if valid_null_scores.size
+                else np.nan,
+                "null_ge_count": ge_count,
+                "n_shuffles": int(n_shuffles),
+                "n_null_valid": int(valid_null_scores.size),
+            }
+        )
+
+    if not result_rows:
+        return annotated
+
+    significance_df = pd.DataFrame(result_rows).set_index("row_index").sort_index()
+    significance_df["q_value"] = compute_q_values(significance_df["p_value"])
+    for column in SIGNIFICANCE_COLUMNS:
+        annotated.loc[significance_df.index, column] = significance_df[column]
+    return annotated
+
+
+def build_epoch_comparison_table(
+    epoch_table_a: pd.DataFrame,
+    epoch_table_b: pd.DataFrame,
+    *,
+    region: str,
+    epoch_a: str,
+    epoch_b: str,
+) -> pd.DataFrame:
+    """Join two per-epoch tables on shared units and matching comparison labels."""
+    if epoch_table_a.empty or epoch_table_b.empty:
+        return _empty_comparison_table()
+
+    join_columns = ["unit", "comparison_family", "comparison_label"]
+    metadata_columns = [
+        "side",
+        "trajectory_a",
+        "trajectory_b",
+        "flip_trajectory_b",
+    ]
+    base_columns = join_columns + metadata_columns + ["similarity"]
+    if "firing_rate_hz" in epoch_table_a.columns:
+        base_columns.append("firing_rate_hz")
+
+    left = epoch_table_a.loc[:, base_columns].rename(
+        columns={
+            "similarity": "similarity_epoch_a",
+            "firing_rate_hz": "firing_rate_hz_epoch_a",
+        }
+    )
+    right = epoch_table_b.loc[:, base_columns].rename(
+        columns={
+            "similarity": "similarity_epoch_b",
+            "firing_rate_hz": "firing_rate_hz_epoch_b",
+        }
+    )
+
+    for column in SIGNIFICANCE_COLUMNS:
+        if column in epoch_table_a.columns:
+            left[f"{column}_epoch_a"] = epoch_table_a[column].to_numpy()
+        if column in epoch_table_b.columns:
+            right[f"{column}_epoch_b"] = epoch_table_b[column].to_numpy()
+
+    comparison = left.merge(
+        right.drop(columns=metadata_columns, errors="ignore"),
+        on=join_columns,
+        how="inner",
+        validate="one_to_one",
+    )
+    if comparison.empty:
+        return _empty_comparison_table()
+
+    comparison.insert(1, "region", region)
+    comparison.insert(2, "epoch_a", epoch_a)
+    comparison.insert(3, "epoch_b", epoch_b)
+    comparison["delta_similarity"] = (
+        comparison["similarity_epoch_b"] - comparison["similarity_epoch_a"]
+    )
+    comparison["comparison_label"] = pd.Categorical(
+        comparison["comparison_label"],
+        categories=COMPARISON_LABEL_ORDER,
+        ordered=True,
+    )
+    return comparison.sort_values(
+        ["unit", "comparison_label"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def plot_epoch_similarity_distributions(
+    similarity_table: pd.DataFrame,
+    *,
+    region: str,
+    epoch: str,
+    similarity_metric: str,
+    fig_path: Path,
+) -> None:
+    """Save one per-epoch histogram figure with left and right panels."""
+    import matplotlib.pyplot as plt
+
+    axis_min, axis_max = get_similarity_axis_limits(similarity_metric)
+    bins = np.linspace(axis_min, axis_max, 25)
+    colors = {
+        "left_turn": "tab:blue",
+        "left_arm": "tab:orange",
+        "right_turn": "tab:blue",
+        "right_arm": "tab:orange",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+    for ax, side in zip(axes, ("left", "right"), strict=True):
+        side_rows = similarity_table[similarity_table["side"] == side]
+        has_data = False
+        for label in SIDE_TO_DIRECT_LABELS[side]:
+            values = pd.to_numeric(
+                side_rows.loc[side_rows["comparison_label"] == label, "similarity"],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            has_data = True
+            ax.hist(
+                values,
+                bins=bins,
+                alpha=0.5,
+                label=label,
+                color=colors[label],
+                edgecolor="none",
+            )
+        if has_data:
+            ax.set_xlim(axis_min, axis_max)
+            ax.set_xlabel(get_similarity_axis_label(similarity_metric))
+            ax.legend(frameon=False)
+        else:
+            ax.text(0.5, 0.5, "No valid units", ha="center", va="center")
+            ax.set_axis_off()
+        ax.set_title(f"{side} comparisons")
+
+    axes[0].set_ylabel("Units")
+    fig.suptitle(f"{region.upper()} {epoch} similarity distributions", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_epoch_similarity_significance(
+    similarity_table: pd.DataFrame,
+    *,
+    region: str,
+    epoch: str,
     similarity_metric: str,
     fig_path: Path,
     p_value_threshold: float = P_VALUE_THRESHOLD,
 ) -> None:
-    """Save one observed-similarity vs significance scatter plot."""
+    """Save one per-epoch similarity-vs-significance figure."""
     import matplotlib.pyplot as plt
 
-    valid = similarity_table.copy()
-    valid = valid[
-        np.isfinite(valid["similarity"]) & np.isfinite(valid["p_value"]) & (valid["p_value"] > 0.0)
-    ]
+    axis_min, axis_max = get_similarity_axis_limits(similarity_metric)
+    colors = {
+        "left_turn": "tab:blue",
+        "left_arm": "tab:orange",
+        "right_turn": "tab:blue",
+        "right_arm": "tab:orange",
+    }
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    if valid.empty:
-        ax.text(0.5, 0.5, "No valid units", ha="center", va="center")
-        ax.set_axis_off()
-    else:
-        ax.scatter(
-            valid["similarity"],
-            -np.log10(valid["p_value"]),
-            alpha=0.6,
-            s=24,
-            color="tab:blue",
-        )
-        axis_min, axis_max = get_metric_axis_limits(similarity_metric)
-        ax.set_xlim(axis_min, axis_max)
-        ax.axhline(-np.log10(p_value_threshold), color="k", linestyle="--", linewidth=1)
-        ax.set_xlabel(get_similarity_axis_label(similarity_metric))
-        ax.set_ylabel("-log10(p_value)")
-    ax.set_title(f"{region.upper()} {epoch} {turn_type} significance")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+    for ax, side in zip(axes, ("left", "right"), strict=True):
+        side_rows = similarity_table[similarity_table["side"] == side]
+        has_data = False
+        for label in SIDE_TO_DIRECT_LABELS[side]:
+            label_rows = side_rows[side_rows["comparison_label"] == label]
+            similarity = pd.to_numeric(label_rows["similarity"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            p_values = pd.to_numeric(label_rows["p_value"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            valid = np.isfinite(similarity) & np.isfinite(p_values) & (p_values > 0.0)
+            if not np.any(valid):
+                continue
+            has_data = True
+            ax.scatter(
+                similarity[valid],
+                -np.log10(p_values[valid]),
+                alpha=0.6,
+                s=24,
+                color=colors[label],
+                label=label,
+            )
+        if has_data:
+            ax.set_xlim(axis_min, axis_max)
+            ax.axhline(-np.log10(p_value_threshold), color="k", linestyle="--", linewidth=1)
+            ax.set_xlabel(get_similarity_axis_label(similarity_metric))
+            ax.legend(frameon=False)
+        else:
+            ax.text(0.5, 0.5, "No valid units", ha="center", va="center")
+            ax.set_axis_off()
+        ax.set_title(f"{side} comparisons")
 
-    plt.tight_layout()
-    plt.savefig(fig_path, dpi=300)
+    axes[0].set_ylabel("-log10(p_value)")
+    fig.suptitle(f"{region.upper()} {epoch} similarity significance", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def compute_similarity_outputs(
-    tuning_curves_by_region: dict[str, dict[str, dict[str, Any]]],
-    movement_firing_rates: dict[str, dict[str, np.ndarray]],
-    spikes_by_region: dict[str, Any],
-    selected_regions: tuple[str, ...],
-    light_epoch: str,
-    dark_epoch: str,
-    similarity_metric: str,
-) -> dict[str, dict[str, pd.DataFrame]]:
-    """Compute left, right, and pooled similarity tables for each region."""
-    outputs: dict[str, dict[str, pd.DataFrame]] = {}
-    for region in selected_regions:
-        dark_epoch_firing_rates = pd.Series(
-            movement_firing_rates[region][dark_epoch],
-            index=list(spikes_by_region[region].keys()),
-            dtype=float,
-        )
-        region_outputs: dict[str, pd.DataFrame] = {}
-
-        for turn_type in ("left", "right"):
-            light_similarity = compute_turn_similarity(
-                tuning_curves_by_region[region][light_epoch],
-                turn_type=turn_type,
-                dark_epoch_firing_rates=dark_epoch_firing_rates,
-                firing_rate_threshold_hz=DEFAULT_REGION_FR_THRESHOLDS[region],
-                similarity_metric=similarity_metric,
-            )
-            dark_similarity = compute_turn_similarity(
-                tuning_curves_by_region[region][dark_epoch],
-                turn_type=turn_type,
-                dark_epoch_firing_rates=dark_epoch_firing_rates,
-                firing_rate_threshold_hz=DEFAULT_REGION_FR_THRESHOLDS[region],
-                similarity_metric=similarity_metric,
-            )
-            region_outputs[f"{turn_type}_light"] = light_similarity
-            region_outputs[f"{turn_type}_dark"] = dark_similarity
-            region_outputs[turn_type] = join_epoch_similarity(light_similarity, dark_similarity)
-
-        pooled_light = compute_pooled_similarity(
-            region_outputs["left_light"],
-            region_outputs["right_light"],
-        )
-        pooled_dark = compute_pooled_similarity(
-            region_outputs["left_dark"],
-            region_outputs["right_dark"],
-        )
-        region_outputs["pooled_light"] = pooled_light
-        region_outputs["pooled_dark"] = pooled_dark
-        region_outputs["pooled"] = join_epoch_similarity(pooled_light, pooled_dark)
-        outputs[region] = region_outputs
-
-    return outputs
-
-
-def compute_similarity_significance_outputs(
-    similarity_outputs: dict[str, dict[str, pd.DataFrame]],
+def plot_epoch_comparison(
+    comparison_table: pd.DataFrame,
     *,
-    session: dict[str, Any],
-    light_epoch: str,
-    dark_epoch: str,
+    region: str,
+    epoch_a: str,
+    epoch_b: str,
     similarity_metric: str,
-    bins: np.ndarray,
-    n_shuffles: int,
-    shuffle_seed: int,
-) -> dict[str, dict[str, pd.DataFrame]]:
-    """Append per-unit significance to within-epoch left/right similarity tables."""
-    outputs_with_significance: dict[str, dict[str, pd.DataFrame]] = {}
-    for region, region_outputs in similarity_outputs.items():
-        updated_region_outputs = dict(region_outputs)
-        for turn_type in ("left", "right"):
-            for epoch_label, epoch in (("light", light_epoch), ("dark", dark_epoch)):
-                key = f"{turn_type}_{epoch_label}"
-                updated_region_outputs[key] = annotate_turn_similarity_significance(
-                    region_outputs[key],
-                    region=region,
-                    epoch=epoch,
-                    turn_type=turn_type,
-                    spikes=session["spikes_by_region"][region],
-                    task_progression_by_trajectory=session["task_progression_by_trajectory"][epoch],
-                    movement_interval=session["movement_by_run"][epoch],
-                    bins=bins,
-                    similarity_metric=similarity_metric,
-                    n_shuffles=n_shuffles,
-                    shuffle_seed=shuffle_seed,
-                )
-        outputs_with_significance[region] = updated_region_outputs
-    return outputs_with_significance
+    fig_path: Path,
+) -> None:
+    """Save one cross-epoch comparison figure for the direct labels."""
+    import matplotlib.pyplot as plt
+
+    axis_min, axis_max = get_similarity_axis_limits(similarity_metric)
+    colors = {
+        "left_turn": "tab:blue",
+        "left_arm": "tab:orange",
+        "right_turn": "tab:blue",
+        "right_arm": "tab:orange",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True, sharey=True)
+    for ax, side in zip(axes, ("left", "right"), strict=True):
+        side_rows = comparison_table[comparison_table["side"] == side]
+        has_data = False
+        for label in SIDE_TO_DIRECT_LABELS[side]:
+            label_rows = side_rows[side_rows["comparison_label"] == label]
+            x = pd.to_numeric(label_rows["similarity_epoch_a"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            y = pd.to_numeric(label_rows["similarity_epoch_b"], errors="coerce").to_numpy(
+                dtype=float
+            )
+            valid = np.isfinite(x) & np.isfinite(y)
+            if not np.any(valid):
+                continue
+            has_data = True
+            ax.scatter(
+                x[valid],
+                y[valid],
+                alpha=0.6,
+                s=24,
+                color=colors[label],
+                label=label,
+            )
+        if has_data:
+            ax.plot([axis_min, axis_max], [axis_min, axis_max], "k--", linewidth=1)
+            ax.set_xlim(axis_min, axis_max)
+            ax.set_ylim(axis_min, axis_max)
+            ax.set_xlabel(f"{epoch_a} {get_similarity_axis_label(similarity_metric).lower()}")
+            ax.legend(frameon=False)
+        else:
+            ax.text(0.5, 0.5, "No shared units", ha="center", va="center")
+            ax.set_axis_off()
+        ax.set_title(f"{side} comparisons")
+
+    axes[0].set_ylabel(f"{epoch_b} {get_similarity_axis_label(similarity_metric).lower()}")
+    fig.suptitle(f"{region.upper()} {epoch_a} vs {epoch_b} similarity", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
-def save_similarity_tables(
-    similarity_outputs: dict[str, dict[str, pd.DataFrame]],
+def save_epoch_similarity_table(
+    similarity_table: pd.DataFrame,
+    *,
     data_dir: Path,
-    light_epoch: str,
-    dark_epoch: str,
+    region: str,
+    epoch: str,
     similarity_metric: str,
-) -> list[Path]:
-    """Write metric-specific per-unit similarity tables as parquet files.
-
-    These outputs are indexed by unit and store summary columns, not time-based
-    signals, so parquet is more appropriate than pynapple for this artifact
-    type.
-    """
-    saved_paths: list[Path] = []
-    for region, region_outputs in similarity_outputs.items():
-        for key, table in region_outputs.items():
-            if key.endswith("_light"):
-                epoch = light_epoch
-                suffix = key[: -len("_light")]
-                filename = (
-                    f"{region}_{epoch}_{similarity_metric}_{suffix}_within_epoch_similarity.parquet"
-                )
-            elif key.endswith("_dark"):
-                epoch = dark_epoch
-                suffix = key[: -len("_dark")]
-                filename = (
-                    f"{region}_{epoch}_{similarity_metric}_{suffix}_within_epoch_similarity.parquet"
-                )
-            else:
-                filename = (
-                    f"{region}_{light_epoch}_{dark_epoch}_{similarity_metric}_{key}_comparison.parquet"
-                )
-            path = data_dir / filename
-            table.to_parquet(path)
-            saved_paths.append(path)
-    return saved_paths
+) -> Path:
+    """Write one per-epoch long-form similarity table as parquet."""
+    output_path = data_dir / f"{region}_{epoch}_{similarity_metric}_within_epoch_similarity.parquet"
+    similarity_table.to_parquet(output_path)
+    return output_path
 
 
-def save_similarity_figures(
-    similarity_outputs: dict[str, dict[str, pd.DataFrame]],
+def save_epoch_similarity_figures(
+    similarity_table: pd.DataFrame,
+    *,
     fig_dir: Path,
-    light_epoch: str,
-    dark_epoch: str,
+    region: str,
+    epoch: str,
     similarity_metric: str,
+    compute_significance: bool,
 ) -> list[Path]:
-    """Write scatter plots for left, right, and pooled similarity comparisons."""
+    """Write the per-epoch summary figures for one region and epoch."""
     saved_paths: list[Path] = []
-    for region, region_outputs in similarity_outputs.items():
-        for turn_label in ("left", "right", "pooled"):
-            comparison = region_outputs[turn_label]
-            fig_path = (
-                fig_dir
-                / f"{region}_{light_epoch}_{dark_epoch}_{similarity_metric}_{turn_label}_similarity.png"
-            )
-            plot_similarity_scatter(
-                comparison,
-                region=region,
-                turn_label=turn_label,
-                light_epoch=light_epoch,
-                dark_epoch=dark_epoch,
-                similarity_metric=similarity_metric,
-                fig_path=fig_path,
-            )
-            saved_paths.append(fig_path)
+    distribution_path = (
+        fig_dir / f"{region}_{epoch}_{similarity_metric}_similarity_distributions.png"
+    )
+    plot_epoch_similarity_distributions(
+        similarity_table,
+        region=region,
+        epoch=epoch,
+        similarity_metric=similarity_metric,
+        fig_path=distribution_path,
+    )
+    saved_paths.append(distribution_path)
+
+    if compute_significance:
+        significance_path = (
+            fig_dir / f"{region}_{epoch}_{similarity_metric}_similarity_significance.png"
+        )
+        plot_epoch_similarity_significance(
+            similarity_table,
+            region=region,
+            epoch=epoch,
+            similarity_metric=similarity_metric,
+            fig_path=significance_path,
+        )
+        saved_paths.append(significance_path)
+
     return saved_paths
 
 
-def save_similarity_significance_figures(
-    similarity_outputs: dict[str, dict[str, pd.DataFrame]],
+def save_epoch_comparison_table(
+    comparison_table: pd.DataFrame,
+    *,
+    data_dir: Path,
+    region: str,
+    epoch_a: str,
+    epoch_b: str,
+    similarity_metric: str,
+) -> Path:
+    """Write one cross-epoch similarity comparison table as parquet."""
+    output_path = (
+        data_dir
+        / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison.parquet"
+    )
+    comparison_table.to_parquet(output_path)
+    return output_path
+
+
+def save_epoch_comparison_figure(
+    comparison_table: pd.DataFrame,
+    *,
     fig_dir: Path,
-    light_epoch: str,
-    dark_epoch: str,
+    region: str,
+    epoch_a: str,
+    epoch_b: str,
     similarity_metric: str,
-) -> list[Path]:
-    """Write observed-similarity vs significance scatter plots for within-epoch tables."""
-    saved_paths: list[Path] = []
-    for region, region_outputs in similarity_outputs.items():
-        for turn_type in ("left", "right"):
-            for epoch_label, epoch in (("light", light_epoch), ("dark", dark_epoch)):
-                key = f"{turn_type}_{epoch_label}"
-                table = region_outputs[key]
-                if "p_value" not in table.columns:
-                    continue
-                fig_path = (
-                    fig_dir
-                    / f"{region}_{epoch}_{similarity_metric}_{turn_type}_significance.png"
-                )
-                plot_similarity_significance_scatter(
-                    table,
-                    region=region,
-                    epoch=epoch,
-                    turn_type=turn_type,
-                    similarity_metric=similarity_metric,
-                    fig_path=fig_path,
-                )
-                saved_paths.append(fig_path)
-    return saved_paths
+) -> Path:
+    """Write one cross-epoch comparison figure."""
+    fig_path = fig_dir / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison.png"
+    plot_epoch_comparison(
+        comparison_table,
+        region=region,
+        epoch_a=epoch_a,
+        epoch_b=epoch_b,
+        similarity_metric=similarity_metric,
+        fig_path=fig_path,
+    )
+    return fig_path
 
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the tuning similarity script."""
     parser = argparse.ArgumentParser(
-        description="Compare task-progression tuning similarity across light and dark epochs"
+        description="Quantify per-epoch task-progression tuning similarity across trajectories"
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
@@ -804,24 +1069,36 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Regions to analyze. Default: {' '.join(REGIONS)}",
     )
     parser.add_argument(
-        "--light-epoch",
-        help="Run epoch label to use as the light epoch. Defaults to the first run epoch.",
+        "--epochs",
+        nargs="+",
+        help=(
+            "Run epoch labels to analyze. Defaults to all run epochs with usable "
+            "cleaned-DLC head position."
+        ),
     )
     parser.add_argument(
-        "--dark-epoch",
-        help="Run epoch label to use as the dark epoch. Defaults to the last run epoch.",
+        "--compare-epochs",
+        nargs=2,
+        metavar=("EPOCH_A", "EPOCH_B"),
+        help=(
+            "Optional explicit epoch pair for cross-epoch comparison. Both epochs "
+            "must already be part of the analyzed epoch set."
+        ),
     )
     parser.add_argument(
         "--similarity-metric",
         choices=("correlation", "absolute_overlap", "shape_overlap"),
         default="correlation",
-        help="Similarity metric used to compare same-turn tuning curves.",
+        help="Similarity metric used to compare trajectory-pair tuning curves.",
     )
     parser.add_argument(
         "--position-offset",
         type=int,
         default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore per epoch. Default: {DEFAULT_POSITION_OFFSET}",
+        help=(
+            "Number of leading position samples to ignore per epoch. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
     )
     parser.add_argument(
         "--speed-threshold-cm-s",
@@ -836,21 +1113,27 @@ def parse_arguments() -> argparse.Namespace:
         "--compute-significance",
         action="store_true",
         help=(
-            "Estimate per-unit within-epoch significance using circular spike-time shifts "
-            "on the movement axis."
+            "Estimate per-unit significance for the direct pairwise rows using "
+            "circular spike-time shifts on the movement axis."
         ),
     )
     parser.add_argument(
         "--n-shuffles",
         type=int,
         default=DEFAULT_N_SHUFFLES,
-        help=f"Number of circular-shift surrogates when significance is enabled. Default: {DEFAULT_N_SHUFFLES}",
+        help=(
+            "Number of circular-shift surrogates when significance is enabled. "
+            f"Default: {DEFAULT_N_SHUFFLES}"
+        ),
     )
     parser.add_argument(
         "--shuffle-seed",
         type=int,
         default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for circular-shift significance. Default: {DEFAULT_SHUFFLE_SEED}",
+        help=(
+            "Random seed used for circular-shift significance. "
+            f"Default: {DEFAULT_SHUFFLE_SEED}"
+        ),
     )
     return parser.parse_args()
 
@@ -859,22 +1142,11 @@ def main() -> None:
     """Run the task-progression tuning similarity workflow for one session."""
     args = parse_arguments()
     selected_regions = tuple(args.regions)
+    selected_epochs = deduplicate_requested_epochs(args.epochs)
     if args.compute_significance:
         _require_statsmodels()
         if args.n_shuffles < 1:
             raise ValueError("--n-shuffles must be at least 1 when significance is enabled.")
-
-    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
-    epoch_tags, _epoch_source = load_epoch_tags(analysis_path)
-    available_run_epochs = get_run_epochs(epoch_tags)
-    light_epoch, dark_epoch = get_light_and_dark_epochs(
-        available_run_epochs,
-        args.light_epoch,
-        args.dark_epoch,
-    )
-    selected_epochs = [light_epoch]
-    if dark_epoch != light_epoch:
-        selected_epochs.append(dark_epoch)
 
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
@@ -885,8 +1157,11 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
-    data_dir = analysis_path / "task_progression_tuning"
-    fig_dir = analysis_path / "figs" / "task_progression_tuning"
+    compare_epochs = resolve_compare_epochs(args.compare_epochs, session["run_epochs"])
+
+    analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
+    fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -894,7 +1169,7 @@ def main() -> None:
     tuning_curves_by_region: dict[str, dict[str, dict[str, Any]]] = {}
     for region in selected_regions:
         tuning_curves_by_region[region] = {}
-        for epoch in (light_epoch, dark_epoch):
+        for epoch in session["run_epochs"]:
             tuning_curves_by_region[region][epoch] = compute_trajectory_task_progression_tuning_curves(
                 session["spikes_by_region"][region],
                 session["task_progression_by_trajectory"][epoch],
@@ -905,53 +1180,105 @@ def main() -> None:
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
-        selected_epochs,
+        session["run_epochs"],
     )
-    similarity_outputs = compute_similarity_outputs(
-        tuning_curves_by_region,
-        movement_firing_rates,
-        session["spikes_by_region"],
-        selected_regions=selected_regions,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        similarity_metric=args.similarity_metric,
-    )
-    if args.compute_significance:
-        similarity_outputs = compute_similarity_significance_outputs(
-            similarity_outputs,
-            session=session,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-            similarity_metric=args.similarity_metric,
-            bins=task_progression_bins,
-            n_shuffles=args.n_shuffles,
-            shuffle_seed=args.shuffle_seed,
-        )
 
-    saved_tables = save_similarity_tables(
-        similarity_outputs,
-        data_dir=data_dir,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        similarity_metric=args.similarity_metric,
-    )
-    saved_figures = save_similarity_figures(
-        similarity_outputs,
-        fig_dir=fig_dir,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        similarity_metric=args.similarity_metric,
-    )
-    if args.compute_significance:
-        saved_figures.extend(
-            save_similarity_significance_figures(
-                similarity_outputs,
-                fig_dir=fig_dir,
-                light_epoch=light_epoch,
-                dark_epoch=dark_epoch,
+    per_epoch_tables: dict[tuple[str, str], pd.DataFrame] = {}
+    saved_tables: list[Path] = []
+    saved_figures: list[Path] = []
+    for region in selected_regions:
+        for epoch in session["run_epochs"]:
+            epoch_firing_rates = pd.Series(
+                movement_firing_rates[region][epoch],
+                index=list(session["spikes_by_region"][region].keys()),
+                dtype=float,
+            )
+            similarity_table = compute_epoch_similarity_table(
+                region=region,
+                epoch=epoch,
+                tuning_curves_by_trajectory=tuning_curves_by_region[region][epoch],
+                epoch_firing_rates=epoch_firing_rates,
+                firing_rate_threshold_hz=DEFAULT_REGION_FR_THRESHOLDS[region],
                 similarity_metric=args.similarity_metric,
             )
-        )
+            similarity_table = append_pooled_similarity_rows(similarity_table)
+            if args.compute_significance:
+                similarity_table = annotate_pairwise_similarity_significance(
+                    similarity_table,
+                    region=region,
+                    epoch=epoch,
+                    spikes=session["spikes_by_region"][region],
+                    task_progression_by_trajectory=session["task_progression_by_trajectory"][epoch],
+                    movement_interval=session["movement_by_run"][epoch],
+                    bins=task_progression_bins,
+                    similarity_metric=args.similarity_metric,
+                    n_shuffles=args.n_shuffles,
+                    shuffle_seed=args.shuffle_seed,
+                )
+
+            per_epoch_tables[(region, epoch)] = similarity_table
+            saved_tables.append(
+                save_epoch_similarity_table(
+                    similarity_table,
+                    data_dir=data_dir,
+                    region=region,
+                    epoch=epoch,
+                    similarity_metric=args.similarity_metric,
+                )
+            )
+            saved_figures.extend(
+                save_epoch_similarity_figures(
+                    similarity_table,
+                    fig_dir=fig_dir,
+                    region=region,
+                    epoch=epoch,
+                    similarity_metric=args.similarity_metric,
+                    compute_significance=args.compute_significance,
+                )
+            )
+
+    comparison_outputs: dict[str, Any] = {}
+    if compare_epochs is not None:
+        epoch_a, epoch_b = compare_epochs
+        saved_comparison_tables: list[Path] = []
+        saved_comparison_figures: list[Path] = []
+        for region in selected_regions:
+            comparison_table = build_epoch_comparison_table(
+                per_epoch_tables[(region, epoch_a)],
+                per_epoch_tables[(region, epoch_b)],
+                region=region,
+                epoch_a=epoch_a,
+                epoch_b=epoch_b,
+            )
+            saved_comparison_tables.append(
+                save_epoch_comparison_table(
+                    comparison_table,
+                    data_dir=data_dir,
+                    region=region,
+                    epoch_a=epoch_a,
+                    epoch_b=epoch_b,
+                    similarity_metric=args.similarity_metric,
+                )
+            )
+            saved_comparison_figures.append(
+                save_epoch_comparison_figure(
+                    comparison_table[
+                        comparison_table["comparison_label"].isin(DIRECT_COMPARISON_LABELS)
+                    ],
+                    fig_dir=fig_dir,
+                    region=region,
+                    epoch_a=epoch_a,
+                    epoch_b=epoch_b,
+                    similarity_metric=args.similarity_metric,
+                )
+            )
+        saved_tables.extend(saved_comparison_tables)
+        saved_figures.extend(saved_comparison_figures)
+        comparison_outputs = {
+            "compare_epochs": list(compare_epochs),
+            "saved_tables": saved_comparison_tables,
+            "saved_figures": saved_comparison_figures,
+        }
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -961,8 +1288,8 @@ def main() -> None:
             "date": args.date,
             "data_root": args.data_root,
             "regions": list(selected_regions),
-            "light_epoch": light_epoch,
-            "dark_epoch": dark_epoch,
+            "epochs": session["run_epochs"],
+            "compare_epochs": list(compare_epochs) if compare_epochs is not None else None,
             "similarity_metric": args.similarity_metric,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -975,6 +1302,7 @@ def main() -> None:
             "run_epochs": session["run_epochs"],
             "saved_tables": saved_tables,
             "saved_figures": saved_figures,
+            "comparison_outputs": comparison_outputs,
         },
     )
     print(f"Saved run metadata to {log_path}")

@@ -194,8 +194,8 @@ def validate_probe_shank_layout(channel_metadata: "DataFrame") -> list[int]:
 
 
 def get_depth_column(shank_metadata: "DataFrame") -> str:
-    """Return the electrode coordinate column used to order channels by depth."""
-    for candidate in ("y", "rel_y"):
+    """Return the within-shank depth coordinate used to order channels."""
+    for candidate in ("rel_y", "y"):
         if candidate not in shank_metadata.columns:
             continue
         candidate_values = pd.to_numeric(shank_metadata[candidate], errors="coerce")
@@ -204,8 +204,8 @@ def get_depth_column(shank_metadata: "DataFrame") -> str:
             return candidate
     channel_ids = shank_metadata["channel_id"].astype(int).tolist()
     raise ValueError(
-        "Could not determine a within-shank depth ordering because neither `y` nor "
-        "`rel_y` varies across the channels in this shank. "
+        "Could not determine a within-shank depth ordering because neither `rel_y` "
+        "nor `y` varies across the channels in this shank. "
         f"Channel ids: {channel_ids!r}"
     )
 

@@ -19,7 +19,12 @@ import numpy as np
 import pandas as pd
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.task_progression._session import DEFAULT_DATA_ROOT, get_analysis_path
+from v1ca1.task_progression._session import (
+    DEFAULT_DATA_ROOT,
+    get_analysis_path,
+    get_task_progression_figure_dir,
+    get_task_progression_output_dir,
+)
 
 
 SUPPORTED_MODEL_FAMILIES = (
@@ -102,7 +107,7 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help=(
             "Directory containing dark_light_glm NetCDF files. "
-            "Default: analysis_path / 'task_progression_dark_light'"
+            "Default: analysis_path / 'task_progression' / 'dark_light_glm'"
         ),
     )
     parser.add_argument(
@@ -110,7 +115,7 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help=(
             "Directory for saved parquet summaries. "
-            "Default: analysis_path / 'segment_coefficient_comparison'"
+            "Default: analysis_path / 'task_progression' / 'segment_coefficient_comparison'"
         ),
     )
     parser.add_argument(
@@ -875,15 +880,15 @@ def main() -> None:
     input_dir = (
         args.input_dir
         if args.input_dir is not None
-        else analysis_path / "task_progression_dark_light"
+        else get_task_progression_output_dir(analysis_path, "dark_light_glm")
     )
     output_dir = (
         args.output_dir
         if args.output_dir is not None
-        else analysis_path / "segment_coefficient_comparison"
+        else get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir = analysis_path / "figs" / "segment_coefficient_comparison"
+    fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     model_families = _resolve_model_families(

@@ -116,6 +116,21 @@ def build_tp_transfer_pair_specs() -> tuple[dict[str, Any], ...]:
 TP_TRANSFER_PAIR_SPECS = build_tp_transfer_pair_specs()
 
 
+def get_task_progression_figure_dir(
+    analysis_path: Path,
+    script_name: str,
+) -> Path:
+    """Return the standardized figure directory for one task-progression script."""
+    return analysis_path / "figs" / "task_progression" / str(script_name)
+
+
+def get_task_progression_output_dir(
+    analysis_path: Path,
+    script_name: str,
+) -> Path:
+    """Return the standardized data/output directory for one task-progression script."""
+    return analysis_path / "task_progression" / str(script_name)
+
 
 def build_task_progression_by_trajectory(
     animal_name: str,
