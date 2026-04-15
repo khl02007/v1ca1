@@ -3,6 +3,9 @@ from __future__ import annotations
 """Session-specific position meters-per-pixel assignments."""
 
 METERS_PER_PIXEL_BY_SESSION: dict[str, dict[str, float]] = {
+    "L12": {
+        "20240421": 0.00203,
+    },
     "L14": {
         "20240611": 0.00189,
     },

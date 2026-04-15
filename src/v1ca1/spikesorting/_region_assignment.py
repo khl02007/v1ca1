@@ -8,6 +8,122 @@ EXPECTED_PROBE_COUNT = 4
 EXPECTED_SHANK_COUNT = 4
 
 SESSION_REGION_ASSIGNMENTS: dict[str, dict[str, list[dict[str, Any]]]] = {
+    "L12": {
+        "20240421": [
+            {
+                "probe_idx": 0,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 0,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -286.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 1,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -286.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 2,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -390.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 3,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -390.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 0,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -286.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 1,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -286.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 2,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -390.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 3,
+                "mode": "threshold_by_extremum_depth",
+                "reference_depth": -390.0,
+                "below_region": "ca1",
+                "above_or_equal_region": "s1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "v1",
+            },
+        ],
+    },
     "L14": {
         "20240611": [
             {
