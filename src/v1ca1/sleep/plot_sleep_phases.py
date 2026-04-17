@@ -15,7 +15,6 @@ from v1ca1.sleep._session import (
     DEFAULT_PLOT_CUTOFF_HZ,
     DEFAULT_PLOT_SPECTROGRAM_NOVERLAP,
     DEFAULT_PLOT_SPECTROGRAM_NPERSEG,
-    DEFAULT_RIPPLE_CHANNEL,
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_LFP_CHANNEL,
     butter_filter_and_decimate,
@@ -34,6 +33,7 @@ from v1ca1.sleep._session import (
     load_sleep_sortings,
     lowpass_filter,
     order_units_by_epoch_spike_count,
+    resolve_ripple_channel,
     validate_epochs,
     validate_recording_channel,
     validate_selected_epochs_across_sources,
@@ -80,10 +80,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ripple-channel",
         type=int,
-        default=DEFAULT_RIPPLE_CHANNEL,
         help=(
             "Recording channel id used for the ripple-band CA1 LFP trace. "
-            f"Default: {DEFAULT_RIPPLE_CHANNEL}"
+            "Default: the first configured session ripple channel."
         ),
     )
     parser.add_argument(
@@ -186,7 +185,7 @@ def plot_sleep_phases_for_session(
     epochs: list[str] | None = None,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     v1_lfp_channel: int = DEFAULT_V1_LFP_CHANNEL,
-    ripple_channel: int = DEFAULT_RIPPLE_CHANNEL,
+    ripple_channel: int | None = None,
     region: str | None = None,
     show: bool = False,
 ) -> dict[str, Any]:
@@ -215,9 +214,14 @@ def plot_sleep_phases_for_session(
         v1_lfp_channel,
         channel_name="V1 LFP channel",
     )
+    selected_ripple_channel = resolve_ripple_channel(
+        animal_name=animal_name,
+        date=date,
+        ripple_channel=ripple_channel,
+    )
     validated_ripple_channel = validate_recording_channel(
         recording,
-        ripple_channel,
+        selected_ripple_channel,
         channel_name="Ripple channel",
     )
     sampling_frequency = get_recording_sampling_frequency(recording)

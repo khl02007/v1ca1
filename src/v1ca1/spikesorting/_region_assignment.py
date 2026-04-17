@@ -440,6 +440,106 @@ SESSION_REGION_ASSIGNMENTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             },
         ],
     },
+    "L19": {
+        "20250930": [
+            {
+                "probe_idx": 0,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 0,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "s1",
+            },
+            {
+                "probe_idx": 1,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "s1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "ca1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "ca1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "ca1",
+            },
+            {
+                "probe_idx": 2,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "ca1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 0,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 1,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 2,
+                "mode": "all",
+                "region": "v1",
+            },
+            {
+                "probe_idx": 3,
+                "shank_idx": 3,
+                "mode": "all",
+                "region": "v1",
+            },
+        ],
+    },
 }
 
 

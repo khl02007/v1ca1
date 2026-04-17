@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 import numpy as np
 import pandas as pd
 
@@ -22,6 +23,9 @@ DEFAULT_OUTPUT_DIRNAME = "dlc_position_cleaned"
 DEFAULT_OUTPUT_NAME_TEMPLATE = "{epoch}_dlc_position_cleaned.parquet"
 DEFAULT_FIGURE_DIRNAME = "dlc_position_cleaned"
 DEFAULT_FIGURE_NAME_TEMPLATE = "{epoch}_dlc_position_cleaned_2d.png"
+DEFAULT_CLEANING_METHOD = "joint_robust"
+DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM = 3.0
+DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES = 15
 DEFAULT_THRESHOLD_Z = 8.0
 DEFAULT_MIN_JUMP_THRESHOLD_PX = 25.0
 DEFAULT_LIKELIHOOD_LOSS_Z = 8.0
@@ -43,6 +47,7 @@ CM_COLUMN_RENAMES = {
     "body_step_next_px": "body_step_next_cm",
     "head_body_distance_px": "head_body_distance_cm",
 }
+VALID_CLEANING_METHODS = ("joint_robust", "jump_interp")
 
 
 def _validate_meters_per_pixel(meters_per_pixel: float) -> float:
@@ -414,6 +419,163 @@ def _interpolate_1d_gaps(
     return interpolated, interpolated_mask, left_sources, right_sources
 
 
+def _compute_jump_interp_axis_mask(
+    values: np.ndarray,
+    max_jump_per_frame: float,
+    max_jump_duration_frames: int,
+) -> np.ndarray:
+    """Return one per-axis jump mask using fixed frame-to-frame thresholds."""
+    value_array = np.asarray(values, dtype=float).reshape(-1)
+    if max_jump_per_frame <= 0:
+        raise ValueError("--jump-interp-max-per-frame-cm must be positive.")
+    if max_jump_duration_frames < 1:
+        raise ValueError("--jump-interp-max-duration-frames must be at least 1.")
+    if value_array.size == 0:
+        return np.zeros(0, dtype=bool)
+
+    jump_mask = np.abs(np.diff(value_array)) > float(max_jump_per_frame)
+    jump_mask = np.concatenate(([False], jump_mask))
+    jump_indices = np.flatnonzero(jump_mask)
+    for index in range(jump_indices.size - 1):
+        left = int(jump_indices[index])
+        right = int(jump_indices[index + 1])
+        if (right - left) < int(max_jump_duration_frames):
+            jump_mask[left:right] = True
+    return jump_mask
+
+
+def _interpolate_jump_interp_axis(
+    t: np.ndarray,
+    values: np.ndarray,
+    jump_mask: np.ndarray,
+) -> np.ndarray:
+    """Interpolate one axis over masked jumps, leaving sparse tracks unchanged."""
+    time_array = np.asarray(t, dtype=float).reshape(-1)
+    value_array = np.asarray(values, dtype=float).reshape(-1)
+    mask_array = np.asarray(jump_mask, dtype=bool).reshape(-1)
+    if not (time_array.shape == value_array.shape == mask_array.shape):
+        raise ValueError("t, values, and jump_mask must have matching shapes.")
+
+    valid = ~mask_array & np.isfinite(time_array) & np.isfinite(value_array)
+    if np.sum(valid) < 2:
+        return value_array.copy()
+    return np.interp(time_array, time_array[valid], value_array[valid])
+
+
+def interpolate_over_jumps(
+    t: np.ndarray,
+    position_cm: np.ndarray,
+    max_jump_per_frame: float = DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM,
+    max_jump_duration_frames: int = DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES,
+) -> np.ndarray:
+    """Interpolate over brief x/y jumps using fixed centimeter-per-frame thresholds."""
+    time_array = np.asarray(t, dtype=float).reshape(-1)
+    position_array = np.asarray(position_cm, dtype=float)
+    if position_array.ndim != 2 or position_array.shape[1] != 2:
+        raise ValueError("position_cm must have shape (n_frames, 2).")
+    if position_array.shape[0] != time_array.size:
+        raise ValueError("t and position_cm must have matching frame counts.")
+    if time_array.size == 0:
+        return position_array.copy()
+
+    time_zeroed = time_array - float(time_array[0])
+    jump_mask_x = _compute_jump_interp_axis_mask(
+        position_array[:, 0],
+        max_jump_per_frame=max_jump_per_frame,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    jump_mask_y = _compute_jump_interp_axis_mask(
+        position_array[:, 1],
+        max_jump_per_frame=max_jump_per_frame,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    x_interp = _interpolate_jump_interp_axis(time_zeroed, position_array[:, 0], jump_mask_x)
+    y_interp = _interpolate_jump_interp_axis(time_zeroed, position_array[:, 1], jump_mask_y)
+    return np.column_stack((x_interp, y_interp))
+
+
+def _clean_position_with_jump_interpolation(
+    raw_table: pd.DataFrame,
+    frame_times: np.ndarray,
+    cm_per_pixel: float,
+    max_jump_per_frame_cm: float,
+    max_jump_duration_frames: int,
+) -> tuple[dict[str, np.ndarray | float], dict[str, Any]]:
+    """Clean one bodypart by interpolating over brief fixed-threshold jumps."""
+    x_raw = raw_table["position_x_raw"].to_numpy(dtype=float)
+    y_raw = raw_table["position_y_raw"].to_numpy(dtype=float)
+    likelihood = raw_table["likelihood"].to_numpy(dtype=float)
+    frame_numbers = raw_table["frame"].to_numpy(dtype=int)
+    position_cm = np.column_stack((x_raw, y_raw)) * float(cm_per_pixel)
+    cleaned_cm = interpolate_over_jumps(
+        t=frame_times,
+        position_cm=position_cm,
+        max_jump_per_frame=max_jump_per_frame_cm,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    jump_mask_x = _compute_jump_interp_axis_mask(
+        position_cm[:, 0],
+        max_jump_per_frame=max_jump_per_frame_cm,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    jump_mask_y = _compute_jump_interp_axis_mask(
+        position_cm[:, 1],
+        max_jump_per_frame=max_jump_per_frame_cm,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    jump_invalid = jump_mask_x | jump_mask_y
+    step_prev_px, step_next_px = _step_prev_next(x_raw, y_raw)
+    x_cleaned = cleaned_cm[:, 0] / float(cm_per_pixel)
+    y_cleaned = cleaned_cm[:, 1] / float(cm_per_pixel)
+
+    return {
+        "frame": frame_numbers,
+        "x_raw": x_raw,
+        "y_raw": y_raw,
+        "likelihood": likelihood,
+        "likelihood_loss": np.full(frame_numbers.shape, np.nan, dtype=float),
+        "low_likelihood": np.zeros(frame_numbers.shape, dtype=bool),
+        "jump_invalid": jump_invalid,
+        "pair_invalid": np.zeros(frame_numbers.shape, dtype=bool),
+        "final_invalid": jump_invalid.copy(),
+        "interpolated": jump_invalid.copy(),
+        "provisional_invalid": jump_invalid.copy(),
+        "x_cleaned": x_cleaned,
+        "y_cleaned": y_cleaned,
+        "step_prev_px": step_prev_px,
+        "step_next_px": step_next_px,
+        "interpolation_source_left": np.full(frame_numbers.shape, np.nan, dtype=float),
+        "interpolation_source_right": np.full(frame_numbers.shape, np.nan, dtype=float),
+        "remaining_edge_nan": np.zeros(frame_numbers.shape, dtype=bool),
+        "frame_times": np.asarray(frame_times, dtype=float),
+    }, {
+        "low_likelihood": {
+            "threshold_source": "not_used",
+            "likelihood_loss_threshold": None,
+            "likelihood_loss_median": None,
+            "likelihood_loss_mad": None,
+            "likelihood_loss_robust_scale": None,
+            "reference_sample_count": 0,
+        },
+        "jump": {
+            "threshold_source": "fixed_cm_per_frame",
+            "jump_max_per_frame_cm": float(max_jump_per_frame_cm),
+            "jump_max_duration_frames": int(max_jump_duration_frames),
+            "jump_invalid_frame_count": int(np.sum(jump_invalid)),
+            "jump_invalid_x_frame_count": int(np.sum(jump_mask_x)),
+            "jump_invalid_y_frame_count": int(np.sum(jump_mask_y)),
+        },
+        "counts": {
+            "low_likelihood_frame_count": 0,
+            "jump_invalid_frame_count": int(np.sum(jump_invalid)),
+            "pair_invalid_frame_count": 0,
+            "final_invalid_frame_count": int(np.sum(jump_invalid)),
+            "interpolated_frame_count": int(np.sum(jump_invalid)),
+            "remaining_edge_nan_frame_count": 0,
+        },
+    }
+
+
 def _clean_one_bodypart(
     raw_table: pd.DataFrame,
     frame_times: np.ndarray,
@@ -645,6 +807,110 @@ def run_joint_position_cleaning(
     return diagnostics, metadata
 
 
+def run_jump_interpolation_cleaning(
+    head_table: pd.DataFrame,
+    body_table: pd.DataFrame,
+    frame_times: np.ndarray,
+    cm_per_pixel: float,
+    max_jump_per_frame_cm: float = DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM,
+    max_jump_duration_frames: int = DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Clean head and body using fixed-threshold jump interpolation in centimeters."""
+    if head_table.shape[0] != len(frame_times):
+        raise ValueError(
+            "Head DLC row count does not match the frame timestamp count: "
+            f"{head_table.shape[0]} vs {len(frame_times)}."
+        )
+    if body_table.shape[0] != len(frame_times):
+        raise ValueError(
+            "Body DLC row count does not match the frame timestamp count: "
+            f"{body_table.shape[0]} vs {len(frame_times)}."
+        )
+
+    head_cleaned, head_metadata = _clean_position_with_jump_interpolation(
+        raw_table=head_table,
+        frame_times=frame_times,
+        cm_per_pixel=cm_per_pixel,
+        max_jump_per_frame_cm=max_jump_per_frame_cm,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    body_cleaned, body_metadata = _clean_position_with_jump_interpolation(
+        raw_table=body_table,
+        frame_times=frame_times,
+        cm_per_pixel=cm_per_pixel,
+        max_jump_per_frame_cm=max_jump_per_frame_cm,
+        max_jump_duration_frames=max_jump_duration_frames,
+    )
+    frame_numbers = np.asarray(head_cleaned["frame"], dtype=int)
+    head_body_distance_px = np.hypot(
+        np.asarray(head_cleaned["x_raw"], dtype=float) - np.asarray(body_cleaned["x_raw"], dtype=float),
+        np.asarray(head_cleaned["y_raw"], dtype=float) - np.asarray(body_cleaned["y_raw"], dtype=float),
+    )
+    pair_distance_invalid = np.zeros(frame_numbers.shape, dtype=bool)
+
+    diagnostics = pd.DataFrame(
+        {
+            "frame": frame_numbers,
+            "frame_time_s": np.asarray(frame_times, dtype=float),
+            "head_x_raw": np.asarray(head_cleaned["x_raw"], dtype=float),
+            "head_y_raw": np.asarray(head_cleaned["y_raw"], dtype=float),
+            "head_likelihood": np.asarray(head_cleaned["likelihood"], dtype=float),
+            "head_likelihood_loss": np.asarray(head_cleaned["likelihood_loss"], dtype=float),
+            "head_x_cleaned": np.asarray(head_cleaned["x_cleaned"], dtype=float),
+            "head_y_cleaned": np.asarray(head_cleaned["y_cleaned"], dtype=float),
+            "head_step_prev_px": np.asarray(head_cleaned["step_prev_px"], dtype=float),
+            "head_step_next_px": np.asarray(head_cleaned["step_next_px"], dtype=float),
+            "head_low_likelihood": np.asarray(head_cleaned["low_likelihood"], dtype=bool),
+            "head_jump_invalid": np.asarray(head_cleaned["jump_invalid"], dtype=bool),
+            "head_pair_invalid": np.asarray(head_cleaned["pair_invalid"], dtype=bool),
+            "head_invalid": np.asarray(head_cleaned["final_invalid"], dtype=bool),
+            "head_interpolated": np.asarray(head_cleaned["interpolated"], dtype=bool),
+            "head_interpolation_source_left": np.asarray(
+                head_cleaned["interpolation_source_left"], dtype=float
+            ),
+            "head_interpolation_source_right": np.asarray(
+                head_cleaned["interpolation_source_right"], dtype=float
+            ),
+            "body_x_raw": np.asarray(body_cleaned["x_raw"], dtype=float),
+            "body_y_raw": np.asarray(body_cleaned["y_raw"], dtype=float),
+            "body_likelihood": np.asarray(body_cleaned["likelihood"], dtype=float),
+            "body_likelihood_loss": np.asarray(body_cleaned["likelihood_loss"], dtype=float),
+            "body_x_cleaned": np.asarray(body_cleaned["x_cleaned"], dtype=float),
+            "body_y_cleaned": np.asarray(body_cleaned["y_cleaned"], dtype=float),
+            "body_step_prev_px": np.asarray(body_cleaned["step_prev_px"], dtype=float),
+            "body_step_next_px": np.asarray(body_cleaned["step_next_px"], dtype=float),
+            "body_low_likelihood": np.asarray(body_cleaned["low_likelihood"], dtype=bool),
+            "body_jump_invalid": np.asarray(body_cleaned["jump_invalid"], dtype=bool),
+            "body_pair_invalid": np.asarray(body_cleaned["pair_invalid"], dtype=bool),
+            "body_invalid": np.asarray(body_cleaned["final_invalid"], dtype=bool),
+            "body_interpolated": np.asarray(body_cleaned["interpolated"], dtype=bool),
+            "body_interpolation_source_left": np.asarray(
+                body_cleaned["interpolation_source_left"], dtype=float
+            ),
+            "body_interpolation_source_right": np.asarray(
+                body_cleaned["interpolation_source_right"], dtype=float
+            ),
+            "head_body_distance_px": head_body_distance_px,
+            "pair_distance_invalid": pair_distance_invalid,
+        }
+    )
+    metadata = {
+        "frame_count": int(len(frame_times)),
+        "head": head_metadata,
+        "body": body_metadata,
+        "pair_distance": {
+            "threshold_source": "not_used",
+            "pair_distance_median_px": None,
+            "pair_distance_mad_px": None,
+            "pair_distance_robust_scale_px": None,
+            "pair_distance_threshold_px": None,
+            "reference_frame_count": 0,
+            "pair_distance_invalid_frame_count": 0,
+        },
+    }
+    return diagnostics, metadata
+
+
 def resolve_output_dir(analysis_path: Path) -> Path:
     """Return the dedicated output directory for cleaned position artifacts."""
     return analysis_path / DEFAULT_OUTPUT_DIRNAME
@@ -701,9 +967,12 @@ def clean_dlc_position(
     nwb_root: Path = DEFAULT_NWB_ROOT,
     output_dirname: str = DEFAULT_OUTPUT_DIRNAME,
     output_name_template: str = DEFAULT_OUTPUT_NAME_TEMPLATE,
+    cleaning_method: str = DEFAULT_CLEANING_METHOD,
     threshold_z: float = DEFAULT_THRESHOLD_Z,
     min_jump_threshold_px: float = DEFAULT_MIN_JUMP_THRESHOLD_PX,
     meters_per_pixel: float | None = None,
+    jump_interp_max_per_frame_cm: float = DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM,
+    jump_interp_max_duration_frames: int = DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES,
 ) -> Path:
     """Clean one epoch's head/body DLC tracks and save one per-epoch parquet."""
     analysis_path = get_analysis_path(
@@ -715,6 +984,11 @@ def clean_dlc_position(
         raise FileNotFoundError(f"Analysis path not found: {analysis_path}")
     if not output_dirname:
         raise ValueError("--output-dirname must be a non-empty string.")
+    if cleaning_method not in VALID_CLEANING_METHODS:
+        raise ValueError(
+            f"--cleaning-method must be one of {VALID_CLEANING_METHODS!r}; "
+            f"got {cleaning_method!r}."
+        )
     scale_metadata = _resolve_position_scale(
         animal_name=animal_name,
         date=date,
@@ -743,13 +1017,23 @@ def clean_dlc_position(
             )
         raw_tables[bodypart] = raw_table
 
-    diagnostics, cleaning_metadata = run_joint_position_cleaning(
-        head_table=raw_tables["head"],
-        body_table=raw_tables["body"],
-        frame_times=frame_times,
-        threshold_z=threshold_z,
-        min_jump_threshold_px=min_jump_threshold_px,
-    )
+    if cleaning_method == "joint_robust":
+        diagnostics, cleaning_metadata = run_joint_position_cleaning(
+            head_table=raw_tables["head"],
+            body_table=raw_tables["body"],
+            frame_times=frame_times,
+            threshold_z=threshold_z,
+            min_jump_threshold_px=min_jump_threshold_px,
+        )
+    else:
+        diagnostics, cleaning_metadata = run_jump_interpolation_cleaning(
+            head_table=raw_tables["head"],
+            body_table=raw_tables["body"],
+            frame_times=frame_times,
+            cm_per_pixel=float(scale_metadata["cm_per_pixel"]),
+            max_jump_per_frame_cm=jump_interp_max_per_frame_cm,
+            max_jump_duration_frames=jump_interp_max_duration_frames,
+        )
 
     output_table = diagnostics.copy()
     output_table.insert(0, "epoch", epoch)
@@ -781,9 +1065,12 @@ def clean_dlc_position(
             "nwb_root": nwb_root,
             "output_dirname": output_dirname,
             "output_name_template": output_name_template,
+            "cleaning_method": cleaning_method,
             "threshold_z": threshold_z,
             "min_jump_threshold_px": min_jump_threshold_px,
             "meters_per_pixel": meters_per_pixel,
+            "jump_interp_max_per_frame_cm": jump_interp_max_per_frame_cm,
+            "jump_interp_max_duration_frames": jump_interp_max_duration_frames,
         },
         outputs={
             "position_timestamp_source": timestamp_source,
@@ -855,6 +1142,15 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cleaning-method",
+        choices=VALID_CLEANING_METHODS,
+        default=DEFAULT_CLEANING_METHOD,
+        help=(
+            "Cleaning method to apply. "
+            f"Default: {DEFAULT_CLEANING_METHOD}"
+        ),
+    )
+    parser.add_argument(
         "--threshold-z",
         type=float,
         default=DEFAULT_THRESHOLD_Z,
@@ -875,6 +1171,24 @@ def parse_arguments() -> argparse.Namespace:
             "uses the session registry in v1ca1.position._meters_per_pixel."
         ),
     )
+    parser.add_argument(
+        "--jump-interp-max-per-frame-cm",
+        type=float,
+        default=DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM,
+        help=(
+            "Fixed jump threshold in centimeters per frame for --cleaning-method jump_interp. "
+            f"Default: {DEFAULT_JUMP_INTERP_MAX_PER_FRAME_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--jump-interp-max-duration-frames",
+        type=int,
+        default=DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES,
+        help=(
+            "Maximum gap between jump events that is still bridged for --cleaning-method "
+            f"jump_interp. Default: {DEFAULT_JUMP_INTERP_MAX_DURATION_FRAMES}"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -890,9 +1204,12 @@ def main() -> None:
         nwb_root=args.nwb_root,
         output_dirname=args.output_dirname,
         output_name_template=args.output_name_template,
+        cleaning_method=args.cleaning_method,
         threshold_z=args.threshold_z,
         min_jump_threshold_px=args.min_jump_threshold_px,
         meters_per_pixel=args.meters_per_pixel,
+        jump_interp_max_per_frame_cm=args.jump_interp_max_per_frame_cm,
+        jump_interp_max_duration_frames=args.jump_interp_max_duration_frames,
     )
 
 

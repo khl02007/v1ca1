@@ -22,9 +22,9 @@ from v1ca1.helper.session import (
     load_position_data_with_precedence,
     load_position_timestamps,
 )
+from v1ca1.ripple._channels import get_session_ripple_channels
 
 DEFAULT_V1_LFP_CHANNEL = 12
-DEFAULT_RIPPLE_CHANNEL = 16 + 32 * 2 + 128 * 2
 DEFAULT_SLEEP_PC1_THRESHOLD = 0.5
 DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S = 4.0
 DEFAULT_SLEEP_MIN_DURATION_S = 0.1
@@ -47,6 +47,31 @@ def get_nwb_path(
 ) -> Path:
     """Return the NWB path for one session."""
     return nwb_root / f"{animal_name}{date}.nwb"
+
+
+def resolve_ripple_channel(
+    animal_name: str,
+    date: str,
+    ripple_channel: int | None = None,
+) -> int:
+    """Return one ripple channel, defaulting to the first configured session channel."""
+    if ripple_channel is not None:
+        return int(ripple_channel)
+
+    try:
+        configured_channels = get_session_ripple_channels(animal_name=animal_name, date=date)
+    except KeyError as exc:
+        raise ValueError(
+            "No ripple channels are configured for this session. "
+            "Add the animal/date entry to v1ca1.ripple._channels.RIPPLE_CHANNELS_BY_SESSION "
+            "or pass --ripple-channel explicitly."
+        ) from exc
+
+    if not configured_channels:
+        raise ValueError(
+            f"No ripple channels were configured for session {animal_name!r} / {date!r}."
+        )
+    return int(configured_channels[0])
 
 
 def validate_epochs(

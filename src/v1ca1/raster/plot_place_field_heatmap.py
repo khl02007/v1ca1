@@ -341,6 +341,20 @@ def load_heatmap_trajectory_intervals(
     return trajectory_intervals
 
 
+def validate_region_sortings(analysis_path: Path, regions: tuple[str, ...]) -> None:
+    """Require saved sorting outputs for the requested regions."""
+    missing_paths = [
+        analysis_path / f"sorting_{region}"
+        for region in regions
+        if not (analysis_path / f"sorting_{region}").exists()
+    ]
+    if missing_paths:
+        raise FileNotFoundError(
+            "Missing sorting output for the requested region(s): "
+            f"{[str(path) for path in missing_paths]!r}"
+        )
+
+
 def prepare_heatmap_session(
     *,
     animal_name: str,
@@ -400,6 +414,7 @@ def prepare_heatmap_session(
         )
 
     timestamps_ephys_all, _ephys_source = load_ephys_timestamps_all(analysis_path)
+    validate_region_sortings(analysis_path, regions)
     spikes_by_region = load_spikes_by_region(
         analysis_path,
         timestamps_ephys_all,
@@ -662,8 +677,10 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--region",
-        choices=REGIONS,
-        help="Only plot one region. Default: plot all regions.",
+        help=(
+            "Only plot one region. Default: plot all default regions. "
+            "Requires a matching sorting_<region> folder under the session analysis path."
+        ),
     )
     parser.add_argument(
         "--epoch",

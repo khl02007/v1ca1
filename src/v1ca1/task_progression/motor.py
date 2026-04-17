@@ -830,6 +830,7 @@ def plot_log_likelihood_difference_histograms(
                 0.98,
                 (
                     f"{label}: n={finite_values.size}, "
+                    f"frac>0={np.mean(finite_values > 0.0):.3f}, "
                     f"mean={np.mean(finite_values):.3f}, "
                     f"median={np.median(finite_values):.3f}"
                 ),
@@ -1549,8 +1550,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--bin-size-s",
         type=float,
-        default=0.02,
-        help="Spike-count bin size in seconds. Default: 0.02",
+        default=0.05,
+        help="Spike-count bin size in seconds. Default: 0.05",
     )
     parser.add_argument(
         "--ridge",
@@ -1613,6 +1614,21 @@ def main() -> None:
     """Run the modernized task-progression TP/place GLM workflow."""
     args = parse_arguments()
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    print(
+        "Starting motor/task-progression/place GLM fits "
+        f"for {args.animal_name} {args.date}"
+    )
+    print(f"Analysis path: {analysis_path}")
+    print(
+        "Fit settings: "
+        f"regions={list(args.regions)}, "
+        f"bin_size_s={args.bin_size_s:.3f}, "
+        f"motor_feature_mode={args.motor_feature_mode}, "
+        f"n_folds={args.n_folds}, "
+        f"ridge={args.ridge}"
+    )
+
+    print("Checking which run epochs have usable head/body position data...")
     selected_epochs, skipped_position_epochs = select_epochs_with_usable_position_data(
         analysis_path,
         args.epochs,
@@ -1623,7 +1639,12 @@ def main() -> None:
             print(f"  {skipped_epoch['epoch']}: {skipped_epoch['reason']}")
     if not selected_epochs:
         raise ValueError("No requested run epochs have usable head/body position data.")
+    print(
+        f"Selected {len(selected_epochs)} run epoch(s) with usable position data: "
+        f"{selected_epochs}"
+    )
 
+    print("Preparing shared session inputs...")
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
@@ -1632,6 +1653,7 @@ def main() -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
+    print("Computing movement firing rates by region and epoch...")
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
@@ -1642,6 +1664,8 @@ def main() -> None:
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
+    print(f"NetCDF output directory: {data_dir}")
+    print(f"Figure output directory: {fig_dir}")
 
     region_thresholds = {
         "v1": float(args.v1_min_fr_hz),
@@ -1650,9 +1674,16 @@ def main() -> None:
     saved_datasets: list[Path] = []
     saved_figures: list[Path] = []
     skipped_fits: list[dict[str, Any]] = []
+    total_fits = len(args.regions) * len(selected_epochs)
+    print(
+        f"Beginning {total_fits} fit(s) across "
+        f"{len(args.regions)} region(s) and {len(selected_epochs)} epoch(s)."
+    )
+    fit_index = 0
 
     for region in args.regions:
         for epoch in selected_epochs:
+            fit_index += 1
             epoch_unit_rates = np.asarray(
                 movement_firing_rates[region][epoch], dtype=float
             )
@@ -1660,7 +1691,20 @@ def main() -> None:
                 epoch_unit_rates,
                 threshold_hz=region_thresholds[region],
             )
+            n_units_kept = int(np.sum(unit_mask))
+            n_units_total = int(unit_mask.size)
+            print(
+                f"[{fit_index}/{total_fits}] "
+                f"Region={region}, epoch={epoch}: "
+                f"{n_units_kept}/{n_units_total} units passed "
+                f"the movement firing-rate threshold "
+                f"({region_thresholds[region]:.3f} Hz)."
+            )
             if not np.any(unit_mask):
+                print(
+                    f"  Skipping {region} {epoch}: "
+                    "no units passed the firing-rate threshold."
+                )
                 skipped_fits.append(
                     {
                         "region": region,
@@ -1682,6 +1726,7 @@ def main() -> None:
                 session["timestamps_position"][epoch],
                 args.position_offset,
             )
+            print(f"  Fitting GLMs for {region} {epoch}...")
             try:
                 fit_result = fit_motor_task_progression_place_epoch(
                     spikes=session["spikes_by_region"][region],
@@ -1705,6 +1750,7 @@ def main() -> None:
                     unit_mask=unit_mask,
                 )
             except Exception as exc:
+                print(f"  Fit failed for {region} {epoch}: {exc}")
                 skipped_fits.append(
                     {
                         "region": region,
@@ -1755,7 +1801,11 @@ def main() -> None:
                 out_path=figure_path,
             )
             saved_figures.append(figure_path)
+            print(
+                f"  Saved dataset to {result_path.name} and figure to {figure_path.name}."
+            )
 
+    print("Writing run metadata log...")
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.motor",
@@ -1792,6 +1842,18 @@ def main() -> None:
         },
     )
 
+    if skipped_fits:
+        print("Skipped fit summary:")
+        for skipped_fit in skipped_fits:
+            details = (
+                f" ({skipped_fit['error']})"
+                if "error" in skipped_fit
+                else ""
+            )
+            print(
+                f"  {skipped_fit['region']} {skipped_fit['epoch']}: "
+                f"{skipped_fit['reason']}{details}"
+            )
     if saved_datasets:
         print(f"Saved {len(saved_datasets)} NetCDF fit dataset(s) to {data_dir}")
     if saved_figures:
