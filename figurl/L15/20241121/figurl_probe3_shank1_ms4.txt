@@ -1,0 +1,1 @@
+https://figurl.org/f?v=npm://@fi-sci/figurl-sortingview@12/dist&d=sha1://ab4ec0de193c80845da79d535a9cb257367db0e3&s={"sortingCuration":"gh://LorenFrankLab/sorting-curations/main/khl02007/L15/20241121/probe3/shank1/ms4/curation.json"}&label=L15%2020241121%20probe3%20shank1%20ms4&zone=franklab.default
