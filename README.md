@@ -1,110 +1,53 @@
 # Lee V1-CA1 Project
 
-This repository contains Python analysis code for the Lee V1-CA1 project: simultaneous recordings from primary visual cortex (V1) and hippocampal CA1 in freely moving rats performing a W-track spatial alternation task, along with sleep-box epochs collected before, between, and after run sessions.
+Python analysis code for the Lee V1-CA1 project: simultaneous V1 and CA1 recordings in freely moving rats during W-track behavior and sleep-box epochs.
 
-## At A Glance
+This is an active lab analysis repo, not a polished end-user package. Most workflows expect local NWB files plus session-specific intermediate artifacts that are not tracked in git.
 
-- This is an active analysis workspace, not a polished end-user package.
-- Most code lives under `src/v1ca1`, organized by analysis type.
-- The repository covers spike sorting, helper preprocessing, decoding, raster/place-field analyses, motor analyses, ripple/theta analyses, cross-correlations, task-progression analyses, and more specialized communication-subspace, topology, and signal-dimension work.
-- Several high-value workflows now expose modern command-line interfaces with standardized outputs and run logs, but many scripts still carry experiment-specific defaults such as `animal_name`, `date`, and absolute filesystem roots.
+## Repo Layout
 
-If you are new to the repo, the shortest accurate description is: this is a lab analysis codebase for working with V1-CA1 recordings once the local data layout and required intermediate files are already in place.
+All main code lives under `src/v1ca1`.
 
-## How To Navigate The Repo
+- `helper`: shared session loading, timestamp extraction, interval builders, W-track utilities
+- `position`: DLC cleaning, geometry fitting, IMU fusion, legacy-position conversion
+- `spikesorting`: Mountainsort4 sorting, figurl generation, curated sorting consolidation
+- `ripple`: ripple detection, GLMs, decoding, modulation plots
+- `task_progression`: tuning, mutual information, encoding/decoding comparisons, GLMs
+- `oscillation`, `sleep`, `behavior`, `motor`, `raster`, `xcorr`, `nwb`: analysis-specific scripts and plots
+- `communication_subspace`, `signal_dim`, `topology`: more specialized analyses
 
-All analysis code currently lives under `src/v1ca1`:
+Several subpackages still contain `legacy` scripts alongside newer CLI-oriented workflows.
 
-- `src/v1ca1/helper`: timestamp extraction, interval builders, shared session loaders, and W-track utilities.
-- `src/v1ca1/spikesorting`: Mountainsort4-based spike sorting, consolidation, and figurl generation.
-- `src/v1ca1/decoding`: conditional intensity estimation, likelihood computation, and 1D/2D position decoding.
-- `src/v1ca1/raster`: place rasters, place fields, spike-triggered averages, and related plotting utilities.
-- `src/v1ca1/motor`: decoding and visualization for speed, head direction, angular velocity, and related motor variables.
-- `src/v1ca1/position`: position-oriented package namespace and related analysis entry points.
-- `src/v1ca1/ripple`: ripple detection and ripple-centered GLM analyses; archival scripts now live under `src/v1ca1/ripple/legacy`.
-- `src/v1ca1/oscillation`: theta phase extraction and oscillatory event detection.
-- `src/v1ca1/sleep`: sleep-focused analyses and utilities.
-- `src/v1ca1/nwb`: NWB-related utilities and workflows.
-- `src/v1ca1/xcorr`: auto/cross-correlogram analyses.
-- `src/v1ca1/task_progression`: task progression tuning, MI, encoding, decoding, GLM, and visual-gain workflows.
-- `src/v1ca1/communication_subspace`: cross-area latent subspace analyses.
-- `src/v1ca1/signal_dim`: signal-dimensionality analyses such as MEME.
-- `src/v1ca1/topology`: topology-oriented analyses.
-- `src/v1ca1/docs`: lightweight documentation helpers and notes.
+## Setup
 
-## Modern CLI Entry Points
-
-Modernized scripts that are relatively self-contained and worth treating as the current entry points include:
-
-- Preprocessing helpers:
-  - `src/v1ca1/helper/get_timestamps.py`
-  - `src/v1ca1/helper/get_trajectory_times.py`
-  - `src/v1ca1/helper/get_immobility_times.py`
-- Spikesorting:
-  - `src/v1ca1/spikesorting/sort.py`
-  - `src/v1ca1/spikesorting/generate_figurl.py`
-  - `src/v1ca1/spikesorting/consolidate_sorting.py`
-- Ripple:
-  - `src/v1ca1/ripple/detect_ripples.py`
-  - `src/v1ca1/ripple/ripple_glm.py`
-- Task progression:
-  - `src/v1ca1/task_progression/tuning_analysis.py`
-  - `src/v1ca1/task_progression/compute_tuning_curves.py`
-  - `src/v1ca1/task_progression/mutual_info.py`
-  - `src/v1ca1/task_progression/encoding_comparison.py`
-  - `src/v1ca1/task_progression/decoding_comparison.py`
-  - `src/v1ca1/task_progression/motor.py`
-  - `src/v1ca1/task_progression/dark_light_glm.py`
-  - `src/v1ca1/task_progression/swap_glm_comparison.py`
-  - `src/v1ca1/task_progression/segment_coefficient_comparison.py`
-- Signal dimension:
-  - `src/v1ca1/signal_dim/meme.py`
-
-The spike sorting curation flow is:
-
-1. Run `sort.py` to produce sorter output.
-2. Run `generate_figurl.py` to create a figurl URL for a probe/shank.
-3. Open that URL in the browser and assign curation labels such as accept or reject.
-4. Those labels are stored in `LorenFrankLab/sorting-curations` as `curation.json`.
-5. Run `consolidate_sorting.py` to load that JSON locally and apply it to the SpikeInterface sorting object.
-6. If probe-to-region assignments differ for a session, pass them explicitly with `--v1-probes` and `--ca1-probes`.
-
-## What Is In This Repo
-
-- Analysis scripts for spike sorting, decoding, ripple/theta detection, place-field and raster analyses, motor-variable analyses, cross-correlations, task-progression analyses, communication subspace analyses, and topology/signal-dimension work.
-- A lightweight importable package namespace at `src/v1ca1`.
-- Minimal packaging metadata via `pyproject.toml` and a starter environment via `environment.yml`.
-- No raw data, processed data, or figures tracked in git. Generated artifacts such as `*.pkl`, `*.npy`, `*.npz`, parquet tables, NetCDF outputs, and figure files are ignored by the repo.
-
-## Quick Start
-
-The preferred setup is:
+Preferred:
 
 ```bash
 conda env create -f environment.yml
 conda activate v1ca1
 ```
 
-Or, if you already have a compatible Python environment:
+Or install into an existing environment:
 
 ```bash
-pip install -e ".[analysis]"
+pip install -e ".[analysis,test]"
 ```
 
-Useful extras:
+Optional extras:
 
 ```bash
 pip install -e ".[glm]"
 pip install -e ".[figurl]"
-pip install -e ".[dev]"
 ```
 
-- `.[analysis]` covers the main scientific Python and neuroscience analysis stack used by the modernized CLIs, including `position_tools` and `track_linearization`.
-- `.[glm]` adds JAX- and `nemos`-based dependencies used by GLM-heavy ripple and task-progression workflows.
-- `.[figurl]` adds figurl support for curation export.
-- `.[dev]` adds the current pytest-based test dependencies.
+- `analysis`: main scientific Python and neuroscience stack
+- `test`: pytest dependencies
+- `glm`: JAX-based dependencies used by GLM-heavy workflows
+- `figurl`: figurl export support
 
-You can run scripts directly from the checkout with:
+## Running Scripts
+
+Scripts are typically run directly from the checkout:
 
 ```bash
 PYTHONPATH=src python src/v1ca1/<module>.py ...
@@ -119,200 +62,63 @@ PYTHONPATH=src python src/v1ca1/helper/get_timestamps.py \
   --ephys-format both
 ```
 
-`get_timestamps.py` derives per-epoch ephys timestamps directly from the NWB
-`e-series` timestamps by splitting on gaps larger than the configured
-threshold. The default threshold is 10 seconds, which is intended to treat
-shorter timestamp dropouts as part of the same epoch. The script always writes
-legacy `timestamps_position.pkl`, can write both legacy pickle and pynapple
-timestamp outputs for ephys, and records its segmentation details in the
-session run log under `v1ca1_log/`.
-
-```bash
-PYTHONPATH=src python src/v1ca1/helper/get_trajectory_times.py \
-  --animal-name L14 \
-  --date 20240611 \
-  --save-pkl
-```
-
-That command reads saved epoch bounds plus NWB poke events and always writes
-the canonical `trajectory_times.parquet` table. Passing `--save-pkl` also
-writes the legacy `trajectory_times.pkl` compatibility artifact.
-
-```bash
-PYTHONPATH=src python src/v1ca1/helper/get_immobility_times.py \
-  --animal-name L14 \
-  --date 20240611 \
-  --output-format both
-```
-
-That command computes movement and immobility intervals from saved position
-data and writes both compatibility pickles and pynapple `.npz` interval files
-at the session root.
-
-```bash
-PYTHONPATH=src python src/v1ca1/spikesorting/sort.py \
-  --animal-name L14 \
-  --date 20240611 \
-  --probe-idx 0 \
-  --shank-idx 0
-```
-
-```bash
-PYTHONPATH=src python src/v1ca1/spikesorting/generate_figurl.py \
-  --animal-name L14 \
-  --date 20240611 \
-  --probe-idx 0 \
-  --shank-idx 0
-```
-
-That command writes a text file containing a figurl URL. Opening the URL gives
-you an interactive curation interface backed by a `curation.json` entry in the
-`LorenFrankLab/sorting-curations` GitHub repository.
-
-```bash
-PYTHONPATH=src python src/v1ca1/spikesorting/consolidate_sorting.py \
-  --animal-name L14 \
-  --date 20240611 \
-  --v1-probes 0,3 \
-  --ca1-probes 1,2
-```
-
-That command reads local `curation.json` files from a `sorting-curations`
-checkout, saves curated per-shank sortings, and then writes aggregated
-`sorting_v1` and `sorting_ca1` outputs. The probe lists are session-specific;
-the defaults match one common implant layout but should be overridden when the
-probe placements differ.
-
 ```bash
 PYTHONPATH=src python src/v1ca1/ripple/detect_ripples.py \
   --animal-name L14 \
   --date 20240611
 ```
 
-That command detects ripples using the session channel registry in
-`v1ca1.ripple._channels`, writes outputs under `analysis_path / "ripple"`,
-emits both the legacy detector pickle and modern interval `.npz` output for the
-selected detector mode, and records the chosen ripple channels in the run log.
-
 ```bash
 PYTHONPATH=src python src/v1ca1/task_progression/motor.py \
   --animal-name L14 \
   --date 20240611 \
-  --regions v1 ca1 \
-  --motor-feature-mode zscore
+  --regions v1 ca1
 ```
 
-That command fits the modern task-progression motor/place GLM workflow and
-writes one NetCDF-backed `xarray.Dataset` per selected region and run epoch
-under `analysis_path / "task_progression_motor"`.
+Good current entry points include:
 
-Important: some scripts are now parameterized, but many downstream analyses still rely on hard-coded defaults inside the source file for items like `animal_name`, `date`, and root paths.
+- `src/v1ca1/helper/get_timestamps.py`
+- `src/v1ca1/helper/get_trajectory_times.py`
+- `src/v1ca1/helper/get_immobility_times.py`
+- `src/v1ca1/spikesorting/sort.py`
+- `src/v1ca1/spikesorting/generate_figurl.py`
+- `src/v1ca1/spikesorting/consolidate_sorting.py`
+- `src/v1ca1/ripple/detect_ripples.py`
+- `src/v1ca1/ripple/ripple_glm.py`
+- `src/v1ca1/task_progression/tuning_analysis.py`
+- `src/v1ca1/task_progression/mutual_info.py`
+- `src/v1ca1/task_progression/motor.py`
 
-## Output Conventions
-
-The refactored workflows now converge on a few common artifact types:
-
-- Pynapple-backed `.npz` files for time-domain artifacts such as timestamps, interval sets, and decoded trajectories.
-- Parquet tables for compact unit- or epoch-level summaries.
-- NetCDF-backed `xarray.Dataset` outputs for larger model-fit results such as task-progression GLMs.
-- Optional legacy pickle outputs in several modernized workflows for downstream compatibility.
-- One JSON run log per execution under `analysis_root / animal_name / date / v1ca1_log/`.
-
-The run logs record the package version, git commit, run parameters, and key
-output paths. Some scripts also record workflow-specific metadata such as the
-gap-based ephys segmentation used by `get_timestamps.py`.
-
-The package version is single-sourced from `v1ca1.__version__`, so runtime logs
-and package metadata stay in sync.
-
-## Data And Experimental Context
-
-The scripts in this repo operate on simultaneous electrophysiology and behavior data from the V1-CA1 project. In the typical experiment, four Livermore polymer probes are implanted in a single rat, targeting bilateral V1 and CA1 while the animal performs a spatial alternation task on a W-track.
-
-The data include both run and sleep epochs:
-
-- During run epochs, the animal performs spatial alternation on the W-track for milk reward.
-- During sleep epochs, the animal is placed in a sleep box.
-- Position is tracked with an overhead camera in both epoch types.
-- Some run epochs include visual manipulations presented on specific W-track segments, including the left arm, right arm, and middle segment.
-- At least one run epoch is typically performed in darkness (`<10^2 R*/s/rod`).
+Many other scripts still rely on file-local defaults or experiment-specific assumptions.
 
 ## Data Assumptions
 
-The code assumes access to Frank Lab-style data and analysis directories that are not included here. Common filesystem roots referenced across the current scripts include:
+The current helpers and CLIs mostly assume:
 
-- `/stelmo/nwb/raw`
-- `/stelmo/kyu/analysis`
-- `/nimbus/kyu`
+- NWB root: `/stelmo/nwb/raw`
+- analysis root: `/stelmo/kyu/analysis`
+- session layout: `analysis_root / animal_name / date`
 
-Many scripts expect precomputed intermediate files such as:
+Common required intermediates include timestamp files, position outputs, trajectory tables, run or sleep intervals, sorting outputs, and other session-level artifacts produced by earlier steps.
 
-- `timestamps_ephys.pkl`
-- `timestamps_position.pkl`
-- `timestamps_ephys_all.pkl`
-- `timestamps_ephys.npz`
-- `timestamps_ephys_all.npz`
-- `timestamps_position.npz`
-- `position.pkl`
-- `trajectory_times.pkl`
-- `trajectory_times.parquet`
-- `run_times.pkl`
-- `run_times.npz`
-- `immobility_times.pkl`
-- `immobility_times.npz`
-- `body_position.pkl`
-- sorting outputs and sorting analyzer folders under the analysis directory
-- ripple outputs under `analysis_path / "ripple"`
-- task-progression outputs under task-specific subdirectories such as `task_progression_motor`, `task_progression_decoding`, or `task_progression_dark_light`
+If that local data layout is missing, many scripts will need small path or workflow adjustments before they can run.
 
-If you do not have that directory layout and those intermediate files available, many scripts will need either local path edits or small refactors before they can run.
+## Outputs
 
-## Suggested Workflow
+Recent workflows tend to write:
 
-If you are picking this codebase up fresh, a practical order is:
+- parquet tables for summaries
+- pynapple-backed `.npz` files for timestamps and interval-style artifacts
+- NetCDF-backed `xarray.Dataset` outputs for larger model-fit results
+- compatibility pickles where downstream code still expects them
+- JSON run logs under `analysis_root / animal_name / date / v1ca1_log`
 
-1. Verify that your NWB files, extracted data, and analysis directories match the expectations of the scripts you want to run.
-2. Start with the helper preprocessing scripts to generate or validate timestamps, trajectory intervals, and movement or immobility intervals.
-3. Run spikesorting or ripple detection next, depending on whether your downstream analysis depends on curated sortings, ripple events, or both.
-4. Run downstream analyses from the relevant subpackage once the expected session-root artifacts and session-specific outputs exist.
-5. Parameterize high-value scripts further before trying to scale them across many sessions.
+## In Practice
 
-## Dependencies
+A typical workflow is:
 
-The codebase uses a mix of standard scientific Python packages and domain-specific neuroscience tooling. The install extras in `pyproject.toml` map well to the current workflows:
+1. Generate or validate session timestamps and intervals with the helper scripts.
+2. Run sorting, ripple detection, or position preprocessing as needed.
+3. Run downstream analyses from the relevant subpackage once the expected session artifacts exist.
 
-- `pip install -e ".[analysis]"` for most modernized helper, spikesorting, ripple, decoding, task-progression summary, and MEME workflows.
-- `pip install -e ".[glm]"` for GLM-heavy task-progression and ripple workflows that depend on JAX and `nemos`.
-- `pip install -e ".[figurl]"` for figurl generation.
-- `pip install -e ".[dev]"` for the current pytest-based test suite.
-
-Imports currently present in the repo include:
-
-- `numpy`, `scipy`, `pandas`, `matplotlib`, `xarray`, `scikit-learn`, `seaborn`
-- `spikeinterface`
-- `pynwb`
-- `pynapple`
-- `position_tools`
-- `track_linearization`
-- `replay_trajectory_classification`
-- `ripple_detection`
-- `trajectory_analysis_tools`
-- `non_local_detector`
-- `kyutils`
-- `jax`, `jaxopt`, `nemos`
-
-`kyutils` appears throughout the repo and looks like a project- or lab-specific dependency, so a usable local environment will likely need both public packages and internal analysis utilities.
-
-`environment.yml` provides a good starting environment, but some workflows still require manual installation of additional packages depending on which analyses you run.
-
-## Current State And Caveats
-
-- This repo is still script-heavy, and many files mix reusable functions with one-off analysis code.
-- Packaging is intentionally light: editable installs work, but the project is not yet a fully reproducible software distribution.
-- There are still few guardrails around path assumptions and intermediate-file dependencies.
-- Portability remains limited until more scripts are parameterized and absolute paths are reduced.
-- Several workflows now have active and `legacy` implementations side by side; the legacy copies are mainly for reproducibility and inspection rather than new feature work.
-
-## Summary
-
-This repo already contains a broad set of V1-CA1 analysis routines, but it is best understood as an active lab analysis workspace. It is most useful to people who already have the expected NWB files, extracted data, intermediate artifacts, and analysis directory layout available locally.
+The repo is most useful if you already have the local Frank Lab-style data layout and intermediate files in place.
