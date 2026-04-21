@@ -49,7 +49,9 @@ from v1ca1.decoding._1d import (
     make_classifier,
     make_interval_mask,
     preflight_no_existing,
+    require_spiking_likelihood_kde_gpu,
     select_regions,
+    validate_classifier_place_fields,
     validate_fold_count,
 )
 from v1ca1.helper.cuda import configure_cuda_visible_devices
@@ -273,6 +275,7 @@ def fit_region_classifiers(
             encoding_group_labels=encoding_labels,
             is_training=train_mask,
         )
+        validate_classifier_place_fields(classifier)
         output_path = output_paths[(region, fold)]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         classifier.save_model(output_path)
@@ -320,6 +323,7 @@ def run(args: argparse.Namespace) -> None:
         overwrite=args.overwrite,
         output_kind="classifier",
     )
+    require_spiking_likelihood_kde_gpu()
 
     session = load_required_session_inputs(
         analysis_path=analysis_path,

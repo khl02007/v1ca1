@@ -54,6 +54,7 @@ from v1ca1.decoding._1d import (
     preflight_no_existing,
     require_existing_paths,
     select_regions,
+    validate_classifier_place_fields,
     validate_fold_count,
 )
 from v1ca1.helper.cuda import configure_cuda_visible_devices
@@ -178,6 +179,14 @@ def parse_arguments() -> argparse.Namespace:
         "--figurl",
         action="store_true",
         help="Generate one combined figurl text output for the predicted epoch.",
+    )
+    parser.add_argument(
+        "--figurl-only",
+        action="store_true",
+        help=(
+            "Regenerate only the figurl from existing prediction NetCDF outputs. "
+            "Implies --figurl and skips classifier loading and posterior prediction."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -475,6 +484,7 @@ def save_figurl(
     date: str,
     epoch: str,
     n_folds: int,
+    unit_selection_label: str,
     results_by_region: dict[str, Any],
     sortings: dict[str, Any],
     timestamps_ephys_all: np.ndarray,
@@ -487,12 +497,21 @@ def save_figurl(
 ) -> Path:
     """Create and save one combined figurl URL."""
     os.environ.setdefault("KACHERY_ZONE", "franklab.default")
+    figurl_time_zero = float(time_grid[0])
+    figurl_time_grid = np.asarray(time_grid, dtype=float) - figurl_time_zero
+    figurl_timestamps_ephys_all = (
+        np.asarray(timestamps_ephys_all, dtype=float) - figurl_time_zero
+    )
+    figurl_results_by_region = {
+        region: results.assign_coords(time=figurl_time_grid)
+        for region, results in results_by_region.items()
+    }
     view = make_combined_figurl_view(
         regions=regions,
-        results_by_region=results_by_region,
+        results_by_region=figurl_results_by_region,
         sortings=sortings,
-        timestamps_ephys_all=timestamps_ephys_all,
-        time_grid=time_grid,
+        timestamps_ephys_all=figurl_timestamps_ephys_all,
+        time_grid=figurl_time_grid,
         unit_ids_by_region=unit_ids_by_region,
         linear_position=linear_position,
         speed=speed,
@@ -501,7 +520,9 @@ def save_figurl(
     )
     label = (
         f"{animal_name} {date} {epoch} 1D CV decode "
-        f"regions {','.join(regions)} {n_folds} folds"
+        f"regions {','.join(regions)} {n_folds} folds "
+        f"unit_selection {unit_selection_label} "
+        f"figurl_time_zero_s {figurl_time_zero:.6f}"
     )
     figurl_path.parent.mkdir(parents=True, exist_ok=True)
     view_url = view.url(label=label)
@@ -546,7 +567,12 @@ def predict_region(
             f"Predicting {region} fold {fold + 1}/{n_folds} with "
             f"{int(np.sum(fold_mask))} time bins."
         )
-        classifier = load_classifier(classifier_paths[(region, fold)])
+        classifier_path = classifier_paths[(region, fold)]
+        classifier = load_classifier(classifier_path)
+        validate_classifier_place_fields(
+            classifier,
+            classifier_path=classifier_path,
+        )
         fold_results.append(
             classifier.predict(
                 spike_indicator[fold_mask],
@@ -566,6 +592,27 @@ def predict_region(
     return combined, spike_indicator
 
 
+def load_saved_prediction_result(path: Path, *, time_grid: np.ndarray) -> Any:
+    """Load one existing prediction result and validate its time coordinate."""
+    import xarray as xr
+
+    result = xr.open_dataset(path).load()
+    predicted_time = np.asarray(result.time, dtype=float)
+    expected_time = np.asarray(time_grid, dtype=float)
+    if predicted_time.size != expected_time.size:
+        raise ValueError(
+            f"Saved prediction result {path} has {predicted_time.size} time bins, "
+            f"but the current settings expect {expected_time.size}."
+        )
+    if not np.allclose(predicted_time, expected_time, rtol=0.0, atol=1e-9):
+        raise ValueError(
+            f"Saved prediction result {path} does not match the current time grid. "
+            "Check --time-bin-size-s, --position-offset, --animal-name, --date, "
+            "and --epoch."
+        )
+    return result
+
+
 def run(args: argparse.Namespace) -> None:
     """Run the 1D decoder prediction workflow."""
     validate_arguments(args)
@@ -577,6 +624,7 @@ def run(args: argparse.Namespace) -> None:
         data_root=args.data_root,
     )
     selected_regions = select_regions(args.region)
+    should_generate_figurl = args.figurl or args.figurl_only
     unit_selection_label = get_unit_selection_label(
         args.v1_ripple_glm_units and "v1" in selected_regions
     )
@@ -634,22 +682,33 @@ def run(args: argparse.Namespace) -> None:
             branch_gap_cm=args.branch_gap_cm,
             unit_selection_label=unit_selection_label,
         )
-        if args.figurl
+        if should_generate_figurl
         else None
     )
 
-    output_preflight_paths = list(prediction_paths.values())
+    output_preflight_paths = (
+        [figurl_path_value]
+        if args.figurl_only and figurl_path_value is not None
+        else list(prediction_paths.values())
+    )
     if figurl_path_value is not None:
-        output_preflight_paths.append(figurl_path_value)
+        if figurl_path_value not in output_preflight_paths:
+            output_preflight_paths.append(figurl_path_value)
     preflight_no_existing(
         output_preflight_paths,
         overwrite=args.overwrite,
-        output_kind="prediction",
+        output_kind="figurl" if args.figurl_only else "prediction",
     )
-    require_existing_paths(
-        list(classifier_paths.values()),
-        input_kind="classifier",
-    )
+    if args.figurl_only:
+        require_existing_paths(
+            list(prediction_paths.values()),
+            input_kind="prediction",
+        )
+    else:
+        require_existing_paths(
+            list(classifier_paths.values()),
+            input_kind="classifier",
+        )
 
     session = load_required_session_inputs(
         analysis_path=analysis_path,
@@ -699,8 +758,13 @@ def run(args: argparse.Namespace) -> None:
     fold_by_time = build_full_epoch_prediction_fold(time_grid, fold_interval_records)
     state_names = get_state_names(direction=args.direction, discrete_var=args.discrete_var)
 
+    action_label = (
+        "Regenerating figurl from existing predictions"
+        if args.figurl_only
+        else "Predicting"
+    )
     print(
-        f"Predicting 1D decoder for {args.animal_name} {args.date} epoch {args.epoch}; "
+        f"{action_label} for {args.animal_name} {args.date} epoch {args.epoch}; "
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
         f"random_state={args.random_state}, direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
@@ -709,6 +773,25 @@ def run(args: argparse.Namespace) -> None:
     spike_indicator_by_region: dict[str, np.ndarray] = {}
     saved_prediction_paths: list[Path] = []
     for region in selected_regions:
+        if args.figurl_only:
+            combined_result = load_saved_prediction_result(
+                prediction_paths[region],
+                time_grid=time_grid,
+            )
+            spike_indicator = get_spike_indicator(
+                sortings[region],
+                timestamps_ephys_all=session["timestamps_ephys_all"],
+                time_grid=time_grid,
+                unit_ids=unit_ids_by_region[region],
+            )
+            results_by_region[region] = combined_result
+            spike_indicator_by_region[region] = spike_indicator
+            print(
+                f"Loaded existing {region} prediction results from "
+                f"{prediction_paths[region]}"
+            )
+            continue
+
         combined_result, spike_indicator = predict_region(
             region=region,
             sorting=sortings[region],
@@ -771,6 +854,7 @@ def run(args: argparse.Namespace) -> None:
             date=args.date,
             epoch=args.epoch,
             n_folds=args.n_folds,
+            unit_selection_label=unit_selection_label,
             results_by_region=results_by_region,
             sortings=sortings,
             timestamps_ephys_all=session["timestamps_ephys_all"],
@@ -807,7 +891,8 @@ def run(args: argparse.Namespace) -> None:
             "unit_selection_label": unit_selection_label,
             "v1_ripple_glm_p_value_threshold": DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
             "cuda_visible_devices": args.cuda_visible_devices,
-            "figurl": args.figurl,
+            "figurl": should_generate_figurl,
+            "figurl_only": args.figurl_only,
             "overwrite": args.overwrite,
         },
         outputs={
@@ -825,11 +910,15 @@ def run(args: argparse.Namespace) -> None:
             "unit_selection_by_region": unit_selection_by_region,
             "fold_interval_records": fold_interval_records,
             "classifier_paths": classifier_paths,
+            "prediction_paths": prediction_paths,
             "saved_prediction_paths": saved_prediction_paths,
             "saved_figurl_path": saved_figurl_path,
         },
     )
-    print(f"Saved {len(saved_prediction_paths)} prediction result file(s).")
+    if args.figurl_only:
+        print("Skipped posterior prediction and reused existing prediction result file(s).")
+    else:
+        print(f"Saved {len(saved_prediction_paths)} prediction result file(s).")
     print(f"Saved run metadata to {log_path}")
 
 

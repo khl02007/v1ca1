@@ -49,6 +49,7 @@ DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD = 0.05
 DISCRETE_VAR_CHOICES = ("switching", "random_walk", "uniform")
 UNIT_SELECTION_ALL = "all_units"
 UNIT_SELECTION_V1_RIPPLE_DEVEXP = "v1_units_ripple_devexp_p_lt_0p05"
+GPU_KDE_PACKAGE_HINT = "cupy-cuda12x"
 
 
 def get_unit_selection_label(v1_ripple_glm_units: bool) -> str:
@@ -936,6 +937,33 @@ def get_state_names(*, direction: bool, discrete_var: str) -> list[str]:
     raise ValueError(f"Unsupported discrete_var={discrete_var!r}.")
 
 
+def require_spiking_likelihood_kde_gpu() -> None:
+    """Fail clearly when the RTC GPU KDE likelihood cannot run."""
+    try:
+        import cupy as cp
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            "fit_1d uses replay_trajectory_classification's "
+            "'spiking_likelihood_kde_gpu' likelihood, which requires CuPy. "
+            f"Install {GPU_KDE_PACKAGE_HINT} in this environment, rerun fit_1d "
+            "with --overwrite, then rerun predict_1d."
+        ) from exc
+
+    try:
+        n_devices = int(cp.cuda.runtime.getDeviceCount())
+    except Exception as exc:
+        raise RuntimeError(
+            "CuPy is installed, but no CUDA GPU is available to "
+            "'spiking_likelihood_kde_gpu'. Check CUDA_VISIBLE_DEVICES and the "
+            "CUDA driver before rerunning fit_1d."
+        ) from exc
+    if n_devices < 1:
+        raise RuntimeError(
+            "CuPy is installed, but it reports zero CUDA devices. Check "
+            "CUDA_VISIBLE_DEVICES and the CUDA driver before rerunning fit_1d."
+        )
+
+
 def build_decoder_state_models(
     *,
     direction: bool,
@@ -1026,6 +1054,37 @@ def load_classifier(path: Path) -> Any:
     import replay_trajectory_classification as rtc
 
     return rtc.SortedSpikesClassifier.load_model(filename=path)
+
+
+def validate_classifier_place_fields(
+    classifier: Any,
+    *,
+    classifier_path: Path | None = None,
+) -> None:
+    """Require fitted classifier place fields to be usable for prediction."""
+    place_fields = getattr(classifier, "place_fields_", None)
+    if not place_fields:
+        path_text = f" Classifier: {classifier_path}" if classifier_path else ""
+        raise ValueError(
+            "Classifier does not contain fitted place fields."
+            f"{path_text} Refit with fit_1d before running predict_1d."
+        )
+
+    invalid_keys = [
+        key
+        for key, value in place_fields.items()
+        if value is None or not hasattr(value, "values")
+    ]
+    if invalid_keys:
+        path_text = f" Classifier: {classifier_path}" if classifier_path else ""
+        raise ValueError(
+            "Classifier has missing place fields for "
+            f"{invalid_keys!r}.{path_text} This usually means fit_1d was run "
+            "without a working CuPy/CUDA setup while using "
+            "'spiking_likelihood_kde_gpu'. Install "
+            f"{GPU_KDE_PACKAGE_HINT}, rerun fit_1d with --overwrite, then rerun "
+            "predict_1d."
+        )
 
 
 def concatenate_fold_results(

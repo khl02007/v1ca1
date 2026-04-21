@@ -16,8 +16,10 @@ dependencies:
   - pynwb
   - pytest>=8
   - pip:
+      - cupy-cuda12x
       - mountainsort4>=1.0
       - position_tools
+      - replay_trajectory_classification
       - ripple_detection
       - track_linearization
       - "-e .[analysis,test]"
@@ -25,7 +27,6 @@ dependencies:
 # Additional packages used by some analyses may need to be installed manually,
 # depending on which workflows you run and how your lab environment is managed:
 # - jax
-# - replay_trajectory_classification
 # - non_local_detector
 # - trajectory_analysis_tools
 # - kyutils  # lab/internal dependency
