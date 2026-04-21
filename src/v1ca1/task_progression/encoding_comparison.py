@@ -612,7 +612,13 @@ def run_tp_cross_trajectory_encoding(
     sigma_bins: float,
     random_state: int = DEFAULT_RANDOM_STATE,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    """Score directed TP transfer families against trajectory-specific target CV."""
+    """Score directed TP transfer families against trajectory-specific target CV.
+
+    Both the source-trajectory transfer model and the target-trajectory baseline
+    are trained fold-by-fold. For each fold, the source model is fit on the
+    held-in source laps, the target baseline is fit on the held-in target laps,
+    and both are evaluated on the same held-out target laps.
+    """
     import pynapple as nap
 
     unit_ids = list(spikes.keys())
@@ -627,7 +633,23 @@ def run_tp_cross_trajectory_encoding(
         source_turn_type = pair_spec["source_turn_type"]
         turn_type = pair_spec["turn_type"]
         flip_tuning_curve = bool(pair_spec.get("flip_tuning_curve", False))
+        source_lap_count = int(_intervalset_to_arrays(trajectory_intervals[source_trajectory])[0].size)
         target_lap_count = int(_intervalset_to_arrays(trajectory_intervals[target_trajectory])[0].size)
+        if source_lap_count < 2 or n_folds > source_lap_count:
+            skipped_pairs.append(
+                {
+                    "transfer_family": transfer_family,
+                    "turn_type": turn_type,
+                    "source_turn_type": source_turn_type,
+                    "source_trajectory": source_trajectory,
+                    "target_trajectory": target_trajectory,
+                    "reason": (
+                        f"source trajectory supports {source_lap_count} laps, "
+                        f"which is insufficient for n_folds={n_folds}"
+                    ),
+                }
+            )
+            continue
         if target_lap_count < 2 or n_folds > target_lap_count:
             skipped_pairs.append(
                 {
@@ -644,55 +666,51 @@ def run_tp_cross_trajectory_encoding(
             )
             continue
 
-        source_epoch = trajectory_intervals[source_trajectory].intersect(movement_interval)
-        source_duration = float(source_epoch.tot_length())
-        if source_duration <= 0.0:
-            skipped_pairs.append(
-                {
-                    "transfer_family": transfer_family,
-                    "turn_type": turn_type,
-                    "source_turn_type": source_turn_type,
-                    "source_trajectory": source_trajectory,
-                    "target_trajectory": target_trajectory,
-                    "reason": "source trajectory has no movement-restricted samples",
-                }
-            )
-            continue
-
-        train_folds, test_folds = build_single_trajectory_train_test_folds(
-            trajectory_intervals[target_trajectory],
+        source_train_folds, _source_test_folds = build_single_trajectory_train_test_folds(
+            trajectory_intervals[source_trajectory],
             n_folds=n_folds,
             random_state=random_state,
         )
-        source_tuning = smooth_pf_along_position_nan_aware(
-            nap.compute_tuning_curves(
-                data=spikes,
-                features=task_progression_by_trajectory[source_trajectory],
-                bins=[task_progression_bins],
-                epochs=source_epoch,
-                feature_names=["tp"],
-            ),
-            pos_dim="tp",
-            sigma_bins=sigma_bins,
+        target_train_folds, target_test_folds = build_single_trajectory_train_test_folds(
+            trajectory_intervals[target_trajectory],
+            n_folds=n_folds,
+            random_state=random_state,
         )
 
         store = initialize_tp_cross_trajectory_store(unit_ids, n_folds=n_folds)
         used_fold_count = 0
         for fold in range(n_folds):
-            train_fold = train_folds[fold].intersect(movement_interval)
-            test_fold = test_folds[fold].intersect(movement_interval)
-            train_duration = float(train_fold.tot_length())
-            test_duration = float(test_fold.tot_length())
-            if train_duration <= 0.0 or test_duration <= 0.0:
+            source_train_fold = source_train_folds[fold].intersect(movement_interval)
+            target_train_fold = target_train_folds[fold].intersect(movement_interval)
+            target_test_fold = target_test_folds[fold].intersect(movement_interval)
+            source_train_duration = float(source_train_fold.tot_length())
+            target_train_duration = float(target_train_fold.tot_length())
+            target_test_duration = float(target_test_fold.tot_length())
+            if (
+                source_train_duration <= 0.0
+                or target_train_duration <= 0.0
+                or target_test_duration <= 0.0
+            ):
                 continue
 
             used_fold_count += 1
+            source_tuning = smooth_pf_along_position_nan_aware(
+                nap.compute_tuning_curves(
+                    data=spikes,
+                    features=task_progression_by_trajectory[source_trajectory],
+                    bins=[task_progression_bins],
+                    epochs=source_train_fold,
+                    feature_names=["tp"],
+                ),
+                pos_dim="tp",
+                sigma_bins=sigma_bins,
+            )
             target_tuning = smooth_pf_along_position_nan_aware(
                 nap.compute_tuning_curves(
                     data=spikes,
                     features=task_progression_by_trajectory[target_trajectory],
                     bins=[task_progression_bins],
-                    epochs=train_fold,
+                    epochs=target_train_fold,
                     feature_names=["tp"],
                 ),
                 pos_dim="tp",
@@ -700,8 +718,8 @@ def run_tp_cross_trajectory_encoding(
             )
             for unit_id in unit_ids:
                 unit_spikes = spikes[unit_id]
-                n_train_spikes = int(len(unit_spikes.restrict(train_fold).t))
-                train_rate = max(n_train_spikes / train_duration, 1e-10)
+                n_train_spikes = int(len(unit_spikes.restrict(target_train_fold).t))
+                train_rate = max(n_train_spikes / target_train_duration, 1e-10)
                 source_curve = np.asarray(
                     source_tuning.sel(unit=unit_id).values,
                     dtype=float,
@@ -717,7 +735,7 @@ def run_tp_cross_trajectory_encoding(
                         dtype=float,
                     ),
                     bin_edges=task_progression_bins,
-                    epoch=test_fold,
+                    epoch=target_test_fold,
                     bin_size_s=bin_size_s,
                     epsilon=1e-10,
                     fill_rate=train_rate,
@@ -728,7 +746,7 @@ def run_tp_cross_trajectory_encoding(
                     position=task_progression_by_trajectory[target_trajectory],
                     tuning_curve=source_curve,
                     bin_edges=task_progression_bins,
-                    epoch=test_fold,
+                    epoch=target_test_fold,
                     bin_size_s=bin_size_s,
                     epsilon=1e-10,
                     fill_rate=train_rate,
@@ -754,7 +772,10 @@ def run_tp_cross_trajectory_encoding(
                     "source_turn_type": source_turn_type,
                     "source_trajectory": source_trajectory,
                     "target_trajectory": target_trajectory,
-                    "reason": "all target folds were empty after movement restriction",
+                    "reason": (
+                        "all fold-matched source-train, target-train, or target-test "
+                        "intervals were empty after movement restriction"
+                    ),
                 }
             )
             continue

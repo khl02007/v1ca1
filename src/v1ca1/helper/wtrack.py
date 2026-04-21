@@ -330,15 +330,66 @@ def get_wtrack_branch_graph(
 
 def get_wtrack_full_graph(
     animal_name: str,
-) -> tuple[Any, np.ndarray]:
-    """Return the full W-track graph for one animal.
+    branch_gap_cm: float = 15.0,
+) -> tuple[Any, list[tuple[int, int]], list[float]]:
+    """Return an animal-specific full W-track graph and linear edge spacing.
 
-    This remains unimplemented because the merged full-track connectivity can
-    differ across animals or days. Hard-coding a single merged edge list would
-    be too brittle until the repository stores a session-appropriate full-track
-    graph specification.
+    The full graph is derived from the stored branch geometries instead of
+    hard-coding a second coordinate table. Nodes 0 and 1 are the shared center
+    well and center junction. Nodes 2-5 are the full left branch continuation,
+    and nodes 6-9 are the full right branch continuation.
     """
-    raise NotImplementedError(
-        "Full W-track graph construction is not implemented yet because "
-        "node count and connectivity may vary across animals or days."
+    import track_linearization as tl
+
+    if branch_gap_cm < 0:
+        raise ValueError("--branch-gap-cm must be non-negative.")
+
+    node_positions_by_side = get_wtrack_node_positions(animal_name)
+    left_node_positions = np.asarray(node_positions_by_side["left"], dtype=float)
+    right_node_positions = np.asarray(node_positions_by_side["right"], dtype=float)
+    if left_node_positions.shape[0] < 6 or right_node_positions.shape[0] < 6:
+        raise ValueError(
+            "Full W-track construction expects six branch nodes per side. "
+            f"Got {left_node_positions.shape[0]} left and "
+            f"{right_node_positions.shape[0]} right nodes."
+        )
+    if not np.allclose(left_node_positions[:2], right_node_positions[:2]):
+        raise ValueError(
+            "Left and right W-track geometries do not share the same center "
+            "well and center junction nodes."
+        )
+
+    node_positions = np.vstack(
+        (
+            left_node_positions[:2],
+            left_node_positions[2:6],
+            right_node_positions[2:6],
+        )
     )
+    edges = np.asarray(
+        [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (1, 6),
+            (6, 7),
+            (7, 8),
+            (8, 9),
+        ],
+        dtype=int,
+    )
+    edge_order = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (1, 6),
+        (6, 7),
+        (7, 8),
+        (8, 9),
+    ]
+    edge_spacing = [0.0, 0.0, 0.0, 0.0, float(branch_gap_cm), 0.0, 0.0, 0.0]
+    return tl.make_track_graph(node_positions, edges), edge_order, edge_spacing
