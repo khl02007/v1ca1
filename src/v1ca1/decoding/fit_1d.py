@@ -7,8 +7,9 @@ linearizes cleaned DLC head position on the animal-specific full W-track,
 builds shuffled lap-wise cross-validation folds from trajectory intervals, and
 fits one sorted-spikes RTC classifier per requested region and fold. Classifier
 objects are written with `SortedSpikesClassifier.save_model`. When requested,
-V1 fits use only units with significant ripple GLM deviance explained. Run
-metadata are recorded under the session log directory.
+V1 fits use ripple GLM unit filtering by deviance-explained significance or a
+direct deviance-explained threshold. Run metadata are recorded under the session
+log directory.
 """
 
 import argparse
@@ -158,13 +159,22 @@ def parse_arguments() -> argparse.Namespace:
         default=True,
         help="Restrict training to movement bins. Default: enabled.",
     )
-    parser.add_argument(
+    unit_selection_group = parser.add_mutually_exclusive_group()
+    unit_selection_group.add_argument(
         "--v1-ripple-glm-units",
         action="store_true",
         help=(
             "Restrict V1 units to those with ripple GLM deviance-explained "
             "p-value < "
             f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
+        ),
+    )
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-devexp-threshold",
+        type=float,
+        help=(
+            "Restrict V1 units to those with ripple GLM ripple_devexp_mean "
+            "greater than or equal to this value. Default: use all units."
         ),
     )
     parser.add_argument(
@@ -197,6 +207,9 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--movement-var must be positive.")
     if args.branch_gap_cm < 0:
         raise ValueError("--branch-gap-cm must be non-negative.")
+    if args.v1_ripple_glm_devexp_threshold is not None:
+        if not np.isfinite(args.v1_ripple_glm_devexp_threshold):
+            raise ValueError("--v1-ripple-glm-devexp-threshold must be finite.")
 
 
 def fit_region_classifiers(
@@ -294,12 +307,21 @@ def run(args: argparse.Namespace) -> None:
         data_root=args.data_root,
     )
     selected_regions = select_regions(args.region)
-    unit_selection_label = get_unit_selection_label(
-        args.v1_ripple_glm_units and "v1" in selected_regions
+    v1_unit_selection_requested = (
+        args.v1_ripple_glm_units
+        or args.v1_ripple_glm_devexp_threshold is not None
     )
-    if args.v1_ripple_glm_units and "v1" not in selected_regions:
+    unit_selection_label = get_unit_selection_label(
+        args.v1_ripple_glm_units and "v1" in selected_regions,
+        (
+            args.v1_ripple_glm_devexp_threshold
+            if "v1" in selected_regions
+            else None
+        ),
+    )
+    if v1_unit_selection_requested and "v1" not in selected_regions:
         print(
-            "--v1-ripple-glm-units was passed, but V1 is not selected; "
+            "A V1 ripple GLM unit-selection option was passed, but V1 is not selected; "
             "CA1 units are unchanged."
         )
     output_paths = build_classifier_output_paths(
@@ -346,6 +368,7 @@ def run(args: argparse.Namespace) -> None:
         analysis_path=analysis_path,
         epoch=args.epoch,
         v1_ripple_glm_units=args.v1_ripple_glm_units,
+        v1_ripple_glm_devexp_threshold=args.v1_ripple_glm_devexp_threshold,
     )
 
     time_grid = build_time_grid(
@@ -426,6 +449,7 @@ def run(args: argparse.Namespace) -> None:
             "direction": args.direction,
             "movement": args.movement,
             "v1_ripple_glm_units": args.v1_ripple_glm_units,
+            "v1_ripple_glm_devexp_threshold": args.v1_ripple_glm_devexp_threshold,
             "unit_selection_label": unit_selection_label,
             "v1_ripple_glm_p_value_threshold": DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
             "cuda_visible_devices": args.cuda_visible_devices,

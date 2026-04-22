@@ -7,7 +7,9 @@ assigns every trimmed epoch time bin to exactly one cross-validation fold, and
 saves one combined NetCDF prediction result per requested region. Bins inside
 trajectory intervals inherit that trajectory's held-out fold, while bins
 between trajectories inherit the earlier trajectory's fold. When requested, V1
-prediction uses the same significant ripple GLM unit subset expected by fit.
+prediction uses the same ripple GLM unit subset expected by fit.
+By default, RTC computes the acausal smoothed posterior; `--causal-only`
+skips that pass and writes the causal posterior output instead.
 """
 
 import argparse
@@ -30,6 +32,8 @@ from v1ca1.decoding._1d import (
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
     DISCRETE_VAR_CHOICES,
+    POSTERIOR_KIND_ACAUSAL,
+    POSTERIOR_KIND_CAUSAL,
     REGIONS,
     build_classifier_output_paths,
     build_full_epoch_prediction_fold,
@@ -62,7 +66,20 @@ from v1ca1.helper.run_logging import write_run_log
 
 
 SCRIPT_NAME = "v1ca1.decoding.predict_1d"
-POSTERIOR_NAME = "acausal_posterior"
+
+
+def get_posterior_kind(*, causal_only: bool) -> str:
+    """Return the prediction posterior kind for the requested mode."""
+    if causal_only:
+        return POSTERIOR_KIND_CAUSAL
+    return POSTERIOR_KIND_ACAUSAL
+
+
+def get_posterior_name(*, causal_only: bool) -> str:
+    """Return the RTC posterior variable to save and display."""
+    if causal_only:
+        return "causal_posterior"
+    return "acausal_posterior"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -162,13 +179,23 @@ def parse_arguments() -> argparse.Namespace:
         default=True,
         help="Load classifiers fit with movement-restricted training. Default: enabled.",
     )
-    parser.add_argument(
+    unit_selection_group = parser.add_mutually_exclusive_group()
+    unit_selection_group.add_argument(
         "--v1-ripple-glm-units",
         action="store_true",
         help=(
             "Use classifiers and V1 spike indicators restricted to units with "
             "ripple GLM deviance-explained p-value < "
             f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
+        ),
+    )
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-devexp-threshold",
+        type=float,
+        help=(
+            "Use classifiers and V1 spike indicators restricted to units with "
+            "ripple GLM ripple_devexp_mean greater than or equal to this value. "
+            "Default: use all units."
         ),
     )
     parser.add_argument(
@@ -179,6 +206,14 @@ def parse_arguments() -> argparse.Namespace:
         "--figurl",
         action="store_true",
         help="Generate one combined figurl text output for the predicted epoch.",
+    )
+    parser.add_argument(
+        "--causal-only",
+        action="store_true",
+        help=(
+            "Skip the acausal smoothing pass and save/display only the causal "
+            "posterior. Default: compute acausal posterior."
+        ),
     )
     parser.add_argument(
         "--figurl-only",
@@ -214,6 +249,9 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--movement-var must be positive.")
     if args.branch_gap_cm < 0:
         raise ValueError("--branch-gap-cm must be non-negative.")
+    if args.v1_ripple_glm_devexp_threshold is not None:
+        if not np.isfinite(args.v1_ripple_glm_devexp_threshold):
+            raise ValueError("--v1-ripple-glm-devexp-threshold must be finite.")
 
 
 def discretize_and_trim(posterior: Any) -> Any:
@@ -293,7 +331,7 @@ def make_speed_view(time_grid: np.ndarray, speed: np.ndarray) -> Any:
     return speed_view
 
 
-def make_state_probability_view(results: Any) -> Any:
+def make_state_probability_view(results: Any, *, posterior_name: str) -> Any:
     """Return state probability traces for one prediction dataset."""
     import sortingview.views as vv
 
@@ -315,7 +353,7 @@ def make_state_probability_view(results: Any) -> Any:
             name=str(state),
             t=np.asarray(results.time.values, dtype=np.float32),
             y=np.asarray(
-                results[POSTERIOR_NAME].sel(state=state).sum("position"),
+                results[posterior_name].sel(state=state).sum("position"),
                 dtype=np.float32,
             ),
             color=color,
@@ -387,12 +425,13 @@ def make_region_figurl_panel(
     speed: np.ndarray,
     spike_indicator: np.ndarray,
     time_bin_size_s: float,
+    posterior_name: str,
 ) -> Any:
     """Return a vertical SortingView panel for one region."""
     import sortingview.views as vv
 
     decode_view = create_1d_decode_view(
-        posterior=results[POSTERIOR_NAME].sum("state"),
+        posterior=results[posterior_name].sum("state"),
         sampling_frequency=1.0 / float(time_bin_size_s),
         observed_position=linear_position,
     )
@@ -402,7 +441,7 @@ def make_region_figurl_panel(
         items=[
             vv.LayoutItem(decode_view, stretch=3, title=f"Decode {region.upper()}"),
             vv.LayoutItem(
-                make_state_probability_view(results),
+                make_state_probability_view(results, posterior_name=posterior_name),
                 stretch=1,
                 title=f"State probability {region.upper()}",
             ),
@@ -443,6 +482,7 @@ def make_combined_figurl_view(
     speed: np.ndarray,
     spike_indicator_by_region: dict[str, np.ndarray],
     time_bin_size_s: float,
+    posterior_name: str,
 ) -> Any:
     """Return a one-region or two-region SortingView layout."""
     import sortingview.views as vv
@@ -459,6 +499,7 @@ def make_combined_figurl_view(
             speed=speed,
             spike_indicator=spike_indicator_by_region[region],
             time_bin_size_s=time_bin_size_s,
+            posterior_name=posterior_name,
         )
         for region in regions
     ]
@@ -494,6 +535,7 @@ def save_figurl(
     speed: np.ndarray,
     spike_indicator_by_region: dict[str, np.ndarray],
     time_bin_size_s: float,
+    posterior_name: str,
 ) -> Path:
     """Create and save one combined figurl URL."""
     os.environ.setdefault("KACHERY_ZONE", "franklab.default")
@@ -517,11 +559,13 @@ def save_figurl(
         speed=speed,
         spike_indicator_by_region=spike_indicator_by_region,
         time_bin_size_s=time_bin_size_s,
+        posterior_name=posterior_name,
     )
     label = (
         f"{animal_name} {date} {epoch} 1D CV decode "
         f"regions {','.join(regions)} {n_folds} folds "
         f"unit_selection {unit_selection_label} "
+        f"posterior {posterior_name} "
         f"figurl_time_zero_s {figurl_time_zero:.6f}"
     )
     figurl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -546,6 +590,7 @@ def predict_region(
     speed: np.ndarray,
     n_folds: int,
     state_names: list[str],
+    causal_only: bool,
 ) -> tuple[Any, np.ndarray]:
     """Predict one combined cross-validated posterior dataset for one region."""
     spike_indicator = get_spike_indicator(
@@ -578,6 +623,7 @@ def predict_region(
                 spike_indicator[fold_mask],
                 time=time_grid[fold_mask],
                 state_names=state_names,
+                is_compute_acausal=not causal_only,
                 use_gpu=True,
             )
         )
@@ -592,7 +638,12 @@ def predict_region(
     return combined, spike_indicator
 
 
-def load_saved_prediction_result(path: Path, *, time_grid: np.ndarray) -> Any:
+def load_saved_prediction_result(
+    path: Path,
+    *,
+    time_grid: np.ndarray,
+    posterior_name: str,
+) -> Any:
     """Load one existing prediction result and validate its time coordinate."""
     import xarray as xr
 
@@ -610,6 +661,11 @@ def load_saved_prediction_result(path: Path, *, time_grid: np.ndarray) -> Any:
             "Check --time-bin-size-s, --position-offset, --animal-name, --date, "
             "and --epoch."
         )
+    if posterior_name not in result:
+        raise ValueError(
+            f"Saved prediction result {path} does not contain {posterior_name!r}. "
+            "Check whether the file was produced with matching --causal-only."
+        )
     return result
 
 
@@ -625,12 +681,23 @@ def run(args: argparse.Namespace) -> None:
     )
     selected_regions = select_regions(args.region)
     should_generate_figurl = args.figurl or args.figurl_only
-    unit_selection_label = get_unit_selection_label(
-        args.v1_ripple_glm_units and "v1" in selected_regions
+    posterior_kind = get_posterior_kind(causal_only=args.causal_only)
+    posterior_name = get_posterior_name(causal_only=args.causal_only)
+    v1_unit_selection_requested = (
+        args.v1_ripple_glm_units
+        or args.v1_ripple_glm_devexp_threshold is not None
     )
-    if args.v1_ripple_glm_units and "v1" not in selected_regions:
+    unit_selection_label = get_unit_selection_label(
+        args.v1_ripple_glm_units and "v1" in selected_regions,
+        (
+            args.v1_ripple_glm_devexp_threshold
+            if "v1" in selected_regions
+            else None
+        ),
+    )
+    if v1_unit_selection_requested and "v1" not in selected_regions:
         print(
-            "--v1-ripple-glm-units was passed, but V1 is not selected; "
+            "A V1 ripple GLM unit-selection option was passed, but V1 is not selected; "
             "CA1 units are unchanged."
         )
     classifier_paths = build_classifier_output_paths(
@@ -664,6 +731,7 @@ def run(args: argparse.Namespace) -> None:
         movement_var=args.movement_var,
         branch_gap_cm=args.branch_gap_cm,
         unit_selection_label=unit_selection_label,
+        posterior_kind=posterior_kind,
     )
     figurl_path_value = (
         figurl_output_path(
@@ -681,6 +749,7 @@ def run(args: argparse.Namespace) -> None:
             movement_var=args.movement_var,
             branch_gap_cm=args.branch_gap_cm,
             unit_selection_label=unit_selection_label,
+            posterior_kind=posterior_kind,
         )
         if should_generate_figurl
         else None
@@ -731,6 +800,7 @@ def run(args: argparse.Namespace) -> None:
         analysis_path=analysis_path,
         epoch=args.epoch,
         v1_ripple_glm_units=args.v1_ripple_glm_units,
+        v1_ripple_glm_devexp_threshold=args.v1_ripple_glm_devexp_threshold,
     )
 
     time_grid = build_time_grid(
@@ -768,6 +838,7 @@ def run(args: argparse.Namespace) -> None:
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
         f"random_state={args.random_state}, direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
+        f" posterior={posterior_name}."
     )
     results_by_region: dict[str, Any] = {}
     spike_indicator_by_region: dict[str, np.ndarray] = {}
@@ -777,6 +848,7 @@ def run(args: argparse.Namespace) -> None:
             combined_result = load_saved_prediction_result(
                 prediction_paths[region],
                 time_grid=time_grid,
+                posterior_name=posterior_name,
             )
             spike_indicator = get_spike_indicator(
                 sortings[region],
@@ -804,6 +876,7 @@ def run(args: argparse.Namespace) -> None:
             speed=speed,
             n_folds=args.n_folds,
             state_names=state_names,
+            causal_only=args.causal_only,
         )
         combined_result.attrs.update(
             {
@@ -824,6 +897,11 @@ def run(args: argparse.Namespace) -> None:
                 "direction": str(args.direction),
                 "movement": str(args.movement),
                 "v1_ripple_glm_units": str(args.v1_ripple_glm_units),
+                "v1_ripple_glm_devexp_threshold": (
+                    ""
+                    if args.v1_ripple_glm_devexp_threshold is None
+                    else str(args.v1_ripple_glm_devexp_threshold)
+                ),
                 "unit_selection_label": unit_selection_label,
                 "unit_selection_method": unit_selection_by_region[region]["method"],
                 "n_units_available": int(unit_selection_by_region[region]["n_available"]),
@@ -831,6 +909,10 @@ def run(args: argparse.Namespace) -> None:
                 "v1_ripple_glm_p_value_threshold": float(
                     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD
                 ),
+                "posterior_kind": posterior_kind,
+                "posterior_name": posterior_name,
+                "causal_only": str(args.causal_only),
+                "is_compute_acausal": str(not args.causal_only),
                 "unit_selection_source_path": str(
                     unit_selection_by_region[region].get("source_path", "")
                 ),
@@ -864,6 +946,7 @@ def run(args: argparse.Namespace) -> None:
             speed=speed,
             spike_indicator_by_region=spike_indicator_by_region,
             time_bin_size_s=args.time_bin_size_s,
+            posterior_name=posterior_name,
         )
 
     log_path = write_run_log(
@@ -888,10 +971,14 @@ def run(args: argparse.Namespace) -> None:
             "direction": args.direction,
             "movement": args.movement,
             "v1_ripple_glm_units": args.v1_ripple_glm_units,
+            "v1_ripple_glm_devexp_threshold": args.v1_ripple_glm_devexp_threshold,
             "unit_selection_label": unit_selection_label,
             "v1_ripple_glm_p_value_threshold": DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
             "cuda_visible_devices": args.cuda_visible_devices,
             "figurl": should_generate_figurl,
+            "causal_only": args.causal_only,
+            "posterior_kind": posterior_kind,
+            "posterior_name": posterior_name,
             "figurl_only": args.figurl_only,
             "overwrite": args.overwrite,
         },

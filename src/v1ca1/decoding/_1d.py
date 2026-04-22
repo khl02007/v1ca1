@@ -47,13 +47,51 @@ DEFAULT_MOVEMENT_VAR = 6.0
 DEFAULT_BRANCH_GAP_CM = 15.0
 DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD = 0.05
 DISCRETE_VAR_CHOICES = ("switching", "random_walk", "uniform")
+POSTERIOR_KIND_ACAUSAL = "acausal"
+POSTERIOR_KIND_CAUSAL = "causal"
+POSTERIOR_KIND_CHOICES = (POSTERIOR_KIND_ACAUSAL, POSTERIOR_KIND_CAUSAL)
 UNIT_SELECTION_ALL = "all_units"
 UNIT_SELECTION_V1_RIPPLE_DEVEXP = "v1_units_ripple_devexp_p_lt_0p05"
+UNIT_SELECTION_V1_RIPPLE_DEVEXP_THRESHOLD_PREFIX = "v1_units_ripple_devexp_ge"
 GPU_KDE_PACKAGE_HINT = "cupy-cuda12x"
 
 
-def get_unit_selection_label(v1_ripple_glm_units: bool) -> str:
+def format_prediction_posterior_path_suffix(posterior_kind: str) -> str:
+    """Return the output-path suffix for one prediction posterior kind."""
+    if posterior_kind == POSTERIOR_KIND_ACAUSAL:
+        return ""
+    if posterior_kind == POSTERIOR_KIND_CAUSAL:
+        return "_posterior_causal"
+    raise ValueError(
+        f"posterior_kind must be one of {POSTERIOR_KIND_CHOICES!r}; "
+        f"got {posterior_kind!r}."
+    )
+
+
+def format_unit_selection_threshold_value(value: float) -> str:
+    """Return a filesystem-friendly threshold value."""
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError("Unit-selection threshold must be finite.")
+    text = np.format_float_positional(value, trim="-")
+    return text.replace("-", "m").replace(".", "p")
+
+
+def get_unit_selection_label(
+    v1_ripple_glm_units: bool,
+    v1_ripple_glm_devexp_threshold: float | None = None,
+) -> str:
     """Return the filename/log label for the requested unit-selection mode."""
+    if v1_ripple_glm_units and v1_ripple_glm_devexp_threshold is not None:
+        raise ValueError(
+            "--v1-ripple-glm-units and --v1-ripple-glm-devexp-threshold "
+            "are mutually exclusive."
+        )
+    if v1_ripple_glm_devexp_threshold is not None:
+        threshold_label = format_unit_selection_threshold_value(
+            v1_ripple_glm_devexp_threshold
+        )
+        return f"{UNIT_SELECTION_V1_RIPPLE_DEVEXP_THRESHOLD_PREFIX}_{threshold_label}"
     if v1_ripple_glm_units:
         return UNIT_SELECTION_V1_RIPPLE_DEVEXP
     return UNIT_SELECTION_ALL
@@ -176,6 +214,7 @@ def prediction_output_path(
     movement_var: float,
     branch_gap_cm: float,
     unit_selection_label: str = UNIT_SELECTION_ALL,
+    posterior_kind: str = POSTERIOR_KIND_ACAUSAL,
 ) -> Path:
     """Return the combined prediction result path for one region."""
     return output_dir / (
@@ -191,6 +230,7 @@ def prediction_output_path(
         f"_movement_var_{movement_var}"
         f"_branch_gap_cm_{branch_gap_cm}"
         f"{format_unit_selection_path_suffix(unit_selection_label)}"
+        f"{format_prediction_posterior_path_suffix(posterior_kind)}"
         ".nc"
     )
 
@@ -211,6 +251,7 @@ def build_prediction_output_paths(
     movement_var: float,
     branch_gap_cm: float,
     unit_selection_label: str = UNIT_SELECTION_ALL,
+    posterior_kind: str = POSTERIOR_KIND_ACAUSAL,
 ) -> dict[str, Path]:
     """Return combined prediction output paths for all requested regions."""
     return {
@@ -229,6 +270,7 @@ def build_prediction_output_paths(
             movement_var=movement_var,
             branch_gap_cm=branch_gap_cm,
             unit_selection_label=unit_selection_label,
+            posterior_kind=posterior_kind,
         )
         for region in regions
     }
@@ -250,6 +292,7 @@ def figurl_output_path(
     movement_var: float,
     branch_gap_cm: float,
     unit_selection_label: str = UNIT_SELECTION_ALL,
+    posterior_kind: str = POSTERIOR_KIND_ACAUSAL,
 ) -> Path:
     """Return the combined figurl text output path."""
     region_label = "_".join(regions)
@@ -266,6 +309,7 @@ def figurl_output_path(
         f"_movement_var_{movement_var}"
         f"_branch_gap_cm_{branch_gap_cm}"
         f"{format_unit_selection_path_suffix(unit_selection_label)}"
+        f"{format_prediction_posterior_path_suffix(posterior_kind)}"
         ".txt"
     )
 
@@ -540,6 +584,66 @@ def load_v1_ripple_glm_significant_unit_ids(
     }
 
 
+def load_v1_ripple_glm_devexp_threshold_unit_ids(
+    *,
+    analysis_path: Path,
+    epoch: str,
+    devexp_threshold: float,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Load V1 units whose ripple deviance explained meets a threshold."""
+    import xarray as xr
+
+    artifact_path = get_default_v1_ripple_glm_path(analysis_path, epoch)
+    if not artifact_path.exists():
+        raise FileNotFoundError(
+            "Required V1 ripple GLM unit-selection artifact not found. "
+            f"Expected the default same-epoch ripple GLM output at {artifact_path}"
+        )
+
+    threshold = float(devexp_threshold)
+    with xr.open_dataset(artifact_path) as dataset:
+        if "ripple_devexp_mean" not in dataset:
+            raise ValueError(
+                "Ripple GLM artifact is missing required variable "
+                f"'ripple_devexp_mean': {artifact_path}"
+            )
+        if "unit" not in dataset.coords:
+            raise ValueError(
+                f"Ripple GLM artifact is missing required 'unit' coordinate: {artifact_path}"
+            )
+
+        devexp = np.asarray(dataset["ripple_devexp_mean"].values, dtype=float).ravel()
+        unit_ids = np.asarray(dataset.coords["unit"].values).ravel()
+        if devexp.shape[0] != unit_ids.shape[0]:
+            raise ValueError(
+                "Ripple GLM artifact has mismatched deviance-explained and unit "
+                f"dimensions: {devexp.shape[0]} values vs {unit_ids.shape[0]} "
+                f"units in {artifact_path}"
+            )
+        keep = np.isfinite(devexp) & (devexp >= threshold)
+        selected_unit_ids = [
+            normalize_unit_id(unit_id)
+            for unit_id in unit_ids[keep].tolist()
+        ]
+
+    if not selected_unit_ids:
+        raise ValueError(
+            "No V1 units passed ripple GLM deviance-explained selection "
+            f"(ripple_devexp_mean >= {threshold}) in {artifact_path}"
+        )
+
+    return selected_unit_ids, {
+        "method": get_unit_selection_label(
+            False,
+            v1_ripple_glm_devexp_threshold=threshold,
+        ),
+        "source_path": artifact_path,
+        "devexp_threshold": threshold,
+        "n_available": int(unit_ids.size),
+        "n_selected": int(len(selected_unit_ids)),
+    }
+
+
 def build_unit_ids_by_region(
     *,
     sortings: dict[str, Any],
@@ -547,18 +651,44 @@ def build_unit_ids_by_region(
     analysis_path: Path,
     epoch: str,
     v1_ripple_glm_units: bool,
+    v1_ripple_glm_devexp_threshold: float | None = None,
 ) -> tuple[dict[str, list[Any]], dict[str, dict[str, Any]]]:
     """Return decoding unit IDs and selection metadata for each region."""
+    if v1_ripple_glm_units and v1_ripple_glm_devexp_threshold is not None:
+        raise ValueError(
+            "--v1-ripple-glm-units and --v1-ripple-glm-devexp-threshold "
+            "are mutually exclusive."
+        )
+
     unit_ids_by_region: dict[str, list[Any]] = {}
     unit_selection_by_region: dict[str, dict[str, Any]] = {}
 
     for region in regions:
         sorting_unit_ids = list(sortings[region].get_unit_ids())
-        if region == "v1" and v1_ripple_glm_units:
-            selected_unit_ids, selection_info = load_v1_ripple_glm_significant_unit_ids(
-                analysis_path=analysis_path,
-                epoch=epoch,
-            )
+        if region == "v1" and (
+            v1_ripple_glm_units or v1_ripple_glm_devexp_threshold is not None
+        ):
+            if v1_ripple_glm_units:
+                selected_unit_ids, selection_info = load_v1_ripple_glm_significant_unit_ids(
+                    analysis_path=analysis_path,
+                    epoch=epoch,
+                )
+                selection_description = (
+                    "ripple_devexp_p_value "
+                    f"< {selection_info['p_value_threshold']}"
+                )
+            else:
+                selected_unit_ids, selection_info = (
+                    load_v1_ripple_glm_devexp_threshold_unit_ids(
+                        analysis_path=analysis_path,
+                        epoch=epoch,
+                        devexp_threshold=float(v1_ripple_glm_devexp_threshold),
+                    )
+                )
+                selection_description = (
+                    "ripple_devexp_mean "
+                    f">= {selection_info['devexp_threshold']}"
+                )
             aligned_unit_ids = align_unit_ids_to_sorting(
                 selected_unit_ids,
                 sorting_unit_ids,
@@ -573,9 +703,7 @@ def build_unit_ids_by_region(
             print(
                 "Restricting V1 decoding units to "
                 f"{len(aligned_unit_ids)}/{selection_info['n_available']} units with "
-                "ripple_devexp_p_value "
-                f"< {selection_info['p_value_threshold']} from "
-                f"{selection_info['source_path']}."
+                f"{selection_description} from {selection_info['source_path']}."
             )
             continue
 
