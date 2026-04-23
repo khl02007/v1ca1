@@ -207,7 +207,7 @@ def test_parse_arguments_supports_model_subset(
     assert module.parse_arguments().models == ["visual", "task_segment_scalar"]
 
 
-def test_build_visual_swapped_light_eta_replaces_only_masked_bins(
+def test_build_visual_swapped_light_eta_replaces_masked_bins_with_full_light_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_model_comparison_module(
@@ -226,24 +226,29 @@ def test_build_visual_swapped_light_eta_replaces_only_masked_bins(
         [[5.0, 6.0], [6.0, 7.0], [7.0, 8.0], [8.0, 9.0]],
         dtype=float,
     )
+    own_light_offset = np.asarray([0.2, 0.4], dtype=float)
+    paired_light_offset = np.asarray([1.2, 1.4], dtype=float)
     swap_mask = np.asarray([False, True, False, True])
 
     swapped = module.build_visual_swapped_light_eta(
         own_light_eta=own_light_eta,
         own_light_place=own_light_place,
         paired_light_place=paired_light_place,
+        own_light_offset=own_light_offset,
+        paired_light_offset=paired_light_offset,
         swap_mask=swap_mask,
     )
 
     expected = own_light_eta.copy()
-    expected[1] += paired_light_place[1] - own_light_place[1]
-    expected[3] += paired_light_place[3] - own_light_place[3]
+    light_offset_delta = paired_light_offset - own_light_offset
+    expected[1] += paired_light_place[1] - own_light_place[1] + light_offset_delta
+    expected[3] += paired_light_place[3] - own_light_place[3] + light_offset_delta
     assert np.allclose(swapped, expected)
     assert np.allclose(swapped[0], own_light_eta[0])
     assert np.allclose(swapped[2], own_light_eta[2])
 
 
-def test_build_task_swapped_light_eta_replaces_one_segment_contribution(
+def test_build_task_swapped_light_eta_replaces_masked_segment_light_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_model_comparison_module(
@@ -263,19 +268,26 @@ def test_build_task_swapped_light_eta_replaces_one_segment_contribution(
         [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]],
         dtype=float,
     )
+    own_light_offset = np.asarray([0.5, 1.0], dtype=float)
+    paired_light_offset = np.asarray([2.5, 4.0], dtype=float)
+    swap_mask = np.asarray([False, True, False])
 
     swapped = module.build_task_swapped_light_eta(
         own_light_eta=own_light_eta,
         own_gain_basis=own_gain_basis,
         own_coef_gain=own_coef_gain,
         paired_coef_gain=paired_coef_gain,
+        own_light_offset=own_light_offset,
+        paired_light_offset=paired_light_offset,
         swap_segment_index=1,
+        swap_mask=swap_mask,
     )
 
     expected = np.zeros((3, 2), dtype=float)
     expected += own_gain_basis[:, [1]] * (
         paired_coef_gain[[1], :] - own_coef_gain[[1], :]
     )
+    expected[swap_mask] += paired_light_offset - own_light_offset
     assert np.allclose(swapped, expected)
     assert np.allclose(swapped[0], [0.0, 0.0])
     assert np.allclose(swapped[2], [0.0, 0.0])

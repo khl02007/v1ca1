@@ -1067,11 +1067,21 @@ def build_visual_swapped_light_eta(
     own_light_eta: np.ndarray,
     own_light_place: np.ndarray,
     paired_light_place: np.ndarray,
+    own_light_offset: np.ndarray | float = 0.0,
+    paired_light_offset: np.ndarray | float = 0.0,
     swap_mask: np.ndarray,
 ) -> np.ndarray:
-    """Return the visual-model light prediction after the designated segment swap."""
+    """Return light prediction after swapping the full visual light component."""
     swapped_eta = np.asarray(own_light_eta, dtype=float).copy()
-    delta = np.asarray(paired_light_place, dtype=float) - np.asarray(own_light_place, dtype=float)
+    light_offset_delta = (
+        np.asarray(paired_light_offset, dtype=float).reshape(1, -1)
+        - np.asarray(own_light_offset, dtype=float).reshape(1, -1)
+    )
+    delta = (
+        np.asarray(paired_light_place, dtype=float)
+        - np.asarray(own_light_place, dtype=float)
+        + light_offset_delta
+    )
     swapped_eta[np.asarray(swap_mask, dtype=bool)] += delta[np.asarray(swap_mask, dtype=bool)]
     return swapped_eta
 
@@ -1082,14 +1092,24 @@ def build_task_swapped_light_eta(
     own_gain_basis: np.ndarray,
     own_coef_gain: np.ndarray,
     paired_coef_gain: np.ndarray,
+    own_light_offset: np.ndarray | float = 0.0,
+    paired_light_offset: np.ndarray | float = 0.0,
     swap_segment_index: int,
+    swap_mask: np.ndarray,
 ) -> np.ndarray:
-    """Return the task-model light prediction after swapping one gain segment."""
+    """Return task-model light prediction after swapping one light segment."""
     swapped_eta = np.asarray(own_light_eta, dtype=float).copy()
     gain_column = np.asarray(own_gain_basis[:, swap_segment_index], dtype=float)[:, None]
     own_contribution = gain_column * np.asarray(own_coef_gain[swap_segment_index], dtype=float)[None, :]
     paired_contribution = gain_column * np.asarray(paired_coef_gain[swap_segment_index], dtype=float)[None, :]
-    swapped_eta += paired_contribution - own_contribution
+    light_offset_delta = (
+        np.asarray(paired_light_offset, dtype=float).reshape(1, -1)
+        - np.asarray(own_light_offset, dtype=float).reshape(1, -1)
+    )
+    mask = np.asarray(swap_mask, dtype=bool)
+    swapped_eta[mask] += (
+        paired_contribution[mask] - own_contribution[mask] + light_offset_delta
+    )
     return swapped_eta
 
 
@@ -1770,12 +1790,16 @@ def finalize_model_results_by_trajectory(
                 own_light_eta=fit_result["pred_validation_light"]["light_eta"],
                 own_light_place=fit_result["pred_validation_light"]["light_place"],
                 paired_light_place=paired_validation_light_place,
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=validation_mask,
             )
             swapped_test_eta = build_visual_swapped_light_eta(
                 own_light_eta=fit_result["pred_test_light"]["light_eta"],
                 own_light_place=fit_result["pred_test_light"]["light_place"],
                 paired_light_place=paired_test_light_place,
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=test_mask,
             )
             grid = np.linspace(POS_BOUNDS[0], POS_BOUNDS[1], 200)
@@ -1805,6 +1829,8 @@ def finalize_model_results_by_trajectory(
                 own_light_eta=grid_pred["light_eta"],
                 own_light_place=grid_pred["light_place"],
                 paired_light_place=paired_grid_pred["light_place"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=swap_grid_mask,
             )
         elif model_name == "task_segment_bump":
@@ -1813,14 +1839,20 @@ def finalize_model_results_by_trajectory(
                 own_gain_basis=fit_result["pred_validation_light"]["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_bump_gain"],
                 paired_coef_gain=paired_result["coef_segment_bump_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=validation_mask,
             )
             swapped_test_eta = build_task_swapped_light_eta(
                 own_light_eta=fit_result["pred_test_light"]["light_eta"],
                 own_gain_basis=fit_result["pred_test_light"]["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_bump_gain"],
                 paired_coef_gain=paired_result["coef_segment_bump_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=test_mask,
             )
             grid = np.linspace(POS_BOUNDS[0], POS_BOUNDS[1], 200)
             speed_ref = _speed_reference_design(fit_result["speed_transform"])
@@ -1835,12 +1867,16 @@ def finalize_model_results_by_trajectory(
                 coef_gain=fit_result["coef_segment_bump_gain"],
                 coef_speed_basis=fit_result["coef_speed_basis"],
             )
+            swap_grid_mask = _segment_mask(grid, segment_edges, swap_segment_index)
             swapped_grid_eta = build_task_swapped_light_eta(
                 own_light_eta=grid_pred["light_eta"],
                 own_gain_basis=grid_pred["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_bump_gain"],
                 paired_coef_gain=paired_result["coef_segment_bump_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=swap_grid_mask,
             )
         elif model_name == "task_segment_scalar":
             swapped_validation_eta = build_task_swapped_light_eta(
@@ -1848,14 +1884,20 @@ def finalize_model_results_by_trajectory(
                 own_gain_basis=fit_result["pred_validation_light"]["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_scalar_gain"],
                 paired_coef_gain=paired_result["coef_segment_scalar_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=validation_mask,
             )
             swapped_test_eta = build_task_swapped_light_eta(
                 own_light_eta=fit_result["pred_test_light"]["light_eta"],
                 own_gain_basis=fit_result["pred_test_light"]["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_scalar_gain"],
                 paired_coef_gain=paired_result["coef_segment_scalar_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=test_mask,
             )
             grid = np.linspace(POS_BOUNDS[0], POS_BOUNDS[1], 200)
             speed_ref = _speed_reference_design(fit_result["speed_transform"])
@@ -1870,12 +1912,16 @@ def finalize_model_results_by_trajectory(
                 coef_segment_scalar_gain=fit_result["coef_segment_scalar_gain"],
                 coef_speed_basis=fit_result["coef_speed_basis"],
             )
+            swap_grid_mask = _segment_mask(grid, segment_edges, swap_segment_index)
             swapped_grid_eta = build_task_swapped_light_eta(
                 own_light_eta=grid_pred["light_eta"],
                 own_gain_basis=grid_pred["gain_basis"],
                 own_coef_gain=fit_result["coef_segment_scalar_gain"],
                 paired_coef_gain=paired_result["coef_segment_scalar_gain"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_segment_index=swap_segment_index,
+                swap_mask=swap_grid_mask,
             )
         elif model_name == "task_dense_gain":
             paired_validation_gain_part = np.asarray(
@@ -1890,12 +1936,16 @@ def finalize_model_results_by_trajectory(
                 own_light_eta=fit_result["pred_validation_light"]["light_eta"],
                 own_light_place=fit_result["pred_validation_light"]["gain_part"],
                 paired_light_place=paired_validation_gain_part,
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=validation_mask,
             )
             swapped_test_eta = build_visual_swapped_light_eta(
                 own_light_eta=fit_result["pred_test_light"]["light_eta"],
                 own_light_place=fit_result["pred_test_light"]["gain_part"],
                 paired_light_place=paired_test_gain_part,
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=test_mask,
             )
             grid = np.linspace(POS_BOUNDS[0], POS_BOUNDS[1], 200)
@@ -1927,6 +1977,8 @@ def finalize_model_results_by_trajectory(
                 own_light_eta=grid_pred["light_eta"],
                 own_light_place=grid_pred["gain_part"],
                 paired_light_place=paired_grid_pred["gain_part"],
+                own_light_offset=fit_result["coef_light"],
+                paired_light_offset=paired_result["coef_light"],
                 swap_mask=swap_grid_mask,
             )
         else:
