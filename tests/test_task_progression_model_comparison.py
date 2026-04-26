@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-import os
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +33,60 @@ def _fake_speed_outputs() -> dict[str, object]:
         "speed_std": 1.0,
         "coef_speed": np.asarray([0.1, 0.2], dtype=float),
         "coef_speed_basis": np.asarray([[0.1, 0.2]], dtype=float),
+    }
+
+
+class _FakeBasis:
+    def __init__(self, n_basis_funcs=2, order=4, bounds=(0.0, 1.0)):
+        self.n_basis_funcs = int(n_basis_funcs)
+
+    def compute_features(self, values):
+        values = np.asarray(values, dtype=float).reshape(-1)
+        return np.column_stack(
+            [values ** power for power in range(self.n_basis_funcs)]
+        )
+
+
+def _patch_fake_glm_backend(module, monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, np.ndarray] = {}
+
+    class FakePopulationGLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fit(self, x_train, y_train):
+            x_train = np.asarray(x_train, dtype=float)
+            y_train = np.asarray(y_train, dtype=float)
+            captured["x_train"] = x_train
+            self.intercept_ = np.zeros((y_train.shape[1],), dtype=float)
+            self.coef_ = np.arange(
+                x_train.shape[1] * y_train.shape[1],
+                dtype=float,
+            ).reshape(x_train.shape[1], y_train.shape[1])
+            return self
+
+    monkeypatch.setattr(module, "BSplineEval", _FakeBasis)
+    monkeypatch.setattr(module, "PopulationGLM", FakePopulationGLM)
+    return captured
+
+
+def _fake_epoch_inputs(n_units: int = 1) -> dict[str, dict[str, np.ndarray]]:
+    unit_ids = np.arange(11, 11 + n_units)
+
+    def make_split(p_values):
+        p_values = np.asarray(p_values, dtype=float)
+        return {
+            "unit_ids": unit_ids,
+            "y": np.ones((p_values.size, n_units), dtype=float),
+            "p": p_values,
+            "v": None,
+        }
+
+    return {
+        "train_dark": make_split([0.1, 0.4]),
+        "train_light": make_split([0.2, 0.6]),
+        "validation_light": make_split([0.2, 0.8]),
+        "test_light": make_split([0.2, 0.8]),
     }
 
 
@@ -133,6 +187,122 @@ def _fake_result(module, *, model_name: str) -> dict[str, object]:
     return result
 
 
+def _fake_selected_dark_light_dataset(module, xr, *, model_name: str):
+    coords = {
+        "trajectory": np.asarray(module.TRAJECTORY_TYPES, dtype=str),
+        "unit": np.asarray([11, 12], dtype=int),
+        "tp_grid": np.linspace(0.0, 1.0, 5),
+        "segment_edge": np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+    }
+    return xr.Dataset(
+        data_vars={},
+        coords=coords,
+        attrs={
+            "schema_version": "4",
+            "fit_stage": "selected",
+            "animal_name": "L14",
+            "date": "20240611",
+            "region": "v1",
+            "model_name": model_name,
+            "dark_train_epoch": "08_r4",
+            "light_train_epoch": "02_r1",
+            "bin_size_s": 0.05,
+            "selected_bin_size_s": 0.05,
+            "selected_n_splines": 3,
+            "spline_order": 4,
+            "has_speed": False,
+            "has_light_offset_term": True,
+            "speed_feature_mode": "none",
+            "n_speed_features": 0,
+            "speed_spline_order": np.nan,
+            "selected_ridge": 1e-3,
+            "selection_score": 0.2,
+        },
+    )
+
+
+def _with_linear_speed_metadata(dataset, *, speed_mean: float, speed_std: float):
+    n_trajectories = int(dataset.sizes["trajectory"])
+    dataset = dataset.assign(
+        {
+            "speed_feature_mode": (
+                ("trajectory",),
+                np.full((n_trajectories,), "linear", dtype=object),
+            ),
+            "speed_basis": (
+                ("trajectory",),
+                np.full((n_trajectories,), "linear", dtype=object),
+            ),
+            "n_speed_features": (
+                ("trajectory",),
+                np.ones((n_trajectories,), dtype=int),
+            ),
+            "speed_spline_order": (
+                ("trajectory",),
+                np.full((n_trajectories,), np.nan, dtype=float),
+            ),
+            "speed_basis_bounds": (
+                ("trajectory", "speed_bound"),
+                np.full((n_trajectories, 2), np.nan, dtype=float),
+            ),
+            "speed_reference_value": (
+                ("trajectory",),
+                np.full((n_trajectories,), speed_mean, dtype=float),
+            ),
+            "speed_mean": (
+                ("trajectory",),
+                np.full((n_trajectories,), speed_mean, dtype=float),
+            ),
+            "speed_std": (
+                ("trajectory",),
+                np.full((n_trajectories,), speed_std, dtype=float),
+            ),
+        }
+    )
+    dataset.attrs.update(
+        {
+            "has_speed": True,
+            "speed_feature_mode": "linear",
+            "n_speed_features": 1,
+            "speed_spline_order": np.nan,
+        }
+    )
+    return dataset
+
+
+def _fake_selected_swap_results(module, *, swapped_bits: np.ndarray):
+    swapped_bits = np.asarray(swapped_bits, dtype=float)
+    results = {}
+    for trajectory in module.TRAJECTORY_TYPES:
+        results[trajectory] = {
+            "unit_ids": np.asarray([11, 12], dtype=int),
+            "swap_source_trajectory": module.SWAP_CONFIG[trajectory]["source_trajectory"],
+            "swap_segment_index_1based": (
+                int(module.SWAP_CONFIG[trajectory]["segment_index"]) + 1
+            ),
+            "swap_segment_start": 0.3,
+            "swap_segment_end": 0.7,
+            "dark_hz_grid": np.full((5, 2), 1.0, dtype=float),
+            "train_light_hz_grid": np.full((5, 2), 2.0, dtype=float),
+            "test_light_unswapped_hz_grid": np.full((5, 2), 2.0, dtype=float),
+            "test_light_swapped_hz_grid": np.full((5, 2), 2.5, dtype=float),
+            "test_light_swapped_segment_n_bins": 4,
+            "test_light_full_n_bins": 10,
+        }
+        for metric_name in (
+            "test_light_swapped_segment_unswapped_metrics",
+            "test_light_swapped_segment_swapped_metrics",
+            "test_light_full_unswapped_metrics",
+            "test_light_full_swapped_metrics",
+        ):
+            results[trajectory][metric_name] = {
+                "raw_ll_sum": np.asarray([1.0, 2.0], dtype=float),
+                "spike_sum": np.asarray([10.0, 20.0], dtype=float),
+                "raw_ll_bits_per_spike": swapped_bits.copy(),
+            }
+    return results
+
+
 def test_validate_model_comparison_epochs_rejects_duplicate_epochs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -150,11 +320,9 @@ def test_validate_model_comparison_epochs_rejects_duplicate_epochs(
         )
 
 
-def test_cuda_visible_devices_is_preparsed_before_normal_argparse(
+def test_parse_arguments_rejects_cuda_visible_devices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
     module = _reload_model_comparison_module(
         monkeypatch,
         [
@@ -174,11 +342,8 @@ def test_cuda_visible_devices_is_preparsed_before_normal_argparse(
         ],
     )
 
-    assert module._CUDA_VISIBLE_DEVICES_CLI == "0,1"
-    assert "--cuda-visible-devices" not in sys.argv
-    assert "0,1" not in sys.argv
-    assert module.parse_arguments().cuda_visible_devices == "0,1"
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
+    with pytest.raises(SystemExit):
+        module.parse_arguments()
 
 
 def test_parse_arguments_supports_model_subset(
@@ -204,7 +369,192 @@ def test_parse_arguments_supports_model_subset(
         ],
     )
 
-    assert module.parse_arguments().models == ["visual", "task_segment_scalar"]
+    args = module.parse_arguments()
+    assert args.models == ["visual", "task_segment_scalar"]
+    assert not hasattr(args, "bin_size_s")
+    assert not hasattr(args, "include_light_offset_term")
+    assert args.dark_light_glm_dir is None
+    assert args.swap_light_offset is False
+
+
+def test_parse_arguments_supports_selected_glm_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        [
+            "swap_glm_comparison.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--dark-train-epoch",
+            "08_r4",
+            "--light-train-epoch",
+            "02_r1",
+            "--light-test-epoch",
+            "04_r2",
+            "--dark-light-glm-dir",
+            str(tmp_path),
+            "--swap-light-offset",
+        ],
+    )
+
+    args = module.parse_arguments()
+    assert args.dark_light_glm_dir == tmp_path
+    assert args.swap_light_offset is True
+
+
+def test_normalize_requested_models_adds_visual_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+
+    model_names, messages = module.normalize_requested_models(["task_segment_bump"])
+
+    assert model_names == ["visual", "task_segment_bump"]
+    assert messages == ["Added required baseline model 'visual'."]
+
+
+def test_validate_selected_dark_light_glms_accepts_matching_nan_speed_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    datasets = {
+        "visual": _fake_selected_dark_light_dataset(module, xr, model_name="visual"),
+        "task_segment_bump": _fake_selected_dark_light_dataset(
+            module,
+            xr,
+            model_name="task_segment_bump",
+        ),
+    }
+
+    metadata = module.validate_selected_dark_light_glms(
+        datasets,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+    )
+
+    assert metadata["bin_size_s"] == pytest.approx(0.05)
+    assert metadata["n_splines"] == 3
+    assert metadata["speed_feature_mode"] == "none"
+
+
+def test_validate_selected_dark_light_glms_rejects_mismatched_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    visual = _fake_selected_dark_light_dataset(module, xr, model_name="visual")
+    task = _fake_selected_dark_light_dataset(
+        module,
+        xr,
+        model_name="task_segment_bump",
+    ).assign_coords(unit=np.asarray([11, 13], dtype=int))
+
+    with pytest.raises(ValueError, match="coordinate 'unit'"):
+        module.validate_selected_dark_light_glms(
+            {"visual": visual, "task_segment_bump": task},
+            animal_name="L14",
+            date="20240611",
+            region="v1",
+            dark_train_epoch="08_r4",
+            light_train_epoch="02_r1",
+        )
+
+
+def test_validate_selected_dark_light_glms_rejects_stale_linear_speed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    visual = _with_linear_speed_metadata(
+        _fake_selected_dark_light_dataset(module, xr, model_name="visual"),
+        speed_mean=np.nan,
+        speed_std=np.nan,
+    )
+
+    with pytest.raises(ValueError, match="invalid linear speed metadata"):
+        module.validate_selected_dark_light_glms(
+            {"visual": visual},
+            animal_name="L14",
+            date="20240611",
+            region="v1",
+            dark_train_epoch="08_r4",
+            light_train_epoch="02_r1",
+        )
+
+
+def test_output_stem_marks_no_light_offset_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+
+    default_stem = module._output_stem(
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="04_r2",
+        model_name="task_segment_bump",
+        bin_size_s=0.02,
+        ridge=1e-3,
+    )
+    no_offset_stem = module._output_stem(
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="04_r2",
+        model_name="task_segment_bump",
+        bin_size_s=0.05,
+        ridge=1e-3,
+        include_light_offset_term=False,
+    )
+
+    assert "no_light_offset" not in default_stem
+    assert "testlight_bin0p02s_task_segment_bump_ridge" in default_stem
+    assert "testlight_bin0p05s_task_segment_bump_no_light_offset_ridge" in no_offset_stem
+    assert "task_segment_bump_no_light_offset_ridge" in no_offset_stem
+    assert no_offset_stem != default_stem
+
+
+def test_build_train_epoch_fr_mask_requires_dark_and_light_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+
+    masks = module.build_train_epoch_fr_mask(
+        dark_epoch_rates=np.asarray([0.6, 0.6, 0.4, np.nan], dtype=float),
+        light_epoch_rates=np.asarray([0.7, 0.2, 0.8, 0.8], dtype=float),
+        min_dark_fr_hz=0.5,
+        min_light_fr_hz=0.5,
+    )
+
+    assert np.array_equal(masks["dark"], np.asarray([True, True, False, False]))
+    assert np.array_equal(masks["light"], np.asarray([True, False, True, True]))
+    assert np.array_equal(masks["combined"], np.asarray([True, False, False, False]))
 
 
 def test_build_visual_swapped_light_eta_replaces_masked_bins_with_full_light_component(
@@ -240,12 +590,45 @@ def test_build_visual_swapped_light_eta_replaces_masked_bins_with_full_light_com
     )
 
     expected = own_light_eta.copy()
-    light_offset_delta = paired_light_offset - own_light_offset
-    expected[1] += paired_light_place[1] - own_light_place[1] + light_offset_delta
-    expected[3] += paired_light_place[3] - own_light_place[3] + light_offset_delta
+    expected[1] += paired_light_place[1] - own_light_place[1]
+    expected[3] += paired_light_place[3] - own_light_place[3]
     assert np.allclose(swapped, expected)
     assert np.allclose(swapped[0], own_light_eta[0])
     assert np.allclose(swapped[2], own_light_eta[2])
+
+
+def test_build_visual_swapped_light_eta_can_swap_light_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    own_light_eta = np.asarray([[1.0, 10.0], [2.0, 20.0]], dtype=float)
+    own_light_place = np.asarray([[0.5, 1.0], [0.6, 1.1]], dtype=float)
+    paired_light_place = np.asarray([[5.0, 6.0], [6.0, 7.0]], dtype=float)
+    own_light_offset = np.asarray([0.2, 0.4], dtype=float)
+    paired_light_offset = np.asarray([1.2, 1.4], dtype=float)
+    swap_mask = np.asarray([False, True])
+
+    swapped = module.build_visual_swapped_light_eta(
+        own_light_eta=own_light_eta,
+        own_light_place=own_light_place,
+        paired_light_place=paired_light_place,
+        own_light_offset=own_light_offset,
+        paired_light_offset=paired_light_offset,
+        swap_mask=swap_mask,
+        swap_light_offset=True,
+    )
+
+    expected = own_light_eta.copy()
+    expected[1] += (
+        paired_light_place[1]
+        - own_light_place[1]
+        + paired_light_offset
+        - own_light_offset
+    )
+    assert np.allclose(swapped, expected)
 
 
 def test_build_task_swapped_light_eta_replaces_masked_segment_light_component(
@@ -284,13 +667,129 @@ def test_build_task_swapped_light_eta_replaces_masked_segment_light_component(
     )
 
     expected = np.zeros((3, 2), dtype=float)
-    expected += own_gain_basis[:, [1]] * (
+    expected[swap_mask] += own_gain_basis[swap_mask, [1]] * (
+        paired_coef_gain[[1], :] - own_coef_gain[[1], :]
+    )
+    assert np.allclose(swapped, expected)
+    assert np.allclose(swapped[0], [0.0, 0.0])
+    assert np.allclose(swapped[2], [0.0, 0.0])
+
+
+def test_build_task_swapped_light_eta_can_swap_light_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    own_light_eta = np.zeros((2, 2), dtype=float)
+    own_gain_basis = np.asarray([[1.0, 0.0], [0.25, 0.75]], dtype=float)
+    own_coef_gain = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=float)
+    paired_coef_gain = np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=float)
+    own_light_offset = np.asarray([0.5, 1.0], dtype=float)
+    paired_light_offset = np.asarray([2.5, 4.0], dtype=float)
+    swap_mask = np.asarray([False, True])
+
+    swapped = module.build_task_swapped_light_eta(
+        own_light_eta=own_light_eta,
+        own_gain_basis=own_gain_basis,
+        own_coef_gain=own_coef_gain,
+        paired_coef_gain=paired_coef_gain,
+        own_light_offset=own_light_offset,
+        paired_light_offset=paired_light_offset,
+        swap_segment_index=1,
+        swap_mask=swap_mask,
+        swap_light_offset=True,
+    )
+
+    expected = np.zeros((2, 2), dtype=float)
+    expected[swap_mask] += own_gain_basis[swap_mask, [1]] * (
         paired_coef_gain[[1], :] - own_coef_gain[[1], :]
     )
     expected[swap_mask] += paired_light_offset - own_light_offset
     assert np.allclose(swapped, expected)
-    assert np.allclose(swapped[0], [0.0, 0.0])
-    assert np.allclose(swapped[2], [0.0, 0.0])
+
+
+def test_fit_visual_model_can_omit_light_offset_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    captured = _patch_fake_glm_backend(module, monkeypatch)
+
+    result = module.fit_visual_model_for_trajectory(
+        epoch_inputs=_fake_epoch_inputs(),
+        ridge=1e-3,
+        n_splines=2,
+        spline_order=4,
+        include_light_offset_term=False,
+        speed_feature_mode="linear",
+        n_splines_speed=5,
+        spline_order_speed=4,
+        speed_bounds=None,
+    )
+
+    assert captured["x_train"].shape == (4, 4)
+    assert result["has_light_offset_term"] is False
+    assert np.allclose(result["coef_light"], [0.0])
+
+
+def test_fit_visual_model_keeps_light_offset_column_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    captured = _patch_fake_glm_backend(module, monkeypatch)
+
+    result = module.fit_visual_model_for_trajectory(
+        epoch_inputs=_fake_epoch_inputs(),
+        ridge=1e-3,
+        n_splines=2,
+        spline_order=4,
+        speed_feature_mode="linear",
+        n_splines_speed=5,
+        spline_order_speed=4,
+        speed_bounds=None,
+    )
+
+    assert captured["x_train"].shape == (4, 5)
+    assert result["has_light_offset_term"] is True
+    assert np.allclose(result["coef_light"], [4.0])
+
+
+def test_fit_task_scalar_model_can_omit_light_offset_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    captured = _patch_fake_glm_backend(module, monkeypatch)
+
+    result = module.fit_task_segment_scalar_model_for_trajectory(
+        epoch_inputs=_fake_epoch_inputs(),
+        ridge=1e-3,
+        n_splines=2,
+        spline_order=4,
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+        include_light_offset_term=False,
+        speed_feature_mode="linear",
+        n_splines_speed=5,
+        spline_order_speed=4,
+        speed_bounds=None,
+    )
+
+    assert captured["x_train"].shape == (4, 5)
+    assert result["has_light_offset_term"] is False
+    assert np.allclose(result["coef_light"], [0.0])
+    assert np.allclose(
+        result["coef_segment_scalar_gain"].reshape(-1),
+        [2.0, 3.0, 4.0],
+    )
 
 
 def test_build_model_dataset_task_scalar_includes_family_specific_gain_name(
@@ -342,6 +841,7 @@ def test_build_model_dataset_task_scalar_includes_family_specific_gain_name(
         light_test_epoch="04_r2",
         ridge=1e-3,
         dark_movement_firing_rates=np.asarray([1.0, 2.0], dtype=float),
+        light_movement_firing_rates=np.asarray([1.5, 2.5], dtype=float),
         segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
         observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
         sources={"analysis_path": "/tmp/example"},
@@ -351,6 +851,8 @@ def test_build_model_dataset_task_scalar_includes_family_specific_gain_name(
             "spline_order": 4,
             "use_speed": True,
             "region_threshold_hz": 0.5,
+            "dark_region_threshold_hz": 0.5,
+            "light_region_threshold_hz": 0.5,
             "seed": 47,
         },
     )
@@ -408,6 +910,7 @@ def test_build_model_dataset_task_dense_gain_uses_gain_basis_dimension(
         light_test_epoch="04_r2",
         ridge=1e-3,
         dark_movement_firing_rates=np.asarray([1.0, 2.0], dtype=float),
+        light_movement_firing_rates=np.asarray([1.5, 2.5], dtype=float),
         segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
         observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
         sources={"analysis_path": "/tmp/example"},
@@ -417,6 +920,8 @@ def test_build_model_dataset_task_dense_gain_uses_gain_basis_dimension(
             "spline_order": 4,
             "use_speed": True,
             "region_threshold_hz": 0.5,
+            "dark_region_threshold_hz": 0.5,
+            "light_region_threshold_hz": 0.5,
             "seed": 47,
         },
     )
@@ -474,6 +979,7 @@ def test_build_model_dataset_visual_includes_expected_schema(
         light_test_epoch="04_r2",
         ridge=1e-3,
         dark_movement_firing_rates=np.asarray([1.0, 2.0], dtype=float),
+        light_movement_firing_rates=np.asarray([1.5, 2.5], dtype=float),
         segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
         observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
         sources={"analysis_path": "/tmp/example"},
@@ -483,11 +989,14 @@ def test_build_model_dataset_visual_includes_expected_schema(
             "spline_order": 4,
             "use_speed": True,
             "region_threshold_hz": 0.5,
+            "dark_region_threshold_hz": 0.5,
+            "light_region_threshold_hz": 0.5,
             "seed": 47,
         },
     )
 
     assert "coef_place_light" in dataset
+    assert "light_train_movement_firing_rate_hz" in dataset
     assert "swap_source_trajectory" in dataset
     assert "test_light_swapped_ll_bits_per_spike" in dataset
     assert "validation_swapped_ll_bits_per_spike_by_ridge" in dataset
@@ -504,7 +1013,83 @@ def test_build_model_dataset_visual_includes_expected_schema(
     assert dataset["test_lap_split"].dims == ("trajectory", "test_lap")
     assert np.allclose(dataset.coords["segment_edge"].values, [0.0, 0.3, 0.7, 1.0])
     assert dataset.attrs["test_scoring_scope"] == "swapped_segment_only"
+    assert dataset.attrs["schema_version"] == "3"
+    assert dataset.attrs["has_light_offset_term"] is True
+    assert dataset.attrs["min_light_firing_rate_hz"] == pytest.approx(0.5)
     assert dataset.attrs["selected_ridge"] == pytest.approx(1e-3)
+
+
+def test_build_model_dataset_no_light_offset_saves_zero_offset_coefficients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    results_by_traj = {
+        trajectory: _fake_result(module, model_name="visual")
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+    validation_sweep = {
+        "candidate_ridge": np.asarray([1e-2, 1e-3], dtype=float),
+        "validation_swapped_ll_bits_per_spike": np.full((2, 4, 2), 0.5, dtype=float),
+        "validation_swapped_deviance_explained": np.full((2, 4, 2), 0.2, dtype=float),
+        "pooled_validation_swapped_ll_bits_per_spike_median": np.asarray(
+            [0.45, 0.5],
+            dtype=float,
+        ),
+        "pooled_validation_swapped_deviance_explained_median": np.asarray(
+            [0.18, 0.2],
+            dtype=float,
+        ),
+        "pooled_validation_finite_count": np.asarray([8, 8], dtype=int),
+        "selected_ridge": 1e-3,
+    }
+    heldout_split_by_traj = {
+        trajectory: {
+            "lap_start_s": np.asarray([0.0, 1.0], dtype=float),
+            "lap_end_s": np.asarray([0.5, 1.5], dtype=float),
+            "lap_split": np.asarray(["validation", "test"], dtype=str),
+        }
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    dataset = module.build_model_dataset(
+        model_name="visual",
+        results_by_traj=results_by_traj,
+        validation_sweep=validation_sweep,
+        heldout_split_by_traj=heldout_split_by_traj,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="04_r2",
+        ridge=1e-3,
+        dark_movement_firing_rates=np.asarray([1.0, 2.0], dtype=float),
+        light_movement_firing_rates=np.asarray([1.5, 2.5], dtype=float),
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+        observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
+        sources={"analysis_path": "/tmp/example"},
+        fit_parameters={
+            "bin_size_s": 0.02,
+            "n_splines": 3,
+            "spline_order": 4,
+            "use_speed": True,
+            "include_light_offset_term": False,
+            "region_threshold_hz": 0.5,
+            "dark_region_threshold_hz": 0.5,
+            "light_region_threshold_hz": 0.5,
+            "seed": 47,
+        },
+    )
+
+    assert dataset.attrs["has_light_offset_term"] is False
+    assert dataset["coef_light_offset"].attrs["fitted"] is False
+    assert np.allclose(dataset["coef_light_offset"].values, 0.0)
+    fit_parameters = json.loads(dataset.attrs["fit_parameters_json"])
+    assert fit_parameters["include_light_offset_term"] is False
 
 
 def test_choose_best_ridge_prefers_stronger_regularization_in_near_tie(
@@ -855,6 +1440,164 @@ def test_plot_metric_difference_histograms_writes_figure(
         task_dataset,
         visual_dataset,
         metric_name="test_light_swapped_ll_bits_per_spike",
+        out_path=out_path,
+    )
+
+    assert saved_path == out_path
+    assert out_path.exists()
+
+
+def test_build_selected_swap_dataset_saves_primary_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    selected_datasets = {
+        "visual": _fake_selected_dark_light_dataset(module, xr, model_name="visual"),
+        "task_segment_bump": _fake_selected_dark_light_dataset(
+            module,
+            xr,
+            model_name="task_segment_bump",
+        ),
+    }
+    results_by_model = {
+        "visual": _fake_selected_swap_results(
+            module,
+            swapped_bits=np.asarray([0.1, 0.2], dtype=float),
+        ),
+        "task_segment_bump": _fake_selected_swap_results(
+            module,
+            swapped_bits=np.asarray([0.4, 0.15], dtype=float),
+        ),
+    }
+    observed_summaries = {
+        trajectory: {
+            "occupancy_s": np.asarray([0.1, 0.2], dtype=float),
+            "spike_count": np.ones((2, 2), dtype=float),
+            "observed_rate_hz": np.full((2, 2), 5.0, dtype=float),
+        }
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    dataset = module.build_selected_swap_dataset(
+        model_names=["visual", "task_segment_bump"],
+        selected_datasets=selected_datasets,
+        selected_paths={
+            "visual": tmp_path / "visual.nc",
+            "task_segment_bump": tmp_path / "task.nc",
+        },
+        results_by_model=results_by_model,
+        test_inputs_by_traj={},
+        observed_summaries_by_traj=observed_summaries,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="06_r3",
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+        observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
+        shared_metadata={
+            "bin_size_s": 0.05,
+            "n_splines": 3,
+            "spline_order": 4,
+            "has_speed": False,
+            "speed_feature_mode": "none",
+            "n_speed_features": 0,
+            "speed_spline_order": np.nan,
+        },
+        sources={},
+        fit_parameters={},
+    )
+
+    delta = dataset[
+        "test_light_swapped_segment_swapped_delta_model_minus_visual_raw_ll_bits_per_spike"
+    ]
+    assert np.all(np.isnan(delta.sel(model="visual").values))
+    assert np.allclose(
+        delta.sel(model="task_segment_bump").values,
+        np.tile(np.asarray([0.3, -0.05], dtype=float), (4, 1)),
+    )
+    assert "test_light_swapped_segment_swapped_raw_ll_bits_per_spike" in dataset
+    assert not any("deviance" in name for name in dataset.data_vars)
+
+
+def test_plot_selected_model_minus_visual_histogram_writes_figure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    selected_datasets = {
+        "visual": _fake_selected_dark_light_dataset(module, xr, model_name="visual"),
+        "task_segment_bump": _fake_selected_dark_light_dataset(
+            module,
+            xr,
+            model_name="task_segment_bump",
+        ),
+    }
+    results_by_model = {
+        "visual": _fake_selected_swap_results(
+            module,
+            swapped_bits=np.asarray([0.1, 0.2], dtype=float),
+        ),
+        "task_segment_bump": _fake_selected_swap_results(
+            module,
+            swapped_bits=np.asarray([0.4, 0.15], dtype=float),
+        ),
+    }
+    observed_summaries = {
+        trajectory: {
+            "occupancy_s": np.asarray([0.1, 0.2], dtype=float),
+            "spike_count": np.ones((2, 2), dtype=float),
+            "observed_rate_hz": np.full((2, 2), 5.0, dtype=float),
+        }
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+    dataset = module.build_selected_swap_dataset(
+        model_names=["visual", "task_segment_bump"],
+        selected_datasets=selected_datasets,
+        selected_paths={
+            "visual": tmp_path / "visual.nc",
+            "task_segment_bump": tmp_path / "task.nc",
+        },
+        results_by_model=results_by_model,
+        test_inputs_by_traj={},
+        observed_summaries_by_traj=observed_summaries,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        dark_train_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="06_r3",
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+        observed_bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
+        shared_metadata={
+            "bin_size_s": 0.05,
+            "n_splines": 3,
+            "spline_order": 4,
+            "has_speed": False,
+            "speed_feature_mode": "none",
+            "n_speed_features": 0,
+            "speed_spline_order": np.nan,
+        },
+        sources={},
+        fit_parameters={},
+    )
+
+    out_path = tmp_path / "selected_metric_hist.png"
+    saved_path = module.plot_selected_model_minus_visual_histogram(
+        dataset,
+        model_name="task_segment_bump",
         out_path=out_path,
     )
 

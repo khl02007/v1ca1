@@ -1,30 +1,28 @@
 from __future__ import annotations
 
-"""Fit and compare swapped-light task-progression GLMs on one session.
+"""Compare selected dark/light task-progression GLMs on swapped light data.
 
-This module fits two dark/light task-progression models using one dark and one
-light training epoch, then evaluates both on a held-out light epoch where the
-left/right arm stimuli are swapped.
+This module consumes selected model outputs from `dark_light_glm.py`, loads only
+the held-out light test epoch, and evaluates whether task-coordinate models
+predict the swapped segment better than the visual model.
 
 Supported models:
 
 - `visual`: separate dark and light fields, analogous to `independent_light_field`
-- `task`: dark field plus segment-specific light gain, analogous to
-  `segment_bump_gain`
+- `task_segment_bump`: dark field plus segment raised-cosine light gain
+- `task_segment_scalar`: dark field plus segment scalar light gain
+- `task_dense_gain`: dark field plus dense spline light gain
 """
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
 from scipy.special import gammaln
 
-from v1ca1.helper.cuda import (
-    configure_cuda_visible_devices,
-    pop_cuda_visible_devices_argument,
-)
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.wtrack import get_wtrack_geometry, get_wtrack_total_length
 from v1ca1.task_progression._session import (
@@ -34,7 +32,6 @@ from v1ca1.task_progression._session import (
     REGIONS,
     TRAJECTORY_TYPES,
     build_task_progression_bins,
-    compute_movement_firing_rates,
     get_analysis_path,
     get_task_progression_figure_dir,
     get_task_progression_output_dir,
@@ -42,19 +39,13 @@ from v1ca1.task_progression._session import (
 )
 
 if TYPE_CHECKING:
+    from nemos.basis import BSplineEval as BSplineEvalType
+
     import xarray as xr
 
 
-_CUDA_VISIBLE_DEVICES_CLI = pop_cuda_visible_devices_argument()
-configure_cuda_visible_devices(_CUDA_VISIBLE_DEVICES_CLI)
-
-
-try:
-    from nemos.basis import BSplineEval
-    from nemos.glm import PopulationGLM
-except ModuleNotFoundError:
-    BSplineEval = None
-    PopulationGLM = None
+BSplineEval = None
+PopulationGLM = None
 
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
@@ -94,13 +85,39 @@ SWAP_CONFIG = {
 }
 
 
-def _require_nemos() -> None:
-    """Ensure NeMoS is available before fitting Poisson GLMs."""
-    if BSplineEval is None or PopulationGLM is None:
+def _require_spline_basis() -> None:
+    """Ensure NeMoS basis evaluation is available for selected GLM outputs."""
+    global BSplineEval
+    if BSplineEval is None:
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
+        try:
+            from nemos.basis import BSplineEval as bspline_eval
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "This script requires `nemos` to evaluate selected task-progression "
+                "GLM spline bases, but it is not installed."
+            ) from exc
+        BSplineEval = bspline_eval
+    if BSplineEval is None:
         raise ModuleNotFoundError(
-            "This script requires `nemos` to fit the task-progression GLMs, but it "
-            "is not installed."
+            "This script requires `nemos` to evaluate selected task-progression "
+            "GLM spline bases, but it is not installed."
         )
+
+
+def _require_nemos() -> None:
+    """Ensure NeMoS fitting dependencies are available for legacy fit helpers."""
+    global PopulationGLM
+    _require_spline_basis()
+    if PopulationGLM is None:
+        try:
+            from nemos.glm import PopulationGLM as population_glm
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "The legacy fitting helpers require `nemos.glm.PopulationGLM`, "
+                "but it is not installed."
+            ) from exc
+        PopulationGLM = population_glm
 
 
 def derive_default_segment_edges(animal_name: str) -> np.ndarray:
@@ -332,6 +349,232 @@ def _format_speed_outputs(
     }
 
 
+def normalize_requested_models(model_names: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Return selected-file model names, always including the visual baseline."""
+    normalized: list[str] = []
+    messages: list[str] = []
+    for model_name in model_names:
+        name = str(model_name)
+        if name not in DEFAULT_MODEL_NAMES:
+            raise ValueError(
+                f"Unknown model {name!r}. Expected one of {DEFAULT_MODEL_NAMES!r}."
+            )
+        if name not in normalized:
+            normalized.append(name)
+    if "visual" not in normalized:
+        normalized.insert(0, "visual")
+        messages.append("Added required baseline model 'visual'.")
+    return normalized, messages
+
+
+def selected_dark_light_glm_dir(analysis_path: Path) -> Path:
+    """Return the default selected-output directory from `dark_light_glm.py`."""
+    return (
+        get_task_progression_output_dir(analysis_path, "dark_light_glm")
+        / "selected"
+    )
+
+
+def selected_dark_light_glm_path(
+    selected_dir: Path,
+    *,
+    region: str,
+    light_train_epoch: str,
+    dark_train_epoch: str,
+    model_name: str,
+) -> Path:
+    """Return the expected selected dark/light GLM path for one model."""
+    return (
+        Path(selected_dir)
+        / f"{region}_{light_train_epoch}_vs_{dark_train_epoch}_{model_name}_selected.nc"
+    )
+
+
+def load_selected_dark_light_glm(
+    selected_dir: Path,
+    *,
+    region: str,
+    light_train_epoch: str,
+    dark_train_epoch: str,
+    model_name: str,
+) -> tuple["xr.Dataset", Path]:
+    """Load one selected dark/light GLM dataset into memory."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "xarray is required to load selected dark/light GLM NetCDF files."
+        ) from exc
+
+    path = selected_dark_light_glm_path(
+        selected_dir,
+        region=region,
+        light_train_epoch=light_train_epoch,
+        dark_train_epoch=dark_train_epoch,
+        model_name=model_name,
+    )
+    if not path.exists():
+        raise FileNotFoundError(
+            "Missing selected dark-light GLM file:\n"
+            f"  expected {path}\n"
+            "Run dark_light_glm.py first with the matching dark and light train epochs."
+        )
+    dataset = xr.open_dataset(path)
+    dataset.load()
+    dataset.close()
+    return dataset, path
+
+
+def _attr_epoch(dataset: "xr.Dataset", *names: str) -> str | None:
+    """Return the first matching epoch attr value from a selected dataset."""
+    for name in names:
+        if name in dataset.attrs:
+            return str(dataset.attrs[name])
+    return None
+
+
+def _assert_coord_equal(
+    reference: "xr.Dataset",
+    candidate: "xr.Dataset",
+    coord_name: str,
+    *,
+    model_name: str,
+) -> None:
+    """Raise if two selected datasets disagree on one coordinate."""
+    reference_values = np.asarray(reference.coords[coord_name].values)
+    candidate_values = np.asarray(candidate.coords[coord_name].values)
+    if reference_values.shape != candidate_values.shape or not np.array_equal(
+        reference_values,
+        candidate_values,
+    ):
+        raise ValueError(
+            f"Selected dark-light file for model {model_name!r} disagrees on "
+            f"coordinate {coord_name!r}."
+        )
+
+
+def _assert_attr_equal(
+    reference: "xr.Dataset",
+    candidate: "xr.Dataset",
+    attr_name: str,
+    *,
+    model_name: str,
+    numeric: bool = False,
+) -> None:
+    """Raise if two selected datasets disagree on one attribute."""
+    if attr_name not in reference.attrs or attr_name not in candidate.attrs:
+        raise ValueError(
+            f"Selected dark-light file for model {model_name!r} is missing "
+            f"required attr {attr_name!r}."
+        )
+    if numeric:
+        if not np.isclose(
+            float(reference.attrs[attr_name]),
+            float(candidate.attrs[attr_name]),
+            equal_nan=True,
+        ):
+            raise ValueError(
+                f"Selected dark-light file for model {model_name!r} disagrees on "
+                f"attr {attr_name!r}."
+            )
+    elif reference.attrs[attr_name] != candidate.attrs[attr_name]:
+        raise ValueError(
+            f"Selected dark-light file for model {model_name!r} disagrees on "
+            f"attr {attr_name!r}."
+        )
+
+
+def validate_selected_dark_light_glms(
+    datasets_by_model: dict[str, "xr.Dataset"],
+    *,
+    animal_name: str,
+    date: str,
+    region: str,
+    dark_train_epoch: str,
+    light_train_epoch: str,
+) -> dict[str, Any]:
+    """Validate selected dark/light outputs and return shared fit metadata."""
+    if "visual" not in datasets_by_model:
+        raise ValueError("The selected visual model is required as the baseline.")
+    reference = datasets_by_model["visual"]
+
+    for model_name, dataset in datasets_by_model.items():
+        if str(dataset.attrs.get("fit_stage", "")) != "selected":
+            raise ValueError(
+                f"Selected dark-light file for model {model_name!r} is not marked "
+                "fit_stage='selected'."
+            )
+        expected_attrs = {
+            "animal_name": animal_name,
+            "date": date,
+            "region": region,
+            "model_name": model_name,
+        }
+        for attr_name, expected in expected_attrs.items():
+            if str(dataset.attrs.get(attr_name, "")) != str(expected):
+                raise ValueError(
+                    f"Selected dark-light file for model {model_name!r} has "
+                    f"{attr_name}={dataset.attrs.get(attr_name)!r}, expected {expected!r}."
+                )
+        dark_epoch = _attr_epoch(dataset, "dark_train_epoch", "dark_epoch")
+        light_epoch = _attr_epoch(dataset, "light_train_epoch", "light_epoch")
+        if dark_epoch != str(dark_train_epoch) or light_epoch != str(light_train_epoch):
+            raise ValueError(
+                f"Selected dark-light file for model {model_name!r} has "
+                f"dark/light train epochs {dark_epoch!r}/{light_epoch!r}, expected "
+                f"{dark_train_epoch!r}/{light_train_epoch!r}."
+            )
+        if bool(dataset.attrs.get("has_light_offset_term", False)) is not True:
+            raise ValueError(
+                f"Selected dark-light file for model {model_name!r} must include "
+                "the scalar light offset term."
+            )
+
+    for model_name, dataset in datasets_by_model.items():
+        for coord_name in ("unit", "trajectory", "tp_grid", "segment_edge"):
+            _assert_coord_equal(reference, dataset, coord_name, model_name=model_name)
+        for attr_name in ("bin_size_s", "selected_bin_size_s"):
+            _assert_attr_equal(
+                reference,
+                dataset,
+                attr_name,
+                model_name=model_name,
+                numeric=True,
+            )
+        for attr_name in (
+            "selected_n_splines",
+            "spline_order",
+            "has_speed",
+            "speed_feature_mode",
+            "n_speed_features",
+        ):
+            _assert_attr_equal(reference, dataset, attr_name, model_name=model_name)
+        _assert_attr_equal(
+            reference,
+            dataset,
+            "speed_spline_order",
+            model_name=model_name,
+            numeric=True,
+        )
+        if bool(dataset.attrs.get("has_speed", False)):
+            for trajectory in np.asarray(dataset.coords["trajectory"].values, dtype=str):
+                _speed_transform_from_selected_dataset(dataset, str(trajectory))
+
+    return {
+        "unit_ids": np.asarray(reference.coords["unit"].values),
+        "trajectory": np.asarray(reference.coords["trajectory"].values, dtype=str),
+        "tp_grid": np.asarray(reference.coords["tp_grid"].values, dtype=float),
+        "segment_edges": np.asarray(reference.coords["segment_edge"].values, dtype=float),
+        "bin_size_s": float(reference.attrs["selected_bin_size_s"]),
+        "n_splines": int(reference.attrs["selected_n_splines"]),
+        "spline_order": int(reference.attrs["spline_order"]),
+        "has_speed": bool(reference.attrs["has_speed"]),
+        "speed_feature_mode": str(reference.attrs["speed_feature_mode"]),
+        "n_speed_features": int(reference.attrs["n_speed_features"]),
+        "speed_spline_order": float(reference.attrs["speed_spline_order"]),
+    }
+
+
 def _segment_center_raised_cosine_basis(
     x: np.ndarray,
     segment_edges: Sequence[float],
@@ -438,6 +681,65 @@ def _prepare_epoch_inputs(
 
     return {
         "unit_ids": unit_ids,
+        "y": np.asarray(y_epoch[valid_mask], dtype=float),
+        "p": np.asarray(p_epoch[valid_mask], dtype=float),
+        "v": v_epoch,
+    }
+
+
+def _prepare_test_epoch_inputs_for_units(
+    *,
+    spikes: Any,
+    unit_ids: np.ndarray,
+    trajectory_ep_by_epoch: dict[str, dict[str, Any]],
+    tp_by_epoch: dict[str, dict[str, Any]],
+    speed_by_epoch: dict[str, Any] | None,
+    traj_name: str,
+    epoch: str,
+    bin_size_s: float,
+    restrict_interval: Any | None,
+) -> dict[str, Any]:
+    """Assemble held-out inputs for selected-file units in exact saved order."""
+    requested_unit_ids = np.asarray(unit_ids)
+    available_unit_ids = np.asarray(list(spikes.keys()))
+    missing = [
+        unit_id for unit_id in requested_unit_ids if unit_id not in set(available_unit_ids)
+    ]
+    if missing:
+        raise ValueError(
+            f"Held-out spikes are missing selected units for trajectory {traj_name!r}: "
+            f"{missing!r}."
+        )
+    unit_mask = np.isin(available_unit_ids, requested_unit_ids)
+    selected_spikes = spikes[unit_mask]
+    trajectory_interval = trajectory_ep_by_epoch[epoch][traj_name]
+    if restrict_interval is not None:
+        trajectory_interval = trajectory_interval.intersect(restrict_interval)
+
+    counts = selected_spikes.count(bin_size_s, ep=trajectory_interval)
+    count_unit_ids = np.asarray(counts.columns)
+    order = []
+    for unit_id in requested_unit_ids:
+        matches = np.where(count_unit_ids == unit_id)[0]
+        if matches.size != 1:
+            raise ValueError(
+                f"Could not recover selected unit {unit_id!r} from held-out spike counts."
+            )
+        order.append(int(matches[0]))
+    order_array = np.asarray(order, dtype=int)
+    y_epoch = np.asarray(counts.d, dtype=float)[:, order_array]
+    p_epoch = tp_by_epoch[epoch][traj_name].interpolate(counts).to_numpy().reshape(-1)
+
+    if speed_by_epoch is None:
+        valid_mask = np.isfinite(p_epoch)
+        v_epoch = None
+    else:
+        speed_epoch = speed_by_epoch[epoch].interpolate(counts).to_numpy().reshape(-1)
+        valid_mask = np.isfinite(p_epoch) & np.isfinite(speed_epoch)
+        v_epoch = np.asarray(speed_epoch[valid_mask], dtype=float)
+
+    return {
+        "unit_ids": requested_unit_ids,
         "y": np.asarray(y_epoch[valid_mask], dtype=float),
         "p": np.asarray(p_epoch[valid_mask], dtype=float),
         "v": v_epoch,
@@ -563,6 +865,33 @@ def summarize_poisson_metrics(
     }
 
 
+def summarize_raw_poisson_metrics(
+    y_true: np.ndarray,
+    lam_pred: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Return raw held-out Poisson LL summaries without a null baseline."""
+    y_true = np.asarray(y_true, dtype=float)
+    lam_pred = np.asarray(lam_pred, dtype=float)
+    n_units = y_true.shape[1] if y_true.ndim == 2 else lam_pred.shape[1]
+    if y_true.size == 0:
+        ll_sum = np.zeros((n_units,), dtype=float)
+        spike_sum = np.zeros((n_units,), dtype=float)
+    else:
+        ll_sum = _poisson_log_likelihood_per_neuron(y_true, lam_pred)
+        spike_sum = np.sum(y_true, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw_ll_bits_per_spike = np.where(
+            spike_sum > 0,
+            ll_sum / (spike_sum * np.log(2.0)),
+            np.nan,
+        )
+    return {
+        "raw_ll_sum": np.asarray(ll_sum, dtype=float),
+        "spike_sum": np.asarray(spike_sum, dtype=float),
+        "raw_ll_bits_per_spike": np.asarray(raw_ll_bits_per_spike, dtype=float),
+    }
+
+
 def build_observed_summary(
     y_epoch: np.ndarray,
     p_epoch: np.ndarray,
@@ -613,6 +942,12 @@ def _segment_mask(
 def _format_ridge_token(ridge: float) -> str:
     """Return a stable filename token for one ridge value."""
     return np.format_float_scientific(float(ridge), trim="-", exp_digits=2)
+
+
+def _format_bin_size_token(bin_size_s: float) -> str:
+    """Return a stable filename token for one spike-count bin size."""
+    token = np.format_float_positional(float(bin_size_s), trim="-")
+    return token.replace("-", "m").replace(".", "p")
 
 
 def _extract_interval_bounds(
@@ -725,15 +1060,20 @@ def _output_stem(
     light_train_epoch: str,
     light_test_epoch: str,
     model_name: str,
+    bin_size_s: float,
     ridge: float,
+    include_light_offset_term: bool = True,
 ) -> str:
     """Return the shared filename stem for one saved model artifact."""
+    bin_size_token = _format_bin_size_token(bin_size_s)
     ridge_token = _format_ridge_token(ridge)
+    light_offset_token = "" if include_light_offset_term else "_no_light_offset"
     return (
         f"{region}_{dark_train_epoch}_traindark_"
         f"{light_train_epoch}_trainlight_"
         f"{light_test_epoch}_testlight_"
-        f"{model_name}_ridge{ridge_token}"
+        f"bin{bin_size_token}s_"
+        f"{model_name}{light_offset_token}_ridge{ridge_token}"
     )
 
 
@@ -741,16 +1081,9 @@ def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the model-comparison workflow."""
     parser = argparse.ArgumentParser(
         description=(
-            "Fit and compare swapped-light task-progression GLMs for one session"
+            "Score selected dark/light task-progression GLMs on a held-out "
+            "swapped-light epoch."
         )
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        default=_CUDA_VISIBLE_DEVICES_CLI,
-        help=(
-            "Optional CUDA_VISIBLE_DEVICES value applied before importing GPU "
-            "dependencies. Default: unset"
-        ),
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
@@ -773,7 +1106,8 @@ def parse_arguments() -> argparse.Namespace:
         choices=DEFAULT_MODEL_NAMES,
         default=list(DEFAULT_MODEL_NAMES),
         help=(
-            "Model families to fit. "
+            "Selected model families to score. The visual baseline is always "
+            "included even if omitted. "
             f"Default: {' '.join(DEFAULT_MODEL_NAMES)}"
         ),
     )
@@ -811,115 +1145,20 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--v1-min-dark-fr-hz",
-        type=float,
-        default=DEFAULT_REGION_FR_THRESHOLDS["v1"],
+        "--dark-light-glm-dir",
+        type=Path,
         help=(
-            "Minimum dark-train movement firing rate for V1 units. "
-            f"Default: {DEFAULT_REGION_FR_THRESHOLDS['v1']}"
+            "Directory containing dark_light_glm selected NetCDF files. "
+            "Default: analysis_path/task_progression/dark_light_glm/selected"
         ),
     )
     parser.add_argument(
-        "--ca1-min-dark-fr-hz",
-        type=float,
-        default=DEFAULT_REGION_FR_THRESHOLDS["ca1"],
-        help=(
-            "Minimum dark-train movement firing rate for CA1 units. "
-            f"Default: {DEFAULT_REGION_FR_THRESHOLDS['ca1']}"
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"Spike-count bin size in seconds. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--ridges",
-        nargs="+",
-        type=float,
-        default=list(DEFAULT_RIDGES),
-        help="Candidate ridge strengths for validation-based selection.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=DEFAULT_SEED,
-        help=(
-            "Random seed used for the held-out light validation/test lap split. "
-            f"Default: {DEFAULT_SEED}"
-        ),
-    )
-    parser.add_argument(
-        "--n-splines",
-        type=int,
-        default=DEFAULT_N_SPLINES,
-        help=(
-            "Number of spline basis functions for the shared place field. "
-            f"Default: {DEFAULT_N_SPLINES}"
-        ),
-    )
-    parser.add_argument(
-        "--spline-order",
-        type=int,
-        default=DEFAULT_SPLINE_ORDER,
-        help=f"Spline order for the place field. Default: {DEFAULT_SPLINE_ORDER}",
-    )
-    speed_group = parser.add_mutually_exclusive_group()
-    speed_group.add_argument(
-        "--use-speed",
-        dest="use_speed",
+        "--swap-light-offset",
         action="store_true",
-        help="Include speed in the GLM fits.",
-    )
-    speed_group.add_argument(
-        "--no-speed",
-        dest="use_speed",
-        action="store_false",
-        help="Exclude speed from the GLM fits.",
-    )
-    parser.set_defaults(use_speed=True)
-    parser.add_argument(
-        "--speed-feature-mode",
-        choices=("linear", "bspline"),
-        default="linear",
         help=(
-            "Speed covariate parameterization when speed is enabled. "
-            "Default: linear"
-        ),
-    )
-    parser.add_argument(
-        "--n-splines-speed",
-        type=int,
-        default=DEFAULT_N_SPLINES_SPEED,
-        help=(
-            "Number of spline basis functions for bspline speed features. "
-            f"Default: {DEFAULT_N_SPLINES_SPEED}"
-        ),
-    )
-    parser.add_argument(
-        "--spline-order-speed",
-        type=int,
-        default=DEFAULT_SPLINE_ORDER_SPEED,
-        help=(
-            "Spline order for bspline speed features. "
-            f"Default: {DEFAULT_SPLINE_ORDER_SPEED}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-bounds",
-        nargs=2,
-        type=float,
-        metavar=("LOW", "HIGH"),
-        help="Optional explicit bounds for bspline speed features.",
-    )
-    parser.add_argument(
-        "--segment-edges",
-        nargs="+",
-        type=float,
-        help=(
-            "Explicit task-progression segment edges. Defaults to geometry-derived "
-            "edges."
+            "Also swap the selected trajectory's scalar light-offset coefficient "
+            "inside the swapped segment. Default: swap only the local "
+            "trajectory/segment-dependent component."
         ),
     )
     return parser.parse_args()
@@ -946,6 +1185,31 @@ def validate_model_comparison_epochs(
             "distinct."
         )
     return dark_train_epoch, light_train_epoch, light_test_epoch
+
+
+def build_train_epoch_fr_mask(
+    dark_epoch_rates: np.ndarray,
+    light_epoch_rates: np.ndarray,
+    *,
+    min_dark_fr_hz: float,
+    min_light_fr_hz: float,
+) -> dict[str, np.ndarray]:
+    """Return dark, light, and combined train-epoch firing-rate masks."""
+    dark_rates = np.asarray(dark_epoch_rates, dtype=float)
+    light_rates = np.asarray(light_epoch_rates, dtype=float)
+    if dark_rates.shape != light_rates.shape:
+        raise ValueError(
+            "dark_epoch_rates and light_epoch_rates must have matching shapes. "
+            f"Got {dark_rates.shape} and {light_rates.shape}."
+        )
+
+    dark_mask = np.isfinite(dark_rates) & (dark_rates > float(min_dark_fr_hz))
+    light_mask = np.isfinite(light_rates) & (light_rates > float(min_light_fr_hz))
+    return {
+        "dark": dark_mask,
+        "light": light_mask,
+        "combined": dark_mask & light_mask,
+    }
 
 
 def _predict_visual_components(
@@ -1070,18 +1334,22 @@ def build_visual_swapped_light_eta(
     own_light_offset: np.ndarray | float = 0.0,
     paired_light_offset: np.ndarray | float = 0.0,
     swap_mask: np.ndarray,
+    swap_light_offset: bool = False,
 ) -> np.ndarray:
-    """Return light prediction after swapping the full visual light component."""
+    """Return light prediction after swapping the local visual light component."""
     swapped_eta = np.asarray(own_light_eta, dtype=float).copy()
-    light_offset_delta = (
-        np.asarray(paired_light_offset, dtype=float).reshape(1, -1)
-        - np.asarray(own_light_offset, dtype=float).reshape(1, -1)
-    )
     delta = (
         np.asarray(paired_light_place, dtype=float)
         - np.asarray(own_light_place, dtype=float)
-        + light_offset_delta
     )
+    if swap_light_offset:
+        offset_delta = (
+            np.asarray(paired_light_offset, dtype=float)
+            - np.asarray(own_light_offset, dtype=float)
+        )
+        delta = delta + (
+            offset_delta if offset_delta.ndim == 0 else offset_delta.reshape(1, -1)
+        )
     swapped_eta[np.asarray(swap_mask, dtype=bool)] += delta[np.asarray(swap_mask, dtype=bool)]
     return swapped_eta
 
@@ -1096,21 +1364,457 @@ def build_task_swapped_light_eta(
     paired_light_offset: np.ndarray | float = 0.0,
     swap_segment_index: int,
     swap_mask: np.ndarray,
+    swap_light_offset: bool = False,
 ) -> np.ndarray:
     """Return task-model light prediction after swapping one light segment."""
     swapped_eta = np.asarray(own_light_eta, dtype=float).copy()
     gain_column = np.asarray(own_gain_basis[:, swap_segment_index], dtype=float)[:, None]
     own_contribution = gain_column * np.asarray(own_coef_gain[swap_segment_index], dtype=float)[None, :]
     paired_contribution = gain_column * np.asarray(paired_coef_gain[swap_segment_index], dtype=float)[None, :]
-    light_offset_delta = (
-        np.asarray(paired_light_offset, dtype=float).reshape(1, -1)
-        - np.asarray(own_light_offset, dtype=float).reshape(1, -1)
-    )
+    delta = paired_contribution - own_contribution
+    if swap_light_offset:
+        offset_delta = (
+            np.asarray(paired_light_offset, dtype=float)
+            - np.asarray(own_light_offset, dtype=float)
+        )
+        delta = delta + (
+            offset_delta if offset_delta.ndim == 0 else offset_delta.reshape(1, -1)
+        )
     mask = np.asarray(swap_mask, dtype=bool)
-    swapped_eta[mask] += (
-        paired_contribution[mask] - own_contribution[mask] + light_offset_delta
-    )
+    swapped_eta[mask] += delta[mask]
     return swapped_eta
+
+
+def _selected_var_by_trajectory(
+    dataset: "xr.Dataset",
+    var_name: str,
+    trajectory: str,
+    *,
+    dtype: type = float,
+) -> np.ndarray:
+    """Return one selected-dataset variable sliced by trajectory."""
+    return np.asarray(dataset[var_name].sel(trajectory=trajectory).values, dtype=dtype)
+
+
+def _selected_scalar_by_trajectory(
+    dataset: "xr.Dataset",
+    var_name: str,
+    trajectory: str,
+) -> Any:
+    """Return one scalar selected-dataset variable sliced by trajectory."""
+    value = dataset[var_name].sel(trajectory=trajectory).values
+    if np.asarray(value).shape == ():
+        return np.asarray(value).item()
+    return np.asarray(value).reshape(-1)[0].item()
+
+
+def _speed_transform_from_selected_dataset(
+    dataset: "xr.Dataset",
+    trajectory: str,
+) -> dict[str, Any]:
+    """Return a saved speed transform for one model and trajectory."""
+    model_name = str(dataset.attrs.get("model_name", "unknown"))
+    transform = {
+        "mode": str(_selected_scalar_by_trajectory(dataset, "speed_feature_mode", trajectory)),
+        "basis": str(_selected_scalar_by_trajectory(dataset, "speed_basis", trajectory)),
+        "n_features": int(_selected_scalar_by_trajectory(dataset, "n_speed_features", trajectory)),
+        "spline_order": float(_selected_scalar_by_trajectory(dataset, "speed_spline_order", trajectory)),
+        "bounds": _selected_var_by_trajectory(dataset, "speed_basis_bounds", trajectory),
+        "reference_value": float(
+            _selected_scalar_by_trajectory(dataset, "speed_reference_value", trajectory)
+        ),
+        "mean": float(_selected_scalar_by_trajectory(dataset, "speed_mean", trajectory)),
+        "std": float(_selected_scalar_by_trajectory(dataset, "speed_std", trajectory)),
+    }
+    mode = str(transform["mode"])
+    n_features = int(transform["n_features"])
+    if mode == "none" or n_features == 0:
+        return transform
+    if mode == "linear":
+        if (
+            not np.isfinite(transform["mean"])
+            or not np.isfinite(transform["std"])
+            or float(transform["std"]) <= 0.0
+        ):
+            raise ValueError(
+                "Selected dark-light GLM file has invalid linear speed metadata "
+                f"for model {model_name!r}, trajectory {trajectory!r}. "
+                "Expected finite speed_mean and positive finite speed_std. "
+                "Regenerate the selected dark_light_glm outputs with the updated writer."
+            )
+        return transform
+    if mode == "bspline":
+        bounds = np.asarray(transform["bounds"], dtype=float)
+        if (
+            bounds.shape != (2,)
+            or not np.all(np.isfinite(bounds))
+            or not np.isfinite(transform["spline_order"])
+        ):
+            raise ValueError(
+                "Selected dark-light GLM file has invalid bspline speed metadata "
+                f"for model {model_name!r}, trajectory {trajectory!r}."
+            )
+        return transform
+    raise ValueError(
+        "Selected dark-light GLM file has unsupported speed_feature_mode "
+        f"{mode!r} for model {model_name!r}, trajectory {trajectory!r}."
+    )
+
+
+def _place_basis(values: np.ndarray, *, n_splines: int, spline_order: int) -> np.ndarray:
+    """Evaluate the selected task-progression B-spline basis."""
+    basis = BSplineEval(
+        n_basis_funcs=int(n_splines),
+        order=int(spline_order),
+        bounds=POS_BOUNDS,
+    )
+    values = np.clip(np.asarray(values, dtype=float).reshape(-1), *POS_BOUNDS)
+    return np.asarray(basis.compute_features(values), dtype=float)
+
+
+def _selected_speed_effect(
+    dataset: "xr.Dataset",
+    trajectory: str,
+    values: np.ndarray | None,
+    *,
+    n_rows: int,
+    n_units: int,
+    allow_missing_speed: bool = False,
+) -> np.ndarray:
+    """Return speed eta from selected per-trajectory speed metadata."""
+    transform = _speed_transform_from_selected_dataset(dataset, trajectory)
+    if str(transform["mode"]) == "none" or int(transform["n_features"]) == 0:
+        return np.zeros((int(n_rows), int(n_units)), dtype=float)
+    if values is None:
+        if allow_missing_speed:
+            return np.zeros((int(n_rows), int(n_units)), dtype=float)
+        raise ValueError(
+            f"Selected model uses speed, but held-out speed is unavailable for {trajectory!r}."
+        )
+    speed_design = _transform_speed_with_feature_transform(values, transform)
+    coef_speed_basis = _selected_var_by_trajectory(
+        dataset,
+        "coef_speed_basis",
+        trajectory,
+    ).reshape(speed_design.shape[1], n_units)
+    return speed_design @ coef_speed_basis
+
+
+def predict_selected_light_eta(
+    *,
+    dataset: "xr.Dataset",
+    model_name: str,
+    trajectory: str,
+    p_eval: np.ndarray,
+    speed_values: np.ndarray | None,
+    n_splines: int,
+    spline_order: int,
+    segment_edges: np.ndarray,
+    allow_missing_speed: bool = False,
+) -> dict[str, np.ndarray]:
+    """Predict selected-model light eta and the swappable component."""
+    p_eval = np.asarray(p_eval, dtype=float).reshape(-1)
+    n_units = int(np.asarray(dataset.coords["unit"].values).size)
+    intercept = _selected_var_by_trajectory(dataset, "coef_intercept", trajectory)
+    coef_light = _selected_var_by_trajectory(dataset, "coef_light_offset", trajectory)
+    speed_eta = _selected_speed_effect(
+        dataset,
+        trajectory,
+        speed_values,
+        n_rows=p_eval.size,
+        n_units=n_units,
+        allow_missing_speed=allow_missing_speed,
+    )
+    place_basis = _place_basis(
+        p_eval,
+        n_splines=n_splines,
+        spline_order=spline_order,
+    )
+
+    if model_name == "visual":
+        coef_place_light = _selected_var_by_trajectory(
+            dataset,
+            "coef_place_light",
+            trajectory,
+        )
+        light_component = place_basis @ coef_place_light
+        return {
+            "light_eta": (
+                intercept[None, :]
+                + coef_light[None, :]
+                + light_component
+                + speed_eta
+            ),
+            "light_component": light_component,
+            "light_offset": coef_light,
+            "basis": place_basis,
+        }
+
+    coef_place_dark = _selected_var_by_trajectory(dataset, "coef_place_dark", trajectory)
+    dark_component = place_basis @ coef_place_dark
+    if model_name == "task_segment_bump":
+        gain_basis = _segment_center_raised_cosine_basis(
+            p_eval,
+            segment_edges,
+            pos_bounds=POS_BOUNDS,
+            overlap_frac=DEFAULT_SEGMENT_OVERLAP_FRAC,
+        )
+        coef_gain = _selected_var_by_trajectory(
+            dataset,
+            "coef_segment_bump_gain",
+            trajectory,
+        )
+    elif model_name == "task_segment_scalar":
+        gain_basis, _ = _segment_onehot_basis(
+            p_eval,
+            segment_edges,
+            pos_bounds=POS_BOUNDS,
+        )
+        coef_gain = _selected_var_by_trajectory(
+            dataset,
+            "coef_segment_scalar_gain",
+            trajectory,
+        )
+    elif model_name == "task_dense_gain":
+        gain_basis = _place_basis(
+            p_eval,
+            n_splines=n_splines,
+            spline_order=spline_order,
+        )
+        coef_gain = _selected_var_by_trajectory(dataset, "coef_gain_spline", trajectory)
+    else:
+        raise ValueError(f"Unknown model_name: {model_name!r}")
+
+    gain_component = gain_basis @ coef_gain
+    return {
+        "light_eta": (
+            intercept[None, :]
+            + dark_component
+            + coef_light[None, :]
+            + gain_component
+            + speed_eta
+        ),
+        "light_component": gain_component,
+        "light_offset": coef_light,
+        "gain_basis": gain_basis,
+        "coef_gain": coef_gain,
+    }
+
+
+def build_selected_swapped_eta(
+    *,
+    model_name: str,
+    own_prediction: dict[str, np.ndarray],
+    paired_dataset: "xr.Dataset",
+    paired_trajectory: str,
+    p_eval: np.ndarray,
+    segment_edges: np.ndarray,
+    swap_segment_index: int,
+    swap_mask: np.ndarray,
+    n_splines: int,
+    spline_order: int,
+    swap_light_offset: bool = False,
+) -> np.ndarray:
+    """Return light eta after swapping only the local model component."""
+    if model_name == "visual":
+        paired_prediction = predict_selected_light_eta(
+            dataset=paired_dataset,
+            model_name=model_name,
+            trajectory=paired_trajectory,
+            p_eval=p_eval,
+            speed_values=None,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+            allow_missing_speed=True,
+        )
+        return build_visual_swapped_light_eta(
+            own_light_eta=own_prediction["light_eta"],
+            own_light_place=own_prediction["light_component"],
+            paired_light_place=paired_prediction["light_component"],
+            own_light_offset=own_prediction["light_offset"],
+            paired_light_offset=paired_prediction["light_offset"],
+            swap_mask=swap_mask,
+            swap_light_offset=swap_light_offset,
+        )
+
+    if model_name in {"task_segment_bump", "task_segment_scalar"}:
+        coef_name = {
+            "task_segment_bump": "coef_segment_bump_gain",
+            "task_segment_scalar": "coef_segment_scalar_gain",
+        }[model_name]
+        paired_coef_gain = _selected_var_by_trajectory(
+            paired_dataset,
+            coef_name,
+            paired_trajectory,
+        )
+        paired_light_offset = _selected_var_by_trajectory(
+            paired_dataset,
+            "coef_light_offset",
+            paired_trajectory,
+        )
+        return build_task_swapped_light_eta(
+            own_light_eta=own_prediction["light_eta"],
+            own_gain_basis=own_prediction["gain_basis"],
+            own_coef_gain=own_prediction["coef_gain"],
+            paired_coef_gain=paired_coef_gain,
+            own_light_offset=own_prediction["light_offset"],
+            paired_light_offset=paired_light_offset,
+            swap_segment_index=swap_segment_index,
+            swap_mask=swap_mask,
+            swap_light_offset=swap_light_offset,
+        )
+
+    if model_name == "task_dense_gain":
+        paired_prediction = predict_selected_light_eta(
+            dataset=paired_dataset,
+            model_name=model_name,
+            trajectory=paired_trajectory,
+            p_eval=p_eval,
+            speed_values=None,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+            allow_missing_speed=True,
+        )
+        return build_visual_swapped_light_eta(
+            own_light_eta=own_prediction["light_eta"],
+            own_light_place=own_prediction["light_component"],
+            paired_light_place=paired_prediction["light_component"],
+            own_light_offset=own_prediction["light_offset"],
+            paired_light_offset=paired_prediction["light_offset"],
+            swap_mask=swap_mask,
+            swap_light_offset=swap_light_offset,
+        )
+
+    raise ValueError(f"Unknown model_name: {model_name!r}")
+
+
+def evaluate_selected_model_on_test_epoch(
+    *,
+    model_name: str,
+    datasets_by_model: dict[str, "xr.Dataset"],
+    test_inputs_by_traj: dict[str, dict[str, Any]],
+    segment_edges: np.ndarray,
+    bin_size_s: float,
+    n_splines: int,
+    spline_order: int,
+    swap_light_offset: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Compute raw held-out swap metrics for one selected model."""
+    dataset = datasets_by_model[model_name]
+    results: dict[str, dict[str, Any]] = {}
+    for trajectory in TRAJECTORY_TYPES:
+        swap_info = SWAP_CONFIG[trajectory]
+        paired_trajectory = str(swap_info["source_trajectory"])
+        swap_segment_index = int(swap_info["segment_index"])
+        test_inputs = test_inputs_by_traj[trajectory]
+        p_test = np.asarray(test_inputs["p"], dtype=float)
+        y_test = np.asarray(test_inputs["y"], dtype=float)
+        swap_mask = _segment_mask(p_test, segment_edges, swap_segment_index)
+
+        own_prediction = predict_selected_light_eta(
+            dataset=dataset,
+            model_name=model_name,
+            trajectory=trajectory,
+            p_eval=p_test,
+            speed_values=test_inputs["v"],
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+        )
+        swapped_eta = build_selected_swapped_eta(
+            model_name=model_name,
+            own_prediction=own_prediction,
+            paired_dataset=dataset,
+            paired_trajectory=paired_trajectory,
+            p_eval=p_test,
+            segment_edges=segment_edges,
+            swap_segment_index=swap_segment_index,
+            swap_mask=swap_mask,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            swap_light_offset=swap_light_offset,
+        )
+
+        unswapped_count = np.exp(own_prediction["light_eta"])
+        swapped_count = np.exp(swapped_eta)
+        grid = np.asarray(dataset.coords["tp_grid"].values, dtype=float)
+        grid_mask = _segment_mask(grid, segment_edges, swap_segment_index)
+        own_grid_hz = _selected_var_by_trajectory(
+            dataset,
+            "train_light_hz_grid",
+            trajectory,
+        )
+        own_grid_eta = np.log(np.clip(own_grid_hz * float(bin_size_s), 1e-12, None))
+        own_grid_prediction = predict_selected_light_eta(
+            dataset=dataset,
+            model_name=model_name,
+            trajectory=trajectory,
+            p_eval=grid,
+            speed_values=None,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+            allow_missing_speed=True,
+        )
+        own_grid_prediction["light_eta"] = own_grid_eta
+        swapped_grid_eta = build_selected_swapped_eta(
+            model_name=model_name,
+            own_prediction=own_grid_prediction,
+            paired_dataset=dataset,
+            paired_trajectory=paired_trajectory,
+            p_eval=grid,
+            segment_edges=segment_edges,
+            swap_segment_index=swap_segment_index,
+            swap_mask=grid_mask,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            swap_light_offset=swap_light_offset,
+        )
+
+        y_segment = y_test[swap_mask] if np.any(swap_mask) else y_test[:0]
+        unswapped_segment_count = (
+            unswapped_count[swap_mask] if np.any(swap_mask) else unswapped_count[:0]
+        )
+        swapped_segment_count = (
+            swapped_count[swap_mask] if np.any(swap_mask) else swapped_count[:0]
+        )
+
+        results[trajectory] = {
+            "unit_ids": np.asarray(dataset.coords["unit"].values),
+            "swap_source_trajectory": paired_trajectory,
+            "swap_segment_index_1based": int(swap_segment_index + 1),
+            "swap_segment_start": float(segment_edges[swap_segment_index]),
+            "swap_segment_end": float(segment_edges[swap_segment_index + 1]),
+            "dark_hz_grid": _selected_var_by_trajectory(
+                dataset,
+                "dark_hz_grid",
+                trajectory,
+            ),
+            "train_light_hz_grid": own_grid_hz,
+            "test_light_unswapped_hz_grid": own_grid_hz,
+            "test_light_swapped_hz_grid": np.exp(swapped_grid_eta) / float(bin_size_s),
+            "test_light_full_unswapped_metrics": summarize_raw_poisson_metrics(
+                y_test,
+                unswapped_count,
+            ),
+            "test_light_full_swapped_metrics": summarize_raw_poisson_metrics(
+                y_test,
+                swapped_count,
+            ),
+            "test_light_swapped_segment_unswapped_metrics": summarize_raw_poisson_metrics(
+                y_segment,
+                unswapped_segment_count,
+            ),
+            "test_light_swapped_segment_swapped_metrics": summarize_raw_poisson_metrics(
+                y_segment,
+                swapped_segment_count,
+            ),
+            "test_light_full_n_bins": int(y_test.shape[0]),
+            "test_light_swapped_segment_n_bins": int(y_segment.shape[0]),
+        }
+    return results
 
 
 def fit_visual_model_for_trajectory(
@@ -1119,6 +1823,7 @@ def fit_visual_model_for_trajectory(
     ridge: float,
     n_splines: int,
     spline_order: int,
+    include_light_offset_term: bool = True,
     speed_feature_mode: str,
     n_splines_speed: int,
     spline_order_speed: int,
@@ -1174,7 +1879,13 @@ def fit_visual_model_for_trajectory(
     n_place_basis = int(place_basis_train.shape[1])
     basis_dark = place_basis_train * (1.0 - l_train[:, None])
     basis_light = place_basis_train * l_train[:, None]
-    x_train = np.concatenate([basis_dark, basis_light, l_train[:, None], v_train], axis=1)
+    if include_light_offset_term:
+        x_train = np.concatenate(
+            [basis_dark, basis_light, l_train[:, None], v_train],
+            axis=1,
+        )
+    else:
+        x_train = np.concatenate([basis_dark, basis_light, v_train], axis=1)
 
     model = PopulationGLM(
         "Poisson",
@@ -1187,8 +1898,14 @@ def fit_visual_model_for_trajectory(
     n_speed_features = int(speed_transform["n_features"])
     coef_place_dark = coef[:n_place_basis]
     coef_place_light = coef[n_place_basis : (2 * n_place_basis)]
-    coef_light = coef[2 * n_place_basis]
-    coef_speed_basis = coef[(2 * n_place_basis + 1) : (2 * n_place_basis + 1 + n_speed_features)]
+    light_index = 2 * n_place_basis
+    if include_light_offset_term:
+        coef_light = coef[light_index]
+        speed_start = light_index + 1
+    else:
+        coef_light = np.zeros((unit_ids.size,), dtype=float)
+        speed_start = light_index
+    coef_speed_basis = coef[speed_start : (speed_start + n_speed_features)]
     intercept = np.asarray(model.intercept_).reshape(-1)
 
     pred_dark = _predict_visual_components(
@@ -1242,6 +1959,7 @@ def fit_visual_model_for_trajectory(
         "unit_ids": unit_ids,
         "epoch_inputs": epoch_inputs,
         "basis": basis,
+        "has_light_offset_term": bool(include_light_offset_term),
         "intercept": intercept,
         "coef_light": coef_light,
         "coef_place_dark": coef_place_dark,
@@ -1263,6 +1981,7 @@ def fit_task_segment_bump_model_for_trajectory(
     n_splines: int,
     spline_order: int,
     segment_edges: np.ndarray,
+    include_light_offset_term: bool = True,
     speed_feature_mode: str,
     n_splines_speed: int,
     spline_order_speed: int,
@@ -1327,10 +2046,21 @@ def fit_task_segment_bump_model_for_trajectory(
     )
     n_dark_basis = int(dark_basis_train.shape[1])
     n_gain_basis = int(gain_basis_train.shape[1])
-    x_train = np.concatenate(
-        [dark_basis_train, l_train[:, None], gain_basis_train * l_train[:, None], v_train],
-        axis=1,
-    )
+    if include_light_offset_term:
+        x_train = np.concatenate(
+            [
+                dark_basis_train,
+                l_train[:, None],
+                gain_basis_train * l_train[:, None],
+                v_train,
+            ],
+            axis=1,
+        )
+    else:
+        x_train = np.concatenate(
+            [dark_basis_train, gain_basis_train * l_train[:, None], v_train],
+            axis=1,
+        )
 
     model = PopulationGLM(
         "Poisson",
@@ -1342,9 +2072,15 @@ def fit_task_segment_bump_model_for_trajectory(
     coef = _coef_feat_by_unit(model, n_features=x_train.shape[1])
     n_speed_features = int(speed_transform["n_features"])
     coef_place_dark = coef[:n_dark_basis]
-    coef_light = coef[n_dark_basis]
-    coef_gain = coef[(n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)]
-    coef_speed_basis = coef[(n_dark_basis + 1 + n_gain_basis) : (n_dark_basis + 1 + n_gain_basis + n_speed_features)]
+    if include_light_offset_term:
+        coef_light = coef[n_dark_basis]
+        gain_start = n_dark_basis + 1
+    else:
+        coef_light = np.zeros((unit_ids.size,), dtype=float)
+        gain_start = n_dark_basis
+    coef_gain = coef[gain_start : (gain_start + n_gain_basis)]
+    speed_start = gain_start + n_gain_basis
+    coef_speed_basis = coef[speed_start : (speed_start + n_speed_features)]
     intercept = np.asarray(model.intercept_).reshape(-1)
 
     pred_dark = _predict_task_components(
@@ -1403,6 +2139,7 @@ def fit_task_segment_bump_model_for_trajectory(
         "epoch_inputs": epoch_inputs,
         "basis": dark_basis,
         "segment_edges": np.asarray(segment_edges, dtype=float),
+        "has_light_offset_term": bool(include_light_offset_term),
         "intercept": intercept,
         "coef_light": coef_light,
         "coef_place_dark": coef_place_dark,
@@ -1424,6 +2161,7 @@ def fit_task_segment_scalar_model_for_trajectory(
     n_splines: int,
     spline_order: int,
     segment_edges: np.ndarray,
+    include_light_offset_term: bool = True,
     speed_feature_mode: str,
     n_splines_speed: int,
     spline_order_speed: int,
@@ -1487,10 +2225,21 @@ def fit_task_segment_scalar_model_for_trajectory(
     )
     n_dark_basis = int(dark_basis_train.shape[1])
     n_gain_basis = int(gain_basis_train.shape[1])
-    x_train = np.concatenate(
-        [dark_basis_train, l_train[:, None], gain_basis_train * l_train[:, None], v_train],
-        axis=1,
-    )
+    if include_light_offset_term:
+        x_train = np.concatenate(
+            [
+                dark_basis_train,
+                l_train[:, None],
+                gain_basis_train * l_train[:, None],
+                v_train,
+            ],
+            axis=1,
+        )
+    else:
+        x_train = np.concatenate(
+            [dark_basis_train, gain_basis_train * l_train[:, None], v_train],
+            axis=1,
+        )
 
     model = PopulationGLM(
         "Poisson",
@@ -1502,15 +2251,15 @@ def fit_task_segment_scalar_model_for_trajectory(
     coef = _coef_feat_by_unit(model, n_features=x_train.shape[1])
     n_speed_features = int(speed_transform["n_features"])
     coef_place_dark = coef[:n_dark_basis]
-    coef_light = coef[n_dark_basis]
-    coef_segment_scalar_gain = coef[
-        (n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)
-    ]
-    coef_speed_basis = coef[
-        (n_dark_basis + 1 + n_gain_basis) : (
-            n_dark_basis + 1 + n_gain_basis + n_speed_features
-        )
-    ]
+    if include_light_offset_term:
+        coef_light = coef[n_dark_basis]
+        gain_start = n_dark_basis + 1
+    else:
+        coef_light = np.zeros((unit_ids.size,), dtype=float)
+        gain_start = n_dark_basis
+    coef_segment_scalar_gain = coef[gain_start : (gain_start + n_gain_basis)]
+    speed_start = gain_start + n_gain_basis
+    coef_speed_basis = coef[speed_start : (speed_start + n_speed_features)]
     intercept = np.asarray(model.intercept_).reshape(-1)
 
     pred_dark = _predict_task_scalar_components(
@@ -1569,6 +2318,7 @@ def fit_task_segment_scalar_model_for_trajectory(
         "epoch_inputs": epoch_inputs,
         "basis": dark_basis,
         "segment_edges": np.asarray(gain_edges, dtype=float),
+        "has_light_offset_term": bool(include_light_offset_term),
         "intercept": intercept,
         "coef_light": coef_light,
         "coef_place_dark": coef_place_dark,
@@ -1589,6 +2339,7 @@ def fit_task_dense_gain_model_for_trajectory(
     ridge: float,
     n_splines: int,
     spline_order: int,
+    include_light_offset_term: bool = True,
     speed_feature_mode: str,
     n_splines_speed: int,
     spline_order_speed: int,
@@ -1653,10 +2404,21 @@ def fit_task_dense_gain_model_for_trajectory(
     gain_basis_train = np.asarray(gain_basis.compute_features(p_train), dtype=float)
     n_dark_basis = int(dark_basis_train.shape[1])
     n_gain_basis = int(gain_basis_train.shape[1])
-    x_train = np.concatenate(
-        [dark_basis_train, l_train[:, None], gain_basis_train * l_train[:, None], v_train],
-        axis=1,
-    )
+    if include_light_offset_term:
+        x_train = np.concatenate(
+            [
+                dark_basis_train,
+                l_train[:, None],
+                gain_basis_train * l_train[:, None],
+                v_train,
+            ],
+            axis=1,
+        )
+    else:
+        x_train = np.concatenate(
+            [dark_basis_train, gain_basis_train * l_train[:, None], v_train],
+            axis=1,
+        )
 
     model = PopulationGLM(
         "Poisson",
@@ -1668,13 +2430,15 @@ def fit_task_dense_gain_model_for_trajectory(
     coef = _coef_feat_by_unit(model, n_features=x_train.shape[1])
     n_speed_features = int(speed_transform["n_features"])
     coef_place_dark = coef[:n_dark_basis]
-    coef_light = coef[n_dark_basis]
-    coef_gain_spline = coef[(n_dark_basis + 1) : (n_dark_basis + 1 + n_gain_basis)]
-    coef_speed_basis = coef[
-        (n_dark_basis + 1 + n_gain_basis) : (
-            n_dark_basis + 1 + n_gain_basis + n_speed_features
-        )
-    ]
+    if include_light_offset_term:
+        coef_light = coef[n_dark_basis]
+        gain_start = n_dark_basis + 1
+    else:
+        coef_light = np.zeros((unit_ids.size,), dtype=float)
+        gain_start = n_dark_basis
+    coef_gain_spline = coef[gain_start : (gain_start + n_gain_basis)]
+    speed_start = gain_start + n_gain_basis
+    coef_speed_basis = coef[speed_start : (speed_start + n_speed_features)]
     intercept = np.asarray(model.intercept_).reshape(-1)
 
     pred_dark = _predict_task_dense_gain_components(
@@ -1733,6 +2497,7 @@ def fit_task_dense_gain_model_for_trajectory(
         "epoch_inputs": epoch_inputs,
         "basis": dark_basis,
         "gain_basis": gain_basis,
+        "has_light_offset_term": bool(include_light_offset_term),
         "intercept": intercept,
         "coef_light": coef_light,
         "coef_place_dark": coef_place_dark,
@@ -2113,6 +2878,7 @@ def fit_model_family(
     segment_edges: np.ndarray,
     bin_size_s: float,
     unit_mask: np.ndarray,
+    include_light_offset_term: bool = True,
     speed_feature_mode: str,
     n_splines_speed: int,
     spline_order_speed: int,
@@ -2184,6 +2950,7 @@ def fit_model_family(
                 ridge=ridge,
                 n_splines=n_splines,
                 spline_order=spline_order,
+                include_light_offset_term=include_light_offset_term,
                 speed_feature_mode=speed_feature_mode,
                 n_splines_speed=n_splines_speed,
                 spline_order_speed=spline_order_speed,
@@ -2196,6 +2963,7 @@ def fit_model_family(
                 n_splines=n_splines,
                 spline_order=spline_order,
                 segment_edges=segment_edges,
+                include_light_offset_term=include_light_offset_term,
                 speed_feature_mode=speed_feature_mode,
                 n_splines_speed=n_splines_speed,
                 spline_order_speed=spline_order_speed,
@@ -2208,6 +2976,7 @@ def fit_model_family(
                 n_splines=n_splines,
                 spline_order=spline_order,
                 segment_edges=segment_edges,
+                include_light_offset_term=include_light_offset_term,
                 speed_feature_mode=speed_feature_mode,
                 n_splines_speed=n_splines_speed,
                 spline_order_speed=spline_order_speed,
@@ -2219,6 +2988,7 @@ def fit_model_family(
                 ridge=ridge,
                 n_splines=n_splines,
                 spline_order=spline_order,
+                include_light_offset_term=include_light_offset_term,
                 speed_feature_mode=speed_feature_mode,
                 n_splines_speed=n_splines_speed,
                 spline_order_speed=spline_order_speed,
@@ -2394,6 +3164,7 @@ def build_model_dataset(
     light_test_epoch: str,
     ridge: float,
     dark_movement_firing_rates: np.ndarray,
+    light_movement_firing_rates: np.ndarray,
     segment_edges: np.ndarray,
     observed_bin_edges: np.ndarray,
     sources: dict[str, Any],
@@ -2416,8 +3187,20 @@ def build_model_dataset(
     )
     speed_outputs = first["speed_outputs"]
     lap_arrays = _build_heldout_lap_arrays(heldout_split_by_traj)
+    include_light_offset_term = bool(
+        fit_parameters.get("include_light_offset_term", True)
+    )
+    coef_light_offset = np.stack(
+        [
+            np.asarray(results_by_traj[trajectory]["coef_light"], dtype=float)
+            for trajectory in TRAJECTORY_TYPES
+        ],
+        axis=0,
+    )
+    if not include_light_offset_term:
+        coef_light_offset = np.zeros_like(coef_light_offset)
     attrs = {
-        "schema_version": "2",
+        "schema_version": "3",
         "animal_name": animal_name,
         "date": date,
         "region": region,
@@ -2430,13 +3213,22 @@ def build_model_dataset(
         "n_splines": int(fit_parameters["n_splines"]),
         "spline_order": int(fit_parameters["spline_order"]),
         "has_speed": bool(fit_parameters["use_speed"]),
+        "has_light_offset_term": include_light_offset_term,
         "pos_bounds_lower": float(POS_BOUNDS[0]),
         "pos_bounds_upper": float(POS_BOUNDS[1]),
         "speed_feature_mode": str(speed_outputs["speed_feature_mode"]),
         "n_speed_features": int(speed_outputs["n_speed_features"]),
         "speed_basis": str(speed_outputs["speed_basis"]),
         "speed_spline_order": float(speed_outputs["speed_spline_order"]),
-        "min_dark_firing_rate_hz": float(fit_parameters["region_threshold_hz"]),
+        "min_dark_firing_rate_hz": float(
+            fit_parameters.get(
+                "dark_region_threshold_hz",
+                fit_parameters["region_threshold_hz"],
+            )
+        ),
+        "min_light_firing_rate_hz": float(
+            fit_parameters["light_region_threshold_hz"]
+        ),
         "test_scoring_scope": "swapped_segment_only",
         "heldout_split_scope": "lap_level_by_trajectory",
         "heldout_validation_fraction": 0.5,
@@ -2455,6 +3247,10 @@ def build_model_dataset(
             "dark_train_movement_firing_rate_hz": (
                 "unit",
                 np.asarray(dark_movement_firing_rates, dtype=float),
+            ),
+            "light_train_movement_firing_rate_hz": (
+                "unit",
+                np.asarray(light_movement_firing_rates, dtype=float),
             ),
             "speed_basis_bounds": (
                 ("trajectory", "speed_bound"),
@@ -2800,10 +3596,7 @@ def build_model_dataset(
             ),
             "coef_light_offset": (
                 ("trajectory", "unit"),
-                np.stack(
-                    [np.asarray(results_by_traj[trajectory]["coef_light"], dtype=float) for trajectory in TRAJECTORY_TYPES],
-                    axis=0,
-                ),
+                coef_light_offset,
             ),
             "coef_place_dark": (
                 ("trajectory", "place_basis", "unit"),
@@ -2902,6 +3695,11 @@ def build_model_dataset(
         },
         attrs=attrs,
     )
+    dataset["coef_light_offset"].attrs["description"] = (
+        "Explicit scalar light indicator coefficient; zeros when "
+        "has_light_offset_term is false."
+    )
+    dataset["coef_light_offset"].attrs["fitted"] = include_light_offset_term
 
     if model_name == "visual":
         dataset["coef_place_light"] = (
@@ -2973,6 +3771,314 @@ def build_model_dataset(
         )
     else:
         raise ValueError(f"Unknown model_name: {model_name}")
+    return dataset
+
+
+def _stack_model_traj_array(
+    results_by_model: dict[str, dict[str, dict[str, Any]]],
+    model_names: Sequence[str],
+    key: str,
+) -> np.ndarray:
+    """Stack one result field into `(model, trajectory, ...)` order."""
+    return np.stack(
+        [
+            np.stack(
+                [
+                    np.asarray(results_by_model[model_name][trajectory][key], dtype=float)
+                    for trajectory in TRAJECTORY_TYPES
+                ],
+                axis=0,
+            )
+            for model_name in model_names
+        ],
+        axis=0,
+    )
+
+
+def _stack_model_traj_metric(
+    results_by_model: dict[str, dict[str, dict[str, Any]]],
+    model_names: Sequence[str],
+    metric_name: str,
+    key: str,
+) -> np.ndarray:
+    """Stack one raw metric into `(model, trajectory, unit)` order."""
+    return np.stack(
+        [
+            np.stack(
+                [
+                    np.asarray(
+                        results_by_model[model_name][trajectory][metric_name][key],
+                        dtype=float,
+                    )
+                    for trajectory in TRAJECTORY_TYPES
+                ],
+                axis=0,
+            )
+            for model_name in model_names
+        ],
+        axis=0,
+    )
+
+
+def _stack_traj_result_vector(
+    results_by_model: dict[str, dict[str, dict[str, Any]]],
+    model_name: str,
+    key: str,
+    *,
+    dtype: type = float,
+) -> np.ndarray:
+    """Stack one trajectory-level result vector from a representative model."""
+    return np.asarray(
+        [results_by_model[model_name][trajectory][key] for trajectory in TRAJECTORY_TYPES],
+        dtype=dtype,
+    )
+
+
+def build_selected_swap_dataset(
+    *,
+    model_names: Sequence[str],
+    selected_datasets: dict[str, "xr.Dataset"],
+    selected_paths: dict[str, Path],
+    results_by_model: dict[str, dict[str, dict[str, Any]]],
+    test_inputs_by_traj: dict[str, dict[str, Any]],
+    observed_summaries_by_traj: dict[str, dict[str, np.ndarray]],
+    animal_name: str,
+    date: str,
+    region: str,
+    dark_train_epoch: str,
+    light_train_epoch: str,
+    light_test_epoch: str,
+    segment_edges: np.ndarray,
+    observed_bin_edges: np.ndarray,
+    shared_metadata: dict[str, Any],
+    sources: dict[str, Any],
+    fit_parameters: dict[str, Any],
+) -> "xr.Dataset":
+    """Build one combined selected-source swap comparison dataset."""
+    try:
+        import xarray as xr
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "xarray is required to save selected-source swap comparison outputs."
+        ) from exc
+
+    model_names = list(model_names)
+    reference_model = "visual"
+    reference_dataset = selected_datasets[reference_model]
+    unit_ids = np.asarray(reference_dataset.coords["unit"].values)
+    tp_grid = np.asarray(reference_dataset.coords["tp_grid"].values, dtype=float)
+    observed_bin_centers = 0.5 * (
+        np.asarray(observed_bin_edges[:-1], dtype=float)
+        + np.asarray(observed_bin_edges[1:], dtype=float)
+    )
+    metric_names = (
+        "test_light_swapped_segment_unswapped",
+        "test_light_swapped_segment_swapped",
+        "test_light_full_unswapped",
+        "test_light_full_swapped",
+    )
+    data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
+        "selected_model_path": (
+            ("model",),
+            np.asarray([str(selected_paths[model_name]) for model_name in model_names], dtype=str),
+        ),
+        "selected_ridge": (
+            ("model",),
+            np.asarray(
+                [
+                    float(selected_datasets[model_name].attrs.get("selected_ridge", np.nan))
+                    for model_name in model_names
+                ],
+                dtype=float,
+            ),
+        ),
+        "selected_score": (
+            ("model",),
+            np.asarray(
+                [
+                    float(selected_datasets[model_name].attrs.get("selection_score", np.nan))
+                    for model_name in model_names
+                ],
+                dtype=float,
+            ),
+        ),
+        "swap_source_trajectory": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "swap_source_trajectory",
+                dtype=str,
+            ),
+        ),
+        "swap_segment_index_1based": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "swap_segment_index_1based",
+                dtype=int,
+            ),
+        ),
+        "swap_segment_start": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "swap_segment_start",
+            ),
+        ),
+        "swap_segment_end": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "swap_segment_end",
+            ),
+        ),
+        "dark_hz_grid": (
+            ("model", "trajectory", "tp_grid", "unit"),
+            _stack_model_traj_array(results_by_model, model_names, "dark_hz_grid"),
+        ),
+        "train_light_hz_grid": (
+            ("model", "trajectory", "tp_grid", "unit"),
+            _stack_model_traj_array(results_by_model, model_names, "train_light_hz_grid"),
+        ),
+        "test_light_unswapped_hz_grid": (
+            ("model", "trajectory", "tp_grid", "unit"),
+            _stack_model_traj_array(
+                results_by_model,
+                model_names,
+                "test_light_unswapped_hz_grid",
+            ),
+        ),
+        "test_light_swapped_hz_grid": (
+            ("model", "trajectory", "tp_grid", "unit"),
+            _stack_model_traj_array(
+                results_by_model,
+                model_names,
+                "test_light_swapped_hz_grid",
+            ),
+        ),
+        "test_light_swapped_segment_n_bins": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "test_light_swapped_segment_n_bins",
+                dtype=int,
+            ),
+        ),
+        "test_light_full_n_bins": (
+            ("trajectory",),
+            _stack_traj_result_vector(
+                results_by_model,
+                reference_model,
+                "test_light_full_n_bins",
+                dtype=int,
+            ),
+        ),
+        "test_light_occupancy_s": (
+            ("trajectory", "tp_observed_bin"),
+            np.stack(
+                [
+                    np.asarray(observed_summaries_by_traj[trajectory]["occupancy_s"], dtype=float)
+                    for trajectory in TRAJECTORY_TYPES
+                ],
+                axis=0,
+            ),
+        ),
+        "test_light_spike_count": (
+            ("trajectory", "tp_observed_bin", "unit"),
+            np.stack(
+                [
+                    np.asarray(observed_summaries_by_traj[trajectory]["spike_count"], dtype=float)
+                    for trajectory in TRAJECTORY_TYPES
+                ],
+                axis=0,
+            ),
+        ),
+        "test_light_observed_rate_hz": (
+            ("trajectory", "tp_observed_bin", "unit"),
+            np.stack(
+                [
+                    np.asarray(
+                        observed_summaries_by_traj[trajectory]["observed_rate_hz"],
+                        dtype=float,
+                    )
+                    for trajectory in TRAJECTORY_TYPES
+                ],
+                axis=0,
+            ),
+        ),
+    }
+    for metric_name in metric_names:
+        source_name = f"{metric_name}_metrics"
+        for key, output_suffix in (
+            ("raw_ll_sum", "raw_ll_sum"),
+            ("spike_sum", "spike_sum"),
+            ("raw_ll_bits_per_spike", "raw_ll_bits_per_spike"),
+        ):
+            data_vars[f"{metric_name}_{output_suffix}"] = (
+                ("model", "trajectory", "unit"),
+                _stack_model_traj_metric(
+                    results_by_model,
+                    model_names,
+                    source_name,
+                    key,
+                ),
+            )
+
+    swapped_bits = data_vars[
+        "test_light_swapped_segment_swapped_raw_ll_bits_per_spike"
+    ][1]
+    visual_index = model_names.index("visual")
+    delta = swapped_bits - swapped_bits[[visual_index], :, :]
+    delta[visual_index, :, :] = np.nan
+    data_vars[
+        "test_light_swapped_segment_swapped_delta_model_minus_visual_raw_ll_bits_per_spike"
+    ] = (("model", "trajectory", "unit"), delta)
+
+    dataset = xr.Dataset(
+        data_vars=data_vars,
+        coords={
+            "model": np.asarray(model_names, dtype=str),
+            "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
+            "unit": unit_ids,
+            "tp_grid": tp_grid,
+            "tp_observed_bin": observed_bin_centers,
+            "tp_observed_edge": np.asarray(observed_bin_edges, dtype=float),
+            "segment_edge": np.asarray(segment_edges, dtype=float),
+        },
+        attrs={
+            "schema_version": "4",
+            "animal_name": animal_name,
+            "date": date,
+            "region": region,
+            "dark_train_epoch": dark_train_epoch,
+            "light_train_epoch": light_train_epoch,
+            "light_test_epoch": light_test_epoch,
+            "fit_source": "dark_light_glm_selected",
+            "test_scoring_scope": "swapped_segment_primary_and_full_diagnostic",
+            "primary_metric": (
+                "test_light_swapped_segment_swapped_delta_model_minus_visual_"
+                "raw_ll_bits_per_spike"
+            ),
+            "heldout_epoch_scope": "all_movement_laps",
+            "raw_ll_bits_per_spike_definition": "raw_poisson_ll_sum / spike_sum / log(2)",
+            "swap_light_offset": bool(fit_parameters.get("swap_light_offset", False)),
+            "bin_size_s": float(shared_metadata["bin_size_s"]),
+            "n_splines": int(shared_metadata["n_splines"]),
+            "spline_order": int(shared_metadata["spline_order"]),
+            "has_speed": bool(shared_metadata["has_speed"]),
+            "speed_feature_mode": str(shared_metadata["speed_feature_mode"]),
+            "n_speed_features": int(shared_metadata["n_speed_features"]),
+            "speed_spline_order": float(shared_metadata["speed_spline_order"]),
+            "swap_rule_json": json.dumps(SWAP_CONFIG, sort_keys=True),
+            "sources_json": json.dumps(sources, sort_keys=True),
+            "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
+        },
+    )
     return dataset
 
 
@@ -3078,247 +4184,276 @@ def plot_metric_difference_histograms(
     return out_path
 
 
+def plot_selected_model_minus_visual_histogram(
+    dataset: "xr.Dataset",
+    *,
+    model_name: str,
+    out_path: Path,
+) -> Path:
+    """Save the primary pooled task-minus-visual swapped-segment LL histogram."""
+    import matplotlib.pyplot as plt
+
+    metric_name = (
+        "test_light_swapped_segment_swapped_delta_model_minus_visual_"
+        "raw_ll_bits_per_spike"
+    )
+    if model_name == "visual":
+        raise ValueError("The visual baseline has no model-minus-visual histogram.")
+    if model_name not in set(str(value) for value in dataset.coords["model"].values):
+        raise ValueError(f"Model {model_name!r} is not present in the selected dataset.")
+    values = np.asarray(dataset[metric_name].sel(model=model_name).values, dtype=float)
+    finite_values = values[np.isfinite(values)]
+
+    if finite_values.size == 0:
+        edges = np.asarray([-0.5, 0.0, 0.5], dtype=float)
+        median_value = np.nan
+        frac_positive = np.nan
+    else:
+        edges = np.asarray(np.histogram_bin_edges(finite_values, bins="auto"), dtype=float)
+        if edges.size < 2:
+            center = float(finite_values[0])
+            edges = np.asarray([center - 0.5, center + 0.5], dtype=float)
+        if not np.any(np.isclose(edges, 0.0)):
+            edges = np.unique(np.concatenate((edges, [0.0])))
+        median_value = float(np.median(finite_values))
+        frac_positive = float(np.mean(finite_values > 0.0))
+
+    fig, axis = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
+    axis.hist(finite_values, bins=edges, color="0.2", edgecolor="white")
+    axis.axvline(0.0, color="0.15", linestyle="--", linewidth=1.0)
+    if finite_values.size == 0:
+        axis.text(
+            0.5,
+            0.5,
+            "No finite delta LL values",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+            fontsize=12,
+        )
+    axis.set_xlabel(
+        f"{model_name} - visual swapped-segment swapped raw LL (bits/spike)"
+    )
+    axis.set_ylabel("Trajectory-cell pairs")
+    axis.set_title(
+        f"{dataset.attrs['region'].upper()} | {dataset.attrs['light_test_epoch']} test | "
+        f"{model_name} vs visual"
+    )
+    axis.text(
+        0.98,
+        0.95,
+        (
+            f"n={int(finite_values.size)}\n"
+            f"median={median_value:.3g}\n"
+            f"frac>0={frac_positive:.3f}"
+        ),
+        ha="right",
+        va="top",
+        transform=axis.transAxes,
+        fontsize=9,
+        bbox={"facecolor": "white", "edgecolor": "0.85", "alpha": 0.9},
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main() -> None:
     """Run the task-progression model-comparison workflow."""
     args = parse_arguments()
+    model_names, model_messages = normalize_requested_models(args.models)
+    for message in model_messages:
+        print(message)
+
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
-    selected_epochs = [
-        args.dark_train_epoch,
-        args.light_train_epoch,
-        args.light_test_epoch,
-    ]
-    print(
-        "Loading session for "
-        f"{args.animal_name} {args.date} with dark-train={args.dark_train_epoch}, "
-        f"light-train={args.light_train_epoch}, light-test={args.light_test_epoch}."
+    selected_dir = (
+        Path(args.dark_light_glm_dir)
+        if args.dark_light_glm_dir is not None
+        else selected_dark_light_glm_dir(analysis_path)
     )
-    if args.cuda_visible_devices is not None:
-        print(f"Using CUDA_VISIBLE_DEVICES={args.cuda_visible_devices}.")
+    if len({args.dark_train_epoch, args.light_train_epoch, args.light_test_epoch}) != 3:
+        raise ValueError(
+            "dark_train_epoch, light_train_epoch, and light_test_epoch must all be distinct."
+        )
+
+    print(
+        "Loading held-out light test epoch for "
+        f"{args.animal_name} {args.date}: light-test={args.light_test_epoch}."
+    )
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
         date=args.date,
         data_root=args.data_root,
-        selected_run_epochs=selected_epochs,
+        regions=tuple(args.regions),
+        selected_run_epochs=[args.light_test_epoch],
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
     )
     validate_model_comparison_epochs(
-        session["run_epochs"],
+        session["available_run_epochs"],
         dark_train_epoch=args.dark_train_epoch,
         light_train_epoch=args.light_train_epoch,
         light_test_epoch=args.light_test_epoch,
     )
 
-    segment_edges = (
-        derive_default_segment_edges(args.animal_name)
-        if args.segment_edges is None
-        else _validate_segment_edges(args.segment_edges)
-    )
-    print(
-        "Using segment edges: "
-        + ", ".join(f"{edge:.4f}" for edge in np.asarray(segment_edges, dtype=float))
-    )
     observed_bin_edges = build_task_progression_bins(args.animal_name)
-    heldout_split_by_traj = split_test_light_laps_by_trajectory(
-        session["trajectory_intervals"][args.light_test_epoch],
-        seed=args.seed,
-    )
-    print(
-        f"Split held-out light epoch {args.light_test_epoch} into validation/test "
-        f"laps with seed={args.seed}."
-    )
-    for trajectory in TRAJECTORY_TYPES:
-        split_info = heldout_split_by_traj[trajectory]
-        print(
-            f"  {trajectory}: "
-            f"{int(split_info['validation_indices'].size)} validation lap(s), "
-            f"{int(split_info['test_indices'].size)} test lap(s)."
-        )
-    movement_firing_rates = compute_movement_firing_rates(
-        session["spikes_by_region"],
-        session["movement_by_run"],
-        session["run_epochs"],
-    )
     data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    region_thresholds = {
-        "v1": float(args.v1_min_dark_fr_hz),
-        "ca1": float(args.ca1_min_dark_fr_hz),
-    }
-    speed_by_run = session["speed_by_run"] if args.use_speed else None
-    speed_bounds = None if args.speed_bounds is None else tuple(args.speed_bounds)
-
     saved_datasets: list[Path] = []
     saved_figures: list[Path] = []
-    skipped_regions: list[dict[str, Any]] = []
-    selected_ridges_by_region: dict[str, dict[str, float]] = {}
+    selected_files_by_region: dict[str, dict[str, str]] = {}
+    _require_spline_basis()
 
     for region in args.regions:
-        print(f"Preparing region {region.upper()}.")
-        dark_epoch_rates = np.asarray(
-            movement_firing_rates[region][args.dark_train_epoch],
-            dtype=float,
-        )
-        unit_mask = np.isfinite(dark_epoch_rates) & (
-            dark_epoch_rates > region_thresholds[region]
-        )
-        if not np.any(unit_mask):
-            skipped_regions.append(
-                {
-                    "region": region,
-                    "reason": "no units passed the dark-train firing-rate threshold",
-                    "threshold_hz": region_thresholds[region],
-                }
-            )
-            print(
-                f"Skipping {region.upper()}: no units passed the dark-train threshold "
-                f"({region_thresholds[region]:.3f} Hz)."
-            )
-            continue
-
-        selected_dark_rates = dark_epoch_rates[unit_mask]
         print(
-            f"Selected {int(unit_mask.sum())} {region.upper()} units above "
-            f"{region_thresholds[region]:.3f} Hz in {args.dark_train_epoch}."
+            f"Loading selected dark/light GLMs for {region.upper()} from {selected_dir}."
         )
-        spikes_region = session["spikes_by_region"][region]
-        model_results: dict[str, dict[str, dict[str, Any]]] = {}
-        model_datasets: dict[str, xr.Dataset] = {}
-        selected_ridges_by_region[region] = {}
-
-        for model_name in args.models:
-            print(
-                f"  Sweeping ridges for {model_name} model across "
-                f"{len(TRAJECTORY_TYPES)} trajectories."
-            )
-            results_by_ridge: dict[float, dict[str, dict[str, Any]]] = {}
-            for ridge in args.ridges:
-                print(
-                    f"    Fitting {model_name} at ridge={float(ridge):.3g}."
-                )
-                results_by_traj = fit_model_family(
-                    model_name=model_name,
-                    spikes=spikes_region,
-                    trajectory_ep_by_epoch=session["trajectory_intervals"],
-                    tp_by_epoch=session["task_progression_by_trajectory"],
-                    speed_by_epoch=speed_by_run,
-                    movement_by_run=session["movement_by_run"],
-                    heldout_split_by_traj=heldout_split_by_traj,
-                    dark_train_epoch=args.dark_train_epoch,
-                    light_train_epoch=args.light_train_epoch,
-                    light_test_epoch=args.light_test_epoch,
-                    ridge=float(ridge),
-                    n_splines=args.n_splines,
-                    spline_order=args.spline_order,
-                    segment_edges=segment_edges,
-                    bin_size_s=args.bin_size_s,
-                    unit_mask=unit_mask,
-                    speed_feature_mode=args.speed_feature_mode,
-                    n_splines_speed=args.n_splines_speed,
-                    spline_order_speed=args.spline_order_speed,
-                    speed_bounds=speed_bounds,
-                    observed_bin_edges=observed_bin_edges,
-                )
-                results_by_ridge[float(ridge)] = results_by_traj
-
-            validation_sweep = build_validation_sweep(
-                results_by_ridge,
-                ridge_values=args.ridges,
-            )
-            selected_ridge = float(validation_sweep["selected_ridge"])
-            selected_ridges_by_region[region][model_name] = selected_ridge
-            model_results[model_name] = results_by_ridge[selected_ridge]
-            print(
-                f"  Selected ridge={selected_ridge:.3g} for {model_name} "
-                f"using pooled median validation swapped bits/spike."
-            )
-
-            fit_parameters = {
-                "position_offset": args.position_offset,
-                "speed_threshold_cm_s": args.speed_threshold_cm_s,
-                "bin_size_s": args.bin_size_s,
-                "ridge_candidates": [float(ridge) for ridge in args.ridges],
-                "selected_ridge": selected_ridge,
-                "seed": int(args.seed),
-                "n_splines": args.n_splines,
-                "spline_order": args.spline_order,
-                "use_speed": args.use_speed,
-                "speed_feature_mode": args.speed_feature_mode,
-                "n_splines_speed": args.n_splines_speed,
-                "spline_order_speed": args.spline_order_speed,
-                "speed_bounds": args.speed_bounds,
-                "segment_edges": [float(edge) for edge in segment_edges],
-                "region_threshold_hz": region_thresholds[region],
-                "models": list(args.models),
-            }
-            dataset = build_model_dataset(
-                model_name=model_name,
-                results_by_traj=model_results[model_name],
-                validation_sweep=validation_sweep,
-                heldout_split_by_traj=heldout_split_by_traj,
-                animal_name=args.animal_name,
-                date=args.date,
+        selected_datasets: dict[str, Any] = {}
+        selected_paths: dict[str, Path] = {}
+        for model_name in model_names:
+            dataset, path = load_selected_dark_light_glm(
+                selected_dir,
                 region=region,
-                dark_train_epoch=args.dark_train_epoch,
                 light_train_epoch=args.light_train_epoch,
-                light_test_epoch=args.light_test_epoch,
-                ridge=selected_ridge,
-                dark_movement_firing_rates=selected_dark_rates,
+                dark_train_epoch=args.dark_train_epoch,
+                model_name=model_name,
+            )
+            selected_datasets[model_name] = dataset
+            selected_paths[model_name] = path
+        shared_metadata = validate_selected_dark_light_glms(
+            selected_datasets,
+            animal_name=args.animal_name,
+            date=args.date,
+            region=region,
+            dark_train_epoch=args.dark_train_epoch,
+            light_train_epoch=args.light_train_epoch,
+        )
+        selected_files_by_region[region] = {
+            model_name: str(path) for model_name, path in selected_paths.items()
+        }
+        segment_edges = np.asarray(shared_metadata["segment_edges"], dtype=float)
+        print(
+            f"Scoring {len(shared_metadata['unit_ids'])} selected {region.upper()} "
+            f"unit(s) at bin={shared_metadata['bin_size_s']:g}s, "
+            f"n_splines={shared_metadata['n_splines']}."
+        )
+
+        speed_by_run = (
+            session["speed_by_run"] if bool(shared_metadata["has_speed"]) else None
+        )
+        test_inputs_by_traj: dict[str, dict[str, Any]] = {}
+        observed_summaries_by_traj: dict[str, dict[str, np.ndarray]] = {}
+        for trajectory in TRAJECTORY_TYPES:
+            test_inputs = _prepare_test_epoch_inputs_for_units(
+                spikes=session["spikes_by_region"][region],
+                unit_ids=np.asarray(shared_metadata["unit_ids"]),
+                trajectory_ep_by_epoch=session["trajectory_intervals"],
+                tp_by_epoch=session["task_progression_by_trajectory"],
+                speed_by_epoch=speed_by_run,
+                traj_name=trajectory,
+                epoch=args.light_test_epoch,
+                bin_size_s=float(shared_metadata["bin_size_s"]),
+                restrict_interval=session["movement_by_run"][args.light_test_epoch],
+            )
+            if int(test_inputs["y"].shape[0]) == 0:
+                raise ValueError(
+                    f"Held-out light test epoch {args.light_test_epoch!r} has no "
+                    f"movement bins for {region!r} trajectory {trajectory!r}."
+                )
+            test_inputs_by_traj[trajectory] = test_inputs
+            observed_summaries_by_traj[trajectory] = build_observed_summary(
+                test_inputs["y"],
+                test_inputs["p"],
+                observed_bin_edges,
+                bin_size_s=float(shared_metadata["bin_size_s"]),
+            )
+
+        results_by_model: dict[str, dict[str, dict[str, Any]]] = {}
+        for model_name in model_names:
+            print(
+                f"  Scoring {model_name} on all movement bins in "
+                f"{args.light_test_epoch}."
+            )
+            results_by_model[model_name] = evaluate_selected_model_on_test_epoch(
+                model_name=model_name,
+                datasets_by_model=selected_datasets,
+                test_inputs_by_traj=test_inputs_by_traj,
                 segment_edges=segment_edges,
-                observed_bin_edges=observed_bin_edges,
-                sources=session["sources"],
-                fit_parameters=fit_parameters,
+                bin_size_s=float(shared_metadata["bin_size_s"]),
+                n_splines=int(shared_metadata["n_splines"]),
+                spline_order=int(shared_metadata["spline_order"]),
+                swap_light_offset=bool(args.swap_light_offset),
             )
-            model_datasets[model_name] = dataset
-            result_stem = _output_stem(
-                region=region,
-                dark_train_epoch=args.dark_train_epoch,
-                light_train_epoch=args.light_train_epoch,
-                light_test_epoch=args.light_test_epoch,
-                model_name=model_name,
-                ridge=selected_ridge,
-            )
-            result_path = data_dir / f"{result_stem}.nc"
-            dataset.to_netcdf(result_path)
-            saved_datasets.append(result_path)
-            print(f"  Saved selected-ridge {model_name} dataset to {result_path}.")
 
-        if "visual" in model_datasets:
-            for model_name in args.models:
-                if model_name == "visual":
-                    continue
-                comparison_stem = (
-                    f"{region}_{args.dark_train_epoch}_traindark_"
-                    f"{args.light_train_epoch}_trainlight_"
-                    f"{args.light_test_epoch}_testlight_"
-                    f"{model_name}_vs_visual_"
-                    f"{model_name}ridge{_format_ridge_token(model_datasets[model_name].attrs['ridge'])}_"
-                    f"visualridge{_format_ridge_token(model_datasets['visual'].attrs['ridge'])}"
+        sources = dict(session["sources"])
+        sources["dark_light_glm_selected"] = {
+            model_name: str(path) for model_name, path in selected_paths.items()
+        }
+        fit_parameters = {
+            "position_offset": args.position_offset,
+            "speed_threshold_cm_s": args.speed_threshold_cm_s,
+            "models": list(model_names),
+            "requested_models": list(args.models),
+            "dark_light_glm_dir": str(selected_dir),
+            "scoring_epoch_scope": "all_movement_laps",
+            "swap_light_offset": bool(args.swap_light_offset),
+            "swapped_component": (
+                "local_model_component_with_scalar_light_offset"
+                if args.swap_light_offset
+                else "local_model_component_without_scalar_light_offset"
+            ),
+        }
+        dataset = build_selected_swap_dataset(
+            model_names=model_names,
+            selected_datasets=selected_datasets,
+            selected_paths=selected_paths,
+            results_by_model=results_by_model,
+            test_inputs_by_traj=test_inputs_by_traj,
+            observed_summaries_by_traj=observed_summaries_by_traj,
+            animal_name=args.animal_name,
+            date=args.date,
+            region=region,
+            dark_train_epoch=args.dark_train_epoch,
+            light_train_epoch=args.light_train_epoch,
+            light_test_epoch=args.light_test_epoch,
+            segment_edges=segment_edges,
+            observed_bin_edges=observed_bin_edges,
+            shared_metadata=shared_metadata,
+            sources=sources,
+            fit_parameters=fit_parameters,
+        )
+        light_offset_token = "_swap_light_offset" if args.swap_light_offset else ""
+        result_stem = (
+            f"{region}_{args.dark_train_epoch}_traindark_"
+            f"{args.light_train_epoch}_trainlight_"
+            f"{args.light_test_epoch}_testlight_"
+            f"dark_light_selected_swap{light_offset_token}"
+        )
+        result_path = data_dir / f"{result_stem}.nc"
+        dataset.to_netcdf(result_path)
+        saved_datasets.append(result_path)
+        print(f"Saved selected-source swap dataset to {result_path}.")
+
+        for model_name in model_names:
+            if model_name == "visual":
+                continue
+            figure_path = fig_dir / f"{result_stem}_{model_name}_minus_visual_bits_hist.png"
+            saved_figures.append(
+                plot_selected_model_minus_visual_histogram(
+                    dataset,
+                    model_name=model_name,
+                    out_path=figure_path,
                 )
-                bits_figure = fig_dir / f"{comparison_stem}_bits_hist.png"
-                devexp_figure = fig_dir / f"{comparison_stem}_devexp_hist.png"
-                saved_figures.append(
-                    plot_metric_difference_histograms(
-                        model_datasets[model_name],
-                        model_datasets["visual"],
-                        metric_name="test_light_swapped_ll_bits_per_spike",
-                        out_path=bits_figure,
-                    )
-                )
-                print(f"  Saved bits/spike histogram to {bits_figure}.")
-                saved_figures.append(
-                    plot_metric_difference_histograms(
-                        model_datasets[model_name],
-                        model_datasets["visual"],
-                        metric_name="test_light_swapped_deviance_explained",
-                        out_path=devexp_figure,
-                    )
-                )
-                print(f"  Saved deviance-explained histogram to {devexp_figure}.")
-        for dataset in model_datasets.values():
+            )
+            print(f"Saved primary delta LL histogram to {figure_path}.")
+
+        dataset.close()
+        for dataset in selected_datasets.values():
             dataset.close()
 
     log_path = write_run_log(
@@ -3328,38 +4463,27 @@ def main() -> None:
             "animal_name": args.animal_name,
             "date": args.date,
             "data_root": args.data_root,
-            "cuda_visible_devices": args.cuda_visible_devices,
             "regions": args.regions,
-            "models": args.models,
+            "models": model_names,
+            "requested_models": args.models,
             "dark_train_epoch": args.dark_train_epoch,
             "light_train_epoch": args.light_train_epoch,
             "light_test_epoch": args.light_test_epoch,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
-            "region_dark_thresholds_hz": region_thresholds,
-            "bin_size_s": args.bin_size_s,
-            "ridges": [float(ridge) for ridge in args.ridges],
-            "seed": args.seed,
-            "n_splines": args.n_splines,
-            "spline_order": args.spline_order,
-            "use_speed": args.use_speed,
-            "speed_feature_mode": args.speed_feature_mode,
-            "n_splines_speed": args.n_splines_speed,
-            "spline_order_speed": args.spline_order_speed,
-            "speed_bounds": args.speed_bounds,
-            "segment_edges": segment_edges.tolist(),
+            "dark_light_glm_dir": selected_dir,
+            "swap_light_offset": bool(args.swap_light_offset),
         },
         outputs={
             "sources": session["sources"],
             "saved_datasets": saved_datasets,
             "saved_figures": saved_figures,
-            "skipped_regions": skipped_regions,
-            "selected_ridges_by_region": selected_ridges_by_region,
+            "selected_files_by_region": selected_files_by_region,
         },
     )
 
     if saved_datasets:
-        print(f"Saved {len(saved_datasets)} NetCDF fit dataset(s) to {data_dir}")
+        print(f"Saved {len(saved_datasets)} NetCDF comparison dataset(s) to {data_dir}")
     if saved_figures:
         print(f"Saved {len(saved_figures)} histogram figure(s) to {fig_dir}")
     print(f"Saved run metadata to {log_path}")
