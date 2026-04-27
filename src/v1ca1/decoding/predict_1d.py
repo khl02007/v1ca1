@@ -82,155 +82,6 @@ def get_posterior_name(*, causal_only: bool) -> str:
     return "acausal_posterior"
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for 1D decoder prediction."""
-    parser = argparse.ArgumentParser(
-        description="Predict full-W 1D RTC decoder posteriors across one run epoch."
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
-    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        help="Optional single region to predict. Default: predict all regions.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--n-folds",
-        type=int,
-        default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
-    )
-    parser.add_argument(
-        "--time-bin-size-s",
-        type=float,
-        default=DEFAULT_TIME_BIN_SIZE_S,
-        help=f"Spike-count time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Leading position samples to drop. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Recorded for consistency with fit settings. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--position-std",
-        type=float,
-        default=DEFAULT_POSITION_STD,
-        help=f"KDE position standard deviation used by fit_1d. Default: {DEFAULT_POSITION_STD}",
-    )
-    parser.add_argument(
-        "--place-bin-size",
-        type=float,
-        default=DEFAULT_PLACE_BIN_SIZE_CM,
-        help=f"RTC environment place bin size used by fit_1d. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
-    )
-    parser.add_argument(
-        "--movement-var",
-        type=float,
-        default=DEFAULT_MOVEMENT_VAR,
-        help=f"Random-walk movement variance used by fit_1d. Default: {DEFAULT_MOVEMENT_VAR}",
-    )
-    parser.add_argument(
-        "--discrete-var",
-        choices=DISCRETE_VAR_CHOICES,
-        default="switching",
-        help="Discrete transition model used by fit_1d. Default: switching.",
-    )
-    parser.add_argument(
-        "--branch-gap-cm",
-        type=float,
-        default=DEFAULT_BRANCH_GAP_CM,
-        help=(
-            "Gap inserted between left and right branches in the full-track "
-            f"linear coordinate. Default: {DEFAULT_BRANCH_GAP_CM}"
-        ),
-    )
-    parser.add_argument(
-        "--direction",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Load classifiers fit with inbound/outbound groups. Default: enabled.",
-    )
-    parser.add_argument(
-        "--movement",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Load classifiers fit with movement-restricted training. Default: enabled.",
-    )
-    unit_selection_group = parser.add_mutually_exclusive_group()
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-units",
-        action="store_true",
-        help=(
-            "Use classifiers and V1 spike indicators restricted to units with "
-            "ripple GLM deviance-explained p-value < "
-            f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
-        ),
-    )
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-devexp-threshold",
-        type=float,
-        help=(
-            "Use classifiers and V1 spike indicators restricted to units with "
-            "ripple GLM ripple_devexp_mean greater than or equal to this value. "
-            "Default: use all units."
-        ),
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        help="Optional value for CUDA_VISIBLE_DEVICES, for example '0' or '0,1'.",
-    )
-    parser.add_argument(
-        "--figurl",
-        action="store_true",
-        help="Generate one combined figurl text output for the predicted epoch.",
-    )
-    parser.add_argument(
-        "--causal-only",
-        action="store_true",
-        help=(
-            "Skip the acausal smoothing pass and save/display only the causal "
-            "posterior. Default: compute acausal posterior."
-        ),
-    )
-    parser.add_argument(
-        "--figurl-only",
-        action="store_true",
-        help=(
-            "Regenerate only the figurl from existing prediction NetCDF outputs. "
-            "Implies --figurl and skips classifier loading and posterior prediction."
-        ),
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing prediction outputs.",
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate numeric CLI arguments."""
     if args.n_folds < 2:
@@ -1007,6 +858,155 @@ def run(args: argparse.Namespace) -> None:
     else:
         print(f"Saved {len(saved_prediction_paths)} prediction result file(s).")
     print(f"Saved run metadata to {log_path}")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for 1D decoder prediction."""
+    parser = argparse.ArgumentParser(
+        description="Predict full-W 1D RTC decoder posteriors across one run epoch."
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
+    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        help="Optional single region to predict. Default: predict all regions.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--n-folds",
+        type=int,
+        default=DEFAULT_N_FOLDS,
+        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=DEFAULT_RANDOM_STATE,
+        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+    )
+    parser.add_argument(
+        "--time-bin-size-s",
+        type=float,
+        default=DEFAULT_TIME_BIN_SIZE_S,
+        help=f"Spike-count time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Leading position samples to drop. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Recorded for consistency with fit settings. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--position-std",
+        type=float,
+        default=DEFAULT_POSITION_STD,
+        help=f"KDE position standard deviation used by fit_1d. Default: {DEFAULT_POSITION_STD}",
+    )
+    parser.add_argument(
+        "--place-bin-size",
+        type=float,
+        default=DEFAULT_PLACE_BIN_SIZE_CM,
+        help=f"RTC environment place bin size used by fit_1d. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
+    )
+    parser.add_argument(
+        "--movement-var",
+        type=float,
+        default=DEFAULT_MOVEMENT_VAR,
+        help=f"Random-walk movement variance used by fit_1d. Default: {DEFAULT_MOVEMENT_VAR}",
+    )
+    parser.add_argument(
+        "--discrete-var",
+        choices=DISCRETE_VAR_CHOICES,
+        default="switching",
+        help="Discrete transition model used by fit_1d. Default: switching.",
+    )
+    parser.add_argument(
+        "--branch-gap-cm",
+        type=float,
+        default=DEFAULT_BRANCH_GAP_CM,
+        help=(
+            "Gap inserted between left and right branches in the full-track "
+            f"linear coordinate. Default: {DEFAULT_BRANCH_GAP_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--direction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load classifiers fit with inbound/outbound groups. Default: enabled.",
+    )
+    parser.add_argument(
+        "--movement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load classifiers fit with movement-restricted training. Default: enabled.",
+    )
+    unit_selection_group = parser.add_mutually_exclusive_group()
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-units",
+        action="store_true",
+        help=(
+            "Use classifiers and V1 spike indicators restricted to units with "
+            "ripple GLM deviance-explained p-value < "
+            f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
+        ),
+    )
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-devexp-threshold",
+        type=float,
+        help=(
+            "Use classifiers and V1 spike indicators restricted to units with "
+            "ripple GLM ripple_devexp_mean greater than or equal to this value. "
+            "Default: use all units."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help="Optional value for CUDA_VISIBLE_DEVICES, for example '0' or '0,1'.",
+    )
+    parser.add_argument(
+        "--figurl",
+        action="store_true",
+        help="Generate one combined figurl text output for the predicted epoch.",
+    )
+    parser.add_argument(
+        "--causal-only",
+        action="store_true",
+        help=(
+            "Skip the acausal smoothing pass and save/display only the causal "
+            "posterior. Default: compute acausal posterior."
+        ),
+    )
+    parser.add_argument(
+        "--figurl-only",
+        action="store_true",
+        help=(
+            "Regenerate only the figurl from existing prediction NetCDF outputs. "
+            "Implies --figurl and skips classifier loading and posterior prediction."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing prediction outputs.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

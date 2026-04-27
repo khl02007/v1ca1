@@ -42,68 +42,6 @@ LFP_CACHE_FORMAT = "ripple_channels_lfp_netcdf"
 LFP_CACHE_FORMAT_VERSION = 1
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for ripple detection."""
-    parser = argparse.ArgumentParser(description="Detect SWR ripples for one session")
-    parser.add_argument(
-        "--animal-name",
-        required=True,
-        help="Animal name",
-    )
-    parser.add_argument(
-        "--date",
-        required=True,
-        help="Recording date in YYYYMMDD format",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--nwb-root",
-        type=Path,
-        default=DEFAULT_NWB_ROOT,
-        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--zscore-threshold",
-        type=float,
-        default=DEFAULT_ZSCORE_THRESHOLD,
-        help=f"Ripple detector z-score threshold. Default: {DEFAULT_ZSCORE_THRESHOLD}",
-    )
-    parser.add_argument(
-        "--disable-speed-gating",
-        action="store_true",
-        help="Disable speed gating and write the no-speed detector outputs.",
-    )
-    parser.add_argument(
-        "--enable-notch-filter",
-        dest="enable_notch_filter",
-        action="store_true",
-        help="Enable notch filtering before ripple-band extraction. Default: disabled.",
-    )
-    parser.add_argument(
-        "--disable-notch-filter",
-        dest="enable_notch_filter",
-        action="store_false",
-        help="Disable notch filtering before ripple-band extraction. Default: disabled.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Recompute the cached ripple-band LFP even if it already exists.",
-    )
-    parser.set_defaults(enable_notch_filter=DEFAULT_ENABLE_NOTCH_FILTER)
-    return parser.parse_args()
-
-
 def validate_epochs(
     available_epochs: list[str],
     requested_epochs: list[str] | None,
@@ -1305,6 +1243,68 @@ def get_ripple_times(
         "use_speed_gating": use_speed_gating,
         "enable_notch_filter": bool(enable_notch_filter),
     }
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for ripple detection."""
+    parser = argparse.ArgumentParser(description="Detect SWR ripples for one session")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--zscore-threshold",
+        type=float,
+        default=DEFAULT_ZSCORE_THRESHOLD,
+        help=f"Ripple detector z-score threshold. Default: {DEFAULT_ZSCORE_THRESHOLD}",
+    )
+    parser.add_argument(
+        "--disable-speed-gating",
+        action="store_true",
+        help="Disable speed gating and write the no-speed detector outputs.",
+    )
+    parser.add_argument(
+        "--enable-notch-filter",
+        dest="enable_notch_filter",
+        action="store_true",
+        help="Enable notch filtering before ripple-band extraction. Default: disabled.",
+    )
+    parser.add_argument(
+        "--disable-notch-filter",
+        dest="enable_notch_filter",
+        action="store_false",
+        help="Disable notch filtering before ripple-band extraction. Default: disabled.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recompute the cached ripple-band LFP even if it already exists.",
+    )
+    parser.set_defaults(enable_notch_filter=DEFAULT_ENABLE_NOTCH_FILTER)
+    return parser.parse_args()
 
 
 def main() -> None:

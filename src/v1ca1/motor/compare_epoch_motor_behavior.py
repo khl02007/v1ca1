@@ -63,57 +63,6 @@ VARIABLE_LABELS = {
 }
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the epoch motor comparison CLI."""
-    parser = argparse.ArgumentParser(
-        description="Compare motor behavior across run epochs for one session"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Specific run epoch labels to compare. Defaults to all run epochs.",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore per epoch. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--progression-bin-size-cm",
-        type=float,
-        default=DEFAULT_PROGRESSION_BIN_SIZE_CM,
-        help=(
-            "Within-trajectory progression bin size in cm. "
-            f"Default: {DEFAULT_PROGRESSION_BIN_SIZE_CM}"
-        ),
-    )
-    parser.add_argument(
-        "--n-hist-bins",
-        type=int,
-        default=DEFAULT_N_HIST_BINS,
-        help=f"Number of fixed histogram bins per variable. Default: {DEFAULT_N_HIST_BINS}",
-    )
-    return parser.parse_args(argv)
-
-
 def select_run_epochs(
     run_epochs: list[str],
     requested_epochs: list[str] | None,
@@ -1108,6 +1057,57 @@ def compare_epoch_motor_behavior(
     print(f"Saved motor comparison outputs to {motor_output_dir}")
     print(f"Saved run log to {log_path}")
     return outputs
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the epoch motor comparison CLI."""
+    parser = argparse.ArgumentParser(
+        description="Compare motor behavior across run epochs for one session"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Specific run epoch labels to compare. Defaults to all run epochs.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Number of leading position samples to ignore per epoch. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define movement intervals. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--progression-bin-size-cm",
+        type=float,
+        default=DEFAULT_PROGRESSION_BIN_SIZE_CM,
+        help=(
+            "Within-trajectory progression bin size in cm. "
+            f"Default: {DEFAULT_PROGRESSION_BIN_SIZE_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--n-hist-bins",
+        type=int,
+        default=DEFAULT_N_HIST_BINS,
+        help=f"Number of fixed histogram bins per variable. Default: {DEFAULT_N_HIST_BINS}",
+    )
+    return parser.parse_args(argv)
 
 
 def main() -> None:

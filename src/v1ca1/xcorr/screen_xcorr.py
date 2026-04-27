@@ -62,106 +62,6 @@ PAIR_STATUS_VALID = "valid"
 PAIR_STATUS_NO_FINITE_BINS = "no_finite_bins"
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for xcorr screening."""
-    parser = argparse.ArgumentParser(
-        description="Screen CA1-V1 cross-correlogram structure for one state"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--state",
-        required=True,
-        choices=STATE_CHOICES,
-        help="Behavioral/state interval to restrict spikes to.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help=(
-            "Optional epoch selection. By default, analyze each epoch present in the "
-            "selected state's saved interval table separately. Pass one or more epoch "
-            f"labels to analyze only those epochs separately, or pass {POOLED_EPOCH_SENTINEL!r} "
-            "to pool all available epochs into one analysis."
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"Cross-correlogram bin size in seconds. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--max-lag-s",
-        type=float,
-        default=DEFAULT_MAX_LAG_S,
-        help=f"Maximum absolute lag in seconds. Default: {DEFAULT_MAX_LAG_S}",
-    )
-    parser.add_argument(
-        "--ripple-window-s",
-        type=float,
-        default=None,
-        help=(
-            "Optional fixed ripple window length in seconds. When set for "
-            "--state ripple, both CA1 and V1 spikes are restricted to "
-            "[ripple_start + ripple_window_offset_s, ripple_start + "
-            "ripple_window_offset_s + ripple_window_s]. Default: use the "
-            "detected ripple intervals."
-        ),
-    )
-    parser.add_argument(
-        "--ripple-window-offset-s",
-        type=float,
-        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
-        help=(
-            "Offset in seconds applied to the optional fixed ripple window "
-            "relative to ripple start. "
-            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
-        ),
-    )
-    parser.add_argument(
-        "--min-state-spikes",
-        type=int,
-        default=DEFAULT_MIN_STATE_SPIKES,
-        help=(
-            "Minimum number of spikes within the selected state required to keep one "
-            f"unit. Default: {DEFAULT_MIN_STATE_SPIKES}"
-        ),
-    )
-    parser.add_argument(
-        "--extremum-half-width-bins",
-        type=int,
-        default=DEFAULT_EXTREMUM_HALF_WIDTH_BINS,
-        help=(
-            "Half-width in lag bins used to average around the strongest "
-            f"extremum. Default: {DEFAULT_EXTREMUM_HALF_WIDTH_BINS}"
-        ),
-    )
-    parser.add_argument(
-        "--display-vmax",
-        "--display-zlim",
-        dest="display_vmax",
-        type=float,
-        default=DEFAULT_DISPLAY_VMAX,
-        help=(
-            "Upper color limit used for normalized-xcorr heatmap display. "
-            f"Default: {DEFAULT_DISPLAY_VMAX}"
-        ),
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display figures interactively in addition to saving them.",
-    )
-    return parser.parse_args(argv)
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate numeric CLI ranges."""
     if args.bin_size_s <= 0:
@@ -1375,6 +1275,106 @@ def screen_xcorr_for_session(
         "epoch_groups": [label for label, _ in epoch_groups],
         "group_outputs": group_outputs,
     }
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for xcorr screening."""
+    parser = argparse.ArgumentParser(
+        description="Screen CA1-V1 cross-correlogram structure for one state"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--state",
+        required=True,
+        choices=STATE_CHOICES,
+        help="Behavioral/state interval to restrict spikes to.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help=(
+            "Optional epoch selection. By default, analyze each epoch present in the "
+            "selected state's saved interval table separately. Pass one or more epoch "
+            f"labels to analyze only those epochs separately, or pass {POOLED_EPOCH_SENTINEL!r} "
+            "to pool all available epochs into one analysis."
+        ),
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"Cross-correlogram bin size in seconds. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--max-lag-s",
+        type=float,
+        default=DEFAULT_MAX_LAG_S,
+        help=f"Maximum absolute lag in seconds. Default: {DEFAULT_MAX_LAG_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-s",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed ripple window length in seconds. When set for "
+            "--state ripple, both CA1 and V1 spikes are restricted to "
+            "[ripple_start + ripple_window_offset_s, ripple_start + "
+            "ripple_window_offset_s + ripple_window_s]. Default: use the "
+            "detected ripple intervals."
+        ),
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Offset in seconds applied to the optional fixed ripple window "
+            "relative to ripple start. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
+    )
+    parser.add_argument(
+        "--min-state-spikes",
+        type=int,
+        default=DEFAULT_MIN_STATE_SPIKES,
+        help=(
+            "Minimum number of spikes within the selected state required to keep one "
+            f"unit. Default: {DEFAULT_MIN_STATE_SPIKES}"
+        ),
+    )
+    parser.add_argument(
+        "--extremum-half-width-bins",
+        type=int,
+        default=DEFAULT_EXTREMUM_HALF_WIDTH_BINS,
+        help=(
+            "Half-width in lag bins used to average around the strongest "
+            f"extremum. Default: {DEFAULT_EXTREMUM_HALF_WIDTH_BINS}"
+        ),
+    )
+    parser.add_argument(
+        "--display-vmax",
+        "--display-zlim",
+        dest="display_vmax",
+        type=float,
+        default=DEFAULT_DISPLAY_VMAX,
+        help=(
+            "Upper color limit used for normalized-xcorr heatmap display. "
+            f"Default: {DEFAULT_DISPLAY_VMAX}"
+        ),
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display figures interactively in addition to saving them.",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -1191,6 +1191,31 @@ def plot_correlation_scatter(
     return fig_path
 
 
+def _output_stem(
+    *,
+    region: str,
+    dark_train_epoch: str,
+    light_train_epoch: str,
+    light_test_epoch: str,
+) -> str:
+    """Return a stable output stem for one region and epoch triplet."""
+    return (
+        f"{region}_{dark_train_epoch}_traindark_"
+        f"{light_train_epoch}_trainlight_"
+        f"{light_test_epoch}_testlight_swap_tuning_curve_comparison"
+    )
+
+
+def _selected_spikes(spikes: Any, unit_mask: np.ndarray) -> Any:
+    """Return the selected units from one TsGroup-like object."""
+    return spikes[np.asarray(unit_mask, dtype=bool)]
+
+
+def _unit_ids_from_spikes(spikes: Any) -> np.ndarray:
+    """Return unit ids from a TsGroup-like object."""
+    return np.asarray(list(spikes.keys()))
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -1329,31 +1354,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Skip figure generation and only save data outputs.",
     )
     return parser.parse_args()
-
-
-def _output_stem(
-    *,
-    region: str,
-    dark_train_epoch: str,
-    light_train_epoch: str,
-    light_test_epoch: str,
-) -> str:
-    """Return a stable output stem for one region and epoch triplet."""
-    return (
-        f"{region}_{dark_train_epoch}_traindark_"
-        f"{light_train_epoch}_trainlight_"
-        f"{light_test_epoch}_testlight_swap_tuning_curve_comparison"
-    )
-
-
-def _selected_spikes(spikes: Any, unit_mask: np.ndarray) -> Any:
-    """Return the selected units from one TsGroup-like object."""
-    return spikes[np.asarray(unit_mask, dtype=bool)]
-
-
-def _unit_ids_from_spikes(spikes: Any) -> np.ndarray:
-    """Return unit ids from a TsGroup-like object."""
-    return np.asarray(list(spikes.keys()))
 
 
 def main() -> None:

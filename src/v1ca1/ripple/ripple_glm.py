@@ -97,138 +97,6 @@ NEMOS_LEGACY_SOLVER_NAME = "LBFGS"
 NEMOS_JAXOPT_SOLVER_NAME = "LBFGS[jaxopt]"
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for the ripple GLM workflow."""
-    parser = argparse.ArgumentParser(
-        description="Fit a CA1-to-V1 ripple population GLM for one session"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--ripple-window-s",
-        type=float,
-        default=DEFAULT_RIPPLE_WINDOW_S,
-        help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
-    )
-    parser.add_argument(
-        "--ripple-window-offset-s",
-        type=float,
-        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
-        help=(
-            "Offset in seconds applied to each fixed ripple window relative to ripple "
-            "start time, so the modeled window becomes "
-            "[start + offset, start + ripple_window_s + offset]. "
-            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
-        ),
-    )
-    parser.add_argument(
-        "--remove-duplicate-ripples",
-        action="store_true",
-        help=(
-            "Drop any ripple whose start falls inside the configured ripple window "
-            "of the previous kept ripple, so nearby ripple clusters contribute "
-            "only one modeled window."
-        ),
-    )
-    parser.add_argument(
-        "--keep-single-ripple-windows",
-        action="store_true",
-        help=(
-            "Keep only fixed ripple windows whose interior contains no other "
-            "ripple start times."
-        ),
-    )
-    parser.add_argument(
-        "--min-spikes-per-ripple",
-        type=float,
-        default=DEFAULT_MIN_SPIKES_PER_RIPPLE,
-        help=(
-            "Minimum average V1 spikes per ripple required to keep one unit. "
-            f"Default: {DEFAULT_MIN_SPIKES_PER_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--min-ca1-spikes-per-ripple",
-        type=float,
-        default=DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
-        help=(
-            "Minimum average CA1 spikes per ripple required to keep one source unit. "
-            f"Default: {DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--n-splits",
-        type=int,
-        default=DEFAULT_N_SPLITS,
-        help=f"Number of ripple CV folds. Default: {DEFAULT_N_SPLITS}",
-    )
-    parser.add_argument(
-        "--n-shuffles-ripple",
-        type=int,
-        default=DEFAULT_N_SHUFFLES_RIPPLE,
-        help=(
-            "Number of shuffle refits per fold for held-out ripple evaluation. "
-            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--ridge-strength",
-        dest="ridge_strengths",
-        nargs="+",
-        type=float,
-        default=list(DEFAULT_RIDGE_STRENGTH_SWEEP),
-        help=(
-            "Ridge regularization strength values to run. Pass one value to fit "
-            "a single model, or multiple values to sweep. "
-            f"Default: {list(DEFAULT_RIDGE_STRENGTH_SWEEP)!r}"
-        ),
-    )
-    parser.add_argument(
-        "--shuffle-seed",
-        dest="shuffle_seed",
-        type=int,
-        default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
-    )
-    parser.add_argument(
-        "--random-seed",
-        dest="shuffle_seed",
-        type=int,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--maxiter",
-        type=int,
-        default=DEFAULT_MAXITER,
-        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
-    )
-    parser.add_argument(
-        "--tol",
-        type=float,
-        default=DEFAULT_TOL,
-        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        help=(
-            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
-            "nemos/JAX, for example '0' or '0,1'."
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI argument ranges."""
     if args.remove_duplicate_ripples and args.keep_single_ripple_windows:
@@ -1781,6 +1649,138 @@ def save_epoch_figures(
             out_path=predicted_vs_observed_out_path,
         ),
     ]
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the ripple GLM workflow."""
+    parser = argparse.ArgumentParser(
+        description="Fit a CA1-to-V1 ripple population GLM for one session"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--ripple-window-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_S,
+        help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Offset in seconds applied to each fixed ripple window relative to ripple "
+            "start time, so the modeled window becomes "
+            "[start + offset, start + ripple_window_s + offset]. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
+    )
+    parser.add_argument(
+        "--remove-duplicate-ripples",
+        action="store_true",
+        help=(
+            "Drop any ripple whose start falls inside the configured ripple window "
+            "of the previous kept ripple, so nearby ripple clusters contribute "
+            "only one modeled window."
+        ),
+    )
+    parser.add_argument(
+        "--keep-single-ripple-windows",
+        action="store_true",
+        help=(
+            "Keep only fixed ripple windows whose interior contains no other "
+            "ripple start times."
+        ),
+    )
+    parser.add_argument(
+        "--min-spikes-per-ripple",
+        type=float,
+        default=DEFAULT_MIN_SPIKES_PER_RIPPLE,
+        help=(
+            "Minimum average V1 spikes per ripple required to keep one unit. "
+            f"Default: {DEFAULT_MIN_SPIKES_PER_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--min-ca1-spikes-per-ripple",
+        type=float,
+        default=DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
+        help=(
+            "Minimum average CA1 spikes per ripple required to keep one source unit. "
+            f"Default: {DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=DEFAULT_N_SPLITS,
+        help=f"Number of ripple CV folds. Default: {DEFAULT_N_SPLITS}",
+    )
+    parser.add_argument(
+        "--n-shuffles-ripple",
+        type=int,
+        default=DEFAULT_N_SHUFFLES_RIPPLE,
+        help=(
+            "Number of shuffle refits per fold for held-out ripple evaluation. "
+            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--ridge-strength",
+        dest="ridge_strengths",
+        nargs="+",
+        type=float,
+        default=list(DEFAULT_RIDGE_STRENGTH_SWEEP),
+        help=(
+            "Ridge regularization strength values to run. Pass one value to fit "
+            "a single model, or multiple values to sweep. "
+            f"Default: {list(DEFAULT_RIDGE_STRENGTH_SWEEP)!r}"
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        dest="shuffle_seed",
+        type=int,
+        default=DEFAULT_SHUFFLE_SEED,
+        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
+    )
+    parser.add_argument(
+        "--random-seed",
+        dest="shuffle_seed",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--maxiter",
+        type=int,
+        default=DEFAULT_MAXITER,
+        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
+    )
+    parser.add_argument(
+        "--tol",
+        type=float,
+        default=DEFAULT_TOL,
+        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help=(
+            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
+            "nemos/JAX, for example '0' or '0,1'."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

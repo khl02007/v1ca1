@@ -123,57 +123,6 @@ LINEAR_EDGE_ORDER_FROM_CENTER = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
 LINEAR_EDGE_ORDER_TO_CENTER = [(5, 4), (4, 3), (3, 2), (2, 1), (1, 0)]
 
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Compare CA1 and V1 ripple decoding content for one session."
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument(
-        "--date",
-        required=True,
-        help="Session date in YYYYMMDD format",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--decode-epoch",
-        default=None,
-        help=(
-            "Optional single run epoch to decode. If omitted, decode all run epochs unless "
-            "--train-epoch is provided alone."
-        ),
-    )
-    parser.add_argument(
-        "--train-epoch",
-        default=None,
-        help=(
-            "Optional run epoch used to build tuning curves. If omitted, the decode epoch "
-            "is also used as the training epoch."
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=BIN_SIZE_S,
-        help=f"Time bin size in seconds for ripple decoding. Default: {BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--scoring-schemes",
-        nargs="+",
-        choices=SCORING_SCHEMES,
-        default=list(SCORING_SCHEMES),
-        help=(
-            "Scoring schemes to compute. "
-            f"Default: {' '.join(SCORING_SCHEMES)}"
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     if args.bin_size_s <= 0:
         raise ValueError("--bin-size-s must be positive.")
@@ -1886,6 +1835,57 @@ def plot_categorical_summary(
     figure.savefig(out_path, dpi=200)
     plt.close(figure)
     return out_path
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compare CA1 and V1 ripple decoding content for one session."
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Session date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--decode-epoch",
+        default=None,
+        help=(
+            "Optional single run epoch to decode. If omitted, decode all run epochs unless "
+            "--train-epoch is provided alone."
+        ),
+    )
+    parser.add_argument(
+        "--train-epoch",
+        default=None,
+        help=(
+            "Optional run epoch used to build tuning curves. If omitted, the decode epoch "
+            "is also used as the training epoch."
+        ),
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=BIN_SIZE_S,
+        help=f"Time bin size in seconds for ripple decoding. Default: {BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--scoring-schemes",
+        nargs="+",
+        choices=SCORING_SCHEMES,
+        default=list(SCORING_SCHEMES),
+        help=(
+            "Scoring schemes to compute. "
+            f"Default: {' '.join(SCORING_SCHEMES)}"
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

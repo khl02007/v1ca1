@@ -39,81 +39,6 @@ DEFAULT_UNIT_ORDERING = "movement_rate"
 UNIT_ORDERING_CHOICES = ("movement_rate", "preferred_phase")
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for theta phase-preference heatmaps."""
-    parser = argparse.ArgumentParser(
-        description="Plot theta phase-preference heatmaps by region and epoch",
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        help="Only plot one region. Default: plot all regions.",
-    )
-    parser.add_argument(
-        "--epoch",
-        help="Only plot one run epoch. Default: plot all run epochs with saved theta phase.",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore per epoch when defining "
-            f"movement. Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--phase-bin-count",
-        type=int,
-        default=DEFAULT_PHASE_BIN_COUNT,
-        help=(
-            "Number of phase bins spanning [-pi, pi). "
-            f"Default: {DEFAULT_PHASE_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--min-spikes",
-        type=int,
-        default=DEFAULT_MIN_SPIKES,
-        help=(
-            "Minimum number of spike-assigned phases required to keep one unit. "
-            f"Default: {DEFAULT_MIN_SPIKES}"
-        ),
-    )
-    parser.add_argument(
-        "--unit-ordering",
-        choices=UNIT_ORDERING_CHOICES,
-        default=DEFAULT_UNIT_ORDERING,
-        help=(
-            "How to order unit rows in the heatmap. "
-            f"Default: {DEFAULT_UNIT_ORDERING}"
-        ),
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display figures in addition to saving them.",
-    )
-    return parser.parse_args(argv)
-
-
 def load_theta_phase_metadata_epochs(analysis_path: Path) -> list[str] | None:
     """Return saved theta metadata epochs when the metadata manifest exists."""
     metadata_path = analysis_path / THETA_OUTPUT_DIRNAME / THETA_METADATA_FILENAME
@@ -698,6 +623,81 @@ def plot_theta_phase_preference_for_session(
                 show=show,
             )
     return output_paths
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for theta phase-preference heatmaps."""
+    parser = argparse.ArgumentParser(
+        description="Plot theta phase-preference heatmaps by region and epoch",
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        help="Only plot one region. Default: plot all regions.",
+    )
+    parser.add_argument(
+        "--epoch",
+        help="Only plot one run epoch. Default: plot all run epochs with saved theta phase.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch when defining "
+            f"movement. Default: {DEFAULT_POSITION_OFFSET}"
+        ),
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define movement intervals. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--phase-bin-count",
+        type=int,
+        default=DEFAULT_PHASE_BIN_COUNT,
+        help=(
+            "Number of phase bins spanning [-pi, pi). "
+            f"Default: {DEFAULT_PHASE_BIN_COUNT}"
+        ),
+    )
+    parser.add_argument(
+        "--min-spikes",
+        type=int,
+        default=DEFAULT_MIN_SPIKES,
+        help=(
+            "Minimum number of spike-assigned phases required to keep one unit. "
+            f"Default: {DEFAULT_MIN_SPIKES}"
+        ),
+    )
+    parser.add_argument(
+        "--unit-ordering",
+        choices=UNIT_ORDERING_CHOICES,
+        default=DEFAULT_UNIT_ORDERING,
+        help=(
+            "How to order unit rows in the heatmap. "
+            f"Default: {DEFAULT_UNIT_ORDERING}"
+        ),
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display figures in addition to saving them.",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

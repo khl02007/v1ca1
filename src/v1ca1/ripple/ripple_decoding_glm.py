@@ -83,96 +83,6 @@ DEFAULT_V1_MIN_MOVEMENT_FR_HZ = 0.5
 DEFAULT_V1_MIN_RIPPLE_FR_HZ = 0.1
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for the ripple decoding GLM."""
-    parser = argparse.ArgumentParser(
-        description="Fit a V1 ripple GLM driven by CA1 ripple decoding"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--representation",
-        required=True,
-        choices=REPRESENTATIONS,
-        help="Decoded state representation: place or task progression",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--decode-epochs",
-        nargs="+",
-        help="Optional run epochs to decode. Default: all run epochs.",
-    )
-    parser.add_argument(
-        "--v1-tuning-epoch",
-        default=DEFAULT_V1_TUNING_EPOCH,
-        help=(
-            "Run epoch used to build V1 tuning curves for the GLM covariates. "
-            f"Default: {DEFAULT_V1_TUNING_EPOCH}"
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"Time bin size in seconds for ripple decoding and GLM fitting. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--ridge-strength",
-        type=float,
-        default=DEFAULT_RIDGE_STRENGTH,
-        help=f"Ridge regularization strength. Default: {DEFAULT_RIDGE_STRENGTH}",
-    )
-    parser.add_argument(
-        "--n-splits",
-        type=int,
-        default=DEFAULT_N_SPLITS,
-        help=f"Number of ripple cross-validation folds. Default: {DEFAULT_N_SPLITS}",
-    )
-    parser.add_argument(
-        "--n-shuffles",
-        type=int,
-        default=DEFAULT_N_SHUFFLES,
-        help=f"Number of shuffle refits per fold. Default: {DEFAULT_N_SHUFFLES}",
-    )
-    parser.add_argument(
-        "--shuffle-seed",
-        type=int,
-        default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
-    )
-    parser.add_argument(
-        "--v1-min-movement-fr-hz",
-        type=float,
-        default=DEFAULT_V1_MIN_MOVEMENT_FR_HZ,
-        help=(
-            "Minimum V1 firing rate during movement in the V1 tuning epoch. "
-            f"Default: {DEFAULT_V1_MIN_MOVEMENT_FR_HZ}"
-        ),
-    )
-    parser.add_argument(
-        "--v1-min-ripple-fr-hz",
-        type=float,
-        default=DEFAULT_V1_MIN_RIPPLE_FR_HZ,
-        help=(
-            "Minimum V1 firing rate during ripple bins in each decoded epoch. "
-            f"Default: {DEFAULT_V1_MIN_RIPPLE_FR_HZ}"
-        ),
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        help=(
-            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
-            "nemos/JAX, for example '0' or '0,1'."
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI ranges."""
     if args.bin_size_s <= 0:
@@ -1126,6 +1036,96 @@ def save_metric_figures(
             )
         )
     return figure_paths
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the ripple decoding GLM."""
+    parser = argparse.ArgumentParser(
+        description="Fit a V1 ripple GLM driven by CA1 ripple decoding"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--representation",
+        required=True,
+        choices=REPRESENTATIONS,
+        help="Decoded state representation: place or task progression",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--decode-epochs",
+        nargs="+",
+        help="Optional run epochs to decode. Default: all run epochs.",
+    )
+    parser.add_argument(
+        "--v1-tuning-epoch",
+        default=DEFAULT_V1_TUNING_EPOCH,
+        help=(
+            "Run epoch used to build V1 tuning curves for the GLM covariates. "
+            f"Default: {DEFAULT_V1_TUNING_EPOCH}"
+        ),
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"Time bin size in seconds for ripple decoding and GLM fitting. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--ridge-strength",
+        type=float,
+        default=DEFAULT_RIDGE_STRENGTH,
+        help=f"Ridge regularization strength. Default: {DEFAULT_RIDGE_STRENGTH}",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=DEFAULT_N_SPLITS,
+        help=f"Number of ripple cross-validation folds. Default: {DEFAULT_N_SPLITS}",
+    )
+    parser.add_argument(
+        "--n-shuffles",
+        type=int,
+        default=DEFAULT_N_SHUFFLES,
+        help=f"Number of shuffle refits per fold. Default: {DEFAULT_N_SHUFFLES}",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=DEFAULT_SHUFFLE_SEED,
+        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
+    )
+    parser.add_argument(
+        "--v1-min-movement-fr-hz",
+        type=float,
+        default=DEFAULT_V1_MIN_MOVEMENT_FR_HZ,
+        help=(
+            "Minimum V1 firing rate during movement in the V1 tuning epoch. "
+            f"Default: {DEFAULT_V1_MIN_MOVEMENT_FR_HZ}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-min-ripple-fr-hz",
+        type=float,
+        default=DEFAULT_V1_MIN_RIPPLE_FR_HZ,
+        help=(
+            "Minimum V1 firing rate during ripple bins in each decoded epoch. "
+            f"Default: {DEFAULT_V1_MIN_RIPPLE_FR_HZ}"
+        ),
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help=(
+            "Optional value to assign to CUDA_VISIBLE_DEVICES before importing "
+            "nemos/JAX, for example '0' or '0,1'."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

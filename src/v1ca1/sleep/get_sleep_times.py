@@ -57,79 +57,6 @@ def select_sleep_ready_epochs(
     return selected_ready, skipped_epochs
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for sleep interval extraction."""
-    parser = argparse.ArgumentParser(description="Compute sleep intervals for one session")
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--nwb-root",
-        type=Path,
-        default=DEFAULT_NWB_ROOT,
-        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore per epoch when defining speed. "
-            f"Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define low-movement periods. "
-            f"Default: {DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--pc1-threshold",
-        type=float,
-        default=DEFAULT_SLEEP_PC1_THRESHOLD,
-        help=(
-            "Threshold on the V1 spectrogram PC1 used to define sleep. "
-            f"Default: {DEFAULT_SLEEP_PC1_THRESHOLD}"
-        ),
-    )
-    parser.add_argument(
-        "--min-duration-s",
-        type=float,
-        default=DEFAULT_SLEEP_MIN_DURATION_S,
-        help=f"Minimum interval duration in seconds. Default: {DEFAULT_SLEEP_MIN_DURATION_S}",
-    )
-    parser.add_argument(
-        "--max-gap-s",
-        type=float,
-        default=DEFAULT_SLEEP_MAX_GAP_S,
-        help=(
-            "Merge adjacent sleep intervals when the gap is at most this many seconds. "
-            f"Default: {DEFAULT_SLEEP_MAX_GAP_S}"
-        ),
-    )
-    parser.add_argument(
-        "--v1-lfp-channel",
-        type=int,
-        default=DEFAULT_V1_LFP_CHANNEL,
-        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
-    )
-    return parser.parse_args(argv)
-
-
 def get_sleep_times_for_session(
     *,
     animal_name: str,
@@ -282,6 +209,79 @@ def get_sleep_times_for_session(
     outputs["log_path"] = log_path
     outputs["intervals_by_epoch"] = intervals_by_epoch
     return outputs
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for sleep interval extraction."""
+    parser = argparse.ArgumentParser(description="Compute sleep intervals for one session")
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch when defining speed. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define low-movement periods. "
+            f"Default: {DEFAULT_SLEEP_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--pc1-threshold",
+        type=float,
+        default=DEFAULT_SLEEP_PC1_THRESHOLD,
+        help=(
+            "Threshold on the V1 spectrogram PC1 used to define sleep. "
+            f"Default: {DEFAULT_SLEEP_PC1_THRESHOLD}"
+        ),
+    )
+    parser.add_argument(
+        "--min-duration-s",
+        type=float,
+        default=DEFAULT_SLEEP_MIN_DURATION_S,
+        help=f"Minimum interval duration in seconds. Default: {DEFAULT_SLEEP_MIN_DURATION_S}",
+    )
+    parser.add_argument(
+        "--max-gap-s",
+        type=float,
+        default=DEFAULT_SLEEP_MAX_GAP_S,
+        help=(
+            "Merge adjacent sleep intervals when the gap is at most this many seconds. "
+            f"Default: {DEFAULT_SLEEP_MAX_GAP_S}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-lfp-channel",
+        type=int,
+        default=DEFAULT_V1_LFP_CHANNEL,
+        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

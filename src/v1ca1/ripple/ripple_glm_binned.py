@@ -83,116 +83,6 @@ def _parse_cuda_visible_devices(argv: list[str] | None = None) -> str | None:
     return parsed.cuda_visible_devices
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the binned ripple GLM workflow."""
-    parser = argparse.ArgumentParser(
-        description="Fit ripple-time CA1-to-V1 population GLMs on within-ripple bins"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"Bin size in seconds for within-ripple spike counts. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--max-lag-bins",
-        type=int,
-        default=DEFAULT_MAX_LAG_BINS,
-        help=(
-            "Maximum number of causal CA1 lag bins to include. "
-            f"Default: {DEFAULT_MAX_LAG_BINS}"
-        ),
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        type=str,
-        help=(
-            "Value assigned to CUDA_VISIBLE_DEVICES before JAX/NEMOS import. "
-            "Default: current environment"
-        ),
-    )
-    parser.add_argument(
-        "--min-total-spikes",
-        type=int,
-        default=DEFAULT_MIN_TOTAL_SPIKES,
-        help=(
-            "Minimum total ripple spikes required to keep one V1 unit. "
-            f"Default: {DEFAULT_MIN_TOTAL_SPIKES}"
-        ),
-    )
-    parser.add_argument(
-        "--n-splits",
-        type=int,
-        default=DEFAULT_N_SPLITS,
-        help=f"Number of ripple cross-validation folds. Default: {DEFAULT_N_SPLITS}",
-    )
-    parser.add_argument(
-        "--n-shuffles-ripple",
-        type=int,
-        default=DEFAULT_N_SHUFFLES_RIPPLE,
-        help=(
-            "Number of shuffle refits per fold for held-out ripple evaluation. "
-            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--ridge-strength",
-        type=float,
-        default=DEFAULT_RIDGE_STRENGTH,
-        help=f"Ridge regularization strength. Default: {DEFAULT_RIDGE_STRENGTH}",
-    )
-    parser.add_argument(
-        "--maxiter",
-        type=int,
-        default=DEFAULT_MAXITER,
-        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
-    )
-    parser.add_argument(
-        "--tol",
-        type=float,
-        default=DEFAULT_TOL,
-        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
-    )
-    parser.add_argument(
-        "--baseline-n-basis",
-        type=int,
-        default=DEFAULT_BASELINE_N_BASIS,
-        help=(
-            "Number of within-ripple phase spline basis functions for the baseline model. "
-            f"Default: {DEFAULT_BASELINE_N_BASIS}"
-        ),
-    )
-    parser.add_argument(
-        "--shuffle-seed",
-        type=int,
-        default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Whether to recompute and overwrite existing saved results. "
-            "Use --no-overwrite to reuse an existing `.npz` payload when present."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI ranges."""
     if args.bin_size_s <= 0:
@@ -1247,6 +1137,116 @@ def build_output_stem(
         f"_min_total_spikes_{min_total_spikes}"
         f"_ridge_strength_{format_float_token(ridge_strength)}"
     )
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the binned ripple GLM workflow."""
+    parser = argparse.ArgumentParser(
+        description="Fit ripple-time CA1-to-V1 population GLMs on within-ripple bins"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"Bin size in seconds for within-ripple spike counts. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--max-lag-bins",
+        type=int,
+        default=DEFAULT_MAX_LAG_BINS,
+        help=(
+            "Maximum number of causal CA1 lag bins to include. "
+            f"Default: {DEFAULT_MAX_LAG_BINS}"
+        ),
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        type=str,
+        help=(
+            "Value assigned to CUDA_VISIBLE_DEVICES before JAX/NEMOS import. "
+            "Default: current environment"
+        ),
+    )
+    parser.add_argument(
+        "--min-total-spikes",
+        type=int,
+        default=DEFAULT_MIN_TOTAL_SPIKES,
+        help=(
+            "Minimum total ripple spikes required to keep one V1 unit. "
+            f"Default: {DEFAULT_MIN_TOTAL_SPIKES}"
+        ),
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=DEFAULT_N_SPLITS,
+        help=f"Number of ripple cross-validation folds. Default: {DEFAULT_N_SPLITS}",
+    )
+    parser.add_argument(
+        "--n-shuffles-ripple",
+        type=int,
+        default=DEFAULT_N_SHUFFLES_RIPPLE,
+        help=(
+            "Number of shuffle refits per fold for held-out ripple evaluation. "
+            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--ridge-strength",
+        type=float,
+        default=DEFAULT_RIDGE_STRENGTH,
+        help=f"Ridge regularization strength. Default: {DEFAULT_RIDGE_STRENGTH}",
+    )
+    parser.add_argument(
+        "--maxiter",
+        type=int,
+        default=DEFAULT_MAXITER,
+        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
+    )
+    parser.add_argument(
+        "--tol",
+        type=float,
+        default=DEFAULT_TOL,
+        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
+    )
+    parser.add_argument(
+        "--baseline-n-basis",
+        type=int,
+        default=DEFAULT_BASELINE_N_BASIS,
+        help=(
+            "Number of within-ripple phase spline basis functions for the baseline model. "
+            f"Default: {DEFAULT_BASELINE_N_BASIS}"
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=DEFAULT_SHUFFLE_SEED,
+        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether to recompute and overwrite existing saved results. "
+            "Use --no-overwrite to reuse an existing `.npz` payload when present."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

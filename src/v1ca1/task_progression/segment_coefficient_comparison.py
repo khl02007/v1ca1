@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-"""Compare raw segment coefficients across two light epochs.
+"""Compare selected segment coefficients across two light epochs.
 
-This module loads segment-based dark/light GLM fits from
+This module consumes selected NetCDF outputs from
 `v1ca1.task_progression.dark_light_glm`, aligns matching units between two
-light epochs, and compares the raw segment interaction coefficients for each
-trajectory and segment. It saves a long-form parquet table with one row per
-matched unit, a compact summary parquet with one row per trajectory/segment,
-trajectory-specific scatter figures, and an outbound/inbound correlation
-summary figure.
+light-training epochs, and compares the learned segment light-modulation
+coefficients for each trajectory and segment. By default it compares only the
+segment-local coefficient. With `--include-light-offset`, it adds the selected
+trajectory's scalar light-offset coefficient to each segment coefficient before
+comparison.
 """
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -27,10 +27,21 @@ from v1ca1.task_progression._session import (
 )
 
 
-SUPPORTED_MODEL_FAMILIES = (
-    "segment_bump_gain",
-    "segment_scalar_gain",
+SUPPORTED_MODEL_NAMES = (
+    "task_segment_bump",
+    "task_segment_scalar",
+)
+DEPRECATED_MODEL_NAME_ALIASES = {
+    "segment_bump_gain": "task_segment_bump",
+    "segment_scalar_gain": "task_segment_scalar",
+}
+DEPRECATED_DARK_LIGHT_ONLY_MODEL_NAMES = (
     "overlapping_segment_bump_gain",
+)
+MODEL_NAME_CHOICES = (
+    *SUPPORTED_MODEL_NAMES,
+    *DEPRECATED_MODEL_NAME_ALIASES,
+    *DEPRECATED_DARK_LIGHT_ONLY_MODEL_NAMES,
 )
 TRAJECTORIES = (
     "center_to_left",
@@ -56,148 +67,106 @@ TRAJECTORY_COLORS = {
 }
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for segment-coefficient comparisons."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Compare raw segment coefficients across two light epochs using "
-            "NetCDF outputs from dark_light_glm."
-        )
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name.")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
-    parser.add_argument(
-        "--region",
-        required=True,
-        choices=("v1", "ca1"),
-        help="Region to analyze.",
-    )
-    parser.add_argument(
-        "--model-family",
-        choices=SUPPORTED_MODEL_FAMILIES,
-        help=(
-            "Optional segment-based dark/light model family to analyze. "
-            "If omitted, the script runs all supported families available for "
-            "both requested light epochs."
-        ),
-    )
-    parser.add_argument(
-        "--light-epoch1",
-        required=True,
-        help="First light epoch to compare.",
-    )
-    parser.add_argument(
-        "--light-epoch2",
-        required=True,
-        help="Second light epoch to compare.",
-    )
-    parser.add_argument(
-        "--dark-epoch",
-        required=True,
-        help="Shared dark epoch used in the underlying dark/light fits.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--input-dir",
-        type=Path,
-        help=(
-            "Directory containing dark_light_glm NetCDF files. "
-            "Default: analysis_path / 'task_progression' / 'dark_light_glm'"
-        ),
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help=(
-            "Directory for saved parquet summaries. "
-            "Default: analysis_path / 'task_progression' / 'segment_coefficient_comparison'"
-        ),
-    )
-    parser.add_argument(
-        "--ridge",
-        type=float,
-        help=(
-            "Optional preferred ridge value. If provided, the nearest saved ridge "
-            "is used if needed. If omitted, the script runs all ridge values saved "
-            "in both compared datasets."
-        ),
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display the saved figures interactively after writing them.",
-    )
-    return parser.parse_args()
-
-
 def _dataset_path(
     input_dir: Path,
     *,
     region: str,
     light_epoch: str,
     dark_epoch: str,
-    model_family: str,
+    model_name: str,
 ) -> Path:
-    """Return the expected NetCDF path for one dark/light fit dataset."""
-    return input_dir / f"{region}_{light_epoch}_vs_{dark_epoch}_{model_family}.nc"
+    """Return the expected selected NetCDF path for one dark/light fit."""
+    return input_dir / f"{region}_{light_epoch}_vs_{dark_epoch}_{model_name}_selected.nc"
 
 
-def _resolve_model_families(
+def _normalize_model_names(model_names: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Return canonical selected model names and any deprecation messages."""
+    normalized: list[str] = []
+    messages: list[str] = []
+    for requested_name in model_names:
+        model_name = str(requested_name)
+        if model_name in DEPRECATED_DARK_LIGHT_ONLY_MODEL_NAMES:
+            raise ValueError(
+                f"Model {model_name!r} is deprecated for the selected-fit workflow. "
+                f"Use one of {SUPPORTED_MODEL_NAMES!r}."
+            )
+        if model_name in DEPRECATED_MODEL_NAME_ALIASES:
+            replacement = DEPRECATED_MODEL_NAME_ALIASES[model_name]
+            messages.append(
+                f"Model {model_name!r} is deprecated; using {replacement!r} instead."
+            )
+            model_name = replacement
+        if model_name not in SUPPORTED_MODEL_NAMES:
+            raise ValueError(
+                f"Unsupported model {model_name!r}. Expected one of "
+                f"{SUPPORTED_MODEL_NAMES!r}."
+            )
+        if model_name not in normalized:
+            normalized.append(model_name)
+    return normalized, messages
+
+
+def _resolve_model_names(
     input_dir: Path,
     *,
     region: str,
     light_epoch1: str,
     light_epoch2: str,
     dark_epoch: str,
-    requested_model_family: str | None,
-) -> list[str]:
-    """Return the requested model family or all supported families available for both epochs."""
-    if requested_model_family is not None:
-        return [requested_model_family]
+    requested_model_names: Sequence[str] | None,
+) -> tuple[list[str], list[str]]:
+    """Return requested models or all available selected segment models."""
+    if requested_model_names is not None:
+        model_names, messages = _normalize_model_names(requested_model_names)
+        return model_names, messages
 
-    available_families = []
-    for model_family in SUPPORTED_MODEL_FAMILIES:
+    available_model_names = []
+    for model_name in SUPPORTED_MODEL_NAMES:
         dataset1_path = _dataset_path(
             input_dir,
             region=region,
             light_epoch=light_epoch1,
             dark_epoch=dark_epoch,
-            model_family=model_family,
+            model_name=model_name,
         )
         dataset2_path = _dataset_path(
             input_dir,
             region=region,
             light_epoch=light_epoch2,
             dark_epoch=dark_epoch,
-            model_family=model_family,
+            model_name=model_name,
         )
         if dataset1_path.exists() and dataset2_path.exists():
-            available_families.append(model_family)
+            available_model_names.append(model_name)
 
-    if not available_families:
+    if not available_model_names:
         raise FileNotFoundError(
-            "No supported model families were found for both requested light epochs in "
-            f"{input_dir}. Checked families: {list(SUPPORTED_MODEL_FAMILIES)!r}."
+            "No supported selected segment models were found for both requested "
+            f"light epochs in {input_dir}. Checked models: {list(SUPPORTED_MODEL_NAMES)!r}."
         )
-    return available_families
+    return available_model_names, []
 
 
-def _load_fit_dataset(
+def _attr_epoch(dataset, *names: str) -> str:
+    """Return the first non-empty epoch attribute from a selected dataset."""
+    for name in names:
+        value = str(dataset.attrs.get(name, ""))
+        if value:
+            return value
+    return ""
+
+
+def _load_selected_dataset(
     path: Path,
     *,
     expected_region: str,
     expected_light_epoch: str,
     expected_dark_epoch: str,
-    expected_model_family: str,
+    expected_model_name: str,
 ):
-    """Load one dark/light fit dataset and validate its core metadata."""
+    """Load one selected dark/light fit dataset and validate core metadata."""
     if not path.exists():
-        raise FileNotFoundError(f"Dark/light fit dataset not found: {path}")
+        raise FileNotFoundError(f"Selected dark/light fit dataset not found: {path}")
 
     try:
         import xarray as xr
@@ -208,62 +177,71 @@ def _load_fit_dataset(
 
     dataset = xr.load_dataset(path)
 
+    fit_stage = str(dataset.attrs.get("fit_stage", ""))
+    if fit_stage != "selected":
+        raise ValueError(
+            f"Dataset {path} has fit_stage={fit_stage!r}; expected 'selected'. "
+            "Regenerate or select dark_light_glm outputs before running this script."
+        )
+
     region = str(dataset.attrs.get("region", ""))
-    light_epoch = str(dataset.attrs.get("light_epoch", ""))
-    dark_epoch = str(dataset.attrs.get("dark_epoch", ""))
-    model_family = str(dataset.attrs.get("model_family", ""))
+    model_name = str(dataset.attrs.get("model_name", ""))
+    light_epoch = _attr_epoch(dataset, "light_train_epoch", "light_epoch")
+    dark_epoch = _attr_epoch(dataset, "dark_train_epoch", "dark_epoch")
     if region and region != expected_region:
         raise ValueError(
             f"Dataset region mismatch for {path}: expected {expected_region!r}, "
             f"found {region!r}."
         )
-    if light_epoch and light_epoch != expected_light_epoch:
+    if model_name != expected_model_name:
         raise ValueError(
-            f"Dataset light_epoch mismatch for {path}: expected "
+            f"Dataset model_name mismatch for {path}: expected "
+            f"{expected_model_name!r}, found {model_name!r}."
+        )
+    if light_epoch != expected_light_epoch:
+        raise ValueError(
+            f"Dataset light_train_epoch mismatch for {path}: expected "
             f"{expected_light_epoch!r}, found {light_epoch!r}."
         )
-    if dark_epoch and dark_epoch != expected_dark_epoch:
+    if dark_epoch != expected_dark_epoch:
         raise ValueError(
-            f"Dataset dark_epoch mismatch for {path}: expected {expected_dark_epoch!r}, "
-            f"found {dark_epoch!r}."
-        )
-    if model_family and model_family != expected_model_family:
-        raise ValueError(
-            f"Dataset model_family mismatch for {path}: expected "
-            f"{expected_model_family!r}, found {model_family!r}."
+            f"Dataset dark_train_epoch mismatch for {path}: expected "
+            f"{expected_dark_epoch!r}, found {dark_epoch!r}."
         )
 
     if "segment_edges" not in dataset:
+        raise ValueError(f"Dataset {path} does not contain segment_edges.")
+    if _segment_gain_var_name(expected_model_name) not in dataset:
         raise ValueError(
-            f"Dataset {path} does not contain segment_edges and is not supported by "
-            "this script."
+            f"Dataset {path} is missing required variable "
+            f"{_segment_gain_var_name(expected_model_name)!r}."
         )
 
-    gain_basis = str(dataset.attrs.get("gain_basis", ""))
-    if gain_basis not in {"segment_raised_cosine", "segment_scalar"}:
-        raise ValueError(
-            f"Dataset {path} uses gain_basis={gain_basis!r}, which is not supported by "
-            "this script."
-        )
-
-    required_vars = [_segment_gain_var_name(dataset)]
-    missing_vars = [name for name in required_vars if name not in dataset]
-    if missing_vars:
-        raise ValueError(f"Dataset {path} is missing required variables: {missing_vars}")
-
-    _validate_segment_layout(dataset, path=path)
+    _validate_segment_layout(dataset, path=path, model_name=expected_model_name)
     _validate_supported_trajectories(dataset, path=path)
     return dataset
 
 
-def _validate_segment_layout(dataset, *, path: Path) -> None:
-    """Require the saved fit to use exactly three task-progression segments."""
-    segment_edges, _ = _segment_metadata(dataset)
+def _validate_segment_layout(dataset, *, path: Path, model_name: str) -> None:
+    """Require exactly three saved task-progression segments."""
+    segment_edges = _segment_edges(dataset)
     n_segments = segment_edges.size - 1
     if n_segments != 3:
         raise ValueError(
             f"Dataset {path} must use exactly 3 segments for this script. "
             f"Found {n_segments} segments from segment_edges={segment_edges.tolist()}."
+        )
+
+    coef = np.asarray(dataset[_segment_gain_var_name(model_name)].values, dtype=float)
+    if coef.ndim != 3:
+        raise ValueError(
+            f"Expected selected segment coefficients with shape "
+            f"(trajectory, segment_basis, unit), got {coef.shape} in {path}."
+        )
+    if coef.shape[1] != n_segments:
+        raise ValueError(
+            f"Expected one coefficient row per segment in {path}. "
+            f"Found {coef.shape[1]} coefficient rows and {n_segments} segments."
         )
 
 
@@ -280,53 +258,25 @@ def _validate_supported_trajectories(dataset, *, path: Path) -> None:
         )
 
 
-def _select_ridge(dataset, ridge: float) -> float:
-    """Return the exact or nearest saved ridge value from one fit dataset."""
-    ridge_values = np.asarray(dataset.coords["ridge"].values, dtype=float).reshape(-1)
-    if ridge_values.size == 0:
-        raise ValueError("The fit dataset does not contain any ridge values.")
-    if np.any(ridge_values <= 0):
+def _segment_edges(dataset) -> np.ndarray:
+    """Return validated segment edges from one selected dataset."""
+    segment_edges = np.asarray(dataset["segment_edges"].values, dtype=float).reshape(-1)
+    if segment_edges.ndim != 1 or segment_edges.size < 2:
         raise ValueError(
-            f"Saved ridge values must be positive. Got {ridge_values.tolist()}."
+            f"segment_edges must be a 1D array with len>=2. Got {segment_edges.shape}."
         )
-    if ridge in ridge_values:
-        return float(ridge)
-    ridge_index = int(
-        np.argmin(np.abs(np.log10(ridge_values) - np.log10(float(ridge))))
-    )
-    return float(ridge_values[ridge_index])
+    if np.any(np.diff(segment_edges) <= 0):
+        raise ValueError("segment_edges must be strictly increasing.")
+    return segment_edges
 
 
-def _common_saved_ridges(dataset1, dataset2) -> list[float]:
-    """Return the exact saved ridge values shared by two datasets."""
-    ridge_values1 = np.asarray(dataset1.coords["ridge"].values, dtype=float).reshape(-1)
-    ridge_values2 = np.asarray(dataset2.coords["ridge"].values, dtype=float).reshape(-1)
-    common = np.intersect1d(ridge_values1, ridge_values2)
-    common = np.asarray(common, dtype=float)
-    common = common[np.isfinite(common)]
-    common = common[common > 0]
-    if common.size == 0:
-        raise ValueError("The compared datasets do not share any saved positive ridge values.")
-    return [float(value) for value in common.tolist()]
-
-
-def _requested_ridge_value(args: argparse.Namespace) -> float:
-    """Return a parquet-friendly requested ridge value."""
-    return np.nan if args.ridge is None else float(args.ridge)
-
-
-def _format_ridge_tag(value: float) -> str:
-    """Return a compact filesystem-safe string for one ridge value."""
-    return f"{float(value):.0e}".replace("+", "").replace("-", "m")
-
-
-def _ridge_output_tag(*, ridge_used1: float, ridge_used2: float) -> str:
-    """Return the filename tag encoding the ridge values used for one comparison."""
-    tag1 = _format_ridge_tag(ridge_used1)
-    tag2 = _format_ridge_tag(ridge_used2)
-    if np.isclose(ridge_used1, ridge_used2):
-        return f"ridge_{tag1}"
-    return f"ridge1_{tag1}_ridge2_{tag2}"
+def _segment_gain_var_name(model_name: str) -> str:
+    """Return the selected segment-gain coefficient variable name."""
+    if model_name == "task_segment_bump":
+        return "coef_segment_bump_gain"
+    if model_name == "task_segment_scalar":
+        return "coef_segment_scalar_gain"
+    raise ValueError(f"Unsupported selected segment model {model_name!r}.")
 
 
 def _align_by_unit_ids(
@@ -358,63 +308,6 @@ def _corr_fast(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.sum(x * y) / denom)
 
 
-def _segment_metadata(dataset) -> tuple[np.ndarray, str]:
-    """Return validated segment edges and gain basis metadata."""
-    segment_edges = np.asarray(dataset["segment_edges"].values, dtype=float).reshape(-1)
-    if segment_edges.ndim != 1 or segment_edges.size < 2:
-        raise ValueError(
-            f"segment_edges must be a 1D array with len>=2. Got {segment_edges.shape}."
-        )
-    if np.any(np.diff(segment_edges) <= 0):
-        raise ValueError("segment_edges must be strictly increasing.")
-    gain_basis = str(dataset.attrs.get("gain_basis", ""))
-    return segment_edges, gain_basis
-
-
-def _segment_gain_var_name(dataset) -> str:
-    """Return the saved segment-gain coefficient variable name for one dataset."""
-    _, gain_basis = _segment_metadata(dataset)
-    if gain_basis == "segment_raised_cosine":
-        return "coef_segment_bump_gain_full_all"
-    if gain_basis == "segment_scalar":
-        return "coef_segment_scalar_gain_full_all"
-    raise ValueError(f"Unsupported gain_basis {gain_basis!r}.")
-
-
-def _segment_coefficients(
-    dataset,
-    *,
-    trajectory: str,
-    ridge_used: float,
-    segment_index: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return one raw segment coefficient vector for one trajectory."""
-    segment_edges, _ = _segment_metadata(dataset)
-    n_segments = segment_edges.size - 1
-    if segment_index < 0 or segment_index >= n_segments:
-        raise ValueError(
-            f"segment_index={segment_index} out of range for n_segments={n_segments}."
-        )
-
-    gamma = np.asarray(
-        dataset[_segment_gain_var_name(dataset)]
-        .sel(trajectory=trajectory, ridge=ridge_used)
-        .values,
-        dtype=float,
-    )
-    if gamma.ndim != 2:
-        raise ValueError(
-            f"Expected segment coefficients with shape (basis, unit), got {gamma.shape}."
-        )
-    if gamma.shape[0] != n_segments:
-        raise ValueError(
-            "This script expects one saved coefficient row per segment. "
-            f"Got gamma.shape[0]={gamma.shape[0]} and n_segments={n_segments}."
-        )
-    unit_ids = np.asarray(dataset.coords["unit"].values)
-    return unit_ids, np.asarray(gamma[segment_index, :], dtype=float), segment_edges
-
-
 def _python_scalar(value: Any) -> Any:
     """Return a plain Python scalar when possible for parquet friendliness."""
     if isinstance(value, np.generic):
@@ -422,19 +315,162 @@ def _python_scalar(value: Any) -> Any:
     return value
 
 
+def _float_attr(dataset, name: str) -> float:
+    """Return a numeric dataset attribute or NaN when absent."""
+    value = dataset.attrs.get(name, np.nan)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _int_attr(dataset, name: str) -> int | float:
+    """Return an integer dataset attribute or NaN when absent."""
+    value = dataset.attrs.get(name, np.nan)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _dataset_selection_metadata(dataset) -> dict[str, Any]:
+    """Return selected-fit metadata useful for output tables."""
+    return {
+        "selected_ridge": _float_attr(dataset, "selected_ridge"),
+        "selected_bin_size_s": _float_attr(dataset, "selected_bin_size_s"),
+        "selected_n_splines": _int_attr(dataset, "selected_n_splines"),
+        "selection_score": _float_attr(dataset, "selection_score"),
+        "selection_metric": str(dataset.attrs.get("selection_metric", "")),
+        "selection_model_name": str(dataset.attrs.get("selection_model_name", "")),
+        "selection_visual_ridge": _float_attr(dataset, "selection_visual_ridge"),
+        "selection_visual_score": _float_attr(dataset, "selection_visual_score"),
+    }
+
+
+def _coefficient_mode(include_light_offset: bool) -> str:
+    """Return the output label for the compared coefficient value."""
+    return "segment_plus_light_offset" if include_light_offset else "segment_only"
+
+
+def _coefficient_axis_label(include_light_offset: bool) -> str:
+    """Return a concise axis label for plotted coefficient values."""
+    if include_light_offset:
+        return "segment coefficient + light offset"
+    return "segment coefficient"
+
+
+def _segment_coefficients(
+    dataset,
+    *,
+    model_name: str,
+    trajectory: str,
+    segment_index: int,
+    include_light_offset: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return one segment coefficient vector for one trajectory."""
+    segment_edges = _segment_edges(dataset)
+    n_segments = segment_edges.size - 1
+    if segment_index < 0 or segment_index >= n_segments:
+        raise ValueError(
+            f"segment_index={segment_index} out of range for n_segments={n_segments}."
+        )
+
+    gamma = np.asarray(
+        dataset[_segment_gain_var_name(model_name)].sel(trajectory=trajectory).values,
+        dtype=float,
+    )
+    if gamma.ndim != 2:
+        raise ValueError(
+            f"Expected segment coefficients with shape (segment_basis, unit), "
+            f"got {gamma.shape}."
+        )
+    if gamma.shape[0] != n_segments:
+        raise ValueError(
+            "This script expects one saved coefficient row per segment. "
+            f"Got gamma.shape[0]={gamma.shape[0]} and n_segments={n_segments}."
+        )
+
+    values = np.asarray(gamma[segment_index, :], dtype=float)
+    if include_light_offset:
+        if "coef_light_offset" not in dataset:
+            raise ValueError(
+                "Cannot include light offset because selected dataset is missing "
+                "'coef_light_offset'."
+            )
+        light_offset = np.asarray(
+            dataset["coef_light_offset"].sel(trajectory=trajectory).values,
+            dtype=float,
+        ).reshape(-1)
+        if light_offset.shape != values.shape:
+            raise ValueError(
+                "coef_light_offset shape does not match segment coefficient shape. "
+                f"Got {light_offset.shape} and {values.shape}."
+            )
+        values = values + light_offset
+
+    unit_ids = np.asarray(dataset.coords["unit"].values)
+    return unit_ids, values, segment_edges
+
+
+def _base_row_metadata(
+    *,
+    args: argparse.Namespace,
+    model_name: str,
+    meta1: dict[str, Any],
+    meta2: dict[str, Any],
+) -> dict[str, Any]:
+    """Return output metadata shared by point and summary rows."""
+    return {
+        "animal_name": args.animal_name,
+        "date": args.date,
+        "region": args.region,
+        "model_name": model_name,
+        "model_family": model_name,
+        "light_epoch1": args.light_epoch1,
+        "light_epoch2": args.light_epoch2,
+        "dark_epoch": args.dark_epoch,
+        "coefficient_mode": _coefficient_mode(args.include_light_offset),
+        "include_light_offset": bool(args.include_light_offset),
+        "selected_ridge_light_epoch1": float(meta1["selected_ridge"]),
+        "selected_ridge_light_epoch2": float(meta2["selected_ridge"]),
+        "selected_bin_size_s_light_epoch1": float(meta1["selected_bin_size_s"]),
+        "selected_bin_size_s_light_epoch2": float(meta2["selected_bin_size_s"]),
+        "selected_n_splines_light_epoch1": meta1["selected_n_splines"],
+        "selected_n_splines_light_epoch2": meta2["selected_n_splines"],
+        "selection_score_light_epoch1": float(meta1["selection_score"]),
+        "selection_score_light_epoch2": float(meta2["selection_score"]),
+        "selection_metric_light_epoch1": meta1["selection_metric"],
+        "selection_metric_light_epoch2": meta2["selection_metric"],
+        "selection_model_name_light_epoch1": meta1["selection_model_name"],
+        "selection_model_name_light_epoch2": meta2["selection_model_name"],
+        "selection_visual_ridge_light_epoch1": float(meta1["selection_visual_ridge"]),
+        "selection_visual_ridge_light_epoch2": float(meta2["selection_visual_ridge"]),
+        "selection_visual_score_light_epoch1": float(meta1["selection_visual_score"]),
+        "selection_visual_score_light_epoch2": float(meta2["selection_visual_score"]),
+    }
+
+
 def build_comparison_tables(
     dataset1,
     dataset2,
     *,
     args: argparse.Namespace,
-    ridge_used1: float,
-    ridge_used2: float,
+    model_name: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build per-unit and per-panel comparison tables for two light epochs."""
-    segment_edges1, _ = _segment_metadata(dataset1)
-    segment_edges2, _ = _segment_metadata(dataset2)
+    segment_edges1 = _segment_edges(dataset1)
+    segment_edges2 = _segment_edges(dataset2)
     if not np.allclose(segment_edges1, segment_edges2):
         raise ValueError("Compared datasets use different segment_edges and cannot be aligned.")
+
+    meta1 = _dataset_selection_metadata(dataset1)
+    meta2 = _dataset_selection_metadata(dataset2)
+    shared_metadata = _base_row_metadata(
+        args=args,
+        model_name=model_name,
+        meta1=meta1,
+        meta2=meta2,
+    )
 
     point_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
@@ -443,15 +479,17 @@ def build_comparison_tables(
         for segment_index in range(segment_edges1.size - 1):
             unit_ids1, coeff1, _ = _segment_coefficients(
                 dataset1,
+                model_name=model_name,
                 trajectory=trajectory,
-                ridge_used=ridge_used1,
                 segment_index=segment_index,
+                include_light_offset=args.include_light_offset,
             )
             unit_ids2, coeff2, _ = _segment_coefficients(
                 dataset2,
+                model_name=model_name,
                 trajectory=trajectory,
-                ridge_used=ridge_used2,
                 segment_index=segment_index,
+                include_light_offset=args.include_light_offset,
             )
             common_units, aligned1, aligned2 = _align_by_unit_ids(
                 unit_ids1,
@@ -472,16 +510,7 @@ def build_comparison_tables(
 
             summary_rows.append(
                 {
-                    "animal_name": args.animal_name,
-                    "date": args.date,
-                    "region": args.region,
-                    "model_family": args.model_family,
-                    "light_epoch1": args.light_epoch1,
-                    "light_epoch2": args.light_epoch2,
-                    "dark_epoch": args.dark_epoch,
-                    "ridge_requested": _requested_ridge_value(args),
-                    "ridge_used_light_epoch1": float(ridge_used1),
-                    "ridge_used_light_epoch2": float(ridge_used2),
+                    **shared_metadata,
                     "trajectory": trajectory,
                     "segment_index": int(segment_index),
                     "segment_start": segment_start,
@@ -502,16 +531,7 @@ def build_comparison_tables(
             ):
                 point_rows.append(
                     {
-                        "animal_name": args.animal_name,
-                        "date": args.date,
-                        "region": args.region,
-                        "model_family": args.model_family,
-                        "light_epoch1": args.light_epoch1,
-                        "light_epoch2": args.light_epoch2,
-                        "dark_epoch": args.dark_epoch,
-                        "ridge_requested": _requested_ridge_value(args),
-                        "ridge_used_light_epoch1": float(ridge_used1),
-                        "ridge_used_light_epoch2": float(ridge_used2),
+                        **shared_metadata,
                         "trajectory": trajectory,
                         "segment_index": int(segment_index),
                         "segment_start": segment_start,
@@ -566,8 +586,9 @@ def plot_trajectory_scatter(
     light_epoch1: str,
     light_epoch2: str,
     region: str,
-    model_family: str,
+    model_name: str,
     dark_epoch: str,
+    include_light_offset: bool,
 ):
     """Return the three-panel scatter figure for one trajectory."""
     import matplotlib.pyplot as plt
@@ -577,6 +598,7 @@ def plot_trajectory_scatter(
     summary_subset = summary_subset.sort_values("segment_index", ignore_index=True)
     limits = _trajectory_limits(point_subset)
     color = TRAJECTORY_COLORS[trajectory]
+    coefficient_label = _coefficient_axis_label(include_light_offset)
 
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2), sharex=True, sharey=True)
     for axis, segment_index in zip(axes, range(3), strict=True):
@@ -626,19 +648,28 @@ def plot_trajectory_scatter(
             fontsize=10,
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 2.5},
         )
-        axis.set_xlabel(f"{light_epoch1} coefficient")
+        axis.set_xlabel(f"{light_epoch1} {coefficient_label}")
 
-    axes[0].set_ylabel(f"{light_epoch2} coefficient")
+    axes[0].set_ylabel(f"{light_epoch2} {coefficient_label}")
     fig.suptitle(
-        "Segment coefficient comparison\n"
+        "Selected segment coefficient comparison\n"
         f"{region.upper()} | {trajectory} | {light_epoch1} vs {light_epoch2} | "
-        f"dark ref {dark_epoch} | {model_family}"
+        f"dark ref {dark_epoch} | {model_name}"
     )
     fig.tight_layout()
     return fig
 
 
-def plot_correlation_summary(summary_table: pd.DataFrame):
+def plot_correlation_summary(
+    summary_table: pd.DataFrame,
+    *,
+    region: str,
+    model_name: str,
+    light_epoch1: str,
+    light_epoch2: str,
+    dark_epoch: str,
+    include_light_offset: bool,
+):
     """Return the outbound/inbound summary figure of segment-wise correlations."""
     import matplotlib.pyplot as plt
 
@@ -722,165 +753,242 @@ def plot_correlation_summary(summary_table: pd.DataFrame):
         axis.legend(frameon=False)
 
     axes[0].set_ylabel("Correlation coefficient")
-    fig.suptitle("Segment coefficient comparison summary")
+    fig.suptitle(
+        "Selected segment coefficient comparison summary\n"
+        f"{region.upper()} | {model_name} | {light_epoch1} vs {light_epoch2} | "
+        f"dark ref {dark_epoch} | {_coefficient_axis_label(include_light_offset)}"
+    )
     fig.tight_layout()
     return fig
 
 
-def _output_stem(
-    args: argparse.Namespace,
-    *,
-    ridge_used1: float,
-    ridge_used2: float,
-) -> str:
+def _output_stem(args: argparse.Namespace, *, model_name: str) -> str:
     """Build the shared output filename stem for this comparison."""
+    offset_tag = "with_light_offset" if args.include_light_offset else "segment_only"
     return (
-        f"{args.region}_{args.model_family}_{args.light_epoch1}_vs_{args.light_epoch2}"
-        f"_ref_{args.dark_epoch}_{_ridge_output_tag(ridge_used1=ridge_used1, ridge_used2=ridge_used2)}"
-        f"_segment_coefficients"
+        f"{args.region}_{model_name}_{args.light_epoch1}_vs_{args.light_epoch2}"
+        f"_ref_{args.dark_epoch}_{offset_tag}_selected_segment_coefficients"
     )
 
 
-def _run_one_model_family(
+def _run_one_model_name(
     *,
     args: argparse.Namespace,
-    analysis_path: Path,
     input_dir: Path,
     output_dir: Path,
     fig_dir: Path,
-    model_family: str,
-) -> list[dict[str, Any]]:
-    """Run the comparison workflow for one model family and save its outputs."""
+    model_name: str,
+) -> dict[str, Any]:
+    """Run the selected comparison workflow for one model and save outputs."""
     dataset1_path = _dataset_path(
         input_dir,
         region=args.region,
         light_epoch=args.light_epoch1,
         dark_epoch=args.dark_epoch,
-        model_family=model_family,
+        model_name=model_name,
     )
     dataset2_path = _dataset_path(
         input_dir,
         region=args.region,
         light_epoch=args.light_epoch2,
         dark_epoch=args.dark_epoch,
-        model_family=model_family,
+        model_name=model_name,
     )
 
-    dataset1 = _load_fit_dataset(
+    dataset1 = _load_selected_dataset(
         dataset1_path,
         expected_region=args.region,
         expected_light_epoch=args.light_epoch1,
         expected_dark_epoch=args.dark_epoch,
-        expected_model_family=model_family,
+        expected_model_name=model_name,
     )
-    dataset2 = _load_fit_dataset(
+    dataset2 = _load_selected_dataset(
         dataset2_path,
         expected_region=args.region,
         expected_light_epoch=args.light_epoch2,
         expected_dark_epoch=args.dark_epoch,
-        expected_model_family=model_family,
+        expected_model_name=model_name,
     )
 
     try:
-        requested_ridges = (
-            [_select_ridge(dataset1, args.ridge), _select_ridge(dataset2, args.ridge)]
-            if args.ridge is not None
-            else None
-        )
-        ridge_pairs = (
-            [(float(requested_ridges[0]), float(requested_ridges[1]))]
-            if requested_ridges is not None
-            else [(ridge_value, ridge_value) for ridge_value in _common_saved_ridges(dataset1, dataset2)]
+        point_table, summary_table = build_comparison_tables(
+            dataset1,
+            dataset2,
+            args=args,
+            model_name=model_name,
         )
 
-        family_results: list[dict[str, Any]] = []
-        for ridge_used1, ridge_used2 in ridge_pairs:
-            point_table, summary_table = build_comparison_tables(
-                dataset1,
-                dataset2,
-                args=args,
-                ridge_used1=ridge_used1,
-                ridge_used2=ridge_used2,
+        stem = _output_stem(args, model_name=model_name)
+        points_parquet_path = output_dir / f"{stem}_points.parquet"
+        summary_parquet_path = output_dir / f"{stem}_summary.parquet"
+        point_table.to_parquet(points_parquet_path, index=False)
+        summary_table.to_parquet(summary_parquet_path, index=False)
+
+        figure_paths: list[Path] = []
+        figures = []
+        for trajectory in TRAJECTORIES:
+            fig = plot_trajectory_scatter(
+                point_table,
+                summary_table,
+                trajectory=trajectory,
+                light_epoch1=args.light_epoch1,
+                light_epoch2=args.light_epoch2,
+                region=args.region,
+                model_name=model_name,
+                dark_epoch=args.dark_epoch,
+                include_light_offset=args.include_light_offset,
             )
+            figure_path = fig_dir / f"{stem}_{trajectory}.png"
+            fig.savefig(figure_path, dpi=200, bbox_inches="tight")
+            figure_paths.append(figure_path)
+            figures.append(fig)
 
-            family_args = argparse.Namespace(**vars(args))
-            family_args.model_family = model_family
-            stem = _output_stem(
-                family_args,
-                ridge_used1=ridge_used1,
-                ridge_used2=ridge_used2,
-            )
-            points_parquet_path = output_dir / f"{stem}_points.parquet"
-            summary_parquet_path = output_dir / f"{stem}_summary.parquet"
-            point_table.to_parquet(points_parquet_path, index=False)
-            summary_table.to_parquet(summary_parquet_path, index=False)
+        summary_figure = plot_correlation_summary(
+            summary_table,
+            region=args.region,
+            model_name=model_name,
+            light_epoch1=args.light_epoch1,
+            light_epoch2=args.light_epoch2,
+            dark_epoch=args.dark_epoch,
+            include_light_offset=args.include_light_offset,
+        )
+        summary_figure_path = fig_dir / f"{stem}_correlation_summary.png"
+        summary_figure.savefig(summary_figure_path, dpi=200, bbox_inches="tight")
+        figure_paths.append(summary_figure_path)
+        figures.append(summary_figure)
 
-            figure_paths: list[Path] = []
-            figures = []
-            for trajectory in TRAJECTORIES:
-                fig = plot_trajectory_scatter(
-                    point_table,
-                    summary_table,
-                    trajectory=trajectory,
-                    light_epoch1=args.light_epoch1,
-                    light_epoch2=args.light_epoch2,
-                    region=args.region,
-                    model_family=model_family,
-                    dark_epoch=args.dark_epoch,
-                )
-                figure_path = fig_dir / f"{stem}_{trajectory}.png"
-                fig.savefig(figure_path, dpi=200, bbox_inches="tight")
-                figure_paths.append(figure_path)
-                figures.append(fig)
+        if args.show:
+            import matplotlib.pyplot as plt
 
-            summary_figure = plot_correlation_summary(summary_table)
-            summary_figure_path = fig_dir / f"{stem}_correlation_summary.png"
-            summary_figure.savefig(summary_figure_path, dpi=200, bbox_inches="tight")
-            figure_paths.append(summary_figure_path)
-            figures.append(summary_figure)
+            plt.show()
+        else:
+            import matplotlib.pyplot as plt
 
-            if args.show:
-                import matplotlib.pyplot as plt
+            for fig in figures:
+                plt.close(fig)
 
-                plt.show()
-            else:
-                import matplotlib.pyplot as plt
-
-                for fig in figures:
-                    plt.close(fig)
-
-            family_results.append(
-                {
-                    "model_family": model_family,
-                    "dataset_paths": {
-                        "light_epoch1": dataset1_path,
-                        "light_epoch2": dataset2_path,
-                    },
-                    "ridge_selection": {
-                        "requested": _requested_ridge_value(args),
-                        "light_epoch1": float(ridge_used1),
-                        "light_epoch2": float(ridge_used2),
-                    },
-                    "points_parquet": points_parquet_path,
-                    "summary_parquet": summary_parquet_path,
-                    "figure_paths": figure_paths,
-                }
-            )
-
-        return family_results
+        return {
+            "model_name": model_name,
+            "dataset_paths": {
+                "light_epoch1": dataset1_path,
+                "light_epoch2": dataset2_path,
+            },
+            "selected_parameters": {
+                "light_epoch1": _dataset_selection_metadata(dataset1),
+                "light_epoch2": _dataset_selection_metadata(dataset2),
+            },
+            "coefficient_mode": _coefficient_mode(args.include_light_offset),
+            "points_parquet": points_parquet_path,
+            "summary_parquet": summary_parquet_path,
+            "figure_paths": figure_paths,
+        }
     finally:
         dataset1.close()
         dataset2.close()
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for selected coefficient comparisons."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare selected task-segment coefficients across two light epochs "
+            "using NetCDF outputs from dark_light_glm."
+        )
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name.")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
+    parser.add_argument(
+        "--region",
+        required=True,
+        choices=("v1", "ca1"),
+        help="Region to analyze.",
+    )
+    parser.add_argument(
+        "--models",
+        "--model-families",
+        "--model-family",
+        dest="models",
+        nargs="+",
+        choices=MODEL_NAME_CHOICES,
+        help=(
+            "Selected segment models to analyze. If omitted, the script runs "
+            "all supported selected segment models available for both requested "
+            "light epochs. Compatible deprecated dark_light_glm aliases are "
+            "normalized."
+        ),
+    )
+    parser.add_argument(
+        "--light-epoch1",
+        "--light-train-epoch1",
+        dest="light_epoch1",
+        required=True,
+        help="First light-training epoch to compare.",
+    )
+    parser.add_argument(
+        "--light-epoch2",
+        "--light-train-epoch2",
+        dest="light_epoch2",
+        required=True,
+        help="Second light-training epoch to compare.",
+    )
+    parser.add_argument(
+        "--dark-epoch",
+        "--dark-train-epoch",
+        dest="dark_epoch",
+        required=True,
+        help="Shared dark-training epoch used in the selected dark/light fits.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--input-dir",
+        "--dark-light-glm-dir",
+        dest="input_dir",
+        type=Path,
+        help=(
+            "Directory containing selected dark_light_glm NetCDF files. "
+            "Default: analysis_path / 'task_progression' / 'dark_light_glm' / 'selected'"
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Directory for saved parquet summaries. "
+            "Default: analysis_path / 'task_progression' / 'segment_coefficient_comparison'"
+        ),
+    )
+    parser.add_argument(
+        "--include-light-offset",
+        "--swap-light-offset",
+        dest="include_light_offset",
+        action="store_true",
+        help=(
+            "Add the selected trajectory's scalar light-offset coefficient to "
+            "each segment coefficient before comparing epochs. Default: compare "
+            "segment-local coefficients only."
+        ),
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display the saved figures interactively after writing them.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    """Run the segment-coefficient comparison workflow."""
+    """Run the selected segment-coefficient comparison workflow."""
     args = parse_arguments()
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     input_dir = (
         args.input_dir
         if args.input_dir is not None
-        else get_task_progression_output_dir(analysis_path, "dark_light_glm")
+        else get_task_progression_output_dir(analysis_path, "dark_light_glm") / "selected"
     )
     output_dir = (
         args.output_dir
@@ -891,24 +999,26 @@ def main() -> None:
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    model_families = _resolve_model_families(
+    model_names, model_messages = _resolve_model_names(
         input_dir,
         region=args.region,
         light_epoch1=args.light_epoch1,
         light_epoch2=args.light_epoch2,
         dark_epoch=args.dark_epoch,
-        requested_model_family=args.model_family,
+        requested_model_names=args.models,
     )
-    family_results = []
-    for model_family in model_families:
-        family_results.extend(
-            _run_one_model_family(
+    for message in model_messages:
+        print(message)
+
+    model_results = []
+    for model_name in model_names:
+        model_results.append(
+            _run_one_model_name(
                 args=args,
-                analysis_path=analysis_path,
                 input_dir=input_dir,
                 output_dir=output_dir,
                 fig_dir=fig_dir,
-                model_family=model_family,
+                model_name=model_name,
             )
         )
 
@@ -919,8 +1029,8 @@ def main() -> None:
             "animal_name": args.animal_name,
             "date": args.date,
             "region": args.region,
-            "model_family": args.model_family,
-            "model_families_run": model_families,
+            "models_requested": args.models,
+            "models_run": model_names,
             "light_epoch1": args.light_epoch1,
             "light_epoch2": args.light_epoch2,
             "dark_epoch": args.dark_epoch,
@@ -928,35 +1038,32 @@ def main() -> None:
             "input_dir": input_dir,
             "output_dir": output_dir,
             "fig_dir": fig_dir,
-            "ridge_requested": _requested_ridge_value(args),
+            "include_light_offset": bool(args.include_light_offset),
+            "coefficient_mode": _coefficient_mode(args.include_light_offset),
         },
         outputs={
-            "family_outputs": {
-                result["model_family"]
-                + "_"
-                + _ridge_output_tag(
-                    ridge_used1=result["ridge_selection"]["light_epoch1"],
-                    ridge_used2=result["ridge_selection"]["light_epoch2"],
-                ): {
-                    "model_family": result["model_family"],
+            "model_outputs": {
+                result["model_name"]: {
+                    "model_name": result["model_name"],
                     "source_datasets": result["dataset_paths"],
-                    "ridge_selection": result["ridge_selection"],
+                    "selected_parameters": result["selected_parameters"],
+                    "coefficient_mode": result["coefficient_mode"],
                     "saved_parquets": {
                         "point_table": result["points_parquet"],
                         "summary_table": result["summary_parquet"],
                     },
                     "saved_figures": result["figure_paths"],
                 }
-                for result in family_results
+                for result in model_results
             },
         },
     )
 
-    for result in family_results:
-        print(f"[{result['model_family']}] Saved point table to {result['points_parquet']}")
-        print(f"[{result['model_family']}] Saved summary table to {result['summary_parquet']}")
+    for result in model_results:
+        print(f"[{result['model_name']}] Saved point table to {result['points_parquet']}")
+        print(f"[{result['model_name']}] Saved summary table to {result['summary_parquet']}")
         print(
-            f"[{result['model_family']}] Saved figures to "
+            f"[{result['model_name']}] Saved figures to "
             f"{[str(path) for path in result['figure_paths']]}"
         )
     print(f"Saved run metadata to {log_path}")

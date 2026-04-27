@@ -101,70 +101,6 @@ EPOCH_SCORE_COLUMNS = [
 ]
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for ripple GLM ridge selection."""
-    parser = argparse.ArgumentParser(
-        description="Select one ridge strength per saved ripple GLM setup"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--ripple-window-s",
-        type=float,
-        help="Optional fixed ripple window to analyze. Default: scan all saved windows.",
-    )
-    parser.add_argument(
-        "--ripple-window-offset-s",
-        type=float,
-        help="Optional ripple-window offset to analyze. Default: scan all saved offsets.",
-    )
-    parser.add_argument(
-        "--ripple-selection-mode",
-        type=str,
-        help="Optional ripple-selection mode to analyze. Default: scan all saved modes.",
-    )
-    parser.add_argument(
-        "--ridge-strengths",
-        nargs="+",
-        type=float,
-        help="Optional subset of ridge strengths to compare. Default: infer from saved files.",
-    )
-    parser.add_argument(
-        "--tie-tol",
-        type=float,
-        default=DEFAULT_TIE_TOL,
-        help=(
-            "Absolute tolerance for near-ties in session-level deviance explained. "
-            f"Default: {DEFAULT_TIE_TOL}"
-        ),
-    )
-    parser.add_argument(
-        "--min-common-epochs",
-        type=int,
-        default=DEFAULT_MIN_COMMON_EPOCHS,
-        help=(
-            "Minimum number of epochs required in the shared comparison set for one setup. "
-            f"Default: {DEFAULT_MIN_COMMON_EPOCHS}"
-        ),
-    )
-    parser.add_argument(
-        "--min-finite-units",
-        type=int,
-        default=DEFAULT_MIN_FINITE_UNITS,
-        help=(
-            "Minimum number of units with finite epoch scores required for one "
-            f"(epoch, ridge) score. Default: {DEFAULT_MIN_FINITE_UNITS}"
-        ),
-    )
-    return parser.parse_args(argv)
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate argument ranges for ridge selection."""
     if args.ripple_window_s is not None and args.ripple_window_s <= 0:
@@ -652,6 +588,70 @@ def print_setup_selection_summary(summary_table: pd.DataFrame) -> None:
             f"({row['selection_status']}; common_file_epochs={int(row['n_common_file_epochs'])}; "
             f"common_valid_epochs={int(row['n_common_valid_epochs'])})"
         )
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for ripple GLM ridge selection."""
+    parser = argparse.ArgumentParser(
+        description="Select one ridge strength per saved ripple GLM setup"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--ripple-window-s",
+        type=float,
+        help="Optional fixed ripple window to analyze. Default: scan all saved windows.",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        help="Optional ripple-window offset to analyze. Default: scan all saved offsets.",
+    )
+    parser.add_argument(
+        "--ripple-selection-mode",
+        type=str,
+        help="Optional ripple-selection mode to analyze. Default: scan all saved modes.",
+    )
+    parser.add_argument(
+        "--ridge-strengths",
+        nargs="+",
+        type=float,
+        help="Optional subset of ridge strengths to compare. Default: infer from saved files.",
+    )
+    parser.add_argument(
+        "--tie-tol",
+        type=float,
+        default=DEFAULT_TIE_TOL,
+        help=(
+            "Absolute tolerance for near-ties in session-level deviance explained. "
+            f"Default: {DEFAULT_TIE_TOL}"
+        ),
+    )
+    parser.add_argument(
+        "--min-common-epochs",
+        type=int,
+        default=DEFAULT_MIN_COMMON_EPOCHS,
+        help=(
+            "Minimum number of epochs required in the shared comparison set for one setup. "
+            f"Default: {DEFAULT_MIN_COMMON_EPOCHS}"
+        ),
+    )
+    parser.add_argument(
+        "--min-finite-units",
+        type=int,
+        default=DEFAULT_MIN_FINITE_UNITS,
+        help=(
+            "Minimum number of units with finite epoch scores required for one "
+            f"(epoch, ridge) score. Default: {DEFAULT_MIN_FINITE_UNITS}"
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

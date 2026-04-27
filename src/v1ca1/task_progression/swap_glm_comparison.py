@@ -1077,93 +1077,6 @@ def _output_stem(
     )
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for the model-comparison workflow."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Score selected dark/light task-progression GLMs on a held-out "
-            "swapped-light epoch."
-        )
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--regions",
-        nargs="+",
-        choices=REGIONS,
-        default=list(REGIONS),
-        help=f"Regions to fit. Default: {' '.join(REGIONS)}",
-    )
-    parser.add_argument(
-        "--models",
-        nargs="+",
-        choices=DEFAULT_MODEL_NAMES,
-        default=list(DEFAULT_MODEL_NAMES),
-        help=(
-            "Selected model families to score. The visual baseline is always "
-            "included even if omitted. "
-            f"Default: {' '.join(DEFAULT_MODEL_NAMES)}"
-        ),
-    )
-    parser.add_argument(
-        "--dark-train-epoch",
-        required=True,
-        help="Dark run epoch used for fitting.",
-    )
-    parser.add_argument(
-        "--light-train-epoch",
-        required=True,
-        help="Light run epoch used for fitting.",
-    )
-    parser.add_argument(
-        "--light-test-epoch",
-        required=True,
-        help="Held-out light run epoch used for evaluation.",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore per epoch. "
-            f"Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--dark-light-glm-dir",
-        type=Path,
-        help=(
-            "Directory containing dark_light_glm selected NetCDF files. "
-            "Default: analysis_path/task_progression/dark_light_glm/selected"
-        ),
-    )
-    parser.add_argument(
-        "--swap-light-offset",
-        action="store_true",
-        help=(
-            "Also swap the selected trajectory's scalar light-offset coefficient "
-            "inside the swapped segment. Default: swap only the local "
-            "trajectory/segment-dependent component."
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_model_comparison_epochs(
     run_epochs: list[str],
     *,
@@ -4258,6 +4171,93 @@ def plot_selected_model_minus_visual_histogram(
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the model-comparison workflow."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Score selected dark/light task-progression GLMs on a held-out "
+            "swapped-light epoch."
+        )
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--regions",
+        nargs="+",
+        choices=REGIONS,
+        default=list(REGIONS),
+        help=f"Regions to fit. Default: {' '.join(REGIONS)}",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=DEFAULT_MODEL_NAMES,
+        default=list(DEFAULT_MODEL_NAMES),
+        help=(
+            "Selected model families to score. The visual baseline is always "
+            "included even if omitted. "
+            f"Default: {' '.join(DEFAULT_MODEL_NAMES)}"
+        ),
+    )
+    parser.add_argument(
+        "--dark-train-epoch",
+        required=True,
+        help="Dark run epoch used for fitting.",
+    )
+    parser.add_argument(
+        "--light-train-epoch",
+        required=True,
+        help="Light run epoch used for fitting.",
+    )
+    parser.add_argument(
+        "--light-test-epoch",
+        required=True,
+        help="Held-out light run epoch used for evaluation.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Speed threshold in cm/s used to define movement intervals. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--dark-light-glm-dir",
+        type=Path,
+        help=(
+            "Directory containing dark_light_glm selected NetCDF files. "
+            "Default: analysis_path/task_progression/dark_light_glm/selected"
+        ),
+    )
+    parser.add_argument(
+        "--swap-light-offset",
+        action="store_true",
+        help=(
+            "Also swap the selected trajectory's scalar light-offset coefficient "
+            "inside the swapped segment. Default: swap only the local "
+            "trajectory/segment-dependent component."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

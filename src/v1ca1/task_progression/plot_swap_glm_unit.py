@@ -43,85 +43,6 @@ def _configure_runtime_caches() -> None:
     os.environ.setdefault("XDG_CACHE_HOME", str(xdg_cache_dir))
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the unit-level swapped GLM figure."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Plot visual/task swapped-segment GLM predictions, held-out rasters, "
-            "and empirical held-out rate for one unit."
-        )
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        default="v1",
-        help="Region to plot. Default: v1",
-    )
-    parser.add_argument("--dark-train-epoch", required=True, help="Dark train epoch")
-    parser.add_argument("--light-train-epoch", required=True, help="Light train epoch")
-    parser.add_argument("--light-test-epoch", required=True, help="Held-out light epoch")
-    parser.add_argument(
-        "--task-model",
-        choices=TASK_MODELS,
-        default=DEFAULT_TASK_MODEL,
-        help=f"Task model to compare against visual. Default: {DEFAULT_TASK_MODEL}",
-    )
-    parser.add_argument(
-        "--unit-id",
-        type=int,
-        help="Unit ID to plot. Default: auto-select from --selection-metric.",
-    )
-    parser.add_argument(
-        "--selection-metric",
-        default=DEFAULT_SELECTION_METRIC,
-        help=f"Metric used when --unit-id is omitted. Default: {DEFAULT_SELECTION_METRIC}",
-    )
-    parser.add_argument(
-        "--select-by",
-        choices=SELECT_BY_CHOICES,
-        default="mean",
-        help=(
-            "How to auto-select the unit when --unit-id is omitted. "
-            "Default: mean of task and visual scores."
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        help=(
-            "Number of leading position samples to ignore. Default: read from "
-            "the GLM dataset, falling back to the task-progression default."
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        help=(
-            "Movement speed threshold used by the session loader. Default: read "
-            "from the GLM dataset, falling back to the task-progression default."
-        ),
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Output directory. Default: task-progression swap GLM figure directory.",
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display the figure in addition to saving it.",
-    )
-    return parser.parse_args(argv)
-
-
 def _find_model_dataset_path(
     *,
     analysis_path: Path,
@@ -469,6 +390,85 @@ def build_output_path(
         f"{task_model}_vs_visual_swapped_segment"
     )
     return output_dir / f"{stem}.png"
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the unit-level swapped GLM figure."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Plot visual/task swapped-segment GLM predictions, held-out rasters, "
+            "and empirical held-out rate for one unit."
+        )
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        default="v1",
+        help="Region to plot. Default: v1",
+    )
+    parser.add_argument("--dark-train-epoch", required=True, help="Dark train epoch")
+    parser.add_argument("--light-train-epoch", required=True, help="Light train epoch")
+    parser.add_argument("--light-test-epoch", required=True, help="Held-out light epoch")
+    parser.add_argument(
+        "--task-model",
+        choices=TASK_MODELS,
+        default=DEFAULT_TASK_MODEL,
+        help=f"Task model to compare against visual. Default: {DEFAULT_TASK_MODEL}",
+    )
+    parser.add_argument(
+        "--unit-id",
+        type=int,
+        help="Unit ID to plot. Default: auto-select from --selection-metric.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        default=DEFAULT_SELECTION_METRIC,
+        help=f"Metric used when --unit-id is omitted. Default: {DEFAULT_SELECTION_METRIC}",
+    )
+    parser.add_argument(
+        "--select-by",
+        choices=SELECT_BY_CHOICES,
+        default="mean",
+        help=(
+            "How to auto-select the unit when --unit-id is omitted. "
+            "Default: mean of task and visual scores."
+        ),
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        help=(
+            "Number of leading position samples to ignore. Default: read from "
+            "the GLM dataset, falling back to the task-progression default."
+        ),
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        help=(
+            "Movement speed threshold used by the session loader. Default: read "
+            "from the GLM dataset, falling back to the task-progression default."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory. Default: task-progression swap GLM figure directory.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display the figure in addition to saving it.",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

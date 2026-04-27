@@ -66,114 +66,6 @@ PERI_RIPPLE_FIRING_RATE_COLUMNS = [
 ]
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the ripple modulation workflow."""
-    parser = argparse.ArgumentParser(
-        description="Plot ripple-triggered firing-rate heatmaps for one session"
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        help="Only process one region. Default: process all regions.",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epochs to process. Default: all epochs with ripple outputs.",
-    )
-    parser.add_argument(
-        "--ripple-threshold-zscore",
-        type=float,
-        default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
-        help=(
-            "Minimum ripple mean z-score to keep one ripple event. "
-            f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE}"
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"PETH bin size in seconds. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--time-before-s",
-        type=float,
-        default=DEFAULT_TIME_BEFORE_S,
-        help=f"Seconds before ripple start for the PETH window. Default: {DEFAULT_TIME_BEFORE_S}",
-    )
-    parser.add_argument(
-        "--time-after-s",
-        type=float,
-        default=DEFAULT_TIME_AFTER_S,
-        help=f"Seconds after ripple start for the PETH window. Default: {DEFAULT_TIME_AFTER_S}",
-    )
-    parser.add_argument(
-        "--response-window-start-s",
-        type=float,
-        default=DEFAULT_RESPONSE_WINDOW_START_S,
-        help=(
-            "Start of the response window in seconds relative to ripple start. "
-            f"Default: {DEFAULT_RESPONSE_WINDOW_START_S}"
-        ),
-    )
-    parser.add_argument(
-        "--response-window-end-s",
-        type=float,
-        default=DEFAULT_RESPONSE_WINDOW_END_S,
-        help=(
-            "End of the response window in seconds relative to ripple start. "
-            f"Default: {DEFAULT_RESPONSE_WINDOW_END_S}"
-        ),
-    )
-    parser.add_argument(
-        "--baseline-window-start-s",
-        type=float,
-        default=DEFAULT_BASELINE_WINDOW_START_S,
-        help=(
-            "Start of the baseline window in seconds relative to ripple start. "
-            f"Default: {DEFAULT_BASELINE_WINDOW_START_S}"
-        ),
-    )
-    parser.add_argument(
-        "--baseline-window-end-s",
-        type=float,
-        default=DEFAULT_BASELINE_WINDOW_END_S,
-        help=(
-            "End of the baseline window in seconds relative to ripple start. "
-            f"Default: {DEFAULT_BASELINE_WINDOW_END_S}"
-        ),
-    )
-    parser.add_argument(
-        "--heatmap-normalize",
-        choices=HEATMAP_NORMALIZE_CHOICES,
-        default=DEFAULT_HEATMAP_NORMALIZE,
-        help=(
-            "How to normalize each unit row before plotting the heatmap. "
-            f"Default: {DEFAULT_HEATMAP_NORMALIZE}"
-        ),
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display figures in addition to saving them.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Recompute and overwrite saved peri-ripple firing-rate outputs.",
-    )
-    return parser.parse_args(argv)
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI argument ranges."""
     if args.ripple_threshold_zscore <= 0:
@@ -1137,6 +1029,114 @@ def plot_ripple_modulation_for_session(
         "skipped_epochs_without_ripple_output": skipped_epochs_without_ripple_output,
         "skipped_epochs_below_threshold": skipped_epochs_below_threshold,
     }
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the ripple modulation workflow."""
+    parser = argparse.ArgumentParser(
+        description="Plot ripple-triggered firing-rate heatmaps for one session"
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        help="Only process one region. Default: process all regions.",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epochs to process. Default: all epochs with ripple outputs.",
+    )
+    parser.add_argument(
+        "--ripple-threshold-zscore",
+        type=float,
+        default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+        help=(
+            "Minimum ripple mean z-score to keep one ripple event. "
+            f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE}"
+        ),
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"PETH bin size in seconds. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--time-before-s",
+        type=float,
+        default=DEFAULT_TIME_BEFORE_S,
+        help=f"Seconds before ripple start for the PETH window. Default: {DEFAULT_TIME_BEFORE_S}",
+    )
+    parser.add_argument(
+        "--time-after-s",
+        type=float,
+        default=DEFAULT_TIME_AFTER_S,
+        help=f"Seconds after ripple start for the PETH window. Default: {DEFAULT_TIME_AFTER_S}",
+    )
+    parser.add_argument(
+        "--response-window-start-s",
+        type=float,
+        default=DEFAULT_RESPONSE_WINDOW_START_S,
+        help=(
+            "Start of the response window in seconds relative to ripple start. "
+            f"Default: {DEFAULT_RESPONSE_WINDOW_START_S}"
+        ),
+    )
+    parser.add_argument(
+        "--response-window-end-s",
+        type=float,
+        default=DEFAULT_RESPONSE_WINDOW_END_S,
+        help=(
+            "End of the response window in seconds relative to ripple start. "
+            f"Default: {DEFAULT_RESPONSE_WINDOW_END_S}"
+        ),
+    )
+    parser.add_argument(
+        "--baseline-window-start-s",
+        type=float,
+        default=DEFAULT_BASELINE_WINDOW_START_S,
+        help=(
+            "Start of the baseline window in seconds relative to ripple start. "
+            f"Default: {DEFAULT_BASELINE_WINDOW_START_S}"
+        ),
+    )
+    parser.add_argument(
+        "--baseline-window-end-s",
+        type=float,
+        default=DEFAULT_BASELINE_WINDOW_END_S,
+        help=(
+            "End of the baseline window in seconds relative to ripple start. "
+            f"Default: {DEFAULT_BASELINE_WINDOW_END_S}"
+        ),
+    )
+    parser.add_argument(
+        "--heatmap-normalize",
+        choices=HEATMAP_NORMALIZE_CHOICES,
+        default=DEFAULT_HEATMAP_NORMALIZE,
+        help=(
+            "How to normalize each unit row before plotting the heatmap. "
+            f"Default: {DEFAULT_HEATMAP_NORMALIZE}"
+        ),
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display figures in addition to saving them.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recompute and overwrite saved peri-ripple firing-rate outputs.",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

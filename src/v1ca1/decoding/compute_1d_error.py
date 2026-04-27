@@ -97,147 +97,6 @@ SUMMARY_COLUMNS = (
 )
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for 1D decoding-error computation."""
-    parser = argparse.ArgumentParser(
-        description="Compute trajectory-aligned 1D ahead/behind decoding error."
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
-    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        help="Optional single region to process. Default: process all regions.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--n-folds",
-        type=int,
-        default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
-    )
-    parser.add_argument(
-        "--time-bin-size-s",
-        type=float,
-        default=DEFAULT_TIME_BIN_SIZE_S,
-        help=f"Prediction time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Leading position samples dropped by predict_1d. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Prediction path setting matching fit_1d/predict_1d. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--position-std",
-        type=float,
-        default=DEFAULT_POSITION_STD,
-        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_POSITION_STD}",
-    )
-    parser.add_argument(
-        "--place-bin-size",
-        type=float,
-        default=DEFAULT_PLACE_BIN_SIZE_CM,
-        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
-    )
-    parser.add_argument(
-        "--movement-var",
-        type=float,
-        default=DEFAULT_MOVEMENT_VAR,
-        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_MOVEMENT_VAR}",
-    )
-    parser.add_argument(
-        "--discrete-var",
-        choices=DISCRETE_VAR_CHOICES,
-        default="switching",
-        help="Prediction path setting matching fit_1d. Default: switching.",
-    )
-    parser.add_argument(
-        "--branch-gap-cm",
-        type=float,
-        default=DEFAULT_BRANCH_GAP_CM,
-        help=(
-            "Prediction path setting matching fit_1d/predict_1d. "
-            f"Default: {DEFAULT_BRANCH_GAP_CM}"
-        ),
-    )
-    parser.add_argument(
-        "--direction",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use outputs fit with inbound/outbound groups. Default: enabled.",
-    )
-    parser.add_argument(
-        "--movement",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use outputs fit with movement-restricted training. Default: enabled.",
-    )
-    unit_selection_group = parser.add_mutually_exclusive_group()
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-units",
-        action="store_true",
-        help=(
-            "Use V1 ripple GLM p-value-selected outputs matching predict_1d. "
-            f"Threshold: {DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}."
-        ),
-    )
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-devexp-threshold",
-        type=float,
-        help=(
-            "Use V1 outputs restricted to units with ripple_devexp_mean greater "
-            "than or equal to this value."
-        ),
-    )
-    parser.add_argument(
-        "--position-bin-size-cm",
-        type=float,
-        help=(
-            "Spatial bin size for trajectory-position summaries. "
-            "Default: --place-bin-size."
-        ),
-    )
-    parser.add_argument(
-        "--min-bin-count",
-        type=int,
-        default=DEFAULT_MIN_BIN_COUNT,
-        help=f"Minimum samples required to summarize a spatial bin. Default: {DEFAULT_MIN_BIN_COUNT}",
-    )
-    parser.add_argument(
-        "--ylim-cm",
-        type=float,
-        help="Optional symmetric y-axis limit for figures, e.g. --ylim-cm 80.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing decoding-error outputs.",
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate numeric CLI arguments."""
     if args.n_folds < 2:
@@ -1393,6 +1252,147 @@ def run(args: argparse.Namespace) -> None:
         },
     )
     print(f"Saved run metadata to {log_path}")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for 1D decoding-error computation."""
+    parser = argparse.ArgumentParser(
+        description="Compute trajectory-aligned 1D ahead/behind decoding error."
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
+    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        help="Optional single region to process. Default: process all regions.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--n-folds",
+        type=int,
+        default=DEFAULT_N_FOLDS,
+        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=DEFAULT_RANDOM_STATE,
+        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+    )
+    parser.add_argument(
+        "--time-bin-size-s",
+        type=float,
+        default=DEFAULT_TIME_BIN_SIZE_S,
+        help=f"Prediction time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Leading position samples dropped by predict_1d. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Prediction path setting matching fit_1d/predict_1d. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--position-std",
+        type=float,
+        default=DEFAULT_POSITION_STD,
+        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_POSITION_STD}",
+    )
+    parser.add_argument(
+        "--place-bin-size",
+        type=float,
+        default=DEFAULT_PLACE_BIN_SIZE_CM,
+        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
+    )
+    parser.add_argument(
+        "--movement-var",
+        type=float,
+        default=DEFAULT_MOVEMENT_VAR,
+        help=f"Prediction path setting matching fit_1d. Default: {DEFAULT_MOVEMENT_VAR}",
+    )
+    parser.add_argument(
+        "--discrete-var",
+        choices=DISCRETE_VAR_CHOICES,
+        default="switching",
+        help="Prediction path setting matching fit_1d. Default: switching.",
+    )
+    parser.add_argument(
+        "--branch-gap-cm",
+        type=float,
+        default=DEFAULT_BRANCH_GAP_CM,
+        help=(
+            "Prediction path setting matching fit_1d/predict_1d. "
+            f"Default: {DEFAULT_BRANCH_GAP_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--direction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use outputs fit with inbound/outbound groups. Default: enabled.",
+    )
+    parser.add_argument(
+        "--movement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use outputs fit with movement-restricted training. Default: enabled.",
+    )
+    unit_selection_group = parser.add_mutually_exclusive_group()
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-units",
+        action="store_true",
+        help=(
+            "Use V1 ripple GLM p-value-selected outputs matching predict_1d. "
+            f"Threshold: {DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}."
+        ),
+    )
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-devexp-threshold",
+        type=float,
+        help=(
+            "Use V1 outputs restricted to units with ripple_devexp_mean greater "
+            "than or equal to this value."
+        ),
+    )
+    parser.add_argument(
+        "--position-bin-size-cm",
+        type=float,
+        help=(
+            "Spatial bin size for trajectory-position summaries. "
+            "Default: --place-bin-size."
+        ),
+    )
+    parser.add_argument(
+        "--min-bin-count",
+        type=int,
+        default=DEFAULT_MIN_BIN_COUNT,
+        help=f"Minimum samples required to summarize a spatial bin. Default: {DEFAULT_MIN_BIN_COUNT}",
+    )
+    parser.add_argument(
+        "--ylim-cm",
+        type=float,
+        help="Optional symmetric y-axis limit for figures, e.g. --ylim-cm 80.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing decoding-error outputs.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

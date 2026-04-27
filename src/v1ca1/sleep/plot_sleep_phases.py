@@ -40,64 +40,6 @@ from v1ca1.sleep._session import (
 )
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for sleep phase figures."""
-    parser = argparse.ArgumentParser(description="Plot behavioral and neural sleep-phase traces")
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--nwb-root",
-        type=Path,
-        default=DEFAULT_NWB_ROOT,
-        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore per epoch when plotting speed. "
-            f"Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--v1-lfp-channel",
-        type=int,
-        default=DEFAULT_V1_LFP_CHANNEL,
-        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
-    )
-    parser.add_argument(
-        "--ripple-channel",
-        type=int,
-        help=(
-            "Recording channel id used for the ripple-band CA1 LFP trace. "
-            "Default: the first configured session ripple channel."
-        ),
-    )
-    parser.add_argument(
-        "--region",
-        choices=("ca1", "v1"),
-        help="Optional heatmap region to plot. Default: include both CA1 and V1 heatmaps.",
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display each figure in addition to saving it.",
-    )
-    return parser.parse_args(argv)
-
-
 def is_run_epoch(epoch: str) -> bool:
     """Return whether one epoch label follows the lab run-epoch naming convention."""
     return "r" in str(epoch).lower()
@@ -449,6 +391,64 @@ def plot_sleep_phases_for_session(
     print(f"Saved run metadata to {log_path}")
     outputs["log_path"] = log_path
     return outputs
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for sleep phase figures."""
+    parser = argparse.ArgumentParser(description="Plot behavioral and neural sleep-phase traces")
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format")
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore per epoch when plotting speed. "
+            f"Default: {DEFAULT_POSITION_OFFSET}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-lfp-channel",
+        type=int,
+        default=DEFAULT_V1_LFP_CHANNEL,
+        help=f"Recording channel id used for the V1 LFP trace. Default: {DEFAULT_V1_LFP_CHANNEL}",
+    )
+    parser.add_argument(
+        "--ripple-channel",
+        type=int,
+        help=(
+            "Recording channel id used for the ripple-band CA1 LFP trace. "
+            "Default: the first configured session ripple channel."
+        ),
+    )
+    parser.add_argument(
+        "--region",
+        choices=("ca1", "v1"),
+        help="Optional heatmap region to plot. Default: include both CA1 and V1 heatmaps.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display each figure in addition to saving it.",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -100,95 +100,6 @@ def get_score_columns(
     return tuple(f"{prefix}_{class_name}" for class_name in class_names)
 
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Classify ripple trajectory identity separately in CA1 and V1."
-    )
-    parser.add_argument(
-        "--animal-name",
-        required=True,
-        help="Animal name",
-    )
-    parser.add_argument(
-        "--date",
-        required=True,
-        help="Session date in YYYYMMDD format",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--decode-epochs",
-        nargs="+",
-        help="Optional run epochs to decode. Default: all run epochs.",
-    )
-    parser.add_argument(
-        "--label-schemes",
-        nargs="+",
-        choices=tuple(LABEL_SCHEMES),
-        default=list(LABEL_SCHEMES),
-        help=(
-            "Trajectory label schemes to decode. "
-            "Default: trajectory turn_group arm"
-        ),
-    )
-    parser.add_argument(
-        "--decoder",
-        choices=DECODER_NAMES,
-        default=DEFAULT_DECODER,
-        help=(
-            "Decoder used for both behavioral CV and ripple classification. "
-            f"Default: {DEFAULT_DECODER}"
-        ),
-    )
-    parser.add_argument(
-        "--bin-size-s",
-        type=float,
-        default=DEFAULT_BIN_SIZE_S,
-        help=f"Time bin size in seconds for traversal and ripple counts. Default: {DEFAULT_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--n-splits",
-        type=int,
-        default=DEFAULT_N_SPLITS,
-        help=f"Requested number of traversal CV folds. Default: {DEFAULT_N_SPLITS}",
-    )
-    parser.add_argument(
-        "--n-shuffles",
-        type=int,
-        default=DEFAULT_N_SHUFFLES,
-        help=f"Number of ripple-level shuffle permutations. Default: {DEFAULT_N_SHUFFLES}",
-    )
-    parser.add_argument(
-        "--shuffle-seed",
-        type=int,
-        default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for traversal CV and ripple shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
-    )
-    parser.add_argument(
-        "--ca1-min-movement-fr-hz",
-        type=float,
-        default=DEFAULT_CA1_MIN_MOVEMENT_FR_HZ,
-        help=(
-            "Minimum CA1 firing rate during movement used for unit masking. "
-            f"Default: {DEFAULT_CA1_MIN_MOVEMENT_FR_HZ}"
-        ),
-    )
-    parser.add_argument(
-        "--v1-min-movement-fr-hz",
-        type=float,
-        default=DEFAULT_V1_MIN_MOVEMENT_FR_HZ,
-        help=(
-            "Minimum V1 firing rate during movement used for unit masking. "
-            f"Default: {DEFAULT_V1_MIN_MOVEMENT_FR_HZ}"
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     if args.bin_size_s <= 0:
         raise ValueError("--bin-size-s must be positive.")
@@ -1574,6 +1485,95 @@ def make_json_safe(value: Any) -> Any:
 
 def get_log_dir(analysis_path: Path) -> Path:
     return analysis_path / "ripple_trajectory_identity" / "logs"
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Classify ripple trajectory identity separately in CA1 and V1."
+    )
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Session date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--decode-epochs",
+        nargs="+",
+        help="Optional run epochs to decode. Default: all run epochs.",
+    )
+    parser.add_argument(
+        "--label-schemes",
+        nargs="+",
+        choices=tuple(LABEL_SCHEMES),
+        default=list(LABEL_SCHEMES),
+        help=(
+            "Trajectory label schemes to decode. "
+            "Default: trajectory turn_group arm"
+        ),
+    )
+    parser.add_argument(
+        "--decoder",
+        choices=DECODER_NAMES,
+        default=DEFAULT_DECODER,
+        help=(
+            "Decoder used for both behavioral CV and ripple classification. "
+            f"Default: {DEFAULT_DECODER}"
+        ),
+    )
+    parser.add_argument(
+        "--bin-size-s",
+        type=float,
+        default=DEFAULT_BIN_SIZE_S,
+        help=f"Time bin size in seconds for traversal and ripple counts. Default: {DEFAULT_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=DEFAULT_N_SPLITS,
+        help=f"Requested number of traversal CV folds. Default: {DEFAULT_N_SPLITS}",
+    )
+    parser.add_argument(
+        "--n-shuffles",
+        type=int,
+        default=DEFAULT_N_SHUFFLES,
+        help=f"Number of ripple-level shuffle permutations. Default: {DEFAULT_N_SHUFFLES}",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=DEFAULT_SHUFFLE_SEED,
+        help=f"Random seed used for traversal CV and ripple shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
+    )
+    parser.add_argument(
+        "--ca1-min-movement-fr-hz",
+        type=float,
+        default=DEFAULT_CA1_MIN_MOVEMENT_FR_HZ,
+        help=(
+            "Minimum CA1 firing rate during movement used for unit masking. "
+            f"Default: {DEFAULT_CA1_MIN_MOVEMENT_FR_HZ}"
+        ),
+    )
+    parser.add_argument(
+        "--v1-min-movement-fr-hz",
+        type=float,
+        default=DEFAULT_V1_MIN_MOVEMENT_FR_HZ,
+        help=(
+            "Minimum V1 firing rate during movement used for unit masking. "
+            f"Default: {DEFAULT_V1_MIN_MOVEMENT_FR_HZ}"
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

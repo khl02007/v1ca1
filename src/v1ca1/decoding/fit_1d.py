@@ -62,133 +62,6 @@ from v1ca1.helper.run_logging import write_run_log
 SCRIPT_NAME = "v1ca1.decoding.fit_1d"
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for the 1D decoder fit."""
-    parser = argparse.ArgumentParser(
-        description="Fit a full-W 1D RTC decoder with lap-wise cross-validation."
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
-    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
-    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        help="Optional single region to fit. Default: fit all regions.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--n-folds",
-        type=int,
-        default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
-    )
-    parser.add_argument(
-        "--time-bin-size-s",
-        type=float,
-        default=DEFAULT_TIME_BIN_SIZE_S,
-        help=f"Spike-count time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Leading position samples to drop. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Movement speed threshold used when --movement is enabled. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--position-std",
-        type=float,
-        default=DEFAULT_POSITION_STD,
-        help=f"KDE position standard deviation in cm. Default: {DEFAULT_POSITION_STD}",
-    )
-    parser.add_argument(
-        "--place-bin-size",
-        type=float,
-        default=DEFAULT_PLACE_BIN_SIZE_CM,
-        help=f"RTC environment place bin size in cm. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
-    )
-    parser.add_argument(
-        "--movement-var",
-        type=float,
-        default=DEFAULT_MOVEMENT_VAR,
-        help=f"Random-walk movement variance. Default: {DEFAULT_MOVEMENT_VAR}",
-    )
-    parser.add_argument(
-        "--discrete-var",
-        choices=DISCRETE_VAR_CHOICES,
-        default="switching",
-        help="Discrete transition model. Default: switching.",
-    )
-    parser.add_argument(
-        "--branch-gap-cm",
-        type=float,
-        default=DEFAULT_BRANCH_GAP_CM,
-        help=(
-            "Gap inserted between left and right branches in the full-track "
-            f"linear coordinate. Default: {DEFAULT_BRANCH_GAP_CM}"
-        ),
-    )
-    parser.add_argument(
-        "--direction",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Fit separate inbound/outbound encoding groups. Default: enabled.",
-    )
-    parser.add_argument(
-        "--movement",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Restrict training to movement bins. Default: enabled.",
-    )
-    unit_selection_group = parser.add_mutually_exclusive_group()
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-units",
-        action="store_true",
-        help=(
-            "Restrict V1 units to those with ripple GLM deviance-explained "
-            "p-value < "
-            f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
-        ),
-    )
-    unit_selection_group.add_argument(
-        "--v1-ripple-glm-devexp-threshold",
-        type=float,
-        help=(
-            "Restrict V1 units to those with ripple GLM ripple_devexp_mean "
-            "greater than or equal to this value. Default: use all units."
-        ),
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        help="Optional value for CUDA_VISIBLE_DEVICES, for example '0' or '0,1'.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing classifier outputs.",
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate numeric CLI arguments."""
     if args.n_folds < 2:
@@ -482,6 +355,133 @@ def run(args: argparse.Namespace) -> None:
     )
     print(f"Saved {len(saved_classifier_paths)} classifier(s).")
     print(f"Saved run metadata to {log_path}")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the 1D decoder fit."""
+    parser = argparse.ArgumentParser(
+        description="Fit a full-W 1D RTC decoder with lap-wise cross-validation."
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
+    parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
+    parser.add_argument("--epoch", required=True, help="Run epoch name, e.g. 02_r1.")
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        help="Optional single region to fit. Default: fit all regions.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--n-folds",
+        type=int,
+        default=DEFAULT_N_FOLDS,
+        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=DEFAULT_RANDOM_STATE,
+        help=f"Random seed for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+    )
+    parser.add_argument(
+        "--time-bin-size-s",
+        type=float,
+        default=DEFAULT_TIME_BIN_SIZE_S,
+        help=f"Spike-count time bin size in seconds. Default: {DEFAULT_TIME_BIN_SIZE_S}",
+    )
+    parser.add_argument(
+        "--position-offset",
+        type=int,
+        default=DEFAULT_POSITION_OFFSET,
+        help=f"Leading position samples to drop. Default: {DEFAULT_POSITION_OFFSET}",
+    )
+    parser.add_argument(
+        "--speed-threshold-cm-s",
+        type=float,
+        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        help=(
+            "Movement speed threshold used when --movement is enabled. "
+            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--position-std",
+        type=float,
+        default=DEFAULT_POSITION_STD,
+        help=f"KDE position standard deviation in cm. Default: {DEFAULT_POSITION_STD}",
+    )
+    parser.add_argument(
+        "--place-bin-size",
+        type=float,
+        default=DEFAULT_PLACE_BIN_SIZE_CM,
+        help=f"RTC environment place bin size in cm. Default: {DEFAULT_PLACE_BIN_SIZE_CM}",
+    )
+    parser.add_argument(
+        "--movement-var",
+        type=float,
+        default=DEFAULT_MOVEMENT_VAR,
+        help=f"Random-walk movement variance. Default: {DEFAULT_MOVEMENT_VAR}",
+    )
+    parser.add_argument(
+        "--discrete-var",
+        choices=DISCRETE_VAR_CHOICES,
+        default="switching",
+        help="Discrete transition model. Default: switching.",
+    )
+    parser.add_argument(
+        "--branch-gap-cm",
+        type=float,
+        default=DEFAULT_BRANCH_GAP_CM,
+        help=(
+            "Gap inserted between left and right branches in the full-track "
+            f"linear coordinate. Default: {DEFAULT_BRANCH_GAP_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--direction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fit separate inbound/outbound encoding groups. Default: enabled.",
+    )
+    parser.add_argument(
+        "--movement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restrict training to movement bins. Default: enabled.",
+    )
+    unit_selection_group = parser.add_mutually_exclusive_group()
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-units",
+        action="store_true",
+        help=(
+            "Restrict V1 units to those with ripple GLM deviance-explained "
+            "p-value < "
+            f"{DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD}. Default: use all units."
+        ),
+    )
+    unit_selection_group.add_argument(
+        "--v1-ripple-glm-devexp-threshold",
+        type=float,
+        help=(
+            "Restrict V1 units to those with ripple GLM ripple_devexp_mean "
+            "greater than or equal to this value. Default: use all units."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help="Optional value for CUDA_VISIBLE_DEVICES, for example '0' or '0,1'.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing classifier outputs.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

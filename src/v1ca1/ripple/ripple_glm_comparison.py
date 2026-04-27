@@ -34,133 +34,6 @@ from v1ca1.ripple.ripple_glm import (
 METRIC_NAMES = ("pseudo_r2", "mae", "devexp", "bits_per_spike")
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for one ripple GLM comparison run."""
-    parser = argparse.ArgumentParser(
-        description="Compare legacy and current ripple GLM inputs and outputs."
-    )
-    parser.add_argument("--animal-name", required=True, help="Animal name")
-    parser.add_argument("--date", required=True, help="Current session date in YYYYMMDD format")
-    parser.add_argument(
-        "--epoch",
-        required=True,
-        help="Single epoch label to compare, for example 02_r1.",
-    )
-    parser.add_argument(
-        "--legacy-date",
-        help=(
-            "Optional legacy session directory name under the same animal. "
-            "Defaults to <date>_old."
-        ),
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--legacy-output-path",
-        type=Path,
-        help="Optional path to a saved legacy .npz output for the requested epoch.",
-    )
-    parser.add_argument(
-        "--current-output-path",
-        type=Path,
-        help="Optional path to a saved current .nc output for the requested epoch.",
-    )
-    parser.add_argument(
-        "--output-path",
-        type=Path,
-        help="Optional path for the JSON comparison report.",
-    )
-    parser.add_argument(
-        "--refit-current",
-        action="store_true",
-        help="Run the current fitter on the current artifacts instead of loading a saved .nc.",
-    )
-    parser.add_argument(
-        "--ripple-window-s",
-        type=float,
-        default=DEFAULT_RIPPLE_WINDOW_S,
-        help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
-    )
-    parser.add_argument(
-        "--ripple-window-offset-s",
-        type=float,
-        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
-        help=(
-            "Offset in seconds applied to the ripple window relative to ripple start time. "
-            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
-        ),
-    )
-    parser.add_argument(
-        "--min-spikes-per-ripple",
-        type=float,
-        default=DEFAULT_MIN_SPIKES_PER_RIPPLE,
-        help=(
-            "Minimum average V1 spikes per ripple required to keep one unit. "
-            f"Default: {DEFAULT_MIN_SPIKES_PER_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--min-ca1-spikes-per-ripple",
-        type=float,
-        default=DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
-        help=(
-            "Minimum average CA1 spikes per ripple required to keep one source unit. "
-            f"Default: {DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--n-splits",
-        type=int,
-        default=DEFAULT_N_SPLITS,
-        help=f"Number of ripple CV folds. Default: {DEFAULT_N_SPLITS}",
-    )
-    parser.add_argument(
-        "--n-shuffles-ripple",
-        type=int,
-        default=DEFAULT_N_SHUFFLES_RIPPLE,
-        help=(
-            "Number of shuffle refits per fold for held-out ripple evaluation. "
-            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
-        ),
-    )
-    parser.add_argument(
-        "--ridge-strength",
-        type=float,
-        default=DEFAULT_RIDGE_STRENGTH,
-        help=f"Single ridge regularization strength to compare. Default: {DEFAULT_RIDGE_STRENGTH}",
-    )
-    parser.add_argument(
-        "--shuffle-seed",
-        type=int,
-        default=DEFAULT_SHUFFLE_SEED,
-        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
-    )
-    parser.add_argument(
-        "--maxiter",
-        type=int,
-        default=DEFAULT_MAXITER,
-        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
-    )
-    parser.add_argument(
-        "--tol",
-        type=float,
-        default=DEFAULT_TOL,
-        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
-    )
-    parser.add_argument(
-        "--cuda-visible-devices",
-        help=(
-            "Optional value to assign to CUDA_VISIBLE_DEVICES before fitting, "
-            "for example '0' or '0,1'."
-        ),
-    )
-    return parser.parse_args()
-
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate argument ranges for the comparison workflow."""
     if args.ripple_window_s <= 0:
@@ -624,6 +497,133 @@ def write_report(output_path: Path, report: dict[str, Any]) -> Path:
         json.dump(report, file, indent=2)
         file.write("\n")
     return output_path
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for one ripple GLM comparison run."""
+    parser = argparse.ArgumentParser(
+        description="Compare legacy and current ripple GLM inputs and outputs."
+    )
+    parser.add_argument("--animal-name", required=True, help="Animal name")
+    parser.add_argument("--date", required=True, help="Current session date in YYYYMMDD format")
+    parser.add_argument(
+        "--epoch",
+        required=True,
+        help="Single epoch label to compare, for example 02_r1.",
+    )
+    parser.add_argument(
+        "--legacy-date",
+        help=(
+            "Optional legacy session directory name under the same animal. "
+            "Defaults to <date>_old."
+        ),
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--legacy-output-path",
+        type=Path,
+        help="Optional path to a saved legacy .npz output for the requested epoch.",
+    )
+    parser.add_argument(
+        "--current-output-path",
+        type=Path,
+        help="Optional path to a saved current .nc output for the requested epoch.",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=Path,
+        help="Optional path for the JSON comparison report.",
+    )
+    parser.add_argument(
+        "--refit-current",
+        action="store_true",
+        help="Run the current fitter on the current artifacts instead of loading a saved .nc.",
+    )
+    parser.add_argument(
+        "--ripple-window-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_S,
+        help=f"Fixed ripple window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Offset in seconds applied to the ripple window relative to ripple start time. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
+    )
+    parser.add_argument(
+        "--min-spikes-per-ripple",
+        type=float,
+        default=DEFAULT_MIN_SPIKES_PER_RIPPLE,
+        help=(
+            "Minimum average V1 spikes per ripple required to keep one unit. "
+            f"Default: {DEFAULT_MIN_SPIKES_PER_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--min-ca1-spikes-per-ripple",
+        type=float,
+        default=DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
+        help=(
+            "Minimum average CA1 spikes per ripple required to keep one source unit. "
+            f"Default: {DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=DEFAULT_N_SPLITS,
+        help=f"Number of ripple CV folds. Default: {DEFAULT_N_SPLITS}",
+    )
+    parser.add_argument(
+        "--n-shuffles-ripple",
+        type=int,
+        default=DEFAULT_N_SHUFFLES_RIPPLE,
+        help=(
+            "Number of shuffle refits per fold for held-out ripple evaluation. "
+            f"Default: {DEFAULT_N_SHUFFLES_RIPPLE}"
+        ),
+    )
+    parser.add_argument(
+        "--ridge-strength",
+        type=float,
+        default=DEFAULT_RIDGE_STRENGTH,
+        help=f"Single ridge regularization strength to compare. Default: {DEFAULT_RIDGE_STRENGTH}",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=DEFAULT_SHUFFLE_SEED,
+        help=f"Random seed used for response shuffles. Default: {DEFAULT_SHUFFLE_SEED}",
+    )
+    parser.add_argument(
+        "--maxiter",
+        type=int,
+        default=DEFAULT_MAXITER,
+        help=f"Maximum number of LBFGS iterations. Default: {DEFAULT_MAXITER}",
+    )
+    parser.add_argument(
+        "--tol",
+        type=float,
+        default=DEFAULT_TOL,
+        help=f"LBFGS optimizer tolerance. Default: {DEFAULT_TOL}",
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        help=(
+            "Optional value to assign to CUDA_VISIBLE_DEVICES before fitting, "
+            "for example '0' or '0,1'."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

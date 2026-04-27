@@ -28,52 +28,6 @@ THETA_PHASE_DIRNAME = "theta_phase"
 THETA_METADATA_FILENAME = "theta_metadata.json"
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for theta phase extraction."""
-    parser = argparse.ArgumentParser(description="Compute theta-band LFP and phase")
-    parser.add_argument(
-        "--animal-name",
-        required=True,
-        help="Animal name",
-    )
-    parser.add_argument(
-        "--date",
-        required=True,
-        help="Recording date in YYYYMMDD format",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--nwb-root",
-        type=Path,
-        default=DEFAULT_NWB_ROOT,
-        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
-    )
-    parser.add_argument(
-        "--theta-channel",
-        type=int,
-        help=(
-            "Recording channel id used for theta extraction. "
-            "Default: use the session-specific registry when available."
-        ),
-    )
-    parser.add_argument(
-        "--epochs",
-        nargs="+",
-        help="Optional subset of epoch labels to process. Default: all saved epochs.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing theta outputs if they already exist.",
-    )
-    return parser.parse_args()
-
-
 def validate_epochs(
     available_epochs: list[str],
     requested_epochs: list[str] | None,
@@ -543,6 +497,52 @@ def get_theta_phase_for_session(
     outputs["log_path"] = log_path
     print(f"Saved run metadata to {log_path}")
     return outputs
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for theta phase extraction."""
+    parser = argparse.ArgumentParser(description="Compute theta-band LFP and phase")
+    parser.add_argument(
+        "--animal-name",
+        required=True,
+        help="Animal name",
+    )
+    parser.add_argument(
+        "--date",
+        required=True,
+        help="Recording date in YYYYMMDD format",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=f"Base analysis directory. Default: {DEFAULT_DATA_ROOT}",
+    )
+    parser.add_argument(
+        "--nwb-root",
+        type=Path,
+        default=DEFAULT_NWB_ROOT,
+        help=f"Base directory containing NWB files. Default: {DEFAULT_NWB_ROOT}",
+    )
+    parser.add_argument(
+        "--theta-channel",
+        type=int,
+        help=(
+            "Recording channel id used for theta extraction. "
+            "Default: use the session-specific registry when available."
+        ),
+    )
+    parser.add_argument(
+        "--epochs",
+        nargs="+",
+        help="Optional subset of epoch labels to process. Default: all saved epochs.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing theta outputs if they already exist.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:

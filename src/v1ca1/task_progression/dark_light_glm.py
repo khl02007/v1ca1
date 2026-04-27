@@ -3780,6 +3780,76 @@ def selection_summary_output_path(
     return data_dir / "selection_summary" / f"{region}_{light_epoch}_vs_{dark_epoch}_selection_summary.nc"
 
 
+def _fit_model_family(
+    family_name: str,
+    *,
+    spikes: Any,
+    trajectory_ep_by_epoch: dict[str, dict[str, Any]],
+    tp_by_epoch: dict[str, dict[str, Any]],
+    speed_by_epoch: dict[str, Any] | None,
+    light_epoch: str,
+    dark_epoch: str,
+    ridge: float,
+    traj_name: str,
+    unit_mask: np.ndarray,
+    movement_by_run: dict[str, Any],
+    args: argparse.Namespace,
+    segment_edges: np.ndarray,
+) -> dict[str, Any]:
+    """Dispatch one model-family fit."""
+    common_kwargs = {
+        "spikes": spikes,
+        "trajectory_ep_by_epoch": trajectory_ep_by_epoch,
+        "tp_by_epoch": tp_by_epoch,
+        "speed_by_epoch": speed_by_epoch,
+        "traj_name": traj_name,
+        "light_epochs": [light_epoch],
+        "dark_epochs": [dark_epoch],
+        "bin_size_s": args.bin_size_s,
+        "n_splines": args.n_splines,
+        "spline_order": args.spline_order,
+        "ridge": ridge,
+        "n_folds": args.n_folds,
+        "seed": args.seed,
+        "unit_mask": unit_mask,
+        "restrict_ep_by_epoch": movement_by_run,
+        "speed_feature_mode": args.speed_feature_mode,
+        "n_splines_speed": args.n_splines_speed,
+        "spline_order_speed": args.spline_order_speed,
+        "speed_bounds": None if args.speed_bounds is None else tuple(args.speed_bounds),
+    }
+    if family_name == "dense_gain":
+        return fit_shared_place_light_mod_nemos_per_traj(**common_kwargs)
+    if family_name == "segment_bump_gain":
+        return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
+            **common_kwargs,
+            segment_edges=segment_edges,
+            gain_overlap_frac=0.0,
+        )
+    if family_name == "reduced_dense_gain":
+        return fit_shared_place_light_mod_nemos_per_traj_gain_splines(
+            **common_kwargs,
+            n_splines_gain=args.n_splines_gain,
+            spline_order_gain=args.spline_order_gain,
+        )
+    if family_name == "segment_scalar_gain":
+        return fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
+            **common_kwargs,
+            segment_edges=segment_edges,
+        )
+    if family_name == "overlapping_segment_bump_gain":
+        return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
+            **common_kwargs,
+            segment_edges=segment_edges,
+            gain_overlap_frac=args.gain_overlap_frac,
+        )
+    if family_name == "additive_light":
+        return fit_true_additive_rate_poisson_fast_per_traj(**common_kwargs)
+    if family_name == "independent_light_field":
+        return fit_separate_dark_light_fields_nemos_per_traj(**common_kwargs)
+    raise ValueError(f"Unknown model family: {family_name}")
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the dark/light task-progression GLM script."""
     parser = argparse.ArgumentParser(
@@ -3991,76 +4061,6 @@ def parse_arguments() -> argparse.Namespace:
     args = parser.parse_args()
     args.model_families = args.models
     return args
-
-
-def _fit_model_family(
-    family_name: str,
-    *,
-    spikes: Any,
-    trajectory_ep_by_epoch: dict[str, dict[str, Any]],
-    tp_by_epoch: dict[str, dict[str, Any]],
-    speed_by_epoch: dict[str, Any] | None,
-    light_epoch: str,
-    dark_epoch: str,
-    ridge: float,
-    traj_name: str,
-    unit_mask: np.ndarray,
-    movement_by_run: dict[str, Any],
-    args: argparse.Namespace,
-    segment_edges: np.ndarray,
-) -> dict[str, Any]:
-    """Dispatch one model-family fit."""
-    common_kwargs = {
-        "spikes": spikes,
-        "trajectory_ep_by_epoch": trajectory_ep_by_epoch,
-        "tp_by_epoch": tp_by_epoch,
-        "speed_by_epoch": speed_by_epoch,
-        "traj_name": traj_name,
-        "light_epochs": [light_epoch],
-        "dark_epochs": [dark_epoch],
-        "bin_size_s": args.bin_size_s,
-        "n_splines": args.n_splines,
-        "spline_order": args.spline_order,
-        "ridge": ridge,
-        "n_folds": args.n_folds,
-        "seed": args.seed,
-        "unit_mask": unit_mask,
-        "restrict_ep_by_epoch": movement_by_run,
-        "speed_feature_mode": args.speed_feature_mode,
-        "n_splines_speed": args.n_splines_speed,
-        "spline_order_speed": args.spline_order_speed,
-        "speed_bounds": None if args.speed_bounds is None else tuple(args.speed_bounds),
-    }
-    if family_name == "dense_gain":
-        return fit_shared_place_light_mod_nemos_per_traj(**common_kwargs)
-    if family_name == "segment_bump_gain":
-        return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
-            **common_kwargs,
-            segment_edges=segment_edges,
-            gain_overlap_frac=0.0,
-        )
-    if family_name == "reduced_dense_gain":
-        return fit_shared_place_light_mod_nemos_per_traj_gain_splines(
-            **common_kwargs,
-            n_splines_gain=args.n_splines_gain,
-            spline_order_gain=args.spline_order_gain,
-        )
-    if family_name == "segment_scalar_gain":
-        return fit_shared_place_light_mod_nemos_per_traj_segment_scalar_gain(
-            **common_kwargs,
-            segment_edges=segment_edges,
-        )
-    if family_name == "overlapping_segment_bump_gain":
-        return fit_shared_place_light_mod_nemos_per_traj_segment_gain(
-            **common_kwargs,
-            segment_edges=segment_edges,
-            gain_overlap_frac=args.gain_overlap_frac,
-        )
-    if family_name == "additive_light":
-        return fit_true_additive_rate_poisson_fast_per_traj(**common_kwargs)
-    if family_name == "independent_light_field":
-        return fit_separate_dark_light_fields_nemos_per_traj(**common_kwargs)
-    raise ValueError(f"Unknown model family: {family_name}")
 
 
 def main() -> None:
