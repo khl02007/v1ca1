@@ -20,6 +20,10 @@ Several subpackages still contain `legacy` scripts alongside newer CLI-oriented 
 
 ## Setup
 
+Use Python 3.11. The active package metadata and conda environment both assume
+Python 3.11; older environments may import stale editable installs but fail on a
+fresh reinstall.
+
 Preferred:
 
 ```bash

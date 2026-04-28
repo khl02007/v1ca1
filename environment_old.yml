@@ -1,3 +1,5 @@
+# Legacy Python 3.10 environment snapshot.
+# Keep for reference only; the active setup is `environment.yml` with Python 3.11.
 name: v1ca1
 channels:
   - conda-forge
