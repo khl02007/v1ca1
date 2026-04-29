@@ -26,9 +26,10 @@ remove the global mean without turning preprocessing into a local spatial
 difference operator.
 
 This is therefore a spatial analog of MEME, not a literal reproduction of the
-paper's visual-stimulus design. Uncertainty is estimated by resampling laps and
-rebuilding grouped tuning curves, so reported intervals reflect variability in
-lap sampling and repeat construction in this navigation setting.
+paper's visual-stimulus design. Uncertainty is estimated by rerunning the full
+pipeline with different random seeds, so reported intervals reflect sensitivity
+to random lap grouping, disjoint condition pairings, and MEME Monte Carlo
+choices.
 """
 
 import argparse
@@ -45,54 +46,43 @@ import pynapple as nap
 import track_linearization as tl
 
 from v1ca1.helper.run_logging import write_run_log
-from v1ca1.helper.session import (
-    DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
-    DEFAULT_CLEAN_DLC_POSITION_NAME,
-    build_movement_interval,
-    build_speed_tsd,
-    compute_movement_firing_rates,
-    get_analysis_path,
-    get_run_epochs,
-    load_ephys_timestamps_all,
-    load_epoch_tags,
-    load_position_data_with_precedence,
-    load_position_timestamps,
-    load_spikes_by_region,
-    load_trajectory_time_bounds,
+from v1ca1.helper.wtrack import get_wtrack_branch_side
+from v1ca1.signal_dim._shared import (
+    DEFAULT_BIN_SIZE_CM,
+    DEFAULT_DATA_ROOT,
+    DEFAULT_MIN_OCCUPANCY_S,
+    DEFAULT_N_GROUPS,
+    DEFAULT_POSITION_OFFSET,
+    DEFAULT_RANDOM_SEED,
+    DEFAULT_REGIONS,
+    DEFAULT_SPEED_THRESHOLD_CM_S,
+    TRAJECTORY_TYPES,
+    get_light_and_dark_epochs,
+    get_signal_dim_figure_dir,
+    get_signal_dim_output_dir,
+    load_signal_dim_session,
+    occupancy_mask_1d,
+    sample_lap_indices,
+    select_run_epochs,
+    split_lap_indices_into_groups,
 )
-from v1ca1.helper.wtrack import (
-    get_wtrack_branch_graph,
-    get_wtrack_branch_side,
-    get_wtrack_total_length,
+from v1ca1.signal_dim.cv_pca import (
+    DEFAULT_MIN_CONDITION_SD_HZ,
+    DEFAULT_REGION_FR_THRESHOLDS,
+    DEFAULT_UNIT_FILTER_MODE,
+    classify_and_select_units,
 )
 
 
-DEFAULT_DATA_ROOT = Path("/stelmo/kyu/analysis")
-DEFAULT_REGIONS = ("v1", "ca1")
-DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
-DEFAULT_POSITION_OFFSET = 10
-DEFAULT_RUN_EPOCH_LIMIT = 4
 DEFAULT_DARK_EPOCH = "08_r4"
-TRAJECTORY_TYPES = (
-    "center_to_left",
-    "center_to_right",
-    "left_to_center",
-    "right_to_center",
-)
-DEFAULT_BIN_SIZE_CM = 4.0
-DEFAULT_N_GROUPS = 4
-DEFAULT_MIN_OCCUPANCY_S = 0.01
-DEFAULT_BOOTSTRAP_LAP_FRACTION = 0.7
-DEFAULT_N_BOOTSTRAPS = 200
-DEFAULT_BOOTSTRAP_CI = 95.0
+DEFAULT_N_RANDOM_REPEATS = 200
+DEFAULT_RANDOM_REPEAT_CI = 95.0
 DEFAULT_FULL_N_PAIRINGS = 1000
 DEFAULT_FULL_N_BIN_PERMS = 5
-DEFAULT_BOOTSTRAP_N_PAIRINGS = 200
-DEFAULT_BOOTSTRAP_N_BIN_PERMS = 5
-DEFAULT_RANDOM_SEED = 47
+DEFAULT_RANDOM_REPEAT_N_PAIRINGS = 200
+DEFAULT_RANDOM_REPEAT_N_BIN_PERMS = 5
 DEFAULT_GROUPMEAN_N_DRAWS = 5000
 DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
-DEFAULT_DARK_RATE_THRESHOLD_HZ = 0.5
 
 # Shape notation used throughout this module:
 #   R = number of disjoint repeat groups of laps
@@ -102,180 +92,12 @@ DEFAULT_DARK_RATE_THRESHOLD_HZ = 0.5
 # This mirrors the paper's repeat-by-stimulus formulation, but here conditions are
 # spatial bins and repeats are grouped laps rather than repeated image presentations.
 
-def _get_default_run_epochs(run_epochs: list[str]) -> list[str]:
-    """Return the current default subset of run epochs used by the legacy script."""
-    return list(run_epochs[:DEFAULT_RUN_EPOCH_LIMIT])
-
-
-def select_run_epochs(
-    run_epochs: list[str],
-    requested_epochs: list[str] | None,
-) -> list[str]:
-    """Return selected run epochs, defaulting to the legacy first-four subset."""
-    if requested_epochs is None:
-        return _get_default_run_epochs(run_epochs)
-
-    missing_run_epochs = [epoch for epoch in requested_epochs if epoch not in run_epochs]
-    if missing_run_epochs:
-        raise ValueError(
-            "Selected run epochs were not found among available run epochs "
-            f"{run_epochs!r}: {missing_run_epochs!r}"
-        )
-    return list(requested_epochs)
-
-
-def get_light_and_dark_epochs(
-    run_epochs: list[str],
-    light_epoch: str | None,
-    dark_epoch: str,
-) -> tuple[list[str], str]:
-    """Return validated light and dark epoch selections for one session."""
-    if not run_epochs:
-        raise ValueError("No run epochs were selected.")
-
-    if dark_epoch not in run_epochs:
-        raise ValueError(
-            f"Requested dark epoch was not found in run epochs {run_epochs!r}: "
-            f"{dark_epoch!r}"
-        )
-
-    if light_epoch is not None:
-        if light_epoch not in run_epochs:
-            raise ValueError(
-                f"Requested light epoch was not found in run epochs {run_epochs!r}: "
-                f"{light_epoch!r}"
-            )
-        if light_epoch == dark_epoch:
-            raise ValueError("Light and dark epochs must be different.")
-        selected_light_epochs = [light_epoch]
-    else:
-        selected_light_epochs = [epoch for epoch in run_epochs if epoch != dark_epoch]
-        if not selected_light_epochs:
-            raise ValueError(
-                "No light epochs remain after excluding the requested dark epoch."
-            )
-
-    return selected_light_epochs, dark_epoch
-
-
-def load_meme_session(
-    *,
-    animal_name: str,
-    date: str,
-    data_root: Path,
-    regions: list[str],
-    position_offset: int,
-    speed_threshold_cm_s: float,
-) -> dict[str, Any]:
-    """Load one session and derive reusable state for MEME analysis.
-
-    The returned session dict collects the raw artifacts needed to rebuild
-    grouped spatial tuning curves on demand. It intentionally keeps the
-    trajectory metadata, linearization helpers, and movement masks separate
-    from the MEME estimation itself so readers can trace the workflow from:
-    raw behavior + spikes -> spatial tuning curves -> MEME inputs.
-    """
-    analysis_path = get_analysis_path(animal_name, date, data_root)
-    epoch_list, _ = load_epoch_tags(analysis_path)
-    position_epoch_tags, timestamps_position_dict, _ = load_position_timestamps(analysis_path)
-    if position_epoch_tags != epoch_list:
-        raise ValueError(
-            "Saved position timestamp epochs do not match saved ephys epochs. "
-            f"Ephys epochs: {epoch_list!r}; position epochs: {position_epoch_tags!r}"
-        )
-    timestamps_ephys_all_ptp, _ = load_ephys_timestamps_all(analysis_path)
-    available_run_epochs = get_run_epochs(epoch_list)
-    position_dict_all, position_source = load_position_data_with_precedence(
-        analysis_path,
-        position_source="clean_dlc_head",
-        clean_dlc_input_dirname=DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
-        clean_dlc_input_name=DEFAULT_CLEAN_DLC_POSITION_NAME,
-        validate_timestamps=True,
-    )
-    run_epochs: list[str] = []
-    skipped_run_epochs: list[dict[str, str]] = []
-    for epoch in available_run_epochs:
-        if epoch not in position_dict_all:
-            skipped_run_epochs.append(
-                {"epoch": epoch, "reason": f"head position missing from {position_source}"}
-            )
-            continue
-        position_xy = np.asarray(position_dict_all[epoch], dtype=float)
-        if not np.isfinite(position_xy).any():
-            skipped_run_epochs.append(
-                {"epoch": epoch, "reason": f"head position is all NaN in {position_source}"}
-            )
-            continue
-        run_epochs.append(epoch)
-
-    if not run_epochs:
-        raise ValueError(
-            "No run epochs have usable head position in the combined cleaned DLC "
-            f"position parquet {position_source}."
-        )
-
-    position_dict = {epoch: position_dict_all[epoch] for epoch in run_epochs}
-    trajectory_times, _trajectory_source = load_trajectory_time_bounds(
-        analysis_path,
-        run_epochs,
-    )
-    spikes_by_region = load_spikes_by_region(
-        analysis_path,
-        timestamps_ephys_all_ptp,
-        regions=tuple(regions),
-    )
-    speed_by_epoch = {
-        epoch: build_speed_tsd(
-            position_dict[epoch],
-            timestamps_position_dict[epoch],
-            position_offset=position_offset,
-        )
-        for epoch in run_epochs
-    }
-    movement_by_epoch = {
-        epoch: build_movement_interval(
-            speed_by_epoch[epoch],
-            speed_threshold_cm_s=speed_threshold_cm_s,
-        )
-        for epoch in run_epochs
-    }
-    movement_firing_rates_by_region = compute_movement_firing_rates(
-        spikes_by_region,
-        movement_by_epoch,
-        run_epochs,
-    )
-    track_graphs_by_side: dict[str, Any] = {}
-    edge_orders_by_side: dict[str, list[tuple[int, int]]] = {}
-    for side in ("left", "right"):
-        track_graph, edge_order = get_wtrack_branch_graph(
-            animal_name,
-            branch_side=side,
-            direction="from_center",
-        )
-        track_graphs_by_side[side] = track_graph
-        edge_orders_by_side[side] = edge_order
-
-    return {
-        "analysis_path": analysis_path,
-        "epoch_list": epoch_list,
-        "run_epochs": run_epochs,
-        "skipped_run_epochs": skipped_run_epochs,
-        "position_source": position_source,
-        "timestamps_position_dict": timestamps_position_dict,
-        "position_dict": position_dict,
-        "trajectory_times": trajectory_times,
-        "spikes_by_region": spikes_by_region,
-        "movement_by_epoch": movement_by_epoch,
-        "movement_firing_rates_by_region": movement_firing_rates_by_region,
-        "track_total_length": get_wtrack_total_length(animal_name),
-        "track_graphs_by_side": track_graphs_by_side,
-        "edge_orders_by_side": edge_orders_by_side,
-        "linear_edge_spacing": 0,
-        "position_offset": position_offset,
-    }
-
 
 ArrayF = npt.NDArray[np.floating]
+load_meme_session = load_signal_dim_session
+_sample_lap_indices = sample_lap_indices
+_split_lap_indices_into_groups = split_lap_indices_into_groups
+_occupancy_mask_1d = occupancy_mask_1d
 
 
 @dataclass(frozen=True)
@@ -332,100 +154,13 @@ def summarize_mc_pr(
     )
 
 
-def _sample_lap_indices(
-    n_available: int,
-    *,
-    lap_fraction: float,
-    n_groups: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """
-    Sample a subset of laps without replacement while keeping enough laps
-    to form `n_groups` disjoint groups.
-    """
-    if not (0.0 < lap_fraction <= 1.0):
-        raise ValueError("lap_fraction must be in (0, 1].")
-    if n_available < n_groups:
-        raise ValueError(
-            f"Need at least n_groups laps. Got n_available={n_available}, "
-            f"n_groups={n_groups}."
-        )
-
-    n_select = int(np.ceil(float(lap_fraction) * n_available))
-    n_select = min(n_available, max(n_groups, n_select))
-    return np.sort(rng.choice(n_available, size=n_select, replace=False))
-
-
-def _split_lap_indices_into_groups(
-    lap_indices: np.ndarray,
-    n_groups: int,
-    rng: np.random.Generator,
-) -> List[np.ndarray]:
-    """
-    Randomly split the provided lap indices into n_groups disjoint groups
-    (as equal as possible).
-    """
-    lap_indices = np.asarray(lap_indices, dtype=np.int64)
-    if lap_indices.ndim != 1:
-        raise ValueError("lap_indices must be a 1D array.")
-    if lap_indices.size < n_groups:
-        raise ValueError(
-            f"Need at least n_groups sampled laps. Got n={lap_indices.size}, "
-            f"n_groups={n_groups}."
-        )
-
-    groups = np.array_split(rng.permutation(lap_indices), n_groups)
-    groups = [g.astype(np.int64, copy=False) for g in groups if len(g) > 0]
-    if len(groups) < 2:
-        raise ValueError(
-            "Grouping produced <2 non-empty groups; increase laps or reduce n_groups."
-        )
-    return groups
-
-
-def _occupancy_mask_1d(
-    linpos_tsd: nap.Tsd,
-    epochs: nap.IntervalSet,
-    bin_edges: np.ndarray,
-    *,
-    min_occupancy_s: float,
-) -> np.ndarray:
-    """
-    Compute a boolean mask over 1D bins indicating bins with >= min_occupancy_s
-    of occupancy within `epochs`.
-
-    We compute occupancy from the restricted position samples.
-    """
-    if min_occupancy_s <= 0:
-        raise ValueError("min_occupancy_s must be > 0.")
-
-    pos = linpos_tsd.restrict(epochs)
-    # Pynapple Tsd typically has .t (times) and .d (data)
-    t = np.asarray(pos.t)
-    x = np.asarray(pos.d)
-
-    if x.size < 2:
-        # No samples => no valid bins
-        return np.zeros(len(bin_edges) - 1, dtype=bool)
-
-    # dt from median sampling interval
-    dt = float(np.median(np.diff(t)))
-    if not np.isfinite(dt) or dt <= 0:
-        # fallback: average dt
-        dt = float((t[-1] - t[0]) / max(len(t) - 1, 1))
-
-    counts, _ = np.histogram(x, bins=bin_edges)
-    occ_s = counts.astype(np.float64) * dt
-    return occ_s >= float(min_occupancy_s)
-
-
 def prepare_F(
     session: dict[str, Any],
     epoch: str,
     region: str,
     *,
     dark_epoch: str = DEFAULT_DARK_EPOCH,
-    fr_dark_threshold: Optional[float] = None,
+    unit_mask: Optional[np.ndarray] = None,
     bin_size: float = DEFAULT_BIN_SIZE_CM,
     n_groups: int = DEFAULT_N_GROUPS,
     group_seed: int = 0,
@@ -457,8 +192,8 @@ def prepare_F(
       repeat groups, so all repeats share the same retained condition axis
     - repeat groups are formed from disjoint laps so the resulting repeats are
       less noisy but still approximately independent
-    - optional neuron filtering is based on dark-epoch movement firing rate,
-      which keeps the cell inclusion rule fixed across compared epochs
+    - optional neuron filtering is applied through an explicit mask, keeping the
+      cell inclusion rule fixed across compared epochs
     - if ``lap_fraction < 1``, each lap-resampling draw first subsamples laps before
       constructing repeat groups
 
@@ -472,7 +207,6 @@ def prepare_F(
     timestamps_position_dict = session["timestamps_position_dict"]
     spikes = session["spikes_by_region"]
     movement_epoch = session["movement_by_epoch"][epoch]
-    fr_dark = session["movement_firing_rates_by_region"][region][dark_epoch]
     track_total_length = float(session["track_total_length"])
     track_graphs_by_side = session["track_graphs_by_side"]
     edge_orders_by_side = session["edge_orders_by_side"]
@@ -612,10 +346,15 @@ def prepare_F(
 
     F = np.stack(F_list, axis=0)  # (R, C, N)
 
-    # Apply a fixed inclusion rule based on dark-epoch movement firing rate so
-    # light/dark comparisons are not driven by epoch-specific cell selection.
-    if fr_dark_threshold is not None:
-        keep_neurons = np.asarray(fr_dark >= fr_dark_threshold)
+    # Apply a caller-provided inclusion rule so light/dark comparisons are not
+    # driven by epoch-specific cell selection.
+    if unit_mask is not None:
+        keep_neurons = np.asarray(unit_mask, dtype=bool).reshape(-1)
+        if keep_neurons.size != F.shape[-1]:
+            raise ValueError(
+                "unit_mask must have one value per unit. "
+                f"Got {keep_neurons.size} mask values for {F.shape[-1]} units."
+            )
         F = F[:, :, keep_neurons]
 
     # final safety
@@ -635,10 +374,10 @@ class MemeMCResult:
 
 
 @dataclass(frozen=True)
-class BootstrapPRResult:
+class RandomRepeatPRResult:
     pr_samples: ArrayF
     summary: PRSummary
-    n_bootstraps: int
+    n_random_repeats: int
     n_successful: int
 
 
@@ -773,93 +512,77 @@ def meme_eigenmoments_and_pr_mc(
     return MemeMCResult(moments=moments, pr=pr, mc_moments=mc_moments, mc_pr=mc_pr)
 
 
-def lap_subsample_meme_pr(
+def random_seed_repeat_meme_pr(
     session: dict[str, Any],
     epoch: str,
     region: str,
     *,
     dark_epoch: str = DEFAULT_DARK_EPOCH,
-    n_bootstraps: int = DEFAULT_N_BOOTSTRAPS,
-    lap_fraction: float = DEFAULT_BOOTSTRAP_LAP_FRACTION,
-    fr_dark_threshold: Optional[float] = None,
+    n_random_repeats: int = DEFAULT_N_RANDOM_REPEATS,
+    unit_mask: Optional[np.ndarray] = None,
     bin_size: float = DEFAULT_BIN_SIZE_CM,
     n_groups: int = DEFAULT_N_GROUPS,
     min_occupancy_s: float = DEFAULT_MIN_OCCUPANCY_S,
     k_moms: int = 6,
     remove_mean: bool = True,
-    n_pairings: int = DEFAULT_BOOTSTRAP_N_PAIRINGS,
-    n_bin_perms: int = DEFAULT_BOOTSTRAP_N_BIN_PERMS,
+    n_pairings: int = DEFAULT_RANDOM_REPEAT_N_PAIRINGS,
+    n_bin_perms: int = DEFAULT_RANDOM_REPEAT_N_BIN_PERMS,
     max_repeat_pairs: Optional[int] = None,
     random_seed: int = 0,
-    ci: float = DEFAULT_BOOTSTRAP_CI,
+    ci: float = DEFAULT_RANDOM_REPEAT_CI,
     center: Literal["mean", "median"] = "mean",
-) -> BootstrapPRResult:
-    """Estimate uncertainty in spatial MEME PR by repeated lap subsampling.
+) -> RandomRepeatPRResult:
+    """Estimate spatial MEME PR stability by full-data random-seed repeats.
 
-    The resampling unit here is the lap, because laps are the natural repeated
-    observations available in this dataset. Each draw subsamples laps without
-    replacement, rebuilds the grouped tuning-curve tensor ``F``, and reruns the
-    full MEME estimator. This quantifies uncertainty in the adapted spatial
-    pipeline, rather than uncertainty for the paper's original repeated-stimulus
-    design.
-
-    Concretely, for each trajectory in each draw, the code:
-    1. samples a fraction of laps without replacement
-    2. repartitions those sampled laps into disjoint repeat groups
-    3. recomputes grouped tuning curves and occupancy filtering
-    4. reruns MEME and stores the resulting PR
-
-    The resulting lap-subsampling distribution therefore reflects uncertainty
-    from finite lap sampling and from the repeat-construction procedure itself,
-    not just from the final Monte Carlo eigenmoment calculation.
+    Each repeat uses all available laps, changes the random seed, rebuilds the
+    grouped tuning-curve tensor ``F``, and reruns MEME. The resulting interval
+    reflects sensitivity to random lap grouping, disjoint condition pairing,
+    condition permutation, and MEME Monte Carlo choices, matching the repeat
+    strategy used by the cvPCA workflow.
     """
-    rng = np.random.default_rng(random_seed)
-    pr_samples = np.full((n_bootstraps,), np.nan, dtype=np.float64)
+    if n_random_repeats < 1:
+        raise ValueError("n_random_repeats must be positive.")
 
-    for b in range(n_bootstraps):
-        f_seed = int(rng.integers(0, np.iinfo(np.int32).max))
-        meme_seed = int(rng.integers(0, np.iinfo(np.int32).max))
+    pr_samples = np.full((n_random_repeats,), np.nan, dtype=np.float64)
+
+    for repeat_index in range(n_random_repeats):
+        repeat_seed = int(random_seed) + repeat_index
 
         try:
-            F_b = prepare_F(
+            F_repeat = prepare_F(
                 session,
                 epoch=epoch,
                 region=region,
                 dark_epoch=dark_epoch,
-                fr_dark_threshold=fr_dark_threshold,
+                unit_mask=unit_mask,
                 bin_size=bin_size,
                 n_groups=n_groups,
-                group_seed=f_seed,
+                group_seed=repeat_seed,
                 min_occupancy_s=min_occupancy_s,
-                lap_fraction=lap_fraction,
             )
-            res_b = meme_eigenmoments_and_pr_mc(
-                F_b,
+            res_repeat = meme_eigenmoments_and_pr_mc(
+                F_repeat,
                 k_moms=k_moms,
                 remove_mean=remove_mean,
                 n_pairings=n_pairings,
                 n_bin_perms=n_bin_perms,
                 max_repeat_pairs=max_repeat_pairs,
-                random_seed=meme_seed,
+                random_seed=repeat_seed,
             )
-            pr_samples[b] = res_b.pr
+            pr_samples[repeat_index] = res_repeat.pr
         except ValueError as exc:
             print(
-                f"[lap_subsample_meme_pr] skipping subsample {b} "
+                f"[random_seed_repeat_meme_pr] skipping repeat {repeat_index} "
                 f"for {region} {epoch}: {exc}"
             )
 
     summary = summarize_mc_pr(pr_samples, ci=ci, center=center)
-    return BootstrapPRResult(
+    return RandomRepeatPRResult(
         pr_samples=pr_samples,
         summary=summary,
-        n_bootstraps=n_bootstraps,
+        n_random_repeats=n_random_repeats,
         n_successful=summary.n_eff,
     )
-
-
-# Backward-compatible alias for older imports.
-bootstrap_meme_pr = lap_subsample_meme_pr
 
 
 def _meme_moments_from_pair(
@@ -1589,7 +1312,7 @@ def plot_pr_light_dark_epochwise(
     random_seed: int = 0,
     title_suffix: str = "",
 ):
-    """Plot per-epoch PR estimates with lap-subsampling uncertainty by condition.
+    """Plot per-epoch PR estimates with random-seed repeat intervals by condition.
 
     This summarizes the adapted MEME output at the epoch level rather than the
     eigenspectrum level, separating the selected light and dark epochs.
@@ -1640,7 +1363,7 @@ def plot_pr_light_dark_epochwise(
     ax.grid(True, alpha=0.25)
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_epochwise_lap_subsampling_ci{int(ci)}.png"
+    out = save_path / f"{region}_pr_light_vs_dark_epochwise_random_repeats_ci{int(ci)}.png"
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1771,7 +1494,7 @@ def plot_pr_light_dark_groupmeans(
     )
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_groupmean_lap_subsampling_ci{int(ci)}.png"
+    out = save_path / f"{region}_pr_light_vs_dark_groupmean_random_repeats_ci{int(ci)}.png"
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1779,11 +1502,91 @@ def plot_pr_light_dark_groupmeans(
     return out, dark_draws, light_draws, delta_draws
 
 
-def get_region_dark_rate_threshold(region: str) -> float | None:
-    """Return the dark-epoch firing-rate threshold used for neuron filtering."""
-    if region not in DEFAULT_REGIONS:
-        raise ValueError(f"Unsupported region: {region!r}")
-    return DEFAULT_DARK_RATE_THRESHOLD_HZ
+def _region_threshold(region: str, args: argparse.Namespace) -> float:
+    """Return the configured movement firing-rate threshold for one region."""
+    if region == "v1":
+        return float(args.v1_min_fr_hz)
+    if region == "ca1":
+        return float(args.ca1_min_fr_hz)
+    raise ValueError(f"Unsupported region: {region!r}")
+
+
+def _condition_sd(f_tensor: ArrayF) -> ArrayF:
+    """Return per-unit condition SD from the repeat-averaged tuning tensor."""
+    tensor = np.asarray(f_tensor, dtype=float)
+    if tensor.ndim != 3:
+        raise ValueError(
+            f"Expected F with shape (repeat, condition, unit), got {tensor.shape}."
+        )
+    return np.std(np.mean(tensor, axis=0), axis=0)
+
+
+def _minimum_metric_across_epochs(
+    values_by_epoch: dict[str, ArrayF],
+    epochs: list[str],
+) -> ArrayF:
+    """Return per-unit minima across selected epochs."""
+    if not epochs:
+        raise ValueError("At least one epoch is required to aggregate unit metrics.")
+    values = [
+        np.asarray(values_by_epoch[epoch], dtype=float).reshape(-1)
+        for epoch in epochs
+    ]
+    first_size = values[0].size
+    if any(value.size != first_size for value in values):
+        raise ValueError("Unit metric sizes must match across epochs.")
+    return np.min(np.stack(values, axis=0), axis=0)
+
+
+def build_meme_unit_mask(
+    *,
+    session: dict[str, Any],
+    f_by_epoch: dict[str, ArrayF],
+    region: str,
+    light_epochs: list[str],
+    dark_epoch: str,
+    min_firing_rate_hz: float,
+    min_condition_sd_hz: float,
+    unit_filter_mode: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a cvPCA-style unit mask and class labels for MEME epochs.
+
+    When multiple light epochs are analyzed together, light metrics are the
+    per-unit minima across selected light epochs. This keeps one stable unit
+    mask for all MEME epoch-level PR estimates.
+    """
+    dark_firing_rate_hz = np.asarray(
+        session["movement_firing_rates_by_region"][region][dark_epoch],
+        dtype=float,
+    )
+    light_firing_rate_hz = _minimum_metric_across_epochs(
+        session["movement_firing_rates_by_region"][region],
+        light_epochs,
+    )
+    condition_sd_by_epoch = {
+        epoch: _condition_sd(f_by_epoch[epoch]) for epoch in [dark_epoch, *light_epochs]
+    }
+    dark_condition_sd_hz = condition_sd_by_epoch[dark_epoch]
+    light_condition_sd_hz = _minimum_metric_across_epochs(
+        condition_sd_by_epoch,
+        light_epochs,
+    )
+    unit_ids = np.arange(dark_firing_rate_hz.size, dtype=int)
+    selection = classify_and_select_units(
+        unit_ids=unit_ids,
+        dark_firing_rate_hz=dark_firing_rate_hz,
+        light_firing_rate_hz=light_firing_rate_hz,
+        dark_condition_sd_hz=dark_condition_sd_hz,
+        light_condition_sd_hz=light_condition_sd_hz,
+        min_firing_rate_hz=min_firing_rate_hz,
+        min_condition_sd_hz=min_condition_sd_hz,
+        unit_filter_mode=unit_filter_mode,
+    )
+    if not np.any(selection.keep_mask):
+        raise ValueError(
+            "No units remain after applying firing-rate and condition-SD filters."
+        )
+    return selection.keep_mask, selection.unit_classes
 
 
 def _stable_region_neuron_count(region_counts: dict[str, int], region: str) -> int:
@@ -1806,8 +1609,9 @@ def save_epoch_summary_tables(
     n_neurons_by_region: dict[str, dict[str, int]],
     meme_pr: dict[str, dict[str, float]],
     naive_pr: dict[str, dict[str, float]],
-    meme_boot_summary: dict[str, dict[str, PRSummary]],
-    fr_dark_threshold_by_region: dict[str, float | None],
+    meme_repeat_summary: dict[str, dict[str, PRSummary]],
+    min_firing_rate_by_region: dict[str, float],
+    n_units_by_class_by_region: dict[str, dict[str, int]],
     settings: dict[str, Any],
 ) -> list[Path]:
     """Write one parquet summary row per region and epoch.
@@ -1818,9 +1622,10 @@ def save_epoch_summary_tables(
     """
     saved_paths: list[Path] = []
     for region in regions:
-        fr_threshold = fr_dark_threshold_by_region[region]
+        min_firing_rate_hz = min_firing_rate_by_region[region]
+        unit_class_counts = n_units_by_class_by_region[region]
         for epoch in analysis_epochs:
-            summary = meme_boot_summary[region][epoch]
+            summary = meme_repeat_summary[region][epoch]
             table = pd.DataFrame(
                 [
                     {
@@ -1830,21 +1635,31 @@ def save_epoch_summary_tables(
                         "n_neurons": n_neurons_by_region[region][epoch],
                         "meme_pr": meme_pr[region][epoch],
                         "repeat_averaged_pca_pr": naive_pr[region][epoch],
-                        "lap_subsample_pr_center": summary.pr_center,
-                        "lap_subsample_pr_ci_low": summary.ci_low,
-                        "lap_subsample_pr_ci_high": summary.ci_high,
-                        "lap_subsample_pr_n_eff": summary.n_eff,
-                        "fr_dark_threshold_hz": (
-                            np.nan if fr_threshold is None else float(fr_threshold)
-                        ),
+                        "random_repeat_pr_center": summary.pr_center,
+                        "random_repeat_pr_ci_low": summary.ci_low,
+                        "random_repeat_pr_ci_high": summary.ci_high,
+                        "random_repeat_pr_n_eff": summary.n_eff,
+                        "unit_filter_mode": settings["unit_filter_mode"],
+                        "min_firing_rate_hz": min_firing_rate_hz,
+                        "min_condition_sd_hz": settings["min_condition_sd_hz"],
+                        "n_all_shared_active": unit_class_counts["shared_active"],
+                        "n_all_dark_only": unit_class_counts["dark_only"],
+                        "n_all_light_only": unit_class_counts["light_only"],
+                        "n_all_inactive_or_low_mod": unit_class_counts[
+                            "inactive_or_low_mod"
+                        ],
                         "bin_size_cm": settings["bin_size_cm"],
                         "n_groups": settings["n_groups"],
-                        "lap_fraction": settings["lap_subsample_fraction"],
-                        "n_lap_subsamples": settings["n_lap_subsamples"],
+                        "n_random_repeats": settings["n_random_repeats"],
+                        "random_repeat_ci": settings["random_repeat_ci"],
                         "n_pairings_full": settings["full_n_pairings"],
                         "n_bin_perms_full": settings["full_n_bin_perms"],
-                        "n_pairings_lap_subsample": settings["lap_subsample_n_pairings"],
-                        "n_bin_perms_lap_subsample": settings["lap_subsample_n_bin_perms"],
+                        "n_pairings_random_repeat": settings[
+                            "random_repeat_n_pairings"
+                        ],
+                        "n_bin_perms_random_repeat": settings[
+                            "random_repeat_n_bin_perms"
+                        ],
                     }
                 ]
             )
@@ -1867,7 +1682,7 @@ def save_light_dark_comparison_tables(
 ) -> list[Path]:
     """Write one light-vs-dark comparison parquet per region.
 
-    Each table stores scalar summaries of the grouped lap-subsampling draw
+    Each table stores scalar summaries of the grouped random-repeat draw
     distributions used for the light/dark PR figures. The goal is to preserve
     the comparison results in a tabular, downstream-friendly format.
     """
@@ -1995,25 +1810,43 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Minimum occupancy in seconds per kept bin. Default: {DEFAULT_MIN_OCCUPANCY_S}",
     )
     parser.add_argument(
-        "--bootstrap-lap-fraction",
+        "--unit-filter-mode",
+        choices=("shared-active", "dark-active", "union-active"),
+        default=DEFAULT_UNIT_FILTER_MODE,
+        help=f"Neuron inclusion rule. Default: {DEFAULT_UNIT_FILTER_MODE}",
+    )
+    parser.add_argument(
+        "--v1-min-fr-hz",
         type=float,
-        default=DEFAULT_BOOTSTRAP_LAP_FRACTION,
+        default=DEFAULT_REGION_FR_THRESHOLDS["v1"],
+        help="Minimum movement firing rate for V1 units. Default: 0.5",
+    )
+    parser.add_argument(
+        "--ca1-min-fr-hz",
+        type=float,
+        default=DEFAULT_REGION_FR_THRESHOLDS["ca1"],
+        help="Minimum movement firing rate for CA1 units. Default: 0.0",
+    )
+    parser.add_argument(
+        "--min-condition-sd-hz",
+        type=float,
+        default=DEFAULT_MIN_CONDITION_SD_HZ,
         help=(
-            "Fraction of laps sampled in each lap-subsampling draw. "
-            f"Default: {DEFAULT_BOOTSTRAP_LAP_FRACTION}"
+            "Minimum repeat-averaged condition SD for unit inclusion. "
+            f"Default: {DEFAULT_MIN_CONDITION_SD_HZ}"
         ),
     )
     parser.add_argument(
-        "--n-bootstraps",
+        "--n-random-repeats",
         type=int,
-        default=DEFAULT_N_BOOTSTRAPS,
-        help=f"Number of lap-subsampling draws. Default: {DEFAULT_N_BOOTSTRAPS}",
+        default=DEFAULT_N_RANDOM_REPEATS,
+        help=f"Number of full-data random-seed repeats. Default: {DEFAULT_N_RANDOM_REPEATS}",
     )
     parser.add_argument(
-        "--bootstrap-ci",
+        "--random-repeat-ci",
         type=float,
-        default=DEFAULT_BOOTSTRAP_CI,
-        help=f"Interval width in percent for lap subsampling. Default: {DEFAULT_BOOTSTRAP_CI}",
+        default=DEFAULT_RANDOM_REPEAT_CI,
+        help=f"Interval width in percent for random-seed repeats. Default: {DEFAULT_RANDOM_REPEAT_CI}",
     )
     parser.add_argument(
         "--full-n-pairings",
@@ -2028,21 +1861,21 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Number of bin permutations for full MEME estimation. Default: {DEFAULT_FULL_N_BIN_PERMS}",
     )
     parser.add_argument(
-        "--bootstrap-n-pairings",
+        "--repeat-n-pairings",
         type=int,
-        default=DEFAULT_BOOTSTRAP_N_PAIRINGS,
+        default=DEFAULT_RANDOM_REPEAT_N_PAIRINGS,
         help=(
-            "Number of Monte Carlo pairing draws inside lap-subsampling "
-            f"estimation. Default: {DEFAULT_BOOTSTRAP_N_PAIRINGS}"
+            "Number of Monte Carlo pairing draws inside random-seed repeat "
+            f"estimation. Default: {DEFAULT_RANDOM_REPEAT_N_PAIRINGS}"
         ),
     )
     parser.add_argument(
-        "--bootstrap-n-bin-perms",
+        "--repeat-n-bin-perms",
         type=int,
-        default=DEFAULT_BOOTSTRAP_N_BIN_PERMS,
+        default=DEFAULT_RANDOM_REPEAT_N_BIN_PERMS,
         help=(
-            "Number of bin permutations inside lap-subsampling estimation. "
-            f"Default: {DEFAULT_BOOTSTRAP_N_BIN_PERMS}"
+            "Number of bin permutations inside random-seed repeat estimation. "
+            f"Default: {DEFAULT_RANDOM_REPEAT_N_BIN_PERMS}"
         ),
     )
     parser.add_argument(
@@ -2054,12 +1887,18 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help=f"Directory for saved parquet tables. Default: analysis_path / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
+        help=(
+            "Directory for saved parquet tables. Default: "
+            f"analysis_path / 'signal_dim' / '{DEFAULT_MEME_OUTPUT_DIRNAME}'"
+        ),
     )
     parser.add_argument(
         "--fig-dir",
         type=Path,
-        help=f"Directory for saved figures. Default: analysis_path / 'figs' / '{DEFAULT_MEME_OUTPUT_DIRNAME}'",
+        help=(
+            "Directory for saved figures. Default: "
+            f"analysis_path / 'figs' / 'signal_dim' / '{DEFAULT_MEME_OUTPUT_DIRNAME}'"
+        ),
     )
     return parser.parse_args()
 
@@ -2072,10 +1911,19 @@ def main() -> None:
     2. choose run epochs plus one light/dark comparison set
     3. build grouped spatial tuning tensors ``F`` for each region and epoch
     4. estimate MEME and repeat-averaged PCA participation ratios
-    5. estimate lap-subsampling uncertainty
+    5. estimate random-seed repeat stability
     6. save figures, parquet summaries, and a run log
     """
     args = parse_arguments()
+    if args.n_random_repeats < 1:
+        raise ValueError("--n-random-repeats must be positive.")
+    if args.random_repeat_ci <= 0.0 or args.random_repeat_ci >= 100.0:
+        raise ValueError("--random-repeat-ci must be between 0 and 100.")
+    if args.repeat_n_pairings < 1 or args.repeat_n_bin_perms < 1:
+        raise ValueError("--repeat-n-pairings and --repeat-n-bin-perms must be positive.")
+    if args.min_condition_sd_hz < 0.0:
+        raise ValueError("--min-condition-sd-hz must be nonnegative.")
+
     session = load_meme_session(
         animal_name=args.animal_name,
         date=args.date,
@@ -2098,12 +1946,17 @@ def main() -> None:
     epoch_to_condition[dark_epoch] = "dark"
 
     analysis_path = session["analysis_path"]
-    out_dir = args.output_dir or (analysis_path / DEFAULT_MEME_OUTPUT_DIRNAME)
-    fig_dir = args.fig_dir or (analysis_path / "figs" / DEFAULT_MEME_OUTPUT_DIRNAME)
+    out_dir = args.output_dir or get_signal_dim_output_dir(
+        analysis_path,
+        DEFAULT_MEME_OUTPUT_DIRNAME,
+    )
+    fig_dir = args.fig_dir or get_signal_dim_figure_dir(
+        analysis_path,
+        DEFAULT_MEME_OUTPUT_DIRNAME,
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    lap_subsample_random_seed = args.random_seed + 1000
     settings = {
         "animal_name": args.animal_name,
         "date": args.date,
@@ -2121,15 +1974,18 @@ def main() -> None:
         "bin_size_cm": args.bin_size_cm,
         "n_groups": args.n_groups,
         "min_occupancy_s": args.min_occupancy_s,
-        "lap_subsample_fraction": args.bootstrap_lap_fraction,
-        "n_lap_subsamples": args.n_bootstraps,
-        "lap_subsample_ci": args.bootstrap_ci,
+        "unit_filter_mode": args.unit_filter_mode,
+        "v1_min_fr_hz": args.v1_min_fr_hz,
+        "ca1_min_fr_hz": args.ca1_min_fr_hz,
+        "min_condition_sd_hz": args.min_condition_sd_hz,
+        "uncertainty_method": "random_seed_repeats",
+        "n_random_repeats": args.n_random_repeats,
+        "random_repeat_ci": args.random_repeat_ci,
         "full_n_pairings": args.full_n_pairings,
         "full_n_bin_perms": args.full_n_bin_perms,
-        "lap_subsample_n_pairings": args.bootstrap_n_pairings,
-        "lap_subsample_n_bin_perms": args.bootstrap_n_bin_perms,
+        "random_repeat_n_pairings": args.repeat_n_pairings,
+        "random_repeat_n_bin_perms": args.repeat_n_bin_perms,
         "random_seed": args.random_seed,
-        "lap_subsample_random_seed": lap_subsample_random_seed,
         "output_dir": out_dir,
         "fig_dir": fig_dir,
     }
@@ -2138,12 +1994,13 @@ def main() -> None:
     naive_eigenvalues = {region: {} for region in args.regions}
     meme_pr = {region: {} for region in args.regions}
     naive_pr = {region: {} for region in args.regions}
-    meme_boot_pr = {region: {} for region in args.regions}
-    meme_boot_summary = {region: {} for region in args.regions}
+    meme_repeat_pr = {region: {} for region in args.regions}
+    meme_repeat_summary = {region: {} for region in args.regions}
     n_neurons_by_region = {region: {} for region in args.regions}
+    n_units_by_class_by_region: dict[str, dict[str, int]] = {}
     comparison_draws_by_region: dict[str, dict[str, ArrayF]] = {}
-    fr_dark_threshold_by_region = {
-        region: get_region_dark_rate_threshold(region) for region in args.regions
+    min_firing_rate_by_region = {
+        region: _region_threshold(region, args) for region in args.regions
     }
 
     # Figure families:
@@ -2152,21 +2009,44 @@ def main() -> None:
     # - PR figures: scalar dimensionality summaries across epochs and conditions
     saved_figures: list[Path] = []
     for region in args.regions:
-        fr_dark_threshold = fr_dark_threshold_by_region[region]
+        min_firing_rate_hz = min_firing_rate_by_region[region]
         print(f"\n=== Processing Region: {region} ===")
 
+        f_all_by_epoch: dict[str, ArrayF] = {}
         for epoch in analysis_epochs:
             print(f"  -- Epoch: {epoch}")
-            F = prepare_F(
+            f_all_by_epoch[epoch] = prepare_F(
                 session,
                 epoch=epoch,
                 region=region,
                 dark_epoch=dark_epoch,
-                fr_dark_threshold=fr_dark_threshold,
                 bin_size=args.bin_size_cm,
                 n_groups=args.n_groups,
+                group_seed=args.random_seed,
                 min_occupancy_s=args.min_occupancy_s,
             )
+        unit_mask, unit_classes = build_meme_unit_mask(
+            session=session,
+            f_by_epoch=f_all_by_epoch,
+            region=region,
+            light_epochs=light_epochs,
+            dark_epoch=dark_epoch,
+            min_firing_rate_hz=min_firing_rate_hz,
+            min_condition_sd_hz=args.min_condition_sd_hz,
+            unit_filter_mode=args.unit_filter_mode,
+        )
+        n_units_by_class_by_region[region] = {
+            unit_class: int(np.sum(unit_classes == unit_class))
+            for unit_class in (
+                "shared_active",
+                "dark_only",
+                "light_only",
+                "inactive_or_low_mod",
+            )
+        }
+
+        for epoch in analysis_epochs:
+            F = f_all_by_epoch[epoch][:, :, unit_mask]
             n_neurons_by_region[region][epoch] = F.shape[-1]
 
             res = meme_eigenmoments_and_pr_mc(
@@ -2181,28 +2061,27 @@ def main() -> None:
             meme_moments[region][epoch] = res.moments
             meme_pr[region][epoch] = res.pr
 
-            boot = lap_subsample_meme_pr(
+            repeat = random_seed_repeat_meme_pr(
                 session,
                 epoch=epoch,
                 region=region,
                 dark_epoch=dark_epoch,
-                n_bootstraps=args.n_bootstraps,
-                lap_fraction=args.bootstrap_lap_fraction,
-                fr_dark_threshold=fr_dark_threshold,
+                n_random_repeats=args.n_random_repeats,
+                unit_mask=unit_mask,
                 bin_size=args.bin_size_cm,
                 n_groups=args.n_groups,
                 min_occupancy_s=args.min_occupancy_s,
                 k_moms=6,
                 remove_mean=True,
-                n_pairings=args.bootstrap_n_pairings,
-                n_bin_perms=args.bootstrap_n_bin_perms,
+                n_pairings=args.repeat_n_pairings,
+                n_bin_perms=args.repeat_n_bin_perms,
                 max_repeat_pairs=None,
-                random_seed=lap_subsample_random_seed,
-                ci=args.bootstrap_ci,
+                random_seed=args.random_seed,
+                ci=args.random_repeat_ci,
                 center="mean",
             )
-            meme_boot_pr[region][epoch] = boot.pr_samples
-            meme_boot_summary[region][epoch] = boot.summary
+            meme_repeat_pr[region][epoch] = repeat.pr_samples
+            meme_repeat_summary[region][epoch] = repeat.summary
 
             naive_pca = naive_cov_eigs_and_pr(F, mode="mean_repeat", center=True)
             naive_eigenvalues[region][epoch] = naive_pca.eigenvalues
@@ -2264,26 +2143,26 @@ def main() -> None:
         saved_figures.append(
             plot_pr_light_dark_epochwise(
                 region=region,
-                epoch_to_mc_pr=meme_boot_pr[region],
+                epoch_to_mc_pr=meme_repeat_pr[region],
                 epoch_to_condition=epoch_to_condition,
                 save_path=fig_dir,
-                ci=args.bootstrap_ci,
+                ci=args.random_repeat_ci,
                 center="mean",
                 annotate=True,
                 random_seed=0,
-                title_suffix=" (lap subsampling)",
+                title_suffix=" (random-seed repeats)",
             )
         )
         groupmean_path, dark_draws, light_draws, delta_draws = plot_pr_light_dark_groupmeans(
             region=region,
-            epoch_to_mc_pr=meme_boot_pr[region],
+            epoch_to_mc_pr=meme_repeat_pr[region],
             epoch_to_condition=epoch_to_condition,
             save_path=fig_dir,
-            ci=args.bootstrap_ci,
+            ci=args.random_repeat_ci,
             center="mean",
             n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
             random_seed=0,
-            title_suffix=" (lap subsampling)",
+            title_suffix=" (random-seed repeats)",
         )
         saved_figures.append(groupmean_path)
         comparison_draws_by_region[region] = {
@@ -2300,8 +2179,9 @@ def main() -> None:
         n_neurons_by_region=n_neurons_by_region,
         meme_pr=meme_pr,
         naive_pr=naive_pr,
-        meme_boot_summary=meme_boot_summary,
-        fr_dark_threshold_by_region=fr_dark_threshold_by_region,
+        meme_repeat_summary=meme_repeat_summary,
+        min_firing_rate_by_region=min_firing_rate_by_region,
+        n_units_by_class_by_region=n_units_by_class_by_region,
         settings=settings,
     )
     saved_comparison_tables = save_light_dark_comparison_tables(
@@ -2310,7 +2190,7 @@ def main() -> None:
         light_epochs=light_epochs,
         dark_epoch=dark_epoch,
         comparison_draws_by_region=comparison_draws_by_region,
-        ci=args.bootstrap_ci,
+        ci=args.random_repeat_ci,
         center="mean",
         n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
     )
