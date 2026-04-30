@@ -83,6 +83,7 @@ DEFAULT_RANDOM_REPEAT_N_PAIRINGS = 200
 DEFAULT_RANDOM_REPEAT_N_BIN_PERMS = 5
 DEFAULT_GROUPMEAN_N_DRAWS = 5000
 DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
+DEFAULT_NORMALIZATION = "zscore"
 
 # Shape notation used throughout this module:
 #   R = number of disjoint repeat groups of laps
@@ -94,6 +95,7 @@ DEFAULT_MEME_OUTPUT_DIRNAME = "meme"
 
 
 ArrayF = npt.NDArray[np.floating]
+NormalizationMode = Literal["zscore", "raw"]
 load_meme_session = load_signal_dim_session
 _sample_lap_indices = sample_lap_indices
 _split_lap_indices_into_groups = split_lap_indices_into_groups
@@ -365,6 +367,39 @@ def prepare_F(
     return F
 
 
+def normalize_meme_tensor(
+    f_tensor: ArrayF,
+    *,
+    normalization: NormalizationMode,
+    min_scale: float,
+) -> ArrayF:
+    """Return raw or epoch-wise z-scored MEME input tensor."""
+    tensor = np.asarray(f_tensor, dtype=np.float64)
+    if tensor.ndim != 3:
+        raise ValueError(f"F must be (repeat, condition, neuron). Got {tensor.shape}.")
+    if min_scale < 0.0:
+        raise ValueError("min_scale must be nonnegative.")
+    if normalization == "raw":
+        return tensor.copy()
+    if normalization != "zscore":
+        raise ValueError(f"Unsupported normalization: {normalization!r}")
+
+    mean_tuning = np.mean(tensor, axis=0)
+    center = np.mean(mean_tuning, axis=0)
+    scale = np.std(mean_tuning, axis=0)
+    safe_scale = np.where(scale >= float(min_scale), scale, 1.0)
+    return (tensor - center.reshape(1, 1, -1)) / safe_scale.reshape(1, 1, -1)
+
+
+def _normalization_suffix(normalization: NormalizationMode) -> str:
+    """Return the output filename suffix for one normalization mode."""
+    if normalization == "raw":
+        return ""
+    if normalization == "zscore":
+        return "_zscore"
+    raise ValueError(f"Unsupported normalization: {normalization!r}")
+
+
 @dataclass(frozen=True)
 class MemeMCResult:
     moments: ArrayF  # (k_moms,)
@@ -523,6 +558,8 @@ def random_seed_repeat_meme_pr(
     bin_size: float = DEFAULT_BIN_SIZE_CM,
     n_groups: int = DEFAULT_N_GROUPS,
     min_occupancy_s: float = DEFAULT_MIN_OCCUPANCY_S,
+    normalization: NormalizationMode = DEFAULT_NORMALIZATION,
+    min_scale: float = DEFAULT_MIN_CONDITION_SD_HZ,
     k_moms: int = 6,
     remove_mean: bool = True,
     n_pairings: int = DEFAULT_RANDOM_REPEAT_N_PAIRINGS,
@@ -559,6 +596,11 @@ def random_seed_repeat_meme_pr(
                 n_groups=n_groups,
                 group_seed=repeat_seed,
                 min_occupancy_s=min_occupancy_s,
+            )
+            F_repeat = normalize_meme_tensor(
+                F_repeat,
+                normalization=normalization,
+                min_scale=min_scale,
             )
             res_repeat = meme_eigenmoments_and_pr_mc(
                 F_repeat,
@@ -653,131 +695,6 @@ def _meme_moments_from_pair(
         F_i = F_i @ F
 
     return moms
-
-
-@dataclass(frozen=True)
-class NaiveSpectrumResult:
-    """
-    Repeat-averaged covariance eigenspectrum + participation ratio computed
-    directly from a covariance matrix estimated from F.
-
-    Attributes
-    ----------
-    eigenvalues
-        Sorted eigenvalues (descending) of the neuron-by-neuron covariance.
-        Shape: (n_neurons,)
-    pr
-        Participation ratio:
-            PR = (sum_i lambda_i)^2 / sum_i lambda_i^2
-    cov
-        The covariance matrix used for the eigendecomposition.
-        Shape: (n_neurons, n_neurons)
-    """
-
-    eigenvalues: ArrayF
-    pr: float
-    cov: ArrayF
-
-
-def naive_cov_eigs_and_pr(
-    F: ArrayF,
-    *,
-    mode: Literal["concat", "mean_repeat"] = "concat",
-    center: bool = True,
-    remove_mean_via_disjoint: bool = False,
-    eps: float = 1e-12,
-) -> NaiveSpectrumResult:
-    """
-    Compute a covariance-based alternative dimensionality estimate from F and
-    return its eigenspectrum and participation ratio (PR).
-
-    Parameters
-    ----------
-    F
-        Array with shape (R, C, N):
-            R = repeats/groups
-            C = conditions (e.g., position bins)
-            N = neurons
-    mode
-        How to aggregate repeats before forming the covariance:
-        - "concat": treat each (repeat, condition) as a sample. Uses X with shape (R*C, N).
-                    This typically yields a higher-rank sample covariance.
-        - "mean_repeat": average over repeats first to get X shape (C, N), then treat each
-                         condition as a sample (like "mean tuning curve" covariance).
-    center
-        If True, subtract the per-neuron mean across samples before computing covariance.
-        Recommended.
-    remove_mean_via_disjoint
-        If True, apply the same disjoint differencing trick used in MEME along the
-        condition axis within each repeat:
-            (even - odd)/sqrt(2)
-        This makes the centering closer in spirit to the MEME preprocessing.
-        If you use this, keep center=True (it typically still helps).
-    eps
-        Small constant for numerical stability in PR computation.
-
-    Returns
-    -------
-    result
-        NaiveSpectrumResult with eigenvalues, PR, and the covariance matrix.
-
-    Notes
-    -----
-    - This is a covariance/PCA-based alternative dimensionality estimate. When
-      used with ``mode="mean_repeat"``, it reflects the repeat-averaged tuning
-      map rather than the repeat-aware MEME estimator.
-    - PR computed from eigenvalues is:
-        $$
-        \\mathrm{PR} = \\frac{(\\sum_i \\lambda_i)^2}{\\sum_i \\lambda_i^2}.
-        $$
-    """
-    F = np.asarray(F, dtype=np.float64)
-    if F.ndim != 3:
-        raise ValueError(f"F must be (R, C, N). Got {F.shape}.")
-    R, C, N = F.shape
-
-    X = np.nan_to_num(F, nan=0.0)
-
-    if remove_mean_via_disjoint:
-        C_use = (C // 2) * 2
-        if C_use < 2:
-            raise ValueError("Need at least 2 conditions for disjoint differencing.")
-        X = X[:, :C_use, :]
-        even = X[:, 0::2, :]
-        odd = X[:, 1::2, :]
-        X = (even - odd) / np.sqrt(2.0)
-        R, C, N = X.shape
-
-    if mode == "concat":
-        Xs = X.reshape(R * C, N)  # (samples, neurons)
-    elif mode == "mean_repeat":
-        Xs = X.mean(axis=0)  # (conditions, neurons)
-    else:
-        raise ValueError("mode must be one of {'concat','mean_repeat'}.")
-
-    if Xs.shape[0] < 2:
-        raise ValueError("Need at least 2 samples to compute covariance.")
-
-    if center:
-        Xs = Xs - Xs.mean(axis=0, keepdims=True)
-
-    # Neuron-by-neuron covariance
-    cov = (Xs.T @ Xs) / float(Xs.shape[0])
-
-    # Symmetrize to reduce numerical issues
-    cov = 0.5 * (cov + cov.T)
-
-    # Eigenvalues (ascending from eigvalsh), then reverse to descending
-    evals = np.linalg.eigvalsh(cov)[::-1]
-
-    # Guard against tiny negative eigenvalues due to numeric issues
-    evals = np.clip(evals, 0.0, np.inf)
-
-    s1 = float(evals.sum())
-    s2 = float(np.sum(evals * evals))
-    pr = (s1 * s1) / max(s2, eps)
-
-    return NaiveSpectrumResult(eigenvalues=evals, pr=pr, cov=cov)
 
 
 @dataclass(frozen=True)
@@ -1084,51 +1001,26 @@ def eigenspectrum_from_fit(fit: PowerLawFit) -> ArrayF:
     raise ValueError(f"Unknown fit.kind: {fit.kind}")
 
 
-def plot_eigenspectrum_comparison(
+def plot_meme_eigenspectrum(
     region: str,
     all_moments: dict,
-    naive_eigenvalues: dict,
     n_neurons: int,
     save_path: Path,
-    metric: Literal["eigenvalue", "variance_explained"] = "variance_explained",
+    *,
+    normalization: NormalizationMode,
+    output_suffix: str,
     max_rank: int = 100,
 ) -> Path:
-    """Plot MEME and repeat-averaged PCA eigenspectra for visual comparison.
-
-    These figures are intended as a geometry check: the MEME panel shows the
-    fitted signal eigenspectrum inferred from eigenmoments, while the
-    repeat-averaged PCA panel shows a covariance-based spectrum from the same
-    grouped spatial tuning data.
-    """
-
-    # Setup y-label
-    if metric == "variance_explained":
-        ylabel = "Fraction of Variance Explained"
-    else:
-        ylabel = "Eigenvalue Amplitude"
-
-    # Ensure max_rank doesn't exceed n_neurons
+    """Plot MEME fitted eigenspectra as fraction of variance explained."""
     limit = min(max_rank, n_neurons)
+    fig, axis = plt.subplots(figsize=(7, 5))
 
-    fig, ax = plt.subplots(figsize=(10, 6), ncols=2, sharey=True)
-
-    # --- 1. MEME PLOTTING ---
     for epoch, moments in all_moments.items():
-        # Reconstruct FULL spectrum first
         pl_fit = fit_power_law_from_meme_moments(moments, n_neurons=n_neurons)
         lam_pl = eigenspectrum_from_fit(pl_fit)
-
-        # Normalize using the TOTAL variance (sum of all N neurons)
-        # If we normalized by sum(limit), the percentages would be wrong.
-        if metric == "variance_explained":
-            total_variance = np.sum(lam_pl)
-            y_values = lam_pl / total_variance
-        else:
-            y_values = lam_pl
-
-        # Slice ONLY the data we want to plot (top 100)
-        # This forces matplotlib to auto-scale Y to these values only.
-        ax[0].loglog(
+        total_variance = np.sum(lam_pl)
+        y_values = lam_pl / total_variance
+        axis.loglog(
             np.arange(1, limit + 1),
             y_values[:limit],
             "-",
@@ -1136,43 +1028,18 @@ def plot_eigenspectrum_comparison(
             label=f"{epoch} (α={pl_fit.alpha:.2f})",
         )
 
-    # --- 2. REPEAT-AVERAGED PCA PLOTTING ---
-    for epoch, eigenvalues in naive_eigenvalues.items():
-        # Use full spectrum for total variance calculation
-        full_evals = eigenvalues[:n_neurons]
-
-        if metric == "variance_explained":
-            total_variance = np.sum(full_evals)
-            y_values = full_evals / total_variance
-        else:
-            y_values = full_evals
-
-        # Slice for plotting
-        ax[1].loglog(
-            np.arange(1, limit + 1),
-            y_values[:limit],
-            "s",
-            markersize=4,
-            alpha=0.6,
-            label=f"{epoch}",
-        )
-
-    # Formatting
-    for a in ax.flat:
-        a.legend(fontsize="small")
-        a.grid(True, which="both", ls="-", alpha=0.2)
-        a.set_xlabel("PC Rank (log)")
-        # Enforce the x-limit strictly
-        a.set_xlim(1, limit)
-
-    ax[0].set_title(f"MEME Estimation\n(First {limit} modes)")
-    ax[1].set_title(f"Repeat-averaged PCA\n(First {limit} modes)")
-    ax[0].set_ylabel(ylabel)
-
-    fig.suptitle(f"Region: {region} | Metric: {metric}")
+    axis.legend(fontsize="small")
+    axis.grid(True, which="both", ls="-", alpha=0.2)
+    axis.set_xlabel("PC rank")
+    axis.set_xlim(1, limit)
+    axis.set_ylabel("Fraction of variance explained")
+    axis.set_title(f"{region}: MEME eigenspectrum ({normalization})")
     plt.tight_layout()
 
-    filename = f"{region}_eigenspectrum_{metric}_top{limit}.png"
+    filename = (
+        f"{region}{output_suffix}_meme_eigenspectrum_"
+        f"variance_explained_top{limit}.png"
+    )
     output_path = save_path / filename
     plt.savefig(output_path, dpi=300)
     plt.close(fig)
@@ -1180,122 +1047,56 @@ def plot_eigenspectrum_comparison(
     return output_path
 
 
-def plot_broken_power_law_comparison(
+def plot_meme_broken_power_law(
     region: str,
     all_moments: dict,
-    naive_eigenvalues: dict,
     n_neurons: int,
     save_path: Path,
-    metric: Literal["eigenvalue", "variance_explained"] = "variance_explained",
+    *,
+    normalization: NormalizationMode,
+    output_suffix: str,
     max_rank: int = 1000,
 ) -> Path:
-    """Plot broken-power-law fits for the inferred eigenspectra.
-
-    These plots are qualitative fit diagnostics. They let the reader inspect
-    whether the spatial tuning eigenspectrum is better captured by a broken
-    power law than by a single-slope fit, mirroring the paper's emphasis on
-    broken-power-law structure.
-    """
-
-    # Setup y-label
-    if metric == "variance_explained":
-        ylabel = "Fraction of Variance Explained"
-    else:
-        ylabel = "Eigenvalue Amplitude"
-
-    # Ensure max_rank doesn't exceed n_neurons
+    """Plot MEME broken-power-law fitted eigenspectra."""
     limit = min(max_rank, n_neurons)
+    fig, axis = plt.subplots(figsize=(8, 5))
 
-    fig, ax = plt.subplots(figsize=(12, 6), ncols=2, sharey=True)
-
-    # --- 1. MEME PLOTTING (Broken Power Law) ---
     for epoch, moments in all_moments.items():
-        # --- CORRECTION HERE: Use the optimized fitter ---
-        # This finds the exact alpha values rather than grid points
         pl_fit = fit_broken_power_law_optimized(moments, n_neurons=n_neurons)
-
-        # Reconstruct spectrum from fit parameters
         lam_pl = eigenspectrum_from_fit(pl_fit)
-
-        # Normalize using the TOTAL variance
-        if metric == "variance_explained":
-            total_variance = np.sum(lam_pl)
-            y_values = lam_pl / total_variance
-        else:
-            y_values = lam_pl
-
-        # Slice for plotting
-        # Note: k0 is an integer, so we format it without decimals
+        total_variance = np.sum(lam_pl)
+        y_values = lam_pl / total_variance
         label_str = (
             f"{epoch}\n"
             f"(α1={pl_fit.alpha1:.2f}, α2={pl_fit.alpha2:.2f}, k0={pl_fit.k0})"
         )
 
-        (line,) = ax[0].loglog(
-            np.arange(1, limit + 1), y_values[:limit], "-", linewidth=2, label=label_str
-        )
-
-        # Visualize the break point k0
-        if pl_fit.k0 < limit:
-            ax[0].axvline(pl_fit.k0, color=line.get_color(), linestyle=":", alpha=0.5)
-
-    # --- 2. REPEAT-AVERAGED PCA PLOTTING ---
-    for epoch, eigenvalues in naive_eigenvalues.items():
-        full_evals = eigenvalues[:n_neurons]
-
-        if metric == "variance_explained":
-            total_variance = np.sum(full_evals)
-            y_values = full_evals / total_variance
-        else:
-            y_values = full_evals
-
-        ax[1].loglog(
+        (line,) = axis.loglog(
             np.arange(1, limit + 1),
             y_values[:limit],
-            "s",
-            markersize=4,
-            alpha=0.6,
-            label=f"{epoch}",
+            "-",
+            linewidth=2,
+            label=label_str,
         )
+        if pl_fit.k0 < limit:
+            axis.axvline(pl_fit.k0, color=line.get_color(), linestyle=":", alpha=0.5)
 
-    # Formatting
-    for a in ax.flat:
-        a.legend(fontsize="x-small", loc="lower left")
-        a.grid(True, which="both", ls="-", alpha=0.2)
-        a.set_xlabel("PC Rank (log)")
-        a.set_xlim(1, limit)
-
-    ax[0].set_title(f"MEME Estimation\n(Broken Power Law Fit)")
-    ax[1].set_title(f"Repeat-averaged PCA\n(Covariance Eigenspectrum)")
-    ax[0].set_ylabel(ylabel)
-
-    fig.suptitle(f"Region: {region} | Metric: {metric} | Broken Power Law")
+    axis.legend(fontsize="x-small", loc="lower left")
+    axis.grid(True, which="both", ls="-", alpha=0.2)
+    axis.set_xlabel("PC rank")
+    axis.set_xlim(1, limit)
+    axis.set_ylabel("Fraction of variance explained")
+    axis.set_title(f"{region}: MEME broken-power-law eigenspectrum ({normalization})")
     plt.tight_layout()
 
-    filename = f"{region}_broken_power_law_{metric}_top{limit}.png"
+    filename = (
+        f"{region}{output_suffix}_meme_broken_power_law_"
+        f"variance_explained_top{limit}.png"
+    )
     output_path = save_path / filename
     plt.savefig(output_path, dpi=300)
     plt.close(fig)
 
-    return output_path
-
-
-def plot_pr(region, meme_pr, naive_pr, save_path) -> Path:
-    """Plot epoch-wise participation ratio summaries for one region."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    epochs = list(meme_pr.keys())
-    # Sort epochs if needed, assuming they are strings they might need sorting logic
-
-    ax.plot(epochs, list(meme_pr.values()), "-o", label="MEME")
-    ax.plot(epochs, list(naive_pr.values()), "-s", label="Repeat-averaged PCA")
-
-    ax.set_ylabel("Participation Ratio")
-    ax.set_title(f"Region: {region}")
-    ax.legend()
-    output_path = save_path / f"{region}_pr.png"
-    plt.savefig(output_path, dpi=300)
-    plt.close(fig)
     return output_path
 
 
@@ -1305,6 +1106,8 @@ def plot_pr_light_dark_epochwise(
     epoch_to_condition: Dict[str, str],
     save_path: Path,
     *,
+    normalization: NormalizationMode,
+    output_suffix: str,
     ci: float = 95.0,
     center: Literal["mean", "median"] = "mean",
     jitter: float = 0.08,
@@ -1359,11 +1162,20 @@ def plot_pr_light_dark_epochwise(
     ax.set_xticks([cond_x["dark"], cond_x["light"]])
     ax.set_xticklabels(["Dark", "Light"])
     ax.set_ylabel("Participation Ratio (PR)")
-    ax.set_title(f"{region}: PR by epoch with {ci:.0f}% interval{title_suffix}")
+    ax.set_title(
+        f"{region}: MEME PR by epoch ({normalization}, {ci:.0f}% interval)"
+        f"{title_suffix}"
+    )
     ax.grid(True, alpha=0.25)
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_epochwise_random_repeats_ci{int(ci)}.png"
+    out = (
+        save_path
+        / (
+            f"{region}{output_suffix}_pr_light_vs_dark_epochwise_"
+            f"random_repeats_ci{int(ci)}.png"
+        )
+    )
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1406,6 +1218,8 @@ def plot_pr_light_dark_groupmeans(
     epoch_to_condition: Dict[str, str],
     save_path: Path,
     *,
+    normalization: NormalizationMode,
+    output_suffix: str,
     ci: float = 95.0,
     center: Literal["mean", "median"] = "mean",
     n_draws: int = 5000,
@@ -1479,7 +1293,10 @@ def plot_pr_light_dark_groupmeans(
     ax.set_xticks(xs)
     ax.set_xticklabels(["Dark (mean across epochs)", "Light (mean across epochs)"])
     ax.set_ylabel("Participation Ratio (PR)")
-    ax.set_title(f"{region}: mean PR Light vs Dark ({ci:.0f}% interval){title_suffix}")
+    ax.set_title(
+        f"{region}: mean MEME PR Light vs Dark ({normalization}, {ci:.0f}% interval)"
+        f"{title_suffix}"
+    )
     ax.grid(True, alpha=0.25)
 
     # annotate delta
@@ -1494,7 +1311,13 @@ def plot_pr_light_dark_groupmeans(
     )
 
     save_path.mkdir(parents=True, exist_ok=True)
-    out = save_path / f"{region}_pr_light_vs_dark_groupmean_random_repeats_ci{int(ci)}.png"
+    out = (
+        save_path
+        / (
+            f"{region}{output_suffix}_pr_light_vs_dark_groupmean_"
+            f"random_repeats_ci{int(ci)}.png"
+        )
+    )
     plt.tight_layout()
     plt.savefig(out, dpi=300)
     plt.close(fig)
@@ -1608,7 +1431,6 @@ def save_epoch_summary_tables(
     epoch_to_condition: dict[str, str],
     n_neurons_by_region: dict[str, dict[str, int]],
     meme_pr: dict[str, dict[str, float]],
-    naive_pr: dict[str, dict[str, float]],
     meme_repeat_summary: dict[str, dict[str, PRSummary]],
     min_firing_rate_by_region: dict[str, float],
     n_units_by_class_by_region: dict[str, dict[str, int]],
@@ -1624,6 +1446,7 @@ def save_epoch_summary_tables(
     for region in regions:
         min_firing_rate_hz = min_firing_rate_by_region[region]
         unit_class_counts = n_units_by_class_by_region[region]
+        output_suffix = str(settings["output_suffix"])
         for epoch in analysis_epochs:
             summary = meme_repeat_summary[region][epoch]
             table = pd.DataFrame(
@@ -1633,8 +1456,8 @@ def save_epoch_summary_tables(
                         "epoch": epoch,
                         "condition": epoch_to_condition.get(epoch),
                         "n_neurons": n_neurons_by_region[region][epoch],
+                        "normalization": settings["normalization"],
                         "meme_pr": meme_pr[region][epoch],
-                        "repeat_averaged_pca_pr": naive_pr[region][epoch],
                         "random_repeat_pr_center": summary.pr_center,
                         "random_repeat_pr_ci_low": summary.ci_low,
                         "random_repeat_pr_ci_high": summary.ci_high,
@@ -1663,7 +1486,7 @@ def save_epoch_summary_tables(
                     }
                 ]
             )
-            path = out_dir / f"{region}_{epoch}_meme_summary.parquet"
+            path = out_dir / f"{region}_{epoch}{output_suffix}_meme_summary.parquet"
             table.to_parquet(path, index=False)
             saved_paths.append(path)
     return saved_paths
@@ -1676,6 +1499,8 @@ def save_light_dark_comparison_tables(
     light_epochs: list[str],
     dark_epoch: str,
     comparison_draws_by_region: dict[str, dict[str, ArrayF]],
+    normalization: NormalizationMode,
+    output_suffix: str,
     ci: float,
     center: Literal["mean", "median"],
     n_draws: int,
@@ -1706,6 +1531,7 @@ def save_light_dark_comparison_tables(
                     "light_epoch": light_epoch_value,
                     "light_epochs": light_epochs_label,
                     "n_light_epochs": len(light_epochs),
+                    "normalization": normalization,
                     "pr_center": dark_summary.pr_center,
                     "pr_ci_low": dark_summary.ci_low,
                     "pr_ci_high": dark_summary.ci_high,
@@ -1719,6 +1545,7 @@ def save_light_dark_comparison_tables(
                     "light_epoch": light_epoch_value,
                     "light_epochs": light_epochs_label,
                     "n_light_epochs": len(light_epochs),
+                    "normalization": normalization,
                     "pr_center": light_summary.pr_center,
                     "pr_ci_low": light_summary.ci_low,
                     "pr_ci_high": light_summary.ci_high,
@@ -1732,6 +1559,7 @@ def save_light_dark_comparison_tables(
                     "light_epoch": light_epoch_value,
                     "light_epochs": light_epochs_label,
                     "n_light_epochs": len(light_epochs),
+                    "normalization": normalization,
                     "pr_center": delta_summary.pr_center,
                     "pr_ci_low": delta_summary.ci_low,
                     "pr_ci_high": delta_summary.ci_high,
@@ -1740,10 +1568,14 @@ def save_light_dark_comparison_tables(
                 },
             ]
         )
-        path = out_dir / f"{region}_{dark_epoch}_light_dark_comparison.parquet"
+        path = (
+            out_dir
+            / f"{region}_{dark_epoch}{output_suffix}_light_dark_comparison.parquet"
+        )
         table.to_parquet(path, index=False)
         saved_paths.append(path)
     return saved_paths
+
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the MEME signal-dimension workflow."""
@@ -1837,6 +1669,16 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--normalization",
+        choices=("zscore", "raw"),
+        default=DEFAULT_NORMALIZATION,
+        help=(
+            "Per-epoch response normalization before MEME. zscore is default "
+            "for comparability with cv_pca.py; raw keeps firing-rate units and "
+            "reproduces the previous MEME scale. Default: zscore"
+        ),
+    )
+    parser.add_argument(
         "--n-random-repeats",
         type=int,
         default=DEFAULT_N_RANDOM_REPEATS,
@@ -1910,7 +1752,7 @@ def main() -> None:
     1. load one session and derive movement- and trajectory-aware state
     2. choose run epochs plus one light/dark comparison set
     3. build grouped spatial tuning tensors ``F`` for each region and epoch
-    4. estimate MEME and repeat-averaged PCA participation ratios
+    4. estimate MEME participation ratios and eigenspectra
     5. estimate random-seed repeat stability
     6. save figures, parquet summaries, and a run log
     """
@@ -1920,9 +1762,12 @@ def main() -> None:
     if args.random_repeat_ci <= 0.0 or args.random_repeat_ci >= 100.0:
         raise ValueError("--random-repeat-ci must be between 0 and 100.")
     if args.repeat_n_pairings < 1 or args.repeat_n_bin_perms < 1:
-        raise ValueError("--repeat-n-pairings and --repeat-n-bin-perms must be positive.")
+        raise ValueError(
+            "--repeat-n-pairings and --repeat-n-bin-perms must be positive."
+        )
     if args.min_condition_sd_hz < 0.0:
         raise ValueError("--min-condition-sd-hz must be nonnegative.")
+    output_suffix = _normalization_suffix(args.normalization)
 
     session = load_meme_session(
         animal_name=args.animal_name,
@@ -1941,7 +1786,9 @@ def main() -> None:
         args.light_epoch,
         args.dark_epoch,
     )
-    analysis_epochs = [dark_epoch] + [epoch for epoch in light_epochs if epoch != dark_epoch]
+    analysis_epochs = [dark_epoch] + [
+        epoch for epoch in light_epochs if epoch != dark_epoch
+    ]
     epoch_to_condition = {epoch: "light" for epoch in light_epochs}
     epoch_to_condition[dark_epoch] = "dark"
 
@@ -1975,6 +1822,8 @@ def main() -> None:
         "n_groups": args.n_groups,
         "min_occupancy_s": args.min_occupancy_s,
         "unit_filter_mode": args.unit_filter_mode,
+        "normalization": args.normalization,
+        "output_suffix": output_suffix,
         "v1_min_fr_hz": args.v1_min_fr_hz,
         "ca1_min_fr_hz": args.ca1_min_fr_hz,
         "min_condition_sd_hz": args.min_condition_sd_hz,
@@ -1991,9 +1840,7 @@ def main() -> None:
     }
 
     meme_moments = {region: {} for region in args.regions}
-    naive_eigenvalues = {region: {} for region in args.regions}
     meme_pr = {region: {} for region in args.regions}
-    naive_pr = {region: {} for region in args.regions}
     meme_repeat_pr = {region: {} for region in args.regions}
     meme_repeat_summary = {region: {} for region in args.regions}
     n_neurons_by_region = {region: {} for region in args.regions}
@@ -2004,8 +1851,8 @@ def main() -> None:
     }
 
     # Figure families:
-    # - eigenspectrum comparison: MEME and repeat-averaged PCA geometry
-    # - broken power law: qualitative inspection of spectrum shape
+    # - MEME eigenspectrum: fitted signal spectrum from eigenmoments
+    # - broken power law: qualitative inspection of MEME spectrum shape
     # - PR figures: scalar dimensionality summaries across epochs and conditions
     saved_figures: list[Path] = []
     for region in args.regions:
@@ -2046,7 +1893,11 @@ def main() -> None:
         }
 
         for epoch in analysis_epochs:
-            F = f_all_by_epoch[epoch][:, :, unit_mask]
+            F = normalize_meme_tensor(
+                f_all_by_epoch[epoch][:, :, unit_mask],
+                normalization=args.normalization,
+                min_scale=args.min_condition_sd_hz,
+            )
             n_neurons_by_region[region][epoch] = F.shape[-1]
 
             res = meme_eigenmoments_and_pr_mc(
@@ -2071,6 +1922,8 @@ def main() -> None:
                 bin_size=args.bin_size_cm,
                 n_groups=args.n_groups,
                 min_occupancy_s=args.min_occupancy_s,
+                normalization=args.normalization,
+                min_scale=args.min_condition_sd_hz,
                 k_moms=6,
                 remove_mean=True,
                 n_pairings=args.repeat_n_pairings,
@@ -2083,61 +1936,28 @@ def main() -> None:
             meme_repeat_pr[region][epoch] = repeat.pr_samples
             meme_repeat_summary[region][epoch] = repeat.summary
 
-            naive_pca = naive_cov_eigs_and_pr(F, mode="mean_repeat", center=True)
-            naive_eigenvalues[region][epoch] = naive_pca.eigenvalues
-            naive_pr[region][epoch] = naive_pca.pr
-
         n_neurons = _stable_region_neuron_count(n_neurons_by_region[region], region)
         print(f"  Plotting for {region} (N={n_neurons})...")
 
         saved_figures.append(
-            plot_eigenspectrum_comparison(
+            plot_meme_eigenspectrum(
                 region=region,
                 all_moments=meme_moments[region],
-                naive_eigenvalues=naive_eigenvalues[region],
                 n_neurons=n_neurons,
                 save_path=fig_dir,
-                metric="variance_explained",
+                normalization=args.normalization,
+                output_suffix=output_suffix,
             )
         )
         saved_figures.append(
-            plot_eigenspectrum_comparison(
+            plot_meme_broken_power_law(
                 region=region,
                 all_moments=meme_moments[region],
-                naive_eigenvalues=naive_eigenvalues[region],
                 n_neurons=n_neurons,
                 save_path=fig_dir,
-                metric="eigenvalue",
-            )
-        )
-        saved_figures.append(
-            plot_broken_power_law_comparison(
-                region=region,
-                all_moments=meme_moments[region],
-                naive_eigenvalues=naive_eigenvalues[region],
-                n_neurons=n_neurons,
-                save_path=fig_dir,
-                metric="variance_explained",
+                normalization=args.normalization,
+                output_suffix=output_suffix,
                 max_rank=1000,
-            )
-        )
-        saved_figures.append(
-            plot_broken_power_law_comparison(
-                region=region,
-                all_moments=meme_moments[region],
-                naive_eigenvalues=naive_eigenvalues[region],
-                n_neurons=n_neurons,
-                save_path=fig_dir,
-                metric="eigenvalue",
-                max_rank=1000,
-            )
-        )
-        saved_figures.append(
-            plot_pr(
-                region=region,
-                meme_pr=meme_pr[region],
-                naive_pr=naive_pr[region],
-                save_path=fig_dir,
             )
         )
         saved_figures.append(
@@ -2146,6 +1966,8 @@ def main() -> None:
                 epoch_to_mc_pr=meme_repeat_pr[region],
                 epoch_to_condition=epoch_to_condition,
                 save_path=fig_dir,
+                normalization=args.normalization,
+                output_suffix=output_suffix,
                 ci=args.random_repeat_ci,
                 center="mean",
                 annotate=True,
@@ -2158,6 +1980,8 @@ def main() -> None:
             epoch_to_mc_pr=meme_repeat_pr[region],
             epoch_to_condition=epoch_to_condition,
             save_path=fig_dir,
+            normalization=args.normalization,
+            output_suffix=output_suffix,
             ci=args.random_repeat_ci,
             center="mean",
             n_draws=DEFAULT_GROUPMEAN_N_DRAWS,
@@ -2178,7 +2002,6 @@ def main() -> None:
         epoch_to_condition=epoch_to_condition,
         n_neurons_by_region=n_neurons_by_region,
         meme_pr=meme_pr,
-        naive_pr=naive_pr,
         meme_repeat_summary=meme_repeat_summary,
         min_firing_rate_by_region=min_firing_rate_by_region,
         n_units_by_class_by_region=n_units_by_class_by_region,
@@ -2190,6 +2013,8 @@ def main() -> None:
         light_epochs=light_epochs,
         dark_epoch=dark_epoch,
         comparison_draws_by_region=comparison_draws_by_region,
+        normalization=args.normalization,
+        output_suffix=output_suffix,
         ci=args.random_repeat_ci,
         center="mean",
         n_draws=DEFAULT_GROUPMEAN_N_DRAWS,

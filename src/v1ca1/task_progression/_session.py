@@ -39,6 +39,7 @@ from v1ca1.helper.session import (
 from v1ca1.helper.wtrack import (
     get_wtrack_branch_graph,
     get_wtrack_branch_side,
+    get_wtrack_full_graph,
     get_wtrack_total_length,
 )
 
@@ -53,6 +54,7 @@ TP_TRANSFER_FAMILY_ORDER = (
     "opposite_turn_same_arm",
     "opposite_turn_same_arm_flipped",
 )
+DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM = 15.0
 
 
 def _trajectory_turn_type(trajectory_type: str) -> str:
@@ -329,6 +331,57 @@ def build_generalized_task_progression(
     )
 
 
+def build_generalized_place_position(
+    animal_name: str,
+    position: np.ndarray,
+    timestamps_position: np.ndarray,
+    movement_interval: "nap.IntervalSet",
+    position_offset: int = DEFAULT_POSITION_OFFSET,
+    branch_gap_cm: float = DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
+) -> "nap.Tsd":
+    """Build full-W linear position with shared stem, both arms, and a branch gap."""
+    import pynapple as nap
+
+    from v1ca1.decoding._1d import linearize_full_w_position
+
+    epoch_position = position[position_offset:]
+    epoch_timestamps = np.asarray(timestamps_position[position_offset:], dtype=float)
+    generalized_place_position, _track_graph, _edge_order, _edge_spacing = (
+        linearize_full_w_position(
+            animal_name=animal_name,
+            position_interp=epoch_position,
+            branch_gap_cm=branch_gap_cm,
+        )
+    )
+    return nap.Tsd(
+        t=epoch_timestamps,
+        d=np.asarray(generalized_place_position, dtype=float),
+        time_support=movement_interval,
+        time_units="s",
+    )
+
+
+def _get_ordered_graph_length(
+    track_graph: Any,
+    edge_order: list[tuple[int, int]],
+    edge_spacing: list[float],
+) -> float:
+    """Return linearized graph length including gaps between ordered edges."""
+    if len(edge_spacing) not in {0, len(edge_order) - 1}:
+        raise ValueError(
+            "edge_spacing must be empty or have one fewer entry than edge_order. "
+            f"Got {len(edge_spacing)} spacings for {len(edge_order)} edges."
+        )
+
+    total_length = 0.0
+    for node_a, node_b in edge_order:
+        node_a_position = np.asarray(track_graph.nodes[node_a]["pos"], dtype=float)
+        node_b_position = np.asarray(track_graph.nodes[node_b]["pos"], dtype=float)
+        total_length += float(np.linalg.norm(node_b_position - node_a_position))
+    total_length += float(np.sum(np.asarray(edge_spacing, dtype=float)))
+    return total_length
+
+
 def build_task_progression_bins(
     animal_name: str,
     place_bin_size_cm: float = DEFAULT_PLACE_BIN_SIZE_CM,
@@ -360,6 +413,20 @@ def build_linear_position_bins(
     )
 
 
+def build_generalized_place_bins(
+    animal_name: str,
+    branch_gap_cm: float = DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
+    place_bin_size_cm: float = DEFAULT_PLACE_BIN_SIZE_CM,
+) -> np.ndarray:
+    """Return bin edges for full-W linear position with an explicit branch gap."""
+    track_graph, edge_order, edge_spacing = get_wtrack_full_graph(
+        animal_name,
+        branch_gap_cm=branch_gap_cm,
+    )
+    full_w_length = _get_ordered_graph_length(track_graph, edge_order, edge_spacing)
+    return np.arange(0, full_w_length + place_bin_size_cm, place_bin_size_cm)
+
+
 def _has_any_head_position_sample(position: np.ndarray) -> bool:
     """Return whether one epoch has at least one finite head-position sample."""
     position_array = np.asarray(position, dtype=float)
@@ -379,6 +446,8 @@ def prepare_task_progression_session(
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
     require_npz_timestamps: bool = True,
     load_body_position: bool = True,
+    include_generalized_place: bool = False,
+    generalized_place_branch_gap_cm: float = DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
 ) -> dict[str, Any]:
     """Load one session and build shared task-progression preprocessing outputs."""
     epoch_source = ""
@@ -482,6 +551,7 @@ def prepare_task_progression_session(
     movement_by_run: dict[str, Any] = {}
     task_progression_by_trajectory: dict[str, dict[str, Any]] = {}
     linear_position_by_run: dict[str, Any] = {}
+    generalized_place_position_by_run: dict[str, Any] = {}
     task_progression_by_run: dict[str, Any] = {}
     generalized_task_progression_by_run: dict[str, Any] = {}
     for epoch in run_epochs:
@@ -513,6 +583,15 @@ def prepare_task_progression_session(
             movement_by_run[epoch],
             position_offset=position_offset,
         )
+        if include_generalized_place:
+            generalized_place_position_by_run[epoch] = build_generalized_place_position(
+                animal_name,
+                position_by_epoch[epoch],
+                timestamps_position[epoch],
+                movement_by_run[epoch],
+                position_offset=position_offset,
+                branch_gap_cm=generalized_place_branch_gap_cm,
+            )
         task_progression_by_run[epoch] = build_task_progression(
             animal_name,
             position_by_epoch[epoch],
@@ -546,6 +625,7 @@ def prepare_task_progression_session(
         "movement_by_run": movement_by_run,
         "task_progression_by_trajectory": task_progression_by_trajectory,
         "linear_position_by_run": linear_position_by_run,
+        "generalized_place_position_by_run": generalized_place_position_by_run,
         "task_progression_by_run": task_progression_by_run,
         "generalized_task_progression_by_run": generalized_task_progression_by_run,
         "sources": {

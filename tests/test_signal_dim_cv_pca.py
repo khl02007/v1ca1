@@ -169,6 +169,11 @@ def test_build_result_dataset_and_summary_table_keep_scalar_outputs(tmp_path) ->
         dataset,
         settings=settings,
     )
+    spectrum_table = cv_pca.build_within_cv_spectrum_table(
+        dataset,
+        repeat_index=0,
+        random_seed=47,
+    )
     dataset.to_netcdf(tmp_path / "cv_pca.nc")
 
     assert dataset.attrs["unit_class_counts_kept_json"]
@@ -189,6 +194,10 @@ def test_build_result_dataset_and_summary_table_keep_scalar_outputs(tmp_path) ->
     assert "residualized_light_cv_participation_ratio" in residualized_table.columns
     assert normalized_capture_table.shape[0] == 6
     assert "normalized_capture_fraction" in normalized_capture_table.columns
+    assert spectrum_table.shape[0] == 2 * dark.shape[2]
+    assert set(spectrum_table["condition"]) == {"dark", "light"}
+    assert "within_cv_spectrum_positive" in spectrum_table.columns
+    assert spectrum_table["repeat_index"].unique().tolist() == [0]
 
 
 def test_residual_power_trajectory_figure_uses_saved_residual_matrices(tmp_path) -> None:
@@ -317,6 +326,36 @@ def test_plot_repeat_dimensionality_summary_writes_errorbar_figure(tmp_path) -> 
             "residualized_light_cv_n_components_90": [17, 18],
         }
     )
+    repeat_spectrum_table = pd.DataFrame(
+        {
+            "repeat_index": [0, 0, 0, 0, 1, 1, 1, 1],
+            "random_seed": [47, 47, 47, 47, 48, 48, 48, 48],
+            "dark_epoch": ["08_r4"] * 8,
+            "light_epoch": ["02_r1"] * 8,
+            "condition": ["dark", "dark", "light", "light"] * 2,
+            "component": [1, 2, 1, 2, 1, 2, 1, 2],
+            "within_cv_spectrum_positive": [
+                1.0,
+                0.5,
+                1.4,
+                0.7,
+                1.1,
+                0.4,
+                1.5,
+                0.8,
+            ],
+            "within_cv_cumulative_shared_variance": [
+                0.67,
+                1.0,
+                0.67,
+                1.0,
+                0.73,
+                1.0,
+                0.65,
+                1.0,
+            ],
+        }
+    )
 
     figure_path = cv_pca.plot_repeat_dimensionality_summary(
         repeat_table,
@@ -324,6 +363,15 @@ def test_plot_repeat_dimensionality_summary_writes_errorbar_figure(tmp_path) -> 
         stem="test_cv_pca",
         residualized_repeat_table=residualized_repeat_table,
     )
+    spectrum_figure_path = cv_pca.plot_repeat_spectrum_summary(
+        repeat_spectrum_table,
+        fig_dir=tmp_path,
+        stem="test_cv_pca",
+    )
 
     assert figure_path == tmp_path / "test_cv_pca_within_cv_pr_repeats.png"
     assert figure_path.exists()
+    assert spectrum_figure_path == (
+        tmp_path / "test_cv_pca_within_cv_spectrum_repeats.png"
+    )
+    assert spectrum_figure_path.exists()

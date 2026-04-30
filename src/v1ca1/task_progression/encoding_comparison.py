@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-"""Compare place, task progression, and generalized task progression encoding.
+"""Compare place, generalized place, task progression, and generalized TP encoding.
 
 This script loads one dataset through shared task-progression utilities in
 `v1ca1.task_progression._session`, where the relevant preprocessing is built,
 including movement intervals, linearized position, and task progression. It
 then rebuilds cross-validated tuning curves on movement-restricted data and
-compares three encoding models for each unit in each run epoch:
+compares four encoding models for each unit in each run epoch:
 
 - concatenated four-trajectory linear position
+- generalized full-W linear position with shared center stem, both side arms
+  present once, and an explicit branch gap between left and right branches
 - combined two-branch task progression
 - generalized one-branch task progression shared across all four trajectories
 
 Held-out log-likelihood is reported for two cases:
 
 - model: the feature-dependent encoding model defined by the training-fold
-  tuning curve, using linear position, directional task progression, or
-  generalized task progression as the feature
+  tuning curve, using trajectory-concatenated linear position, generalized
+  full-W linear position, directional task progression, or generalized task
+  progression as the feature
 - null: a baseline model with one constant firing rate for the unit across the
   evaluation epoch, set from the train-fold mean firing rate
 
@@ -58,6 +61,7 @@ from v1ca1.helper.session import (
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
@@ -66,6 +70,7 @@ from v1ca1.task_progression._session import (
     TRAJECTORY_TYPES,
     build_task_progression_bins,
     build_combined_task_progression_bins,
+    build_generalized_place_bins,
     build_linear_position_bins,
     get_analysis_path,
     get_task_progression_figure_dir,
@@ -492,11 +497,13 @@ def aggregate_tp_cross_trajectory_store(store: dict[Any, dict[str, Any]]) -> Non
 def run_cross_validated_encoding(
     spikes: Any,
     linear_position: Any,
+    generalized_place_position: Any,
     task_progression: Any,
     generalized_task_progression: Any,
     movement_interval: Any,
     trajectory_intervals: dict[str, Any],
     position_bins: np.ndarray,
+    generalized_place_bins: np.ndarray,
     task_progression_bins: np.ndarray,
     generalized_task_progression_bins: np.ndarray,
     n_folds: int,
@@ -504,12 +511,13 @@ def run_cross_validated_encoding(
     sigma_bins: float,
     random_state: int = DEFAULT_RANDOM_STATE,
 ) -> dict[str, dict[Any, dict[str, Any]]]:
-    """Fit and score place, TP, and generalized TP models across CV folds."""
+    """Fit and score place, generalized place, TP, and generalized TP models."""
     import pynapple as nap
 
     unit_ids = list(spikes.keys())
     cv_by_model = {
         "place": initialize_cv_store(unit_ids, n_folds=n_folds),
+        "generalized_place": initialize_cv_store(unit_ids, n_folds=n_folds),
         "tp": initialize_cv_store(unit_ids, n_folds=n_folds),
         "gtp": initialize_cv_store(unit_ids, n_folds=n_folds),
     }
@@ -540,6 +548,17 @@ def run_cross_validated_encoding(
                 pos_dim="linpos",
                 sigma_bins=sigma_bins,
             ),
+            "generalized_place": smooth_pf_along_position_nan_aware(
+                nap.compute_tuning_curves(
+                    data=spikes,
+                    features=generalized_place_position,
+                    bins=[generalized_place_bins],
+                    epochs=train_fold,
+                    feature_names=["generalized_place"],
+                ),
+                pos_dim="generalized_place",
+                sigma_bins=sigma_bins,
+            ),
             "tp": smooth_pf_along_position_nan_aware(
                 nap.compute_tuning_curves(
                     data=spikes,
@@ -565,11 +584,13 @@ def run_cross_validated_encoding(
         }
         feature_by_model = {
             "place": linear_position,
+            "generalized_place": generalized_place_position,
             "tp": task_progression,
             "gtp": generalized_task_progression,
         }
         bins_by_model = {
             "place": np.asarray(position_bins, dtype=float),
+            "generalized_place": np.asarray(generalized_place_bins, dtype=float),
             "tp": np.asarray(task_progression_bins, dtype=float),
             "gtp": np.asarray(generalized_task_progression_bins, dtype=float),
         }
@@ -838,7 +859,7 @@ def cv_epoch_to_df(
     cv_by_model: dict[str, dict[Any, dict[str, Any]]],
 ) -> pd.DataFrame:
     """Convert legacy nested CV results into one unit-indexed summary table."""
-    required_models = ("place", "tp", "gtp")
+    required_models = ("place", "generalized_place", "tp", "gtp")
     missing_models = [model_name for model_name in required_models if model_name not in cv_by_model]
     if missing_models:
         raise ValueError(f"Missing CV results for models: {missing_models!r}")
@@ -881,10 +902,16 @@ def cv_epoch_to_df(
             )
 
         ll_place = float(metrics_by_model["place"].get("ll_model_per_spike_cv", np.nan))
+        ll_generalized_place = float(
+            metrics_by_model["generalized_place"].get("ll_model_per_spike_cv", np.nan)
+        )
         ll_tp = float(metrics_by_model["tp"].get("ll_model_per_spike_cv", np.nan))
         ll_gtp = float(metrics_by_model["gtp"].get("ll_model_per_spike_cv", np.nan))
         ll_null = float(finite_null_values[0]) if finite_null_values.size else np.nan
         info_place = float(metrics_by_model["place"].get("info_bits_per_spike_cv", np.nan))
+        info_generalized_place = float(
+            metrics_by_model["generalized_place"].get("info_bits_per_spike_cv", np.nan)
+        )
         info_tp = float(metrics_by_model["tp"].get("info_bits_per_spike_cv", np.nan))
         info_gtp = float(metrics_by_model["gtp"].get("info_bits_per_spike_cv", np.nan))
         rows.append(
@@ -893,13 +920,20 @@ def cv_epoch_to_df(
                 "n_spikes": int(n_spikes_values[0]),
                 "ll_null": ll_null,
                 "ll_place": ll_place,
+                "ll_generalized_place": ll_generalized_place,
                 "ll_tp": ll_tp,
                 "ll_gtp": ll_gtp,
                 "info_bits_place": info_place,
+                "info_bits_generalized_place": info_generalized_place,
                 "info_bits_tp": info_tp,
                 "info_bits_gtp": info_gtp,
                 "delta_bits_place_vs_tp": (ll_place - ll_tp) / np.log(2.0)
                 if np.isfinite(ll_place) and np.isfinite(ll_tp)
+                else np.nan,
+                "delta_bits_generalized_place_vs_tp": (
+                    ll_generalized_place - ll_tp
+                ) / np.log(2.0)
+                if np.isfinite(ll_generalized_place) and np.isfinite(ll_tp)
                 else np.nan,
                 "delta_bits_gtp_vs_tp": (ll_gtp - ll_tp) / np.log(2.0)
                 if np.isfinite(ll_gtp) and np.isfinite(ll_tp)
@@ -912,12 +946,15 @@ def cv_epoch_to_df(
                 "n_spikes",
                 "ll_null",
                 "ll_place",
+                "ll_generalized_place",
                 "ll_tp",
                 "ll_gtp",
                 "info_bits_place",
+                "info_bits_generalized_place",
                 "info_bits_tp",
                 "info_bits_gtp",
                 "delta_bits_place_vs_tp",
+                "delta_bits_generalized_place_vs_tp",
                 "delta_bits_gtp_vs_tp",
             ],
             index=pd.Index([], name="unit"),
@@ -953,6 +990,10 @@ def build_comparison_table(
     comparison.insert(0, "light_epoch", light_epoch)
     comparison["delta_bits_change_place_vs_tp"] = (
         comparison["dark_delta_bits_place_vs_tp"] - comparison["light_delta_bits_place_vs_tp"]
+    )
+    comparison["delta_bits_change_generalized_place_vs_tp"] = (
+        comparison["dark_delta_bits_generalized_place_vs_tp"]
+        - comparison["light_delta_bits_generalized_place_vs_tp"]
     )
     comparison["delta_bits_change_gtp_vs_tp"] = (
         comparison["dark_delta_bits_gtp_vs_tp"] - comparison["light_delta_bits_gtp_vs_tp"]
@@ -1019,6 +1060,27 @@ def _build_zero_including_histogram_edges(
     return edges
 
 
+def _format_delta_histogram_stats(values: np.ndarray) -> str:
+    """Return summary text for one model-difference histogram."""
+    valid = np.asarray(values, dtype=float)
+    valid = valid[np.isfinite(valid)]
+    if valid.size == 0:
+        return "No valid units"
+
+    fraction_below_zero = float(np.mean(valid < 0.0))
+    mean_value = float(np.mean(valid))
+    median_value = float(np.median(valid))
+    if np.isclose(mean_value, 0.0, atol=5e-13, rtol=0.0):
+        mean_value = 0.0
+    if np.isclose(median_value, 0.0, atol=5e-13, rtol=0.0):
+        median_value = 0.0
+    return (
+        f"Frac < 0: {fraction_below_zero:.2f}\n"
+        f"Mean: {mean_value:.3f}\n"
+        f"Median: {median_value:.3f}"
+    )
+
+
 def plot_epoch_delta_histogram(
     df: pd.DataFrame,
     epoch: str,
@@ -1049,11 +1111,26 @@ def plot_epoch_delta_histogram(
     if values.size == 0:
         axis.text(0.5, 0.5, "No valid units", ha="center", va="center")
     else:
-        axis.hist(values, bins=bin_edges, color="0.45", edgecolor="white")
+        weights = np.full(values.shape, 1.0 / values.size, dtype=float)
+        axis.hist(values, bins=bin_edges, weights=weights, color="0.45", edgecolor="white")
+        axis.text(
+            0.98,
+            0.95,
+            _format_delta_histogram_stats(values),
+            ha="right",
+            va="top",
+            transform=axis.transAxes,
+            bbox={
+                "boxstyle": "round,pad=0.3",
+                "facecolor": "white",
+                "edgecolor": "0.6",
+                "alpha": 0.9,
+            },
+        )
     axis.axvline(0.0, color="k", linestyle="--", linewidth=1)
     axis.set_title(f"{epoch} (n={values.size})")
     axis.set_xlabel(x_label)
-    axis.set_ylabel("Unit count")
+    axis.set_ylabel("Fraction of units")
 
     figure.suptitle(f"{region.upper()} {figure_title}")
     figure.tight_layout()
@@ -1297,8 +1374,8 @@ def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the encoding comparison workflow."""
     parser = argparse.ArgumentParser(
         description=(
-            "Compare place, task progression, and generalized task progression "
-            "encoding with cross-validated Poisson likelihood"
+            "Compare place, generalized place, task progression, and generalized "
+            "task progression encoding with cross-validated Poisson likelihood"
         )
     )
     parser.add_argument("--animal-name", required=True, help="Animal name")
@@ -1330,6 +1407,16 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Speed threshold in cm/s used to define movement intervals. "
             f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+        ),
+    )
+    parser.add_argument(
+        "--generalized-place-branch-gap-cm",
+        type=float,
+        default=DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
+        help=(
+            "Gap inserted between left and right branches in the generalized full-W "
+            "linear-position coordinate. The center stem is shared and both side arms "
+            f"are present once. Default: {DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM}"
         ),
     )
     parser.add_argument(
@@ -1371,6 +1458,9 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     """Run the cross-validated encoding comparison workflow for one session."""
     args = parse_arguments()
+    if args.generalized_place_branch_gap_cm < 0:
+        raise ValueError("--generalized-place-branch-gap-cm must be non-negative.")
+
     selected_regions = tuple(args.regions)
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     run_epochs = require_npz_session_sources(analysis_path)
@@ -1391,6 +1481,8 @@ def main() -> None:
         position_source="clean_dlc_head",
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
+        include_generalized_place=True,
+        generalized_place_branch_gap_cm=args.generalized_place_branch_gap_cm,
     )
     data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
@@ -1402,6 +1494,10 @@ def main() -> None:
         n_folds=args.n_folds,
     )
     position_bins = build_linear_position_bins(args.animal_name)
+    generalized_place_bins = build_generalized_place_bins(
+        args.animal_name,
+        branch_gap_cm=args.generalized_place_branch_gap_cm,
+    )
     task_progression_bins = build_combined_task_progression_bins(args.animal_name)
     single_trajectory_task_progression_bins = build_task_progression_bins(args.animal_name)
 
@@ -1420,11 +1516,13 @@ def main() -> None:
             cv_by_model = run_cross_validated_encoding(
                 spikes=session["spikes_by_region"][region],
                 linear_position=session["linear_position_by_run"][epoch],
+                generalized_place_position=session["generalized_place_position_by_run"][epoch],
                 task_progression=session["task_progression_by_run"][epoch],
                 generalized_task_progression=session["generalized_task_progression_by_run"][epoch],
                 movement_interval=session["movement_by_run"][epoch],
                 trajectory_intervals=session["trajectory_intervals"][epoch],
                 position_bins=position_bins,
+                generalized_place_bins=generalized_place_bins,
                 task_progression_bins=task_progression_bins,
                 generalized_task_progression_bins=single_trajectory_task_progression_bins,
                 n_folds=args.n_folds,
@@ -1488,6 +1586,19 @@ def main() -> None:
             )
             saved_figures.append(histogram_path)
 
+            histogram_path = fig_dir / f"{region}_{epoch}_cv_generalized_place_vs_tp_histogram.png"
+            plot_epoch_delta_histogram(
+                summary_tables[region][epoch],
+                epoch,
+                region=region,
+                save_path=histogram_path,
+                ll_columns=("ll_generalized_place", "ll_tp"),
+                delta_column="delta_bits_generalized_place_vs_tp",
+                figure_title="generalized place - TP histogram",
+                x_label="generalized place - TP (bits/spike)",
+            )
+            saved_figures.append(histogram_path)
+
             histogram_path = fig_dir / f"{region}_{epoch}_cv_gtp_vs_tp_histogram.png"
             plot_epoch_delta_histogram(
                 summary_tables[region][epoch],
@@ -1523,6 +1634,10 @@ def main() -> None:
             summary_tables[region][dark_epoch],
             ll_columns=("ll_place", "ll_tp"),
         )
+        filtered_dark_generalized_place_tp = filter_epoch_df(
+            summary_tables[region][dark_epoch],
+            ll_columns=("ll_generalized_place", "ll_tp"),
+        )
         filtered_dark_gtp_tp = filter_epoch_df(
             summary_tables[region][dark_epoch],
             ll_columns=("ll_gtp", "ll_tp"),
@@ -1547,6 +1662,30 @@ def main() -> None:
                 delta_column="delta_bits_place_vs_tp",
                 comparison_label="LL_place vs LL_TP",
                 fraction_title="Fraction of units favoring place",
+            )
+            saved_figures.append(figure_path)
+
+            filtered_light_generalized_place_tp = filter_epoch_df(
+                summary_tables[region][light_epoch],
+                ll_columns=("ll_generalized_place", "ll_tp"),
+            )
+            figure_path = (
+                fig_dir / f"{region}_{light_epoch}_vs_{dark_epoch}_cv_generalized_place_vs_tp.png"
+            )
+            plot_cv_light_dark_comparison(
+                filtered_light_generalized_place_tp,
+                filtered_dark_generalized_place_tp,
+                light_epoch=light_epoch,
+                dark_epoch=dark_epoch,
+                region=region,
+                save_path=figure_path,
+                x_ll_column="ll_tp",
+                y_ll_column="ll_generalized_place",
+                x_label="LL_TP (per spike)",
+                y_label="LL_generalized place (per spike)",
+                delta_column="delta_bits_generalized_place_vs_tp",
+                comparison_label="LL_generalized place vs LL_TP",
+                fraction_title="Fraction of units favoring generalized place",
             )
             saved_figures.append(figure_path)
 
@@ -1585,6 +1724,7 @@ def main() -> None:
             "selected_run_epochs": selected_run_epochs,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
+            "generalized_place_branch_gap_cm": args.generalized_place_branch_gap_cm,
             "n_folds": args.n_folds,
             "bin_size_s": args.bin_size_s,
             "sigma_bins": args.sigma_bins,

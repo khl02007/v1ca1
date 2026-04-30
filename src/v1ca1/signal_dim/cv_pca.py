@@ -1483,6 +1483,69 @@ def build_normalized_capture_summary_table(dataset: Any, *, settings: dict[str, 
     return pd.DataFrame(rows)
 
 
+def build_within_cv_spectrum_table(
+    dataset: Any,
+    *,
+    repeat_index: int | None = None,
+    random_seed: int | None = None,
+) -> Any:
+    """Build a parquet-ready table of within-condition cvPCA spectra."""
+    import pandas as pd
+
+    rows: list[dict[str, Any]] = []
+    components = np.asarray(dataset.coords["component"].values, dtype=int)
+    for condition in CONDITIONS:
+        spectrum_signed = np.asarray(
+            dataset["within_cv_spectrum_signed"]
+            .sel(within_condition=condition)
+            .values,
+            dtype=float,
+        )
+        spectrum_positive = np.asarray(
+            dataset["within_cv_spectrum_positive"]
+            .sel(within_condition=condition)
+            .values,
+            dtype=float,
+        )
+        cumulative = np.asarray(
+            dataset["within_cv_cumulative_shared_variance"]
+            .sel(within_condition=condition)
+            .values,
+            dtype=float,
+        )
+        for component, signed, positive, cumulative_value in zip(
+            components,
+            spectrum_signed,
+            spectrum_positive,
+            cumulative,
+            strict=True,
+        ):
+            row = {
+                "animal_name": dataset.attrs["animal_name"],
+                "date": dataset.attrs["date"],
+                "region": dataset.attrs["region"],
+                "dark_epoch": dataset.attrs["dark_epoch"],
+                "light_epoch": dataset.attrs["light_epoch"],
+                "unit_filter_mode": dataset.attrs["unit_filter_mode"],
+                "normalization": dataset.attrs["normalization"],
+                "condition": condition,
+                "component": int(component),
+                "within_cv_spectrum_signed": float(signed),
+                "within_cv_spectrum_positive": float(positive),
+                "within_cv_cumulative_shared_variance": float(cumulative_value),
+                "n_units": int(dataset.attrs["n_units"]),
+                "bin_size_cm": float(dataset.attrs["bin_size_cm"]),
+                "n_groups": int(dataset.attrs["n_groups"]),
+                "min_occupancy_s": float(dataset.attrs["min_occupancy_s"]),
+            }
+            if repeat_index is not None:
+                row["repeat_index"] = int(repeat_index)
+            if random_seed is not None:
+                row["random_seed"] = int(random_seed)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _plot_residual_power_by_trajectory(
     dataset: Any,
     *,
@@ -1997,6 +2060,99 @@ def plot_repeat_dimensionality_summary(
     return repeat_path
 
 
+def _repeat_condition_label(table: Any, condition: str) -> str:
+    """Return a condition label from a repeat summary table."""
+    epoch_column = "dark_epoch" if condition == "dark" else "light_epoch"
+    if epoch_column not in table:
+        return condition
+    epochs = table[epoch_column].dropna()
+    if epochs.empty:
+        return condition
+    return f"{condition} ({epochs.iloc[0]})"
+
+
+def plot_repeat_spectrum_summary(
+    repeat_spectrum_table: Any,
+    *,
+    fig_dir: Path,
+    stem: str,
+) -> Path | None:
+    """Save mean within-condition cvPCA spectra across random lap groupings."""
+    if repeat_spectrum_table is None or repeat_spectrum_table.empty:
+        return None
+    if "repeat_index" not in repeat_spectrum_table:
+        return None
+    if int(repeat_spectrum_table["repeat_index"].nunique()) < 2:
+        return None
+
+    import matplotlib.pyplot as plt
+
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(figsize=(10, 4), ncols=2)
+    colors = {"dark": "0.35", "light": "0.70"}
+    plot_specs = (
+        (
+            "within_cv_spectrum_positive",
+            "Shared variance",
+            "Within-condition cvPCA",
+        ),
+        (
+            "within_cv_cumulative_shared_variance",
+            "Cumulative shared variance",
+            "Cumulative spectrum",
+        ),
+    )
+    for condition in CONDITIONS:
+        condition_table = repeat_spectrum_table.loc[
+            repeat_spectrum_table["condition"] == condition
+        ]
+        if condition_table.empty:
+            continue
+        components = np.asarray(sorted(condition_table["component"].unique()), dtype=int)
+        grouped = condition_table.groupby("component")
+        label = _repeat_condition_label(condition_table, condition)
+        color = colors[condition]
+        for axis, (column, ylabel, title) in zip(axes, plot_specs, strict=True):
+            means = grouped[column].mean().reindex(components).to_numpy(dtype=float)
+            sds = (
+                grouped[column]
+                .std(ddof=1)
+                .reindex(components)
+                .fillna(0.0)
+                .to_numpy(dtype=float)
+            )
+            lower = means - sds
+            upper = means + sds
+            if column == "within_cv_spectrum_positive":
+                lower = np.maximum(lower, 0.0)
+            else:
+                lower = np.clip(lower, 0.0, 1.0)
+                upper = np.clip(upper, 0.0, 1.0)
+            axis.plot(components, means, marker="o", color=color, label=label)
+            axis.fill_between(
+                components,
+                lower,
+                upper,
+                color=color,
+                alpha=0.18,
+                linewidth=0.0,
+            )
+            axis.set_xlabel("PC")
+            axis.set_ylabel(ylabel)
+            axis.set_title(title)
+            axis.grid(True, alpha=0.25)
+
+    axes[1].set_ylim(0.0, 1.05)
+    for axis in axes:
+        axis.legend()
+    fig.suptitle("Within-condition cvPCA spectra across random lap groupings")
+    spectrum_path = fig_dir / f"{stem}_within_cv_spectrum_repeats.png"
+    fig.tight_layout()
+    fig.savefig(spectrum_path, dpi=300)
+    plt.close(fig)
+    return spectrum_path
+
+
 def _region_threshold(region: str, args: argparse.Namespace) -> float:
     """Return the configured movement firing-rate threshold for one region."""
     if region == "v1":
@@ -2113,7 +2269,7 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_N_RANDOM_REPEATS,
         help=(
             "Number of random lap groupings to run. Values greater than 1 save "
-            "seed-specific outputs plus a repeat summary and PR error-bar figure. "
+            "seed-specific outputs plus repeat summary and spectrum figures. "
             f"Default: {DEFAULT_N_RANDOM_REPEATS}"
         ),
     )
@@ -2213,6 +2369,7 @@ def main() -> None:
         for light_epoch in light_epochs:
             stem = _output_stem(region, light_epoch, dark_epoch)
             repeat_tables: list[Any] = []
+            repeat_spectrum_tables: list[Any] = []
             residualized_repeat_tables: list[Any] = []
             normalized_capture_repeat_tables: list[Any] = []
             for repeat_index in range(args.n_random_repeats):
@@ -2303,6 +2460,13 @@ def main() -> None:
                     summary_table.insert(0, "repeat_index", repeat_index)
                     summary_table.insert(1, "random_seed", random_seed)
                     repeat_tables.append(summary_table)
+                    repeat_spectrum_tables.append(
+                        build_within_cv_spectrum_table(
+                            dataset,
+                            repeat_index=repeat_index,
+                            random_seed=random_seed,
+                        )
+                    )
                 table_path = output_dir / f"{output_stem}_summary.parquet"
                 summary_table.to_parquet(table_path, index=False)
                 saved_tables.append(table_path)
@@ -2358,6 +2522,20 @@ def main() -> None:
                 repeat_table_path = output_dir / f"{stem}_random_repeats_summary.parquet"
                 repeat_table.to_parquet(repeat_table_path, index=False)
                 saved_tables.append(repeat_table_path)
+                repeat_spectrum_table = (
+                    pd.concat(repeat_spectrum_tables, ignore_index=True)
+                    if repeat_spectrum_tables
+                    else None
+                )
+                if repeat_spectrum_table is not None:
+                    repeat_spectrum_table_path = (
+                        output_dir / f"{stem}_within_cv_spectrum_random_repeats.parquet"
+                    )
+                    repeat_spectrum_table.to_parquet(
+                        repeat_spectrum_table_path,
+                        index=False,
+                    )
+                    saved_tables.append(repeat_spectrum_table_path)
                 residualized_repeat_table = (
                     pd.concat(residualized_repeat_tables, ignore_index=True)
                     if residualized_repeat_tables
@@ -2397,6 +2575,13 @@ def main() -> None:
                     )
                     if repeat_figure is not None:
                         saved_figures.append(repeat_figure)
+                    spectrum_figure = plot_repeat_spectrum_summary(
+                        repeat_spectrum_table,
+                        fig_dir=fig_dir,
+                        stem=stem,
+                    )
+                    if spectrum_figure is not None:
+                        saved_figures.append(spectrum_figure)
 
     log_path = write_run_log(
         analysis_path=analysis_path,
