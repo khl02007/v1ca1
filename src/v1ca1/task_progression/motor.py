@@ -11,27 +11,34 @@ using head coordinates for task progression and body coordinates for
 head-direction motor covariates. Trajectory intervals are loaded from
 `trajectory_times.parquet`.
 
-For each selected region and run epoch, the script compares five Poisson GLMs:
+For each selected region and run epoch, the script compares nine Poisson GLMs:
 
 - strict motor only
 - motor + TP group offset + trajectory-grouped task progression
 - TP group offset + trajectory-grouped task progression
 - motor + trajectory offset + trajectory-specific place
 - trajectory offset + trajectory-specific place
+- motor + generalized full-W place
+- generalized full-W place only
+- motor + generalized task progression
+- generalized task progression only
 
 Motor covariates can be represented either as instantaneous z-scored values or
 as spline-expanded features, including head angular acceleration on the binned
 time axis. Task progression uses one tuning curve per same-turn trajectory pair,
-whereas place uses one tuning curve per trajectory type. The primary scientific
-scores are pooled unit-level held-out lap-CV deltas for motor+TP vs motor and
-motor+place vs motor. Ridge is selected separately per model by inner lap-CV on
-the outer-train laps, and the full-data refit is saved for visualization rather
-than final inference.
+place uses one tuning curve per trajectory type, generalized place uses one
+full-W tuning curve, and generalized task progression uses one normalized
+within-trajectory tuning curve shared across all trajectories. The generalized
+models have no trajectory identity or trajectory-group offset. The primary
+scientific scores are pooled unit-level held-out lap-CV deltas for motor+TP vs
+motor, motor+place vs motor, motor+generalized-place vs motor, and
+motor+generalized-TP vs motor. Ridge and spatial bin size are selected
+separately per model by inner lap-CV on the outer-train laps, and the full-data
+refit is saved for visualization rather than final inference.
 """
 
 import argparse
 import json
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
@@ -43,7 +50,6 @@ from v1ca1.helper.cuda import (
 _CUDA_VISIBLE_DEVICES_CLI = pop_cuda_visible_devices_argument()
 configure_cuda_visible_devices(_CUDA_VISIBLE_DEVICES_CLI)
 
-import jax.numpy as jnp
 import numpy as np
 import position_tools as pt
 from nemos.basis import BSplineEval
@@ -58,8 +64,10 @@ from v1ca1.helper.session import (
     load_epoch_tags,
 )
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.wtrack import get_wtrack_full_graph, get_wtrack_total_length
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_SIGMA_S,
     DEFAULT_SPEED_THRESHOLD_CM_S,
@@ -78,6 +86,7 @@ if TYPE_CHECKING:
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
 DEFAULT_RIDGES = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6)
+DEFAULT_SPATIAL_BIN_SIZES_CM = (2.0, 4.0, 8.0)
 DEFAULT_INNER_N_FOLDS = 3
 HYPERPARAMETER_TIE_ATOL = 1e-6
 TP_GROUPS: tuple[tuple[str, tuple[str, str]], ...] = (
@@ -90,6 +99,13 @@ MODEL_NAMES = (
     "tp_only",
     "motor_place",
     "place_only",
+    "motor_generalized_place",
+    "generalized_place_only",
+    "motor_generalized_task_progression",
+    "generalized_task_progression_only",
+)
+POSITION_BASIS_MODEL_NAMES = tuple(
+    model_name for model_name in MODEL_NAMES if model_name != "motor"
 )
 MODEL_DEFINITIONS = {
     "motor": "strict motor covariates only",
@@ -97,14 +113,30 @@ MODEL_DEFINITIONS = {
     "tp_only": "TP group offset plus TP group-specific spline fields",
     "motor_place": "motor covariates plus trajectory offset and trajectory-specific place fields",
     "place_only": "trajectory offset plus trajectory-specific place fields",
+    "motor_generalized_place": "motor covariates plus one generalized full-W place spline field",
+    "generalized_place_only": "one generalized full-W place spline field",
+    "motor_generalized_task_progression": "motor covariates plus one generalized task-progression spline field",
+    "generalized_task_progression_only": "one generalized task-progression spline field",
 }
 PRIMARY_DELTA_METRIC_NAMES = (
     "dll_motor_tp_vs_motor_bits_per_spike",
     "dll_motor_place_vs_motor_bits_per_spike",
+    "dll_motor_generalized_place_vs_motor_bits_per_spike",
+    "dll_motor_generalized_task_progression_vs_motor_bits_per_spike",
 )
 DELTA_SPECS = (
     ("dll_motor_tp_vs_motor_bits_per_spike", "motor_tp", "motor"),
     ("dll_motor_place_vs_motor_bits_per_spike", "motor_place", "motor"),
+    (
+        "dll_motor_generalized_place_vs_motor_bits_per_spike",
+        "motor_generalized_place",
+        "motor",
+    ),
+    (
+        "dll_motor_generalized_task_progression_vs_motor_bits_per_spike",
+        "motor_generalized_task_progression",
+        "motor",
+    ),
     ("dll_tp_only_vs_motor_bits_per_spike", "tp_only", "motor"),
     ("dll_place_only_vs_motor_bits_per_spike", "place_only", "motor"),
     ("dll_motor_tp_vs_tp_only_bits_per_spike", "motor_tp", "tp_only"),
@@ -119,7 +151,13 @@ CV_METRIC_NAMES = (
     "ll_tp_only_bits_per_spike",
     "ll_motor_place_bits_per_spike",
     "ll_place_only_bits_per_spike",
+    "ll_motor_generalized_place_bits_per_spike",
+    "ll_generalized_place_only_bits_per_spike",
+    "ll_motor_generalized_task_progression_bits_per_spike",
+    "ll_generalized_task_progression_only_bits_per_spike",
     "dll_motor_tp_vs_motor_bits_per_spike",
+    "dll_motor_generalized_place_vs_motor_bits_per_spike",
+    "dll_motor_generalized_task_progression_vs_motor_bits_per_spike",
     "dll_tp_only_vs_motor_bits_per_spike",
     "dll_motor_tp_vs_tp_only_bits_per_spike",
     "dll_motor_place_vs_motor_bits_per_spike",
@@ -407,8 +445,27 @@ def build_cv_metric_dict(
         "ll_tp_only_bits_per_spike": ll_bits_per_model["tp_only"],
         "ll_motor_place_bits_per_spike": ll_bits_per_model["motor_place"],
         "ll_place_only_bits_per_spike": ll_bits_per_model["place_only"],
+        "ll_motor_generalized_place_bits_per_spike": ll_bits_per_model[
+            "motor_generalized_place"
+        ],
+        "ll_generalized_place_only_bits_per_spike": ll_bits_per_model[
+            "generalized_place_only"
+        ],
+        "ll_motor_generalized_task_progression_bits_per_spike": ll_bits_per_model[
+            "motor_generalized_task_progression"
+        ],
+        "ll_generalized_task_progression_only_bits_per_spike": ll_bits_per_model[
+            "generalized_task_progression_only"
+        ],
         "dll_motor_tp_vs_motor_bits_per_spike": (
             ll_bits_per_model["motor_tp"] - ll_bits_per_model["motor"]
+        ),
+        "dll_motor_generalized_place_vs_motor_bits_per_spike": (
+            ll_bits_per_model["motor_generalized_place"] - ll_bits_per_model["motor"]
+        ),
+        "dll_motor_generalized_task_progression_vs_motor_bits_per_spike": (
+            ll_bits_per_model["motor_generalized_task_progression"]
+            - ll_bits_per_model["motor"]
         ),
         "dll_tp_only_vs_motor_bits_per_spike": (
             ll_bits_per_model["tp_only"] - ll_bits_per_model["motor"]
@@ -541,6 +598,118 @@ def build_histogram_bin_edges(values: np.ndarray) -> np.ndarray:
     if not np.any(np.isclose(bin_edges, 0.0)):
         bin_edges = np.sort(np.unique(np.concatenate([bin_edges, np.array([0.0])])))
     return np.asarray(bin_edges, dtype=float)
+
+
+def compute_ordered_graph_length(
+    track_graph: Any,
+    edge_order: Sequence[tuple[int, int]],
+    edge_spacing: Sequence[float],
+) -> float:
+    """Return linearized graph length including gaps between ordered edges."""
+    if len(edge_spacing) not in {0, len(edge_order) - 1}:
+        raise ValueError(
+            "edge_spacing must be empty or have one fewer entry than edge_order. "
+            f"Got {len(edge_spacing)} spacings for {len(edge_order)} edges."
+        )
+
+    total_length = 0.0
+    for node_a, node_b in edge_order:
+        node_a_position = np.asarray(track_graph.nodes[node_a]["pos"], dtype=float)
+        node_b_position = np.asarray(track_graph.nodes[node_b]["pos"], dtype=float)
+        total_length += float(np.linalg.norm(node_b_position - node_a_position))
+    total_length += float(np.sum(np.asarray(edge_spacing, dtype=float)))
+    return total_length
+
+
+def get_generalized_place_length_cm(
+    animal_name: str,
+    *,
+    branch_gap_cm: float,
+) -> float:
+    """Return the full-W generalized-place linearized length in centimeters."""
+    track_graph, edge_order, edge_spacing = get_wtrack_full_graph(
+        animal_name,
+        branch_gap_cm=float(branch_gap_cm),
+    )
+    return compute_ordered_graph_length(track_graph, edge_order, edge_spacing)
+
+
+def n_splines_from_spatial_bin_size(
+    length_cm: float,
+    spatial_bin_size_cm: float,
+    *,
+    spline_order: int,
+) -> int:
+    """Return a positive spline count from a spatial bin size."""
+    if not np.isfinite(length_cm) or length_cm <= 0.0:
+        raise ValueError(f"Track length must be positive and finite. Got {length_cm!r}.")
+    if not np.isfinite(spatial_bin_size_cm) or spatial_bin_size_cm <= 0.0:
+        raise ValueError(
+            "Spatial bin size must be positive and finite. "
+            f"Got {spatial_bin_size_cm!r}."
+        )
+    return max(
+        int(spline_order),
+        int(np.ceil(float(length_cm) / float(spatial_bin_size_cm))),
+    )
+
+
+def build_position_basis_config(
+    *,
+    animal_name: str,
+    spatial_bin_size_cm: float,
+    spline_order: int,
+    generalized_place_branch_gap_cm: float,
+) -> dict[str, Any]:
+    """Build one spatial-bin-derived basis configuration."""
+    trajectory_length_cm = float(get_wtrack_total_length(animal_name))
+    generalized_place_length_cm = get_generalized_place_length_cm(
+        animal_name,
+        branch_gap_cm=generalized_place_branch_gap_cm,
+    )
+    trajectory_n_splines = n_splines_from_spatial_bin_size(
+        trajectory_length_cm,
+        spatial_bin_size_cm,
+        spline_order=spline_order,
+    )
+    generalized_place_n_splines = n_splines_from_spatial_bin_size(
+        generalized_place_length_cm,
+        spatial_bin_size_cm,
+        spline_order=spline_order,
+    )
+    return {
+        "spatial_bin_size_cm": float(spatial_bin_size_cm),
+        "spline_order": int(spline_order),
+        "trajectory_length_cm": trajectory_length_cm,
+        "generalized_place_length_cm": generalized_place_length_cm,
+        "trajectory_n_splines": trajectory_n_splines,
+        "generalized_place_n_splines": generalized_place_n_splines,
+        "trajectory_bounds": (0.0, 1.0),
+        "generalized_place_bounds": (0.0, generalized_place_length_cm),
+        "generalized_place_branch_gap_cm": float(generalized_place_branch_gap_cm),
+    }
+
+
+def build_position_basis_configs(
+    *,
+    animal_name: str,
+    spatial_bin_sizes_cm: Sequence[float],
+    spline_order: int,
+    generalized_place_branch_gap_cm: float,
+) -> list[dict[str, Any]]:
+    """Build ordered basis configs for one spatial-bin-size grid."""
+    spatial_bin_sizes = [float(value) for value in dict.fromkeys(spatial_bin_sizes_cm)]
+    if not spatial_bin_sizes:
+        raise ValueError("At least one spatial bin size is required.")
+    return [
+        build_position_basis_config(
+            animal_name=animal_name,
+            spatial_bin_size_cm=spatial_bin_size_cm,
+            spline_order=spline_order,
+            generalized_place_branch_gap_cm=generalized_place_branch_gap_cm,
+        )
+        for spatial_bin_size_cm in spatial_bin_sizes
+    ]
 
 
 def build_fit_dataset(
@@ -906,10 +1075,25 @@ def _format_ridge_grid_token(ridge_values: Sequence[float]) -> str:
     )
 
 
+def _format_spatial_bin_grid_token(spatial_bin_sizes_cm: Sequence[float]) -> str:
+    """Return a compact path token for one spatial-bin-size grid."""
+    values = [float(value) for value in spatial_bin_sizes_cm]
+    if not values:
+        raise ValueError("At least one spatial bin size is required.")
+    if len(values) == 1:
+        return f"spbin{_format_float_token(values[0])}cm"
+    return (
+        f"spbin{_format_float_token(values[0])}-"
+        f"{_format_float_token(values[-1])}cmn{len(values)}"
+    )
+
+
 def build_config_token(
     *,
     bin_size_s: float,
-    tp_spline_k: int,
+    spatial_bin_sizes_cm: Sequence[float],
+    tp_spline_order: int,
+    generalized_place_branch_gap_cm: float,
     motor_feature_mode: str,
     n_folds: int,
     inner_n_folds: int,
@@ -918,7 +1102,9 @@ def build_config_token(
     """Return the filename token for one nested-lap-CV configuration."""
     return (
         f"bin{_format_float_token(bin_size_s)}s_"
-        f"tp{int(tp_spline_k)}_"
+        f"{_format_spatial_bin_grid_token(spatial_bin_sizes_cm)}_"
+        f"order{int(tp_spline_order)}_"
+        f"gpgap{_format_float_token(generalized_place_branch_gap_cm)}cm_"
         f"{motor_feature_mode}_"
         f"outer{int(n_folds)}_"
         f"inner{int(inner_n_folds)}_"
@@ -1113,6 +1299,8 @@ def prepare_motor_epoch_data(
     spikes: Any,
     position_tsd: Any,
     body_position_tsd: Any,
+    generalized_place_position: Any,
+    generalized_task_progression: Any,
     trajectory_intervals: dict[str, Any],
     task_progression_by_trajectory: dict[str, Any],
     movement_interval: Any,
@@ -1197,12 +1385,57 @@ def prepare_motor_epoch_data(
         task_progression[trajectory_mask] = interpolated_tp
     task_progression = np.clip(task_progression, tp_lower, tp_upper)
 
+    generalized_place = np.full(n_time_bins, np.nan, dtype=float)
+    interpolated_generalized_place = generalized_place_position.interpolate(spike_counts)
+    interpolated_generalized_place = np.asarray(
+        interpolated_generalized_place.to_numpy(),
+        dtype=float,
+    ).reshape(-1)
+    if interpolated_generalized_place.size == n_time_bins:
+        generalized_place[:] = interpolated_generalized_place
+    elif interpolated_generalized_place.size == int(in_movement.sum()):
+        generalized_place[in_movement] = interpolated_generalized_place
+    else:
+        raise RuntimeError(
+            "Interpolated generalized-place position size did not match either all "
+            "time bins or movement time bins. "
+            f"Got {interpolated_generalized_place.size}, expected {n_time_bins} "
+            f"or {int(in_movement.sum())}."
+        )
+
+    generalized_tp = np.full(n_time_bins, np.nan, dtype=float)
+    interpolated_generalized_tp = generalized_task_progression.interpolate(spike_counts)
+    interpolated_generalized_tp = np.asarray(
+        interpolated_generalized_tp.to_numpy(),
+        dtype=float,
+    ).reshape(-1)
+    if interpolated_generalized_tp.size == n_time_bins:
+        generalized_tp[:] = interpolated_generalized_tp
+    elif interpolated_generalized_tp.size == int(in_movement.sum()):
+        generalized_tp[in_movement] = interpolated_generalized_tp
+    else:
+        raise RuntimeError(
+            "Interpolated generalized task progression size did not match either all "
+            "time bins or movement time bins. "
+            f"Got {interpolated_generalized_tp.size}, expected {n_time_bins} "
+            f"or {int(in_movement.sum())}."
+        )
+    generalized_tp = np.clip(generalized_tp, tp_lower, tp_upper)
+
     finite_covariates = np.ones(n_time_bins, dtype=bool)
     for values in motor_covariates.values():
         finite_covariates &= np.isfinite(values)
-    base_keep_mask &= finite_covariates & np.isfinite(task_progression)
+    base_keep_mask &= (
+        finite_covariates
+        & np.isfinite(task_progression)
+        & np.isfinite(generalized_place)
+        & np.isfinite(generalized_tp)
+    )
     if not np.any(base_keep_mask):
-        raise ValueError("No bins remain after dropping non-finite motor or TP samples.")
+        raise ValueError(
+            "No bins remain after dropping non-finite motor, TP, generalized-place, "
+            "or generalized-TP samples."
+        )
 
     return {
         "spike_counts": spike_counts,
@@ -1213,6 +1446,8 @@ def prepare_motor_epoch_data(
         "base_keep_mask": base_keep_mask,
         "trajectory_labels": trajectory_labels,
         "task_progression": task_progression,
+        "generalized_place": generalized_place,
+        "generalized_task_progression": generalized_tp,
         "motor_covariates": motor_covariates,
         "bin_size_s": float(bin_size_s),
         "tp_bounds": (tp_lower, tp_upper),
@@ -1357,15 +1592,22 @@ def build_model_designs(
     rows: np.ndarray,
     motor_transform: dict[str, Any],
     *,
-    tp_spline_k: int,
-    tp_spline_order: int,
+    position_basis: dict[str, Any],
 ) -> dict[str, Any]:
     """Build all model design matrices for selected rows."""
     rows = np.asarray(rows, dtype=bool)
     motor_design = apply_motor_feature_transform(data, rows, motor_transform)
     trajectory_labels = np.asarray(data["trajectory_labels"][rows], dtype=int)
     task_progression = np.asarray(data["task_progression"][rows], dtype=float)
+    generalized_place = np.asarray(data["generalized_place"][rows], dtype=float)
+    generalized_task_progression = np.asarray(
+        data["generalized_task_progression"][rows],
+        dtype=float,
+    )
     group_labels = _trajectory_group_labels(trajectory_labels)
+    spline_order = int(position_basis["spline_order"])
+    trajectory_n_splines = int(position_basis["trajectory_n_splines"])
+    generalized_place_n_splines = int(position_basis["generalized_place_n_splines"])
 
     tp_group_design = (group_labels == 1).astype(float)[:, None]
     tp_group_feature_names = [f"is_{TP_GROUPS[1][0]}"]
@@ -1373,17 +1615,22 @@ def build_model_designs(
     place_trajectory_blocks: list[np.ndarray] = []
     place_trajectory_feature_names: list[str] = []
     for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES[1:], start=1):
-        place_trajectory_blocks.append((trajectory_labels == trajectory_index).astype(float)[:, None])
+        place_trajectory_blocks.append(
+            (trajectory_labels == trajectory_index).astype(float)[:, None]
+        )
         place_trajectory_feature_names.append(f"is_{trajectory_type}")
     place_trajectory_design = np.concatenate(place_trajectory_blocks, axis=1)
 
-    tp_lower, tp_upper = data["tp_bounds"]
+    tp_lower, tp_upper = map(float, position_basis["trajectory_bounds"])
     tp_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
+        n_basis_funcs=trajectory_n_splines,
+        order=spline_order,
         bounds=(float(tp_lower), float(tp_upper)),
     )
-    tp_basis_features = np.asarray(tp_basis.compute_features(task_progression), dtype=float)
+    tp_basis_features = np.asarray(
+        tp_basis.compute_features(task_progression),
+        dtype=float,
+    )
     if not np.all(np.isfinite(tp_basis_features)):
         raise ValueError("Encountered non-finite task-progression spline features.")
 
@@ -1405,9 +1652,21 @@ def build_model_designs(
         )
     tp_design = np.concatenate(tp_feature_blocks, axis=1)
 
+    generalized_tp_basis_features = np.asarray(
+        tp_basis.compute_features(generalized_task_progression),
+        dtype=float,
+    )
+    if not np.all(np.isfinite(generalized_tp_basis_features)):
+        raise ValueError("Encountered non-finite generalized-TP spline features.")
+    generalized_tp_design = generalized_tp_basis_features
+    generalized_tp_feature_names = [
+        f"generalized_tp_bs{basis_index}"
+        for basis_index in range(generalized_tp_design.shape[1])
+    ]
+
     place_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
+        n_basis_funcs=trajectory_n_splines,
+        order=spline_order,
         bounds=(float(tp_lower), float(tp_upper)),
     )
     place_basis_features = np.asarray(
@@ -1429,6 +1688,31 @@ def build_model_designs(
             for basis_index in range(n_place_basis)
         )
     place_design = np.concatenate(place_feature_blocks, axis=1)
+
+    generalized_place_lower, generalized_place_upper = map(
+        float,
+        position_basis["generalized_place_bounds"],
+    )
+    generalized_place_values = np.clip(
+        generalized_place,
+        generalized_place_lower,
+        generalized_place_upper,
+    )
+    generalized_place_basis = BSplineEval(
+        n_basis_funcs=generalized_place_n_splines,
+        order=spline_order,
+        bounds=(generalized_place_lower, generalized_place_upper),
+    )
+    generalized_place_design = np.asarray(
+        generalized_place_basis.compute_features(generalized_place_values),
+        dtype=float,
+    )
+    if not np.all(np.isfinite(generalized_place_design)):
+        raise ValueError("Encountered non-finite generalized-place spline features.")
+    generalized_place_feature_names = [
+        f"generalized_place_bs{basis_index}"
+        for basis_index in range(generalized_place_design.shape[1])
+    ]
 
     designs: dict[str, np.ndarray] = {}
     blocks: dict[str, dict[str, slice]] = {}
@@ -1481,6 +1765,44 @@ def build_model_designs(
     start += place_trajectory_design.shape[1]
     blocks["place_only"]["place"] = slice(start, start + place_design.shape[1])
 
+    start = 0
+    designs["motor_generalized_place"] = np.concatenate(
+        [motor_design, generalized_place_design],
+        axis=1,
+    )
+    blocks["motor_generalized_place"] = {
+        "motor": slice(start, start + motor_design.shape[1]),
+    }
+    start += motor_design.shape[1]
+    blocks["motor_generalized_place"]["generalized_place"] = slice(
+        start,
+        start + generalized_place_design.shape[1],
+    )
+
+    designs["generalized_place_only"] = generalized_place_design
+    blocks["generalized_place_only"] = {
+        "generalized_place": slice(0, generalized_place_design.shape[1]),
+    }
+
+    start = 0
+    designs["motor_generalized_task_progression"] = np.concatenate(
+        [motor_design, generalized_tp_design],
+        axis=1,
+    )
+    blocks["motor_generalized_task_progression"] = {
+        "motor": slice(start, start + motor_design.shape[1]),
+    }
+    start += motor_design.shape[1]
+    blocks["motor_generalized_task_progression"]["generalized_tp"] = slice(
+        start,
+        start + generalized_tp_design.shape[1],
+    )
+
+    designs["generalized_task_progression_only"] = generalized_tp_design
+    blocks["generalized_task_progression_only"] = {
+        "generalized_tp": slice(0, generalized_tp_design.shape[1]),
+    }
+
     for matrix_name, matrix in designs.items():
         if not np.all(np.isfinite(matrix)):
             bad_row, bad_col = np.argwhere(~np.isfinite(matrix))[0]
@@ -1499,12 +1821,26 @@ def build_model_designs(
             "place_traj": place_trajectory_feature_names,
             "tp": tp_feature_names,
             "place": place_feature_names,
+            "generalized_place": generalized_place_feature_names,
+            "generalized_tp": generalized_tp_feature_names,
         },
         "basis": {
             "tp_n_splines": int(n_tp_basis),
             "place_n_splines": int(n_place_basis),
-            "order": int(tp_spline_order),
+            "generalized_tp_n_splines": int(generalized_tp_design.shape[1]),
+            "generalized_place_n_splines": int(generalized_place_design.shape[1]),
+            "order": spline_order,
             "bounds": (float(tp_lower), float(tp_upper)),
+            "trajectory_bounds": (float(tp_lower), float(tp_upper)),
+            "generalized_place_bounds": (
+                float(generalized_place_lower),
+                float(generalized_place_upper),
+            ),
+            "spatial_bin_size_cm": float(position_basis["spatial_bin_size_cm"]),
+            "trajectory_length_cm": float(position_basis["trajectory_length_cm"]),
+            "generalized_place_length_cm": float(
+                position_basis["generalized_place_length_cm"]
+            ),
         },
     }
 
@@ -1608,21 +1944,30 @@ def compute_null_ll_sum(
     return _poisson_ll_sum(response_test, null_lam)
 
 
-def compute_ridge_cv_scores(
+def compute_hyperparameter_cv_scores(
     data: dict[str, Any],
     folds: Sequence[dict[str, Any]],
     *,
     unit_mask: np.ndarray,
     ridge_values: Sequence[float],
-    tp_spline_k: int,
-    tp_spline_order: int,
+    position_basis_configs: Sequence[dict[str, Any]],
     motor_feature_mode: Literal["zscore", "spline"],
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
 ) -> dict[str, Any]:
-    """Return pooled lap-CV ridge scores for each model."""
+    """Return pooled lap-CV scores for ridge and spatial-bin-size candidates."""
     ridge_values = [float(value) for value in ridge_values]
+    position_basis_configs = list(position_basis_configs)
+    if not position_basis_configs:
+        raise ValueError("At least one position basis configuration is required.")
+    spatial_bin_sizes_cm = np.asarray(
+        [
+            float(position_basis["spatial_bin_size_cm"])
+            for position_basis in position_basis_configs
+        ],
+        dtype=float,
+    )
     unit_mask = np.asarray(unit_mask, dtype=bool)
     if unit_mask.size != int(data["response"].shape[1]):
         raise ValueError(
@@ -1634,9 +1979,10 @@ def compute_ridge_cv_scores(
         raise ValueError("No units were selected for ridge CV.")
 
     n_models = len(MODEL_NAMES)
+    n_spatial = len(position_basis_configs)
     n_ridges = len(ridge_values)
     n_units = int(unit_indices.size)
-    ll_sum = np.zeros((n_models, n_ridges, n_units), dtype=float)
+    ll_sum = np.zeros((n_models, n_spatial, n_ridges, n_units), dtype=float)
     null_ll_sum = np.zeros(n_units, dtype=float)
     spike_sum = np.zeros(n_units, dtype=float)
 
@@ -1650,79 +1996,122 @@ def compute_ridge_cv_scores(
             motor_spline_k=motor_spline_k,
             motor_spline_order=motor_spline_order,
         )
-        train_design_info = build_model_designs(
-            data,
-            train_rows,
-            motor_transform,
-            tp_spline_k=tp_spline_k,
-            tp_spline_order=tp_spline_order,
-        )
-        test_design_info = build_model_designs(
-            data,
-            test_rows,
-            motor_transform,
-            tp_spline_k=tp_spline_k,
-            tp_spline_order=tp_spline_order,
-        )
         response_train = data["response"][train_rows][:, unit_indices]
         response_test = data["response"][test_rows][:, unit_indices]
         null_ll_sum += compute_null_ll_sum(response_train, response_test)
         spike_sum += np.asarray(response_test.sum(axis=0), dtype=float)
 
-        for model_index, model_name in enumerate(MODEL_NAMES):
-            x_train = train_design_info["designs"][model_name]
-            x_test = test_design_info["designs"][model_name]
-            for ridge_index, ridge in enumerate(ridge_values):
-                model = fit_population_glm(x_train, response_train, ridge=ridge)
-                ll_sum[model_index, ridge_index] += score_model_on_split(
-                    model,
-                    x_test,
-                    response_test,
-                )
+        for spatial_index, position_basis in enumerate(position_basis_configs):
+            train_design_info = build_model_designs(
+                data,
+                train_rows,
+                motor_transform,
+                position_basis=position_basis,
+            )
+            test_design_info = build_model_designs(
+                data,
+                test_rows,
+                motor_transform,
+                position_basis=position_basis,
+            )
+            for model_index, model_name in enumerate(MODEL_NAMES):
+                x_train = train_design_info["designs"][model_name]
+                x_test = test_design_info["designs"][model_name]
+                for ridge_index, ridge in enumerate(ridge_values):
+                    model = fit_population_glm(x_train, response_train, ridge=ridge)
+                    ll_sum[model_index, spatial_index, ridge_index] += (
+                        score_model_on_split(
+                            model,
+                            x_test,
+                            response_test,
+                        )
+                    )
 
     info_bits = _bits_per_spike_from_ll(
         ll_sum,
-        null_ll_sum[None, None, :],
-        spike_sum[None, None, :],
+        null_ll_sum[None, None, None, :],
+        spike_sum[None, None, None, :],
     )
-    score_median = np.full((n_models, n_ridges), np.nan, dtype=float)
-    score_mean = np.full((n_models, n_ridges), np.nan, dtype=float)
-    score_n_finite = np.zeros((n_models, n_ridges), dtype=int)
+    score_median = np.full((n_models, n_spatial, n_ridges), np.nan, dtype=float)
+    score_mean = np.full((n_models, n_spatial, n_ridges), np.nan, dtype=float)
+    score_n_finite = np.zeros((n_models, n_spatial, n_ridges), dtype=int)
     for model_index in range(n_models):
-        for ridge_index in range(n_ridges):
-            finite = info_bits[model_index, ridge_index][
-                np.isfinite(info_bits[model_index, ridge_index])
-            ]
-            score_n_finite[model_index, ridge_index] = int(finite.size)
-            if finite.size > 0:
-                score_median[model_index, ridge_index] = float(np.median(finite))
-                score_mean[model_index, ridge_index] = float(np.mean(finite))
+        for spatial_index in range(n_spatial):
+            for ridge_index in range(n_ridges):
+                finite = info_bits[model_index, spatial_index, ridge_index][
+                    np.isfinite(info_bits[model_index, spatial_index, ridge_index])
+                ]
+                score_n_finite[model_index, spatial_index, ridge_index] = int(
+                    finite.size
+                )
+                if finite.size > 0:
+                    score_median[model_index, spatial_index, ridge_index] = float(
+                        np.median(finite)
+                    )
+                    score_mean[model_index, spatial_index, ridge_index] = float(
+                        np.mean(finite)
+                    )
 
     selected_ridge = np.full(n_models, np.nan, dtype=float)
+    selected_spatial_bin_size_cm = np.full(n_models, np.nan, dtype=float)
+    selected_spatial_index = np.zeros(n_models, dtype=int)
     selected_score = np.full(n_models, np.nan, dtype=float)
     for model_index, model_name in enumerate(MODEL_NAMES):
-        best_index: int | None = None
-        for ridge_index, ridge in enumerate(ridge_values):
-            score = float(score_median[model_index, ridge_index])
-            if not np.isfinite(score):
-                continue
-            if best_index is None:
-                best_index = ridge_index
-                continue
-            best_score = float(score_median[model_index, best_index])
-            best_ridge = float(ridge_values[best_index])
-            if score > best_score + HYPERPARAMETER_TIE_ATOL:
-                best_index = ridge_index
-            elif abs(score - best_score) <= HYPERPARAMETER_TIE_ATOL and ridge > best_ridge:
-                best_index = ridge_index
+        best_index: tuple[int, int] | None = None
+        for spatial_index, spatial_bin_size_cm in enumerate(spatial_bin_sizes_cm):
+            for ridge_index, ridge in enumerate(ridge_values):
+                score = float(score_median[model_index, spatial_index, ridge_index])
+                if not np.isfinite(score):
+                    continue
+                if best_index is None:
+                    best_index = (spatial_index, ridge_index)
+                    continue
+                best_spatial_index, best_ridge_index = best_index
+                best_score = float(
+                    score_median[model_index, best_spatial_index, best_ridge_index]
+                )
+                best_spatial_bin_size_cm = float(
+                    spatial_bin_sizes_cm[best_spatial_index]
+                )
+                best_ridge = float(ridge_values[best_ridge_index])
+                if score > best_score + HYPERPARAMETER_TIE_ATOL:
+                    best_index = (spatial_index, ridge_index)
+                elif abs(score - best_score) <= HYPERPARAMETER_TIE_ATOL:
+                    if model_name in POSITION_BASIS_MODEL_NAMES and (
+                        spatial_bin_size_cm > best_spatial_bin_size_cm
+                        + HYPERPARAMETER_TIE_ATOL
+                    ):
+                        best_index = (spatial_index, ridge_index)
+                    elif (
+                        (
+                            model_name not in POSITION_BASIS_MODEL_NAMES
+                            or abs(
+                                spatial_bin_size_cm - best_spatial_bin_size_cm
+                            )
+                            <= HYPERPARAMETER_TIE_ATOL
+                        )
+                        and ridge > best_ridge
+                    ):
+                        best_index = (spatial_index, ridge_index)
         if best_index is None:
-            raise ValueError(f"No finite ridge-CV score for model {model_name!r}.")
-        selected_ridge[model_index] = float(ridge_values[best_index])
-        selected_score[model_index] = float(score_median[model_index, best_index])
+            raise ValueError(
+                f"No finite hyperparameter-CV score for model {model_name!r}."
+            )
+        spatial_index, ridge_index = best_index
+        selected_spatial_index[model_index] = int(spatial_index)
+        selected_ridge[model_index] = float(ridge_values[ridge_index])
+        selected_score[model_index] = float(
+            score_median[model_index, spatial_index, ridge_index]
+        )
+        if model_name in POSITION_BASIS_MODEL_NAMES:
+            selected_spatial_bin_size_cm[model_index] = float(
+                spatial_bin_sizes_cm[spatial_index]
+            )
 
     return {
         "unit_indices": unit_indices,
         "ridge_values": np.asarray(ridge_values, dtype=float),
+        "spatial_bin_sizes_cm": spatial_bin_sizes_cm,
         "ll_sum": ll_sum,
         "null_ll_sum": null_ll_sum,
         "spike_sum": spike_sum,
@@ -1731,6 +2120,8 @@ def compute_ridge_cv_scores(
         "score_mean": score_mean,
         "score_n_finite": score_n_finite,
         "selected_ridge": selected_ridge,
+        "selected_spatial_bin_size_cm": selected_spatial_bin_size_cm,
+        "selected_spatial_index": selected_spatial_index,
         "selected_score": selected_score,
     }
 
@@ -1742,8 +2133,7 @@ def score_models_on_split(
     test_rows: np.ndarray,
     unit_mask: np.ndarray,
     ridge_by_model: dict[str, float],
-    tp_spline_k: int,
-    tp_spline_order: int,
+    position_basis_by_model: dict[str, dict[str, Any]],
     motor_feature_mode: Literal["zscore", "spline"],
     motor_zscore_eps: float,
     motor_spline_k: int,
@@ -1767,20 +2157,6 @@ def score_models_on_split(
         motor_spline_k=motor_spline_k,
         motor_spline_order=motor_spline_order,
     )
-    train_design_info = build_model_designs(
-        data,
-        train_rows,
-        motor_transform,
-        tp_spline_k=tp_spline_k,
-        tp_spline_order=tp_spline_order,
-    )
-    test_design_info = build_model_designs(
-        data,
-        test_rows,
-        motor_transform,
-        tp_spline_k=tp_spline_k,
-        tp_spline_order=tp_spline_order,
-    )
     response_train = data["response"][train_rows][:, unit_indices]
     response_test = data["response"][test_rows][:, unit_indices]
     null_ll_sum = compute_null_ll_sum(response_train, response_test)
@@ -1789,6 +2165,19 @@ def score_models_on_split(
     ll_sum = np.zeros((len(MODEL_NAMES), unit_indices.size), dtype=float)
     fitted_models: dict[str, PopulationGLM] = {}
     for model_index, model_name in enumerate(MODEL_NAMES):
+        position_basis = position_basis_by_model[model_name]
+        train_design_info = build_model_designs(
+            data,
+            train_rows,
+            motor_transform,
+            position_basis=position_basis,
+        )
+        test_design_info = build_model_designs(
+            data,
+            test_rows,
+            motor_transform,
+            position_basis=position_basis,
+        )
         model = fit_population_glm(
             train_design_info["designs"][model_name],
             response_train,
@@ -1835,11 +2224,10 @@ def run_nested_lap_cv(
     outer_folds: Sequence[dict[str, Any]],
     *,
     ridge_values: Sequence[float],
+    position_basis_configs: Sequence[dict[str, Any]],
     inner_n_folds: int,
     seed: int,
     min_firing_rate_hz: float,
-    tp_spline_k: int,
-    tp_spline_order: int,
     motor_feature_mode: Literal["zscore", "spline"],
     motor_zscore_eps: float,
     motor_spline_k: int,
@@ -1848,8 +2236,17 @@ def run_nested_lap_cv(
 ) -> dict[str, Any]:
     """Run nested lap-level CV with per-model population ridge selection."""
     ridge_values = [float(value) for value in ridge_values]
+    position_basis_configs = list(position_basis_configs)
+    spatial_bin_sizes_cm = np.asarray(
+        [
+            float(position_basis["spatial_bin_size_cm"])
+            for position_basis in position_basis_configs
+        ],
+        dtype=float,
+    )
     n_outer = len(outer_folds)
     n_models = len(MODEL_NAMES)
+    n_spatial = len(position_basis_configs)
     n_ridges = len(ridge_values)
     n_units = int(data["response"].shape[1])
 
@@ -1858,12 +2255,28 @@ def run_nested_lap_cv(
     outer_spike_sum = np.full((n_outer, n_units), np.nan, dtype=float)
     outer_info = np.full((n_outer, n_models, n_units), np.nan, dtype=float)
     outer_selected_ridge = np.full((n_outer, n_models), np.nan, dtype=float)
+    outer_selected_spatial_bin_size_cm = np.full((n_outer, n_models), np.nan, dtype=float)
     outer_selected_score = np.full((n_outer, n_models), np.nan, dtype=float)
     outer_unit_selected = np.zeros((n_outer, n_units), dtype=np.int8)
-    inner_info = np.full((n_outer, n_models, n_ridges, n_units), np.nan, dtype=float)
-    inner_score_median = np.full((n_outer, n_models, n_ridges), np.nan, dtype=float)
-    inner_score_mean = np.full((n_outer, n_models, n_ridges), np.nan, dtype=float)
-    inner_score_n_finite = np.zeros((n_outer, n_models, n_ridges), dtype=int)
+    inner_info = np.full(
+        (n_outer, n_models, n_spatial, n_ridges, n_units),
+        np.nan,
+        dtype=float,
+    )
+    inner_score_median = np.full(
+        (n_outer, n_models, n_spatial, n_ridges),
+        np.nan,
+        dtype=float,
+    )
+    inner_score_mean = np.full(
+        (n_outer, n_models, n_spatial, n_ridges),
+        np.nan,
+        dtype=float,
+    )
+    inner_score_n_finite = np.zeros(
+        (n_outer, n_models, n_spatial, n_ridges),
+        dtype=int,
+    )
     outer_train_bin_count = np.zeros(n_outer, dtype=int)
     outer_test_bin_count = np.zeros(n_outer, dtype=int)
 
@@ -1896,35 +2309,51 @@ def run_nested_lap_cv(
             seed=int(seed) + 1000 + outer_index,
             candidate_indices_by_trajectory=outer_fold["train_indices_by_trajectory"],
         )
-        ridge_scores = compute_ridge_cv_scores(
+        ridge_scores = compute_hyperparameter_cv_scores(
             data,
             inner_folds,
             unit_mask=unit_mask,
             ridge_values=ridge_values,
-            tp_spline_k=tp_spline_k,
-            tp_spline_order=tp_spline_order,
+            position_basis_configs=position_basis_configs,
             motor_feature_mode=motor_feature_mode,
             motor_zscore_eps=motor_zscore_eps,
             motor_spline_k=motor_spline_k,
             motor_spline_order=motor_spline_order,
         )
         unit_indices = ridge_scores["unit_indices"]
-        inner_info[outer_index][:, :, unit_indices] = ridge_scores[
+        inner_info[outer_index][..., unit_indices] = ridge_scores[
             "info_bits_per_spike"
         ]
         inner_score_median[outer_index] = ridge_scores["score_median"]
         inner_score_mean[outer_index] = ridge_scores["score_mean"]
         inner_score_n_finite[outer_index] = ridge_scores["score_n_finite"]
         outer_selected_ridge[outer_index] = ridge_scores["selected_ridge"]
+        outer_selected_spatial_bin_size_cm[outer_index] = ridge_scores[
+            "selected_spatial_bin_size_cm"
+        ]
         outer_selected_score[outer_index] = ridge_scores["selected_score"]
         ridge_by_model = {
             model_name: float(ridge_scores["selected_ridge"][model_index])
             for model_index, model_name in enumerate(MODEL_NAMES)
         }
+        position_basis_by_model = {
+            model_name: position_basis_configs[
+                int(ridge_scores["selected_spatial_index"][model_index])
+            ]
+            for model_index, model_name in enumerate(MODEL_NAMES)
+        }
         print(
-            f"{print_prefix}  Selected ridges: "
+            f"{print_prefix}  Selected hyperparameters: "
             + ", ".join(
-                f"{model_name}={ridge_by_model[model_name]:.3g}"
+                (
+                    f"{model_name}=ridge{ridge_by_model[model_name]:.3g}"
+                    if model_name not in POSITION_BASIS_MODEL_NAMES
+                    else (
+                        f"{model_name}=spbin"
+                        f"{position_basis_by_model[model_name]['spatial_bin_size_cm']:.3g}cm,"
+                        f"ridge{ridge_by_model[model_name]:.3g}"
+                    )
+                )
                 for model_name in MODEL_NAMES
             )
         )
@@ -1935,8 +2364,7 @@ def run_nested_lap_cv(
             test_rows=test_rows,
             unit_mask=unit_mask,
             ridge_by_model=ridge_by_model,
-            tp_spline_k=tp_spline_k,
-            tp_spline_order=tp_spline_order,
+            position_basis_by_model=position_basis_by_model,
             motor_feature_mode=motor_feature_mode,
             motor_zscore_eps=motor_zscore_eps,
             motor_spline_k=motor_spline_k,
@@ -1958,6 +2386,10 @@ def run_nested_lap_cv(
         motor_index = MODEL_NAMES.index("motor")
         motor_tp_index = MODEL_NAMES.index("motor_tp")
         motor_place_index = MODEL_NAMES.index("motor_place")
+        motor_generalized_place_index = MODEL_NAMES.index("motor_generalized_place")
+        motor_generalized_tp_index = MODEL_NAMES.index(
+            "motor_generalized_task_progression"
+        )
         fold_spike_sum = split_scores["spike_sum"]
         fold_tp_delta = _delta_bits_per_spike(
             split_scores["ll_sum"][motor_tp_index],
@@ -1969,10 +2401,24 @@ def run_nested_lap_cv(
             split_scores["ll_sum"][motor_index],
             fold_spike_sum,
         )
+        fold_generalized_place_delta = _delta_bits_per_spike(
+            split_scores["ll_sum"][motor_generalized_place_index],
+            split_scores["ll_sum"][motor_index],
+            fold_spike_sum,
+        )
+        fold_generalized_tp_delta = _delta_bits_per_spike(
+            split_scores["ll_sum"][motor_generalized_tp_index],
+            split_scores["ll_sum"][motor_index],
+            fold_spike_sum,
+        )
         print(
             f"{print_prefix}  Held-out primary medians: "
             f"motor+TP - motor={np.nanmedian(fold_tp_delta):.5g}, "
-            f"motor+place - motor={np.nanmedian(fold_place_delta):.5g} bits/spike."
+            f"motor+place - motor={np.nanmedian(fold_place_delta):.5g}, "
+            "motor+generalized-place - motor="
+            f"{np.nanmedian(fold_generalized_place_delta):.5g}, "
+            "motor+generalized-TP - motor="
+            f"{np.nanmedian(fold_generalized_tp_delta):.5g} bits/spike."
         )
 
     valid = np.isfinite(outer_spike_sum) & (outer_unit_selected > 0)
@@ -2000,11 +2446,13 @@ def run_nested_lap_cv(
 
     return {
         "ridge_values": np.asarray(ridge_values, dtype=float),
+        "spatial_bin_sizes_cm": spatial_bin_sizes_cm,
         "outer_ll_sum": outer_ll_sum,
         "outer_null_ll_sum": outer_null_ll_sum,
         "outer_spike_sum": outer_spike_sum,
         "outer_info_bits_per_spike": outer_info,
         "outer_selected_ridge": outer_selected_ridge,
+        "outer_selected_spatial_bin_size_cm": outer_selected_spatial_bin_size_cm,
         "outer_selected_score": outer_selected_score,
         "outer_unit_selected": outer_unit_selected,
         "inner_cv_info_bits_per_spike": inner_info,
@@ -2026,14 +2474,13 @@ def fit_full_refit_models(
     *,
     unit_mask: np.ndarray,
     ridge_by_model: dict[str, float],
-    tp_spline_k: int,
-    tp_spline_order: int,
+    position_basis_by_model: dict[str, dict[str, Any]],
     motor_feature_mode: Literal["zscore", "spline"],
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
 ) -> dict[str, Any]:
-    """Fit selected-ridge models on all eligible bins for coefficient outputs."""
+    """Fit selected-hyperparameter models on all eligible bins for coefficients."""
     all_rows = np.asarray(data["base_keep_mask"], dtype=bool)
     unit_mask = np.asarray(unit_mask, dtype=bool)
     if unit_mask.size != int(data["response"].shape[1]):
@@ -2052,18 +2499,19 @@ def fit_full_refit_models(
         motor_spline_k=motor_spline_k,
         motor_spline_order=motor_spline_order,
     )
-    design_info = build_model_designs(
-        data,
-        all_rows,
-        motor_transform,
-        tp_spline_k=tp_spline_k,
-        tp_spline_order=tp_spline_order,
-    )
     response = data["response"][all_rows][:, unit_indices]
     fitted_models: dict[str, PopulationGLM] = {}
     coefficients: dict[str, np.ndarray] = {}
     intercepts: dict[str, np.ndarray] = {}
+    design_info_by_model: dict[str, dict[str, Any]] = {}
     for model_name in MODEL_NAMES:
+        design_info = build_model_designs(
+            data,
+            all_rows,
+            motor_transform,
+            position_basis=position_basis_by_model[model_name],
+        )
+        design_info_by_model[model_name] = design_info
         design = design_info["designs"][model_name]
         model = fit_population_glm(
             design,
@@ -2074,13 +2522,11 @@ def fit_full_refit_models(
         coefficients[model_name] = extract_model_coefficients(model, design.shape[1])
         intercepts[model_name] = np.asarray(model.intercept_).reshape(-1)
 
-    tp_lower, tp_upper = data["tp_bounds"]
-    tp_grid = np.linspace(float(tp_lower), float(tp_upper), 200)
-    place_grid = np.linspace(float(tp_lower), float(tp_upper), 200)
+    reference_design_info = design_info_by_model["motor"]
     motor_reference = (
-        np.zeros(design_info["motor_design"].shape[1], dtype=float)
+        np.zeros(reference_design_info["motor_design"].shape[1], dtype=float)
         if motor_feature_mode == "zscore"
-        else np.asarray(design_info["motor_design"], dtype=float).mean(axis=0)
+        else np.asarray(reference_design_info["motor_design"], dtype=float).mean(axis=0)
     )
     trajectory_to_index = {
         trajectory_type: index for index, trajectory_type in enumerate(TRAJECTORY_TYPES)
@@ -2088,26 +2534,39 @@ def fit_full_refit_models(
     trajectory_index_to_group = _trajectory_group_labels(
         np.arange(len(TRAJECTORY_TYPES), dtype=int)
     )
+
+    motor_tp_design_info = design_info_by_model["motor_tp"]
+    motor_tp_basis_info = motor_tp_design_info["basis"]
+    tp_lower, tp_upper = motor_tp_basis_info["trajectory_bounds"]
+    tp_grid = np.linspace(float(tp_lower), float(tp_upper), 200)
     tp_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
+        n_basis_funcs=int(motor_tp_basis_info["tp_n_splines"]),
+        order=int(motor_tp_basis_info["order"]),
         bounds=(float(tp_lower), float(tp_upper)),
     )
+
+    motor_place_design_info = design_info_by_model["motor_place"]
+    motor_place_basis_info = motor_place_design_info["basis"]
+    place_lower, place_upper = motor_place_basis_info["trajectory_bounds"]
+    place_grid = np.linspace(float(place_lower), float(place_upper), 200)
     place_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
-        bounds=(float(tp_lower), float(tp_upper)),
+        n_basis_funcs=int(motor_place_basis_info["place_n_splines"]),
+        order=int(motor_place_basis_info["order"]),
+        bounds=(float(place_lower), float(place_upper)),
     )
 
     tp_rate_curves_hz: dict[str, dict[str, np.ndarray]] = {}
     place_rate_curves_hz: dict[str, dict[str, np.ndarray]] = {}
-    n_tp_basis = int(design_info["basis"]["tp_n_splines"])
-    n_place_basis = int(design_info["basis"]["place_n_splines"])
+    n_tp_basis = int(motor_tp_basis_info["tp_n_splines"])
+    n_place_basis = int(motor_place_basis_info["place_n_splines"])
     for trajectory_type in TRAJECTORY_TYPES:
         trajectory_index = trajectory_to_index[trajectory_type]
         group_index = int(trajectory_index_to_group[trajectory_index])
 
-        tp_grid_features = np.asarray(tp_basis.compute_features(tp_grid), dtype=float)
+        tp_grid_features = np.asarray(
+            tp_basis.compute_features(tp_grid),
+            dtype=float,
+        )
         tp_group_dummy = np.zeros((tp_grid.size, 1), dtype=float)
         if group_index == 1:
             tp_group_dummy[:, 0] = 1.0
@@ -2128,14 +2587,24 @@ def fit_full_refit_models(
         )
         tp_rate_curves_hz[trajectory_type] = {
             "tp_grid": tp_grid,
-            "rate_hz": np.exp(np.clip(eta, -50.0, 50.0)) / float(data["bin_size_s"]),
+            "rate_hz": np.exp(np.clip(eta, -50.0, 50.0))
+            / float(data["bin_size_s"]),
         }
 
-        place_grid_features = np.asarray(place_basis.compute_features(place_grid), dtype=float)
-        place_trajectory_dummy = np.zeros((place_grid.size, len(TRAJECTORY_TYPES) - 1), dtype=float)
+        place_grid_features = np.asarray(
+            place_basis.compute_features(place_grid),
+            dtype=float,
+        )
+        place_trajectory_dummy = np.zeros(
+            (place_grid.size, len(TRAJECTORY_TYPES) - 1),
+            dtype=float,
+        )
         if trajectory_index > 0:
             place_trajectory_dummy[:, trajectory_index - 1] = 1.0
-        place_block = np.zeros((place_grid.size, n_place_basis * len(TRAJECTORY_TYPES)), dtype=float)
+        place_block = np.zeros(
+            (place_grid.size, n_place_basis * len(TRAJECTORY_TYPES)),
+            dtype=float,
+        )
         place_start = trajectory_index * n_place_basis
         place_block[:, place_start : place_start + n_place_basis] = place_grid_features
         motor_place_grid_design = np.concatenate(
@@ -2152,19 +2621,102 @@ def fit_full_refit_models(
         )
         place_rate_curves_hz[trajectory_type] = {
             "place_grid": place_grid,
-            "rate_hz": np.exp(np.clip(place_eta, -50.0, 50.0)) / float(data["bin_size_s"]),
+            "rate_hz": np.exp(np.clip(place_eta, -50.0, 50.0))
+            / float(data["bin_size_s"]),
         }
+
+    motor_generalized_place_design_info = design_info_by_model[
+        "motor_generalized_place"
+    ]
+    motor_generalized_place_basis_info = motor_generalized_place_design_info["basis"]
+    generalized_place_lower, generalized_place_upper = motor_generalized_place_basis_info[
+        "generalized_place_bounds"
+    ]
+    generalized_place_grid = np.linspace(
+        float(generalized_place_lower),
+        float(generalized_place_upper),
+        200,
+    )
+    generalized_place_basis = BSplineEval(
+        n_basis_funcs=int(
+            motor_generalized_place_basis_info["generalized_place_n_splines"]
+        ),
+        order=int(motor_generalized_place_basis_info["order"]),
+        bounds=(float(generalized_place_lower), float(generalized_place_upper)),
+    )
+    generalized_place_grid_features = np.asarray(
+        generalized_place_basis.compute_features(generalized_place_grid),
+        dtype=float,
+    )
+    motor_generalized_place_grid_design = np.concatenate(
+        [
+            np.repeat(motor_reference[None, :], generalized_place_grid.size, axis=0),
+            generalized_place_grid_features,
+        ],
+        axis=1,
+    )
+    generalized_place_eta = (
+        intercepts["motor_generalized_place"][None, :]
+        + motor_generalized_place_grid_design @ coefficients["motor_generalized_place"]
+    )
+    generalized_place_rate_curve_hz = {
+        "generalized_place_grid": generalized_place_grid,
+        "rate_hz": np.exp(np.clip(generalized_place_eta, -50.0, 50.0))
+        / float(data["bin_size_s"]),
+    }
+
+    motor_generalized_tp_design_info = design_info_by_model[
+        "motor_generalized_task_progression"
+    ]
+    motor_generalized_tp_basis_info = motor_generalized_tp_design_info["basis"]
+    generalized_tp_lower, generalized_tp_upper = motor_generalized_tp_basis_info[
+        "trajectory_bounds"
+    ]
+    generalized_tp_grid = np.linspace(
+        float(generalized_tp_lower),
+        float(generalized_tp_upper),
+        200,
+    )
+    generalized_tp_basis = BSplineEval(
+        n_basis_funcs=int(motor_generalized_tp_basis_info["generalized_tp_n_splines"]),
+        order=int(motor_generalized_tp_basis_info["order"]),
+        bounds=(float(generalized_tp_lower), float(generalized_tp_upper)),
+    )
+    generalized_tp_grid_features = np.asarray(
+        generalized_tp_basis.compute_features(generalized_tp_grid),
+        dtype=float,
+    )
+    motor_generalized_tp_grid_design = np.concatenate(
+        [
+            np.repeat(motor_reference[None, :], generalized_tp_grid.size, axis=0),
+            generalized_tp_grid_features,
+        ],
+        axis=1,
+    )
+    generalized_tp_eta = (
+        intercepts["motor_generalized_task_progression"][None, :]
+        + motor_generalized_tp_grid_design
+        @ coefficients["motor_generalized_task_progression"]
+    )
+    generalized_tp_rate_curve_hz = {
+        "generalized_task_progression_grid": generalized_tp_grid,
+        "rate_hz": np.exp(np.clip(generalized_tp_eta, -50.0, 50.0))
+        / float(data["bin_size_s"]),
+    }
 
     return {
         "unit_indices": unit_indices,
         "unit_ids": np.asarray(data["unit_ids"])[unit_indices],
         "motor_transform": motor_transform,
-        "design_info": design_info,
+        "design_info_by_model": design_info_by_model,
         "coefficients": coefficients,
         "intercepts": intercepts,
         "tp_rate_curves_hz": tp_rate_curves_hz,
         "place_rate_curves_hz": place_rate_curves_hz,
+        "generalized_place_rate_curve_hz": generalized_place_rate_curve_hz,
+        "generalized_task_progression_rate_curve_hz": generalized_tp_rate_curve_hz,
         "ridge_by_model": ridge_by_model,
+        "position_basis_by_model": position_basis_by_model,
     }
 
 
@@ -2265,6 +2817,13 @@ def build_nested_cv_dataset(
                 ("outer_fold", "model"),
                 np.asarray(nested_result["outer_selected_ridge"], dtype=float),
             ),
+            "outer_selected_spatial_bin_size_cm": (
+                ("outer_fold", "model"),
+                np.asarray(
+                    nested_result["outer_selected_spatial_bin_size_cm"],
+                    dtype=float,
+                ),
+            ),
             "outer_selected_score_median": (
                 ("outer_fold", "model"),
                 np.asarray(nested_result["outer_selected_score"], dtype=float),
@@ -2282,19 +2841,19 @@ def build_nested_cv_dataset(
                 np.asarray(nested_result["outer_test_bin_count"], dtype=int),
             ),
             "inner_cv_info_bits_per_spike": (
-                ("outer_fold", "model", "ridge", "unit"),
+                ("outer_fold", "model", "spatial_bin_size_cm", "ridge", "unit"),
                 np.asarray(nested_result["inner_cv_info_bits_per_spike"], dtype=float),
             ),
             "inner_cv_score_median": (
-                ("outer_fold", "model", "ridge"),
+                ("outer_fold", "model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(nested_result["inner_cv_score_median"], dtype=float),
             ),
             "inner_cv_score_mean": (
-                ("outer_fold", "model", "ridge"),
+                ("outer_fold", "model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(nested_result["inner_cv_score_mean"], dtype=float),
             ),
             "inner_cv_score_n_finite": (
-                ("outer_fold", "model", "ridge"),
+                ("outer_fold", "model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(nested_result["inner_cv_score_n_finite"], dtype=int),
             ),
             "pooled_ll_sum": (
@@ -2341,6 +2900,10 @@ def build_nested_cv_dataset(
         coords={
             "outer_fold": np.arange(outer_fold_count, dtype=int),
             "model": np.asarray(MODEL_NAMES, dtype=str),
+            "spatial_bin_size_cm": np.asarray(
+                nested_result["spatial_bin_sizes_cm"],
+                dtype=float,
+            ),
             "ridge": np.asarray(nested_result["ridge_values"], dtype=float),
             "unit": np.asarray(data["unit_ids"]),
             "delta_metric": np.asarray(
@@ -2375,8 +2938,12 @@ def build_nested_cv_dataset(
             "cv_fold_scope": "nested_lap_level_by_trajectory_movement_only",
             "unit_selection": "outer_train_movement_lap_firing_rate_threshold",
             "ridge_selection": (
-                "per-model population ridge selected by median unit-level "
+                "per-model population ridge selected with spatial bin size by median unit-level "
                 "inner-CV null-corrected information"
+            ),
+            "spatial_bin_size_selection": (
+                "per-model spatial bin size selected with ridge by inner lap-CV; "
+                "ignored by the strict motor-only model"
             ),
             "motor_baseline_definition": (
                 "strict motor covariates only; no trajectory group or trajectory identity terms"
@@ -2385,6 +2952,8 @@ def build_nested_cv_dataset(
             "tp_only_includes_trajectory_group_offset": "true",
             "place_models_use_trajectory_specific_basis": "true",
             "place_models_include_trajectory_offset": "true",
+            "generalized_place_models_include_trajectory_offset": "false",
+            "generalized_task_progression_models_include_trajectory_or_group_offset": "false",
             "sources_json": json.dumps(sources, sort_keys=True),
             "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
         },
@@ -2454,12 +3023,45 @@ def build_full_refit_dataset(
             "xarray is required to save task-progression motor full-refit outputs."
         ) from exc
 
-    design_info = full_fit["design_info"]
-    blocks = design_info["blocks"]
+    design_info_by_model = full_fit["design_info_by_model"]
     coefficients = full_fit["coefficients"]
     intercepts = full_fit["intercepts"]
-    n_tp_basis = int(design_info["basis"]["tp_n_splines"])
-    n_place_basis = int(design_info["basis"]["place_n_splines"])
+    blocks_by_model = {
+        model_name: design_info_by_model[model_name]["blocks"][model_name]
+        for model_name in MODEL_NAMES
+    }
+    n_motor_tp_basis = int(
+        design_info_by_model["motor_tp"]["basis"]["tp_n_splines"]
+    )
+    n_tp_only_basis = int(
+        design_info_by_model["tp_only"]["basis"]["tp_n_splines"]
+    )
+    n_motor_place_basis = int(
+        design_info_by_model["motor_place"]["basis"]["place_n_splines"]
+    )
+    n_place_only_basis = int(
+        design_info_by_model["place_only"]["basis"]["place_n_splines"]
+    )
+    n_motor_generalized_place_basis = int(
+        design_info_by_model["motor_generalized_place"]["basis"][
+            "generalized_place_n_splines"
+        ]
+    )
+    n_generalized_place_only_basis = int(
+        design_info_by_model["generalized_place_only"]["basis"][
+            "generalized_place_n_splines"
+        ]
+    )
+    n_motor_generalized_tp_basis = int(
+        design_info_by_model["motor_generalized_task_progression"]["basis"][
+            "generalized_tp_n_splines"
+        ]
+    )
+    n_generalized_tp_only_basis = int(
+        design_info_by_model["generalized_task_progression_only"]["basis"][
+            "generalized_tp_n_splines"
+        ]
+    )
     unit_indices = np.asarray(full_fit["unit_indices"], dtype=int)
     selected_unit_rates = np.asarray(movement_firing_rates, dtype=float)[unit_indices]
     tp_grid = np.asarray(
@@ -2470,95 +3072,195 @@ def build_full_refit_dataset(
         full_fit["place_rate_curves_hz"][TRAJECTORY_TYPES[0]]["place_grid"],
         dtype=float,
     )
+    generalized_place_grid = np.asarray(
+        full_fit["generalized_place_rate_curve_hz"]["generalized_place_grid"],
+        dtype=float,
+    )
+    generalized_tp_grid = np.asarray(
+        full_fit["generalized_task_progression_rate_curve_hz"][
+            "generalized_task_progression_grid"
+        ],
+        dtype=float,
+    )
 
     selected_ridge = np.asarray(
         [float(full_fit["ridge_by_model"][model_name]) for model_name in MODEL_NAMES],
+        dtype=float,
+    )
+    selected_spatial_bin_size_cm = np.asarray(
+        [
+            (
+                np.nan
+                if model_name not in POSITION_BASIS_MODEL_NAMES
+                else float(
+                    full_fit["position_basis_by_model"][model_name][
+                        "spatial_bin_size_cm"
+                    ]
+                )
+            )
+            for model_name in MODEL_NAMES
+        ],
         dtype=float,
     )
     dataset = xr.Dataset(
         data_vars={
             "movement_firing_rate_hz": ("unit", selected_unit_rates),
             "selected_ridge": ("model", selected_ridge),
+            "selected_spatial_bin_size_cm": (
+                "model",
+                selected_spatial_bin_size_cm,
+            ),
             "full_cv_info_bits_per_spike": (
-                ("model", "ridge", "unit"),
+                ("model", "spatial_bin_size_cm", "ridge", "unit"),
                 np.asarray(ridge_cv_result["info_bits_per_spike"], dtype=float),
             ),
             "full_cv_score_median": (
-                ("model", "ridge"),
+                ("model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(ridge_cv_result["score_median"], dtype=float),
             ),
             "full_cv_score_mean": (
-                ("model", "ridge"),
+                ("model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(ridge_cv_result["score_mean"], dtype=float),
             ),
             "full_cv_score_n_finite": (
-                ("model", "ridge"),
+                ("model", "spatial_bin_size_cm", "ridge"),
                 np.asarray(ridge_cv_result["score_n_finite"], dtype=int),
             ),
             "motor_intercept": ("unit", intercepts["motor"]),
             "motor_coef_motor": (
                 ("motor_feature", "unit"),
-                coefficients["motor"][blocks["motor"]["motor"], :],
+                coefficients["motor"][blocks_by_model["motor"]["motor"], :],
             ),
             "motor_tp_intercept": ("unit", intercepts["motor_tp"]),
             "motor_tp_coef_motor": (
                 ("motor_feature", "unit"),
-                coefficients["motor_tp"][blocks["motor_tp"]["motor"], :],
+                coefficients["motor_tp"][blocks_by_model["motor_tp"]["motor"], :],
             ),
             "motor_tp_coef_tp_group_offset": (
                 ("tp_group_feature", "unit"),
-                coefficients["motor_tp"][blocks["motor_tp"]["tp_group"], :],
+                coefficients["motor_tp"][blocks_by_model["motor_tp"]["tp_group"], :],
             ),
             "motor_tp_coef_tp_by_group": (
-                ("tp_group", "tp_basis", "unit"),
+                ("tp_group", "motor_tp_tp_basis", "unit"),
                 _stack_group_coefficients(
                     coefficients["motor_tp"],
-                    blocks["motor_tp"]["tp"],
-                    n_basis=n_tp_basis,
+                    blocks_by_model["motor_tp"]["tp"],
+                    n_basis=n_motor_tp_basis,
                 ),
             ),
             "tp_only_intercept": ("unit", intercepts["tp_only"]),
             "tp_only_coef_tp_group_offset": (
                 ("tp_group_feature", "unit"),
-                coefficients["tp_only"][blocks["tp_only"]["tp_group"], :],
+                coefficients["tp_only"][blocks_by_model["tp_only"]["tp_group"], :],
             ),
             "tp_only_coef_tp_by_group": (
-                ("tp_group", "tp_basis", "unit"),
+                ("tp_group", "tp_only_tp_basis", "unit"),
                 _stack_group_coefficients(
                     coefficients["tp_only"],
-                    blocks["tp_only"]["tp"],
-                    n_basis=n_tp_basis,
+                    blocks_by_model["tp_only"]["tp"],
+                    n_basis=n_tp_only_basis,
                 ),
             ),
             "motor_place_intercept": ("unit", intercepts["motor_place"]),
             "motor_place_coef_motor": (
                 ("motor_feature", "unit"),
-                coefficients["motor_place"][blocks["motor_place"]["motor"], :],
+                coefficients["motor_place"][
+                    blocks_by_model["motor_place"]["motor"],
+                    :,
+                ],
             ),
             "motor_place_coef_trajectory_offset": (
                 ("place_traj_feature", "unit"),
-                coefficients["motor_place"][blocks["motor_place"]["place_traj"], :],
+                coefficients["motor_place"][
+                    blocks_by_model["motor_place"]["place_traj"],
+                    :,
+                ],
             ),
             "motor_place_coef_place_by_trajectory": (
-                ("trajectory", "place_basis", "unit"),
+                ("trajectory", "motor_place_place_basis", "unit"),
                 _stack_trajectory_coefficients(
                     coefficients["motor_place"],
-                    blocks["motor_place"]["place"],
-                    n_basis=n_place_basis,
+                    blocks_by_model["motor_place"]["place"],
+                    n_basis=n_motor_place_basis,
                 ),
             ),
             "place_only_intercept": ("unit", intercepts["place_only"]),
             "place_only_coef_trajectory_offset": (
                 ("place_traj_feature", "unit"),
-                coefficients["place_only"][blocks["place_only"]["place_traj"], :],
+                coefficients["place_only"][
+                    blocks_by_model["place_only"]["place_traj"],
+                    :,
+                ],
             ),
             "place_only_coef_place_by_trajectory": (
-                ("trajectory", "place_basis", "unit"),
+                ("trajectory", "place_only_place_basis", "unit"),
                 _stack_trajectory_coefficients(
                     coefficients["place_only"],
-                    blocks["place_only"]["place"],
-                    n_basis=n_place_basis,
+                    blocks_by_model["place_only"]["place"],
+                    n_basis=n_place_only_basis,
                 ),
+            ),
+            "motor_generalized_place_intercept": (
+                "unit",
+                intercepts["motor_generalized_place"],
+            ),
+            "motor_generalized_place_coef_motor": (
+                ("motor_feature", "unit"),
+                coefficients["motor_generalized_place"][
+                    blocks_by_model["motor_generalized_place"]["motor"],
+                    :,
+                ],
+            ),
+            "motor_generalized_place_coef_generalized_place": (
+                ("motor_generalized_place_basis", "unit"),
+                coefficients["motor_generalized_place"][
+                    blocks_by_model["motor_generalized_place"]["generalized_place"],
+                    :,
+                ],
+            ),
+            "generalized_place_only_intercept": (
+                "unit",
+                intercepts["generalized_place_only"],
+            ),
+            "generalized_place_only_coef_generalized_place": (
+                ("generalized_place_only_basis", "unit"),
+                coefficients["generalized_place_only"][
+                    blocks_by_model["generalized_place_only"]["generalized_place"],
+                    :,
+                ],
+            ),
+            "motor_generalized_task_progression_intercept": (
+                "unit",
+                intercepts["motor_generalized_task_progression"],
+            ),
+            "motor_generalized_task_progression_coef_motor": (
+                ("motor_feature", "unit"),
+                coefficients["motor_generalized_task_progression"][
+                    blocks_by_model["motor_generalized_task_progression"]["motor"],
+                    :,
+                ],
+            ),
+            "motor_generalized_task_progression_coef_generalized_tp": (
+                ("motor_generalized_task_progression_basis", "unit"),
+                coefficients["motor_generalized_task_progression"][
+                    blocks_by_model["motor_generalized_task_progression"][
+                        "generalized_tp"
+                    ],
+                    :,
+                ],
+            ),
+            "generalized_task_progression_only_intercept": (
+                "unit",
+                intercepts["generalized_task_progression_only"],
+            ),
+            "generalized_task_progression_only_coef_generalized_tp": (
+                ("generalized_task_progression_only_basis", "unit"),
+                coefficients["generalized_task_progression_only"][
+                    blocks_by_model["generalized_task_progression_only"][
+                        "generalized_tp"
+                    ],
+                    :,
+                ],
             ),
             "tp_rate_curves_hz": (
                 ("trajectory", "tp_grid", "unit"),
@@ -2568,26 +3270,67 @@ def build_full_refit_dataset(
                 ("trajectory", "place_grid", "unit"),
                 stack_place_rate_curves(full_fit["place_rate_curves_hz"]),
             ),
+            "generalized_place_rate_curve_hz": (
+                ("generalized_place_grid", "unit"),
+                np.asarray(
+                    full_fit["generalized_place_rate_curve_hz"]["rate_hz"],
+                    dtype=float,
+                ),
+            ),
+            "generalized_task_progression_rate_curve_hz": (
+                ("generalized_task_progression_grid", "unit"),
+                np.asarray(
+                    full_fit["generalized_task_progression_rate_curve_hz"]["rate_hz"],
+                    dtype=float,
+                ),
+            ),
         },
         coords={
             "model": np.asarray(MODEL_NAMES, dtype=str),
+            "spatial_bin_size_cm": np.asarray(
+                ridge_cv_result["spatial_bin_sizes_cm"],
+                dtype=float,
+            ),
             "ridge": np.asarray(ridge_cv_result["ridge_values"], dtype=float),
             "unit": np.asarray(full_fit["unit_ids"]),
-            "motor_feature": np.asarray(design_info["feature_names"]["motor"], dtype=str),
+            "motor_feature": np.asarray(
+                design_info_by_model["motor"]["feature_names"]["motor"],
+                dtype=str,
+            ),
             "tp_group_feature": np.asarray(
-                design_info["feature_names"]["tp_group"],
+                design_info_by_model["motor_tp"]["feature_names"]["tp_group"],
                 dtype=str,
             ),
             "place_traj_feature": np.asarray(
-                design_info["feature_names"]["place_traj"],
+                design_info_by_model["motor_place"]["feature_names"]["place_traj"],
                 dtype=str,
             ),
             "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
             "tp_group": np.asarray([group_name for group_name, _ in TP_GROUPS], dtype=str),
-            "tp_basis": np.arange(n_tp_basis, dtype=int),
-            "place_basis": np.arange(n_place_basis, dtype=int),
+            "motor_tp_tp_basis": np.arange(n_motor_tp_basis, dtype=int),
+            "tp_only_tp_basis": np.arange(n_tp_only_basis, dtype=int),
+            "motor_place_place_basis": np.arange(n_motor_place_basis, dtype=int),
+            "place_only_place_basis": np.arange(n_place_only_basis, dtype=int),
+            "motor_generalized_place_basis": np.arange(
+                n_motor_generalized_place_basis,
+                dtype=int,
+            ),
+            "generalized_place_only_basis": np.arange(
+                n_generalized_place_only_basis,
+                dtype=int,
+            ),
+            "motor_generalized_task_progression_basis": np.arange(
+                n_motor_generalized_tp_basis,
+                dtype=int,
+            ),
+            "generalized_task_progression_only_basis": np.arange(
+                n_generalized_tp_only_basis,
+                dtype=int,
+            ),
             "tp_grid": tp_grid,
             "place_grid": place_grid,
+            "generalized_place_grid": generalized_place_grid,
+            "generalized_task_progression_grid": generalized_tp_grid,
         },
         attrs={
             "schema_version": "2",
@@ -2599,17 +3342,22 @@ def build_full_refit_dataset(
             "bin_size_s": float(data["bin_size_s"]),
             "motor_feature_mode": str(full_fit["motor_transform"]["mode"]),
             "min_firing_rate_hz": float(min_firing_rate_hz),
-            "tp_basis_n_splines": n_tp_basis,
-            "tp_basis_order": int(design_info["basis"]["order"]),
-            "place_basis_n_splines": n_place_basis,
-            "place_basis_order": int(design_info["basis"]["order"]),
-            "basis_bounds_lower": float(design_info["basis"]["bounds"][0]),
-            "basis_bounds_upper": float(design_info["basis"]["bounds"][1]),
+            "spline_order": int(
+                design_info_by_model["motor_tp"]["basis"]["order"]
+            ),
             "model_definitions_json": json.dumps(MODEL_DEFINITIONS, sort_keys=True),
             "primary_delta_metric_names_json": json.dumps(list(PRIMARY_DELTA_METRIC_NAMES)),
+            "selected_position_basis_by_model_json": json.dumps(
+                {
+                    model_name: full_fit["position_basis_by_model"][model_name]
+                    for model_name in MODEL_NAMES
+                },
+                sort_keys=True,
+            ),
             "full_refit_note": (
                 "Coefficients and rate curves are fit on all eligible bins after "
-                "lap-CV ridge selection; use the nested-CV dataset for held-out evidence."
+                "lap-CV ridge and spatial-bin-size selection; use the nested-CV "
+                "dataset for held-out evidence."
             ),
             "sources_json": json.dumps(sources, sort_keys=True),
             "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
@@ -2672,7 +3420,7 @@ def plot_primary_delta_histograms(
     *,
     out_path: Path,
 ) -> Path:
-    """Save the two-panel histogram for the primary held-out deltas."""
+    """Save the four-panel histogram for the primary held-out deltas."""
     import matplotlib.pyplot as plt
 
     panel_specs = (
@@ -2686,11 +3434,21 @@ def plot_primary_delta_histograms(
             "dll_motor_place_vs_motor_bits_per_spike",
             "#55A868",
         ),
+        (
+            "Motor + Generalized Place minus Motor",
+            "dll_motor_generalized_place_vs_motor_bits_per_spike",
+            "#C44E52",
+        ),
+        (
+            "Motor + Generalized TP minus Motor",
+            "dll_motor_generalized_task_progression_vs_motor_bits_per_spike",
+            "#8172B2",
+        ),
     )
     fig, axes = plt.subplots(
         1,
-        2,
-        figsize=(11.2, 4.2),
+        4,
+        figsize=(20.0, 4.2),
         constrained_layout=True,
         sharey=True,
     )
@@ -2754,648 +3512,19 @@ def plot_primary_delta_histograms(
     return out_path
 
 
-def fit_motor_task_progression_place_epoch(
-    *,
-    spikes: Any,
-    position_tsd: Any,
-    body_position_tsd: Any,
-    trajectory_intervals: dict[str, Any],
-    task_progression_by_trajectory: dict[str, Any],
-    movement_interval: Any,
-    bin_size_s: float = 0.02,
-    tp_spline_k: int = 25,
-    tp_spline_order: int = 4,
-    tp_bounds: tuple[float, float] = (0.0, 1.0),
-    motor_spline_k: int = 5,
-    motor_spline_order: int = 4,
-    motor_feature_mode: Literal["zscore", "spline"] = "zscore",
-    motor_zscore_eps: float = 1e-12,
-    ridge: float = 1e-3,
-    n_folds: int = 5,
-    seed: int = 0,
-    unit_mask: np.ndarray | None = None,
-) -> dict[str, Any]:
-    """Fit motor, task-progression, and trajectory-specific place GLMs."""
-    import pynapple as nap
-
-    for trajectory_type in TRAJECTORY_TYPES:
-        if trajectory_type not in trajectory_intervals:
-            raise ValueError(
-                f"trajectory_intervals is missing required key: {trajectory_type}"
-            )
-        if trajectory_type not in task_progression_by_trajectory:
-            raise ValueError(
-                f"task_progression_by_trajectory is missing required key: {trajectory_type}"
-            )
-
-    selected_spikes = spikes if unit_mask is None else spikes[unit_mask]
-    if len(selected_spikes.keys()) == 0:
-        raise ValueError("No units remain after applying the firing-rate threshold.")
-
-    position_times = np.asarray(position_tsd.t, dtype=float)
-    all_interval = nap.IntervalSet(
-        start=float(position_times[0]),
-        end=float(position_times[-1]),
-        time_units="s",
-    )
-    spike_counts = selected_spikes.count(bin_size_s, ep=all_interval)
-    unit_ids = np.asarray(spike_counts.columns)
-    spike_count_array = np.asarray(spike_counts.d, dtype=float)
-    n_time_bins, n_units = spike_count_array.shape
-
-    in_movement = np.asarray(
-        spike_counts.in_interval(movement_interval),
-        dtype=bool,
-    ).reshape(-1)
-    in_trajectory = {
-        trajectory_type: np.asarray(
-            spike_counts.in_interval(trajectory_intervals[trajectory_type]),
-            dtype=bool,
-        ).reshape(-1)
-        for trajectory_type in TRAJECTORY_TYPES
-    }
-    in_any_trajectory = np.zeros(n_time_bins, dtype=bool)
-    overlap_count = np.zeros(n_time_bins, dtype=int)
-    for trajectory_type in TRAJECTORY_TYPES:
-        in_any_trajectory |= in_trajectory[trajectory_type]
-        overlap_count += in_trajectory[trajectory_type].astype(int)
-
-    keep_mask = in_movement & in_any_trajectory
-    if not np.any(keep_mask):
-        raise ValueError(
-            "No bins remain after restricting to movement and trajectories."
-        )
-    if np.any(keep_mask & (overlap_count != 1)):
-        raise ValueError(
-            "Trajectory intervals appear to overlap within the kept bins. "
-            "Each retained time bin must belong to exactly one trajectory."
-        )
-
-    trajectory_labels_full = np.full(n_time_bins, -1, dtype=int)
-    for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-        trajectory_labels_full[in_trajectory[trajectory_type]] = trajectory_index
-
-    motor_covariates = compute_motor_covariates(
-        position_xy=np.asarray(position_tsd.d, dtype=float),
-        body_xy=np.asarray(body_position_tsd.d, dtype=float),
-        position_timestamps=np.asarray(position_tsd.t, dtype=float),
-        spike_counts=spike_counts,
-    )
-
-    tp_lower, tp_upper = map(float, tp_bounds)
-    if not np.isfinite(tp_lower) or not np.isfinite(tp_upper) or tp_upper <= tp_lower:
-        raise ValueError(f"Invalid task-progression bounds: {tp_bounds!r}")
-
-    task_progression_full = np.full(n_time_bins, np.nan, dtype=float)
-    for trajectory_type in TRAJECTORY_TYPES:
-        interpolated_tp = task_progression_by_trajectory[trajectory_type].interpolate(
-            spike_counts
-        )
-        interpolated_tp = np.asarray(interpolated_tp.to_numpy(), dtype=float).reshape(
-            -1
-        )
-        trajectory_mask = in_trajectory[trajectory_type]
-        if interpolated_tp.size != int(trajectory_mask.sum()):
-            raise RuntimeError(
-                f"{trajectory_type}: interpolated task progression size {interpolated_tp.size} "
-                f"did not match the number of bins in the trajectory mask {int(trajectory_mask.sum())}."
-            )
-        task_progression_full[trajectory_mask] = interpolated_tp
-    task_progression_full = np.clip(task_progression_full, tp_lower, tp_upper)
-
-    finite_covariates = np.ones(n_time_bins, dtype=bool)
-    for values in motor_covariates.values():
-        finite_covariates &= np.isfinite(values)
-    keep_mask &= finite_covariates & np.isfinite(task_progression_full)
-    if not np.any(keep_mask):
-        raise ValueError(
-            "No bins remain after dropping non-finite motor or TP samples."
-        )
-
-    response = spike_count_array[keep_mask]
-    trajectory_labels = trajectory_labels_full[keep_mask]
-    task_progression = task_progression_full[keep_mask]
-    masked_covariates = {
-        name: np.asarray(values[keep_mask], dtype=float)
-        for name, values in motor_covariates.items()
-    }
-
-    motor_feature_names: list[str] = []
-    motor_standardization: dict[str, Any] | None = None
-    if motor_feature_mode == "spline":
-        motor_blocks: list[np.ndarray] = []
-        for covariate_name in MOTOR_CONTINUOUS_FEATURE_NAMES:
-            features = bspline_features(
-                masked_covariates[covariate_name],
-                n_basis=motor_spline_k,
-                order=motor_spline_order,
-            )
-            motor_blocks.append(features)
-            motor_feature_names.extend(
-                f"{covariate_name}_bs{basis_index}"
-                for basis_index in range(features.shape[1])
-            )
-        motor_blocks.append(masked_covariates["sin_hd"][:, None])
-        motor_blocks.append(masked_covariates["cos_hd"][:, None])
-        motor_feature_names.extend(["sin_hd", "cos_hd"])
-        motor_design = np.concatenate(motor_blocks, axis=1)
-    elif motor_feature_mode == "zscore":
-        motor_raw_names = list(MOTOR_RAW_FEATURE_NAMES)
-        motor_raw = np.column_stack(
-            [masked_covariates[name] for name in motor_raw_names]
-        )
-        mean = motor_raw.mean(axis=0)
-        std_raw = motor_raw.std(axis=0)
-        std = std_raw.copy()
-        constant_mask = (~np.isfinite(std)) | (std < float(motor_zscore_eps))
-        std[constant_mask] = 1.0
-        motor_design = (motor_raw - mean) / std
-        if np.any(constant_mask):
-            motor_design[:, constant_mask] = 0.0
-        motor_feature_names = [f"{name}_z" for name in motor_raw_names]
-        motor_standardization = {
-            "raw_feature_names": motor_raw_names,
-            "mean": mean,
-            "std": std,
-            "std_raw": std_raw,
-            "eps": float(motor_zscore_eps),
-            "constant_mask": constant_mask,
-        }
-    else:
-        raise ValueError(
-            f"motor_feature_mode must be 'zscore' or 'spline', got {motor_feature_mode!r}"
-        )
-
-    trajectory_to_index = {
-        trajectory_type: index for index, trajectory_type in enumerate(TRAJECTORY_TYPES)
-    }
-    trajectory_index_to_group = np.full(len(TRAJECTORY_TYPES), -1, dtype=int)
-    for group_index, (_, grouped_trajectories) in enumerate(TP_GROUPS):
-        for trajectory_type in grouped_trajectories:
-            trajectory_index_to_group[trajectory_to_index[trajectory_type]] = (
-                group_index
-            )
-    if np.any(trajectory_index_to_group < 0):
-        missing = [
-            TRAJECTORY_TYPES[index]
-            for index in np.flatnonzero(trajectory_index_to_group < 0)
-        ]
-        raise ValueError(
-            f"Some trajectories were not assigned to a TP group: {missing!r}"
-        )
-
-    group_labels = trajectory_index_to_group[trajectory_labels]
-    trajectory_group_design = (group_labels == 1).astype(float)[:, None]
-    trajectory_feature_names = [f"is_{TP_GROUPS[1][0]}"]
-
-    tp_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
-        bounds=(tp_lower, tp_upper),
-    )
-    tp_basis_features = np.asarray(
-        tp_basis.compute_features(task_progression), dtype=float
-    )
-    if not np.all(np.isfinite(tp_basis_features)):
-        raise ValueError("Encountered non-finite task-progression spline features.")
-
-    tp_feature_blocks: list[np.ndarray] = []
-    tp_feature_names: list[str] = []
-    n_tp_basis = tp_basis_features.shape[1]
-    for group_index, (group_name, grouped_trajectories) in enumerate(TP_GROUPS):
-        grouped_indices = [
-            trajectory_to_index[trajectory_type]
-            for trajectory_type in grouped_trajectories
-        ]
-        gate = np.isin(trajectory_labels, grouped_indices).astype(float)[:, None]
-        tp_feature_blocks.append(tp_basis_features * gate)
-        tp_feature_names.extend(
-            f"tp_{group_name}_bs{basis_index}" for basis_index in range(n_tp_basis)
-        )
-    tp_design = np.concatenate(tp_feature_blocks, axis=1)
-    if np.allclose(tp_design, 0.0):
-        raise RuntimeError("Task-progression design matrix is all zeros.")
-
-    place_basis = BSplineEval(
-        n_basis_funcs=int(tp_spline_k),
-        order=int(tp_spline_order),
-        bounds=(tp_lower, tp_upper),
-    )
-    place_basis_features = np.asarray(
-        place_basis.compute_features(task_progression), dtype=float
-    )
-    if not np.all(np.isfinite(place_basis_features)):
-        raise ValueError("Encountered non-finite place spline features.")
-
-    place_feature_blocks: list[np.ndarray] = []
-    place_feature_names: list[str] = []
-    n_place_basis = place_basis_features.shape[1]
-    for trajectory_type in TRAJECTORY_TYPES:
-        gate = (trajectory_labels == trajectory_to_index[trajectory_type]).astype(float)[
-            :, None
-        ]
-        place_feature_blocks.append(place_basis_features * gate)
-        place_feature_names.extend(
-            f"place_{trajectory_type}_bs{basis_index}"
-            for basis_index in range(n_place_basis)
-        )
-    place_design = np.concatenate(place_feature_blocks, axis=1)
-    if np.allclose(place_design, 0.0):
-        raise RuntimeError("Place design matrix is all zeros.")
-
-    model_specs = {
-        "motor": {
-            "design": np.concatenate([motor_design, trajectory_group_design], axis=1),
-            "blocks": {
-                "motor": slice(0, motor_design.shape[1]),
-                "traj": slice(
-                    motor_design.shape[1],
-                    motor_design.shape[1] + trajectory_group_design.shape[1],
-                ),
-            },
-        },
-        "motor_tp": {
-            "design": np.concatenate(
-                [motor_design, trajectory_group_design, tp_design],
-                axis=1,
-            ),
-            "blocks": {
-                "motor": slice(0, motor_design.shape[1]),
-                "traj": slice(
-                    motor_design.shape[1],
-                    motor_design.shape[1] + trajectory_group_design.shape[1],
-                ),
-                "tp": slice(
-                    motor_design.shape[1] + trajectory_group_design.shape[1],
-                    motor_design.shape[1]
-                    + trajectory_group_design.shape[1]
-                    + tp_design.shape[1],
-                ),
-            },
-        },
-        "tp_only": {
-            "design": np.concatenate([trajectory_group_design, tp_design], axis=1),
-            "blocks": {
-                "traj": slice(0, trajectory_group_design.shape[1]),
-                "tp": slice(
-                    trajectory_group_design.shape[1],
-                    trajectory_group_design.shape[1] + tp_design.shape[1],
-                ),
-            },
-        },
-        "motor_place": {
-            "design": np.concatenate([motor_design, place_design], axis=1),
-            "blocks": {
-                "motor": slice(0, motor_design.shape[1]),
-                "place": slice(
-                    motor_design.shape[1],
-                    motor_design.shape[1] + place_design.shape[1],
-                ),
-            },
-        },
-        "place_only": {
-            "design": place_design,
-            "blocks": {
-                "place": slice(0, place_design.shape[1]),
-            },
-        },
-    }
-
-    for matrix_name, matrix in (
-        ("motor_design", motor_design),
-        ("trajectory_group_design", trajectory_group_design),
-        ("tp_design", tp_design),
-        ("place_design", place_design),
-    ):
-        if not np.all(np.isfinite(matrix)):
-            bad_row, bad_col = np.argwhere(~np.isfinite(matrix))[0]
-            raise ValueError(
-                f"{matrix_name} contains non-finite values at "
-                f"row {int(bad_row)}, column {int(bad_col)}."
-            )
-
-    folds = stratified_contiguous_folds(trajectory_labels, n_folds=n_folds, seed=seed)
-    fold_test_counts = np.zeros((n_folds, len(TRAJECTORY_TYPES)), dtype=int)
-    for fold_index, (_, test_indices) in enumerate(folds):
-        for trajectory_index in range(len(TRAJECTORY_TYPES)):
-            fold_test_counts[fold_index, trajectory_index] = int(
-                np.sum(trajectory_labels[test_indices] == trajectory_index)
-            )
-    for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-        if np.min(fold_test_counts[:, trajectory_index]) == 0:
-            warnings.warn(
-                f"Trajectory {trajectory_type!r} has no test bins in at least one CV fold.",
-                stacklevel=2,
-            )
-
-    aggregate_sample_scores = lambda array: jnp.sum(array, axis=0)
-    ll_sum_by_model = {
-        model_name: np.zeros(n_units, dtype=float) for model_name in model_specs
-    }
-    spike_sum = np.zeros(n_units, dtype=float)
-    ll_sum_by_model_by_trajectory = {
-        model_name: {
-            trajectory_type: np.zeros(n_units, dtype=float)
-            for trajectory_type in TRAJECTORY_TYPES
-        }
-        for model_name in model_specs
-    }
-    spike_sum_by_trajectory = {
-        trajectory_type: np.zeros(n_units, dtype=float)
-        for trajectory_type in TRAJECTORY_TYPES
-    }
-
-    for train_indices, test_indices in folds:
-        fold_models = {}
-        for model_name, model_spec in model_specs.items():
-            model = PopulationGLM(
-                "Poisson",
-                regularizer="Ridge",
-                regularizer_strength=ridge,
-            )
-            model.fit(model_spec["design"][train_indices], response[train_indices])
-            fold_models[model_name] = model
-
-        fold_spike_sum = np.asarray(response[test_indices].sum(axis=0), dtype=float)
-
-        for model_name, model_spec in model_specs.items():
-            ll_sum_by_model[model_name] += np.asarray(
-                fold_models[model_name].score(
-                    model_spec["design"][test_indices],
-                    response[test_indices],
-                    score_type="log-likelihood",
-                    aggregate_sample_scores=aggregate_sample_scores,
-                )
-            )
-        spike_sum += fold_spike_sum
-
-        for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-            trajectory_test_indices = test_indices[
-                trajectory_labels[test_indices] == trajectory_index
-            ]
-            if trajectory_test_indices.size == 0:
-                continue
-            for model_name, model_spec in model_specs.items():
-                ll_sum_by_model_by_trajectory[model_name][trajectory_type] += np.asarray(
-                    fold_models[model_name].score(
-                        model_spec["design"][trajectory_test_indices],
-                        response[trajectory_test_indices],
-                        score_type="log-likelihood",
-                        aggregate_sample_scores=aggregate_sample_scores,
-                    )
-                )
-            spike_sum_by_trajectory[trajectory_type] += np.asarray(
-                response[trajectory_test_indices].sum(axis=0),
-                dtype=float,
-            )
-
-    def to_per_spike(ll_values: np.ndarray, spike_values: np.ndarray) -> np.ndarray:
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return np.where(spike_values > 0, ll_values / spike_values, np.nan)
-
-    ll_per_spike_by_model = {
-        model_name: to_per_spike(ll_values, spike_sum)
-        for model_name, ll_values in ll_sum_by_model.items()
-    }
-    cv_pooled = build_cv_metric_dict(ll_per_spike_by_model, spike_sum)
-
-    cv_by_trajectory: dict[str, dict[str, np.ndarray]] = {}
-    for trajectory_type in TRAJECTORY_TYPES:
-        trajectory_spike_sum = spike_sum_by_trajectory[trajectory_type]
-        ll_per_spike_trajectory = {
-            model_name: to_per_spike(
-                ll_sum_by_model_by_trajectory[model_name][trajectory_type],
-                trajectory_spike_sum,
-            )
-            for model_name in model_specs
-        }
-        cv_by_trajectory[trajectory_type] = build_cv_metric_dict(
-            ll_per_spike_trajectory,
-            trajectory_spike_sum,
-        )
-
-    fitted_models_all = {}
-    for model_name, model_spec in model_specs.items():
-        model = PopulationGLM(
-            "Poisson",
-            regularizer="Ridge",
-            regularizer_strength=ridge,
-        )
-        model.fit(model_spec["design"], response)
-        fitted_models_all[model_name] = model
-
-    def extract_coefficients(model: PopulationGLM, n_features: int) -> np.ndarray:
-        coefficients = np.asarray(model.coef_)
-        if coefficients.shape[0] != n_features:
-            coefficients = coefficients.T
-        return coefficients
-
-    model_coefficients_all = {
-        model_name: extract_coefficients(
-            fitted_models_all[model_name],
-            model_spec["design"].shape[1],
-        )
-        for model_name, model_spec in model_specs.items()
-    }
-
-    motor_tp_coefficients_by_group = {}
-    tp_only_coefficients_by_group = {}
-    for group_index, (group_name, _) in enumerate(TP_GROUPS):
-        start = group_index * n_tp_basis
-        stop = (group_index + 1) * n_tp_basis
-        motor_tp_coefficients_by_group[group_name] = model_coefficients_all["motor_tp"][
-            model_specs["motor_tp"]["blocks"]["tp"].start
-            + start : model_specs["motor_tp"]["blocks"]["tp"].start
-            + stop,
-            :,
-        ]
-        tp_only_coefficients_by_group[group_name] = model_coefficients_all["tp_only"][
-            model_specs["tp_only"]["blocks"]["tp"].start
-            + start : model_specs["tp_only"]["blocks"]["tp"].start
-            + stop,
-            :,
-        ]
-
-    motor_place_coefficients_by_trajectory = {}
-    place_only_coefficients_by_trajectory = {}
-    for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-        start = trajectory_index * n_place_basis
-        stop = (trajectory_index + 1) * n_place_basis
-        motor_place_coefficients_by_trajectory[trajectory_type] = (
-            model_coefficients_all["motor_place"][
-                model_specs["motor_place"]["blocks"]["place"].start
-                + start : model_specs["motor_place"]["blocks"]["place"].start
-                + stop,
-                :,
-            ]
-        )
-        place_only_coefficients_by_trajectory[trajectory_type] = (
-            model_coefficients_all["place_only"][
-                model_specs["place_only"]["blocks"]["place"].start
-                + start : model_specs["place_only"]["blocks"]["place"].start
-                + stop,
-                :,
-            ]
-        )
-
-    motor_mean = (
-        np.zeros(motor_design.shape[1], dtype=float)
-        if motor_feature_mode == "zscore"
-        else motor_design.mean(axis=0)
-    )
-    tp_rate_curves_hz = {}
-    place_rate_curves_hz = {}
-    tp_grid = np.linspace(tp_lower, tp_upper, 200)
-    place_grid = np.linspace(tp_lower, tp_upper, 200)
-    for trajectory_index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-        tp_grid_features = np.asarray(tp_basis.compute_features(tp_grid), dtype=float)
-        group_index = trajectory_index_to_group[trajectory_index]
-        trajectory_dummy = np.zeros(
-            (tp_grid.size, trajectory_group_design.shape[1]), dtype=float
-        )
-        if group_index == 1:
-            trajectory_dummy[:, 0] = 1.0
-        tp_block = np.zeros((tp_grid.size, tp_design.shape[1]), dtype=float)
-        start = group_index * n_tp_basis
-        stop = (group_index + 1) * n_tp_basis
-        tp_block[:, start:stop] = tp_grid_features
-        grid_design = np.concatenate(
-            [
-                np.repeat(motor_mean[None, :], tp_grid.size, axis=0),
-                trajectory_dummy,
-                tp_block,
-            ],
-            axis=1,
-        )
-        eta = (
-            np.asarray(fitted_models_all["motor_tp"].intercept_).reshape(1, -1)
-            + grid_design @ model_coefficients_all["motor_tp"]
-        )
-        tp_rate_curves_hz[trajectory_type] = {
-            "tp_grid": tp_grid,
-            "rate_hz": np.exp(eta) / float(bin_size_s),
-        }
-
-        place_grid_features = np.asarray(
-            place_basis.compute_features(place_grid), dtype=float
-        )
-        place_block = np.zeros((place_grid.size, place_design.shape[1]), dtype=float)
-        place_start = trajectory_index * n_place_basis
-        place_stop = (trajectory_index + 1) * n_place_basis
-        place_block[:, place_start:place_stop] = place_grid_features
-        place_grid_design = np.concatenate(
-            [
-                np.repeat(motor_mean[None, :], place_grid.size, axis=0),
-                place_block,
-            ],
-            axis=1,
-        )
-        place_eta = (
-            np.asarray(fitted_models_all["motor_place"].intercept_).reshape(1, -1)
-            + place_grid_design @ model_coefficients_all["motor_place"]
-        )
-        place_rate_curves_hz[trajectory_type] = {
-            "place_grid": place_grid,
-            "rate_hz": np.exp(place_eta) / float(bin_size_s),
-        }
-
-    return {
-        "unit_ids": unit_ids,
-        "bin_size_s": float(bin_size_s),
-        "motor_feature_mode": motor_feature_mode,
-        "motor_standardization": motor_standardization,
-        "feature_names_motor": motor_feature_names,
-        "feature_names_traj": trajectory_feature_names,
-        "feature_names_tp": tp_feature_names,
-        "feature_names_place": place_feature_names,
-        "tp_basis": {
-            "n_splines": int(tp_spline_k),
-            "order": int(tp_spline_order),
-            "bounds": (tp_lower, tp_upper),
-        },
-        "place_basis": {
-            "n_splines": int(tp_spline_k),
-            "order": int(tp_spline_order),
-            "bounds": (tp_lower, tp_upper),
-        },
-        "cv": {
-            "pooled": cv_pooled,
-            "by_traj": cv_by_trajectory,
-            "fold_test_counts": fold_test_counts,
-        },
-        "coef": {
-            "motor": {
-                "intercept": np.asarray(fitted_models_all["motor"].intercept_).reshape(
-                    -1
-                ),
-                "coef_motor": model_coefficients_all["motor"][
-                    model_specs["motor"]["blocks"]["motor"],
-                    :,
-                ],
-                "coef_traj": model_coefficients_all["motor"][
-                    model_specs["motor"]["blocks"]["traj"],
-                    :,
-                ],
-            },
-            "motor_tp": {
-                "intercept": np.asarray(
-                    fitted_models_all["motor_tp"].intercept_
-                ).reshape(-1),
-                "coef_motor": model_coefficients_all["motor_tp"][
-                    model_specs["motor_tp"]["blocks"]["motor"],
-                    :,
-                ],
-                "coef_traj": model_coefficients_all["motor_tp"][
-                    model_specs["motor_tp"]["blocks"]["traj"],
-                    :,
-                ],
-                "coef_tp_by_group": motor_tp_coefficients_by_group,
-            },
-            "tp_only": {
-                "intercept": np.asarray(
-                    fitted_models_all["tp_only"].intercept_
-                ).reshape(-1),
-                "coef_traj": model_coefficients_all["tp_only"][
-                    model_specs["tp_only"]["blocks"]["traj"],
-                    :,
-                ],
-                "coef_tp_by_group": tp_only_coefficients_by_group,
-            },
-            "motor_place": {
-                "intercept": np.asarray(
-                    fitted_models_all["motor_place"].intercept_
-                ).reshape(-1),
-                "coef_motor": model_coefficients_all["motor_place"][
-                    model_specs["motor_place"]["blocks"]["motor"],
-                    :,
-                ],
-                "coef_place_by_trajectory": motor_place_coefficients_by_trajectory,
-            },
-            "place_only": {
-                "intercept": np.asarray(
-                    fitted_models_all["place_only"].intercept_
-                ).reshape(-1),
-                "coef_place_by_trajectory": place_only_coefficients_by_trajectory,
-            },
-        },
-        "tp_rate_curves_hz": tp_rate_curves_hz,
-        "place_rate_curves_hz": place_rate_curves_hz,
-    }
-
-
 def parse_arguments() -> argparse.Namespace:
-    """Parse command-line arguments for the task-progression TP/place GLM script."""
+    """Parse command-line arguments for the motor/TP/place GLM script."""
     parser = argparse.ArgumentParser(
         description=(
-            "Fit nested lap-CV motor, task-progression, and trajectory-specific "
-            "place GLMs for one task-progression session"
+            "Fit nested lap-CV motor, task-progression, trajectory-specific "
+            "place, generalized-place, and generalized-TP GLMs for one session"
         )
     )
     parser.add_argument(
         "--cuda-visible-devices",
         default=_CUDA_VISIBLE_DEVICES_CLI,
         help=(
-            "Optional CUDA_VISIBLE_DEVICES value applied before importing JAX. "
+            "Optional CUDA_VISIBLE_DEVICES value applied before importing compute libraries. "
             "Default: unset"
         ),
     )
@@ -3507,16 +3636,30 @@ def parse_arguments() -> argparse.Namespace:
         help="Spline order for motor covariates in spline mode. Default: 4",
     )
     parser.add_argument(
-        "--tp-spline-k",
-        type=int,
-        default=25,
-        help="Number of spline basis functions for both task progression and place. Default: 25",
+        "--spatial-bin-sizes-cm",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_SPATIAL_BIN_SIZES_CM),
+        help=(
+            "Spatial bin-size candidates used to derive non-motor position "
+            "spline counts by ceil(track_length / bin_size). Default: "
+            + " ".join(f"{value:g}" for value in DEFAULT_SPATIAL_BIN_SIZES_CM)
+        ),
     )
     parser.add_argument(
         "--tp-spline-order",
         type=int,
         default=4,
         help="Spline order for both task progression and place. Default: 4",
+    )
+    parser.add_argument(
+        "--generalized-place-branch-gap-cm",
+        type=float,
+        default=DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM,
+        help=(
+            "Gap inserted between full-W generalized-place left and right branches. "
+            f"Default: {DEFAULT_GENERALIZED_PLACE_BRANCH_GAP_CM}"
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -3530,31 +3673,46 @@ def main() -> None:
     """Run the nested lap-CV task-progression TP/place GLM workflow."""
     args = parse_arguments()
     ridge_values = [float(value) for value in dict.fromkeys(args.ridges)]
+    spatial_bin_sizes_cm = [
+        float(value) for value in dict.fromkeys(args.spatial_bin_sizes_cm)
+    ]
     if args.bin_size_s <= 0:
         raise ValueError("--bin-size-s must be positive.")
     if args.n_folds < 2:
         raise ValueError("--n-folds must be at least 2.")
     if args.inner_n_folds < 2:
         raise ValueError("--inner-n-folds must be at least 2.")
-    if args.tp_spline_k <= 0:
-        raise ValueError("--tp-spline-k must be positive.")
+    if args.tp_spline_order <= 0:
+        raise ValueError("--tp-spline-order must be positive.")
+    if any(value <= 0 for value in spatial_bin_sizes_cm):
+        raise ValueError("--spatial-bin-sizes-cm values must be positive.")
+    if args.generalized_place_branch_gap_cm < 0:
+        raise ValueError("--generalized-place-branch-gap-cm must be non-negative.")
     if args.motor_spline_k <= 0:
         raise ValueError("--motor-spline-k must be positive.")
     if any(value < 0 for value in ridge_values):
         raise ValueError("--ridges must be non-negative.")
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
+    position_basis_configs = build_position_basis_configs(
+        animal_name=args.animal_name,
+        spatial_bin_sizes_cm=spatial_bin_sizes_cm,
+        spline_order=args.tp_spline_order,
+        generalized_place_branch_gap_cm=args.generalized_place_branch_gap_cm,
+    )
     config_token = build_config_token(
         bin_size_s=args.bin_size_s,
-        tp_spline_k=args.tp_spline_k,
+        spatial_bin_sizes_cm=spatial_bin_sizes_cm,
+        tp_spline_order=args.tp_spline_order,
+        generalized_place_branch_gap_cm=args.generalized_place_branch_gap_cm,
         motor_feature_mode=args.motor_feature_mode,
         n_folds=args.n_folds,
         inner_n_folds=args.inner_n_folds,
         ridge_values=ridge_values,
     )
     print(
-        "Starting nested lap-CV motor/task-progression/place GLM fits "
-        f"for {args.animal_name} {args.date}"
+        "Starting nested lap-CV motor/task-progression/place/generalized-place/"
+        f"generalized-TP GLM fits for {args.animal_name} {args.date}"
     )
     print(f"Analysis path: {analysis_path}")
     print(
@@ -3564,8 +3722,22 @@ def main() -> None:
         f"motor_feature_mode={args.motor_feature_mode}, "
         f"n_folds={args.n_folds}, "
         f"inner_n_folds={args.inner_n_folds}, "
+        "spatial_bin_sizes_cm="
+        + ",".join(f"{value:g}" for value in spatial_bin_sizes_cm)
+        + ", "
         "ridges="
         + ",".join(f"{value:g}" for value in ridge_values)
+    )
+    print(
+        "Derived position basis configs: "
+        + ", ".join(
+            (
+                f"{config['spatial_bin_size_cm']:g}cm -> "
+                f"trajectory {config['trajectory_n_splines']} splines, "
+                f"generalized place {config['generalized_place_n_splines']} splines"
+            )
+            for config in position_basis_configs
+        )
     )
     print(f"Output config token: {config_token}")
     print("Primary deltas: " + ", ".join(PRIMARY_DELTA_METRIC_NAMES))
@@ -3594,6 +3766,8 @@ def main() -> None:
         selected_run_epochs=selected_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
+        include_generalized_place=True,
+        generalized_place_branch_gap_cm=args.generalized_place_branch_gap_cm,
     )
     print("Computing movement firing rates by region and epoch...")
     movement_firing_rates = compute_movement_firing_rates(
@@ -3725,8 +3899,10 @@ def main() -> None:
                 "motor_zscore_eps": args.motor_zscore_eps,
                 "motor_spline_k": args.motor_spline_k,
                 "motor_spline_order": args.motor_spline_order,
-                "tp_spline_k": args.tp_spline_k,
+                "spatial_bin_sizes_cm": spatial_bin_sizes_cm,
                 "tp_spline_order": args.tp_spline_order,
+                "position_basis_configs": position_basis_configs,
+                "generalized_place_branch_gap_cm": args.generalized_place_branch_gap_cm,
                 "model_definitions": MODEL_DEFINITIONS,
                 "primary_delta_metric_names": PRIMARY_DELTA_METRIC_NAMES,
                 "config_token": config_token,
@@ -3738,6 +3914,12 @@ def main() -> None:
                     spikes=session["spikes_by_region"][region],
                     position_tsd=position_tsd,
                     body_position_tsd=body_position_tsd,
+                    generalized_place_position=session[
+                        "generalized_place_position_by_run"
+                    ][epoch],
+                    generalized_task_progression=session[
+                        "generalized_task_progression_by_run"
+                    ][epoch],
                     trajectory_intervals=session["trajectory_intervals"][epoch],
                     task_progression_by_trajectory=session[
                         "task_progression_by_trajectory"
@@ -3755,11 +3937,10 @@ def main() -> None:
                     epoch_data,
                     outer_folds,
                     ridge_values=ridge_values,
+                    position_basis_configs=position_basis_configs,
                     inner_n_folds=args.inner_n_folds,
                     seed=args.seed,
                     min_firing_rate_hz=region_thresholds[region],
-                    tp_spline_k=args.tp_spline_k,
-                    tp_spline_order=args.tp_spline_order,
                     motor_feature_mode=args.motor_feature_mode,
                     motor_zscore_eps=args.motor_zscore_eps,
                     motor_spline_k=args.motor_spline_k,
@@ -3779,19 +3960,21 @@ def main() -> None:
                     fit_parameters=fit_parameters_common,
                 )
 
-                print("  Selecting full-data refit ridges by lap-level CV...")
+                print(
+                    "  Selecting full-data refit ridges and spatial bin sizes "
+                    "by lap-level CV..."
+                )
                 full_refit_folds = build_lap_cv_folds_for_epoch(
                     session["trajectory_intervals"][epoch],
                     n_folds=args.n_folds,
                     seed=args.seed,
                 )
-                full_ridge_cv = compute_ridge_cv_scores(
+                full_ridge_cv = compute_hyperparameter_cv_scores(
                     epoch_data,
                     full_refit_folds,
                     unit_mask=full_refit_unit_mask,
                     ridge_values=ridge_values,
-                    tp_spline_k=args.tp_spline_k,
-                    tp_spline_order=args.tp_spline_order,
+                    position_basis_configs=position_basis_configs,
                     motor_feature_mode=args.motor_feature_mode,
                     motor_zscore_eps=args.motor_zscore_eps,
                     motor_spline_k=args.motor_spline_k,
@@ -3803,10 +3986,24 @@ def main() -> None:
                     )
                     for model_index, model_name in enumerate(MODEL_NAMES)
                 }
+                full_position_basis_by_model = {
+                    model_name: position_basis_configs[
+                        int(full_ridge_cv["selected_spatial_index"][model_index])
+                    ]
+                    for model_index, model_name in enumerate(MODEL_NAMES)
+                }
                 print(
-                    "  Full-refit selected ridges: "
+                    "  Full-refit selected hyperparameters: "
                     + ", ".join(
-                        f"{model_name}={full_ridge_by_model[model_name]:.3g}"
+                        (
+                            f"{model_name}=ridge{full_ridge_by_model[model_name]:.3g}"
+                            if model_name not in POSITION_BASIS_MODEL_NAMES
+                            else (
+                                f"{model_name}=spbin"
+                                f"{full_position_basis_by_model[model_name]['spatial_bin_size_cm']:.3g}cm,"
+                                f"ridge{full_ridge_by_model[model_name]:.3g}"
+                            )
+                        )
                         for model_name in MODEL_NAMES
                     )
                 )
@@ -3814,8 +4011,7 @@ def main() -> None:
                     epoch_data,
                     unit_mask=full_refit_unit_mask,
                     ridge_by_model=full_ridge_by_model,
-                    tp_spline_k=args.tp_spline_k,
-                    tp_spline_order=args.tp_spline_order,
+                    position_basis_by_model=full_position_basis_by_model,
                     motor_feature_mode=args.motor_feature_mode,
                     motor_zscore_eps=args.motor_zscore_eps,
                     motor_spline_k=args.motor_spline_k,
@@ -3881,10 +4077,14 @@ def main() -> None:
             "motor_zscore_eps": args.motor_zscore_eps,
             "motor_spline_k": args.motor_spline_k,
             "motor_spline_order": args.motor_spline_order,
-            "tp_spline_k": args.tp_spline_k,
+            "spatial_bin_sizes_cm": spatial_bin_sizes_cm,
             "tp_spline_order": args.tp_spline_order,
+            "position_basis_configs": position_basis_configs,
+            "generalized_place_branch_gap_cm": args.generalized_place_branch_gap_cm,
             "config_token": config_token,
-            "workflow": "nested_lap_cv_strict_motor_baseline",
+            "workflow": (
+                "nested_lap_cv_strict_motor_baseline_generalized_place_generalized_tp"
+            ),
         },
         outputs={
             "sources": {

@@ -338,6 +338,10 @@ def _dataset_selection_metadata(dataset) -> dict[str, Any]:
     return {
         "selected_ridge": _float_attr(dataset, "selected_ridge"),
         "selected_bin_size_s": _float_attr(dataset, "selected_bin_size_s"),
+        "selected_spatial_bin_size_cm": _float_attr(
+            dataset,
+            "selected_spatial_bin_size_cm",
+        ),
         "selected_n_splines": _int_attr(dataset, "selected_n_splines"),
         "selection_score": _float_attr(dataset, "selection_score"),
         "selection_metric": str(dataset.attrs.get("selection_metric", "")),
@@ -435,6 +439,12 @@ def _base_row_metadata(
         "selected_ridge_light_epoch2": float(meta2["selected_ridge"]),
         "selected_bin_size_s_light_epoch1": float(meta1["selected_bin_size_s"]),
         "selected_bin_size_s_light_epoch2": float(meta2["selected_bin_size_s"]),
+        "selected_spatial_bin_size_cm_light_epoch1": float(
+            meta1["selected_spatial_bin_size_cm"]
+        ),
+        "selected_spatial_bin_size_cm_light_epoch2": float(
+            meta2["selected_spatial_bin_size_cm"]
+        ),
         "selected_n_splines_light_epoch1": meta1["selected_n_splines"],
         "selected_n_splines_light_epoch2": meta2["selected_n_splines"],
         "selection_score_light_epoch1": float(meta1["selection_score"]),

@@ -566,6 +566,9 @@ def validate_selected_dark_light_glms(
         "tp_grid": np.asarray(reference.coords["tp_grid"].values, dtype=float),
         "segment_edges": np.asarray(reference.coords["segment_edge"].values, dtype=float),
         "bin_size_s": float(reference.attrs["selected_bin_size_s"]),
+        "spatial_bin_size_cm": float(
+            reference.attrs.get("selected_spatial_bin_size_cm", np.nan)
+        ),
         "n_splines": int(reference.attrs["selected_n_splines"]),
         "spline_order": int(reference.attrs["spline_order"]),
         "has_speed": bool(reference.attrs["has_speed"]),
@@ -3981,6 +3984,9 @@ def build_selected_swap_dataset(
             "raw_ll_bits_per_spike_definition": "raw_poisson_ll_sum / spike_sum / log(2)",
             "swap_light_offset": bool(fit_parameters.get("swap_light_offset", False)),
             "bin_size_s": float(shared_metadata["bin_size_s"]),
+            "spatial_bin_size_cm": float(
+                shared_metadata.get("spatial_bin_size_cm", np.nan)
+            ),
             "n_splines": int(shared_metadata["n_splines"]),
             "spline_order": int(shared_metadata["spline_order"]),
             "has_speed": bool(shared_metadata["has_speed"]),
@@ -4340,7 +4346,8 @@ def main() -> None:
         print(
             f"Scoring {len(shared_metadata['unit_ids'])} selected {region.upper()} "
             f"unit(s) at bin={shared_metadata['bin_size_s']:g}s, "
-            f"n_splines={shared_metadata['n_splines']}."
+            f"spatial_bin={shared_metadata['spatial_bin_size_cm']:g}cm "
+            f"({shared_metadata['n_splines']} splines)."
         )
 
         speed_by_run = (

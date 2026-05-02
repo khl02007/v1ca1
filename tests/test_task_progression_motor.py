@@ -188,6 +188,43 @@ class _FakeFitDataset:
         return self._cv_pooled
 
 
+class _FakeDeltaValues:
+    """Minimal xarray-like delta selection result exposing `.values`."""
+
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = np.asarray(values, dtype=float)
+
+
+class _FakeDeltaArray:
+    """Minimal xarray-like DataArray for primary delta lookup."""
+
+    def __init__(self, metric_values: dict[str, np.ndarray]) -> None:
+        self._metric_values = {
+            key: np.asarray(values, dtype=float) for key, values in metric_values.items()
+        }
+
+    def sel(self, *, delta_metric: str) -> _FakeDeltaValues:
+        return _FakeDeltaValues(self._metric_values[delta_metric])
+
+
+class _FakeNestedDataset:
+    """Minimal dataset wrapper used by primary histogram plotting tests."""
+
+    def __init__(self, metric_values: dict[str, np.ndarray]) -> None:
+        self._pooled_delta = _FakeDeltaArray(metric_values)
+        self.attrs = {
+            "animal_name": "L14",
+            "date": "20240611",
+            "region": "v1",
+            "epoch": "run1",
+        }
+
+    def __getitem__(self, key: str) -> _FakeDeltaArray:
+        if key != "pooled_delta_bits_per_spike":
+            raise KeyError(key)
+        return self._pooled_delta
+
+
 class _FakeAxis:
     """Simple matplotlib axis stand-in that records histogram calls."""
 
@@ -256,6 +293,26 @@ class _FakePyplot(types.ModuleType):
             {"nrows": nrows, "ncols": ncols, "kwargs": kwargs}
         )
         return self.figure, self.axes_grid
+
+    def close(self, fig: _FakeFigure) -> None:
+        self.closed_figures.append(fig)
+
+
+class _FakePrimaryPyplot(types.ModuleType):
+    """Minimal pyplot replacement for primary histogram plotting tests."""
+
+    def __init__(self) -> None:
+        super().__init__("matplotlib.pyplot")
+        self.subplots_calls: list[dict[str, object]] = []
+        self.closed_figures: list[_FakeFigure] = []
+        self.axes = np.asarray([_FakeAxis(), _FakeAxis(), _FakeAxis(), _FakeAxis()])
+        self.figure = _FakeFigure()
+
+    def subplots(self, nrows: int, ncols: int, **kwargs):
+        self.subplots_calls.append(
+            {"nrows": nrows, "ncols": ncols, "kwargs": kwargs}
+        )
+        return self.figure, self.axes
 
     def close(self, fig: _FakeFigure) -> None:
         self.closed_figures.append(fig)
@@ -474,78 +531,190 @@ def test_select_epochs_with_usable_position_data_uses_clean_dlc_only(
     ]
 
 
-def test_fit_motor_task_progression_place_epoch_adds_hd_acc_zscore_feature(
+def test_build_position_basis_config_uses_spatial_bin_size_and_full_w_length(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_motor_module(monkeypatch)
-    _install_fake_pynapple(monkeypatch)
-    monkeypatch.setattr(module, "compute_motor_covariates", lambda **_: _fake_covariates())
 
-    fit_result = module.fit_motor_task_progression_place_epoch(
-        **_make_fake_fit_inputs(module),
+    class _FakeGraph:
+        def __init__(self) -> None:
+            self.nodes = {
+                0: {"pos": np.asarray((0.0, 0.0), dtype=float)},
+                1: {"pos": np.asarray((3.0, 4.0), dtype=float)},
+                2: {"pos": np.asarray((6.0, 4.0), dtype=float)},
+            }
+
+    monkeypatch.setattr(module, "get_wtrack_total_length", lambda animal_name: 11.0)
+    monkeypatch.setattr(
+        module,
+        "get_wtrack_full_graph",
+        lambda animal_name, branch_gap_cm: (
+            _FakeGraph(),
+            [(0, 1), (1, 2)],
+            [float(branch_gap_cm)],
+        ),
+    )
+
+    config = module.build_position_basis_config(
+        animal_name="L14",
+        spatial_bin_size_cm=4.0,
+        spline_order=3,
+        generalized_place_branch_gap_cm=9.0,
+    )
+
+    assert config["trajectory_length_cm"] == 11.0
+    assert config["generalized_place_length_cm"] == 17.0
+    assert config["trajectory_n_splines"] == 3
+    assert config["generalized_place_n_splines"] == 5
+    assert config["trajectory_bounds"] == (0.0, 1.0)
+    assert config["generalized_place_bounds"] == (0.0, 17.0)
+
+
+def test_build_model_designs_adds_no_offset_generalized_place_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    n_time = 8
+    rows = np.ones(n_time, dtype=bool)
+    data = {
+        "motor_covariates": _fake_covariates(),
+        "trajectory_labels": np.asarray([0, 1, 2, 3, 0, 1, 2, 3], dtype=int),
+        "task_progression": np.linspace(0.0, 1.0, n_time, dtype=float),
+        "generalized_place": np.linspace(0.0, 40.0, n_time, dtype=float),
+        "generalized_task_progression": np.linspace(1.0, 0.0, n_time, dtype=float),
+    }
+    motor_transform = module.fit_motor_feature_transform(
+        data,
+        rows,
         motor_feature_mode="zscore",
-        n_folds=2,
-        tp_spline_k=3,
+        motor_zscore_eps=1e-12,
         motor_spline_k=3,
+        motor_spline_order=4,
+    )
+    design_info = module.build_model_designs(
+        data,
+        rows,
+        motor_transform,
+        position_basis={
+            "spatial_bin_size_cm": 4.0,
+            "spline_order": 3,
+            "trajectory_length_cm": 12.0,
+            "generalized_place_length_cm": 40.0,
+            "trajectory_n_splines": 3,
+            "generalized_place_n_splines": 5,
+            "trajectory_bounds": (0.0, 1.0),
+            "generalized_place_bounds": (0.0, 40.0),
+        },
     )
 
-    assert fit_result["feature_names_motor"] == [
-        "speed_z",
-        "accel_z",
-        "hd_vel_z",
-        "hd_acc_z",
-        "abs_hd_vel_z",
-        "sin_hd_z",
-        "cos_hd_z",
+    assert tuple(design_info["designs"]) == module.MODEL_NAMES
+    assert design_info["designs"]["motor"].shape == (n_time, 7)
+    assert design_info["designs"]["motor_tp"].shape == (n_time, 14)
+    assert design_info["designs"]["tp_only"].shape == (n_time, 7)
+    assert design_info["designs"]["motor_place"].shape == (n_time, 22)
+    assert design_info["designs"]["place_only"].shape == (n_time, 15)
+    assert design_info["designs"]["motor_generalized_place"].shape == (n_time, 12)
+    assert design_info["designs"]["generalized_place_only"].shape == (n_time, 5)
+    assert design_info["designs"]["motor_generalized_task_progression"].shape == (
+        n_time,
+        10,
+    )
+    assert design_info["designs"]["generalized_task_progression_only"].shape == (
+        n_time,
+        3,
+    )
+    assert list(design_info["blocks"]["generalized_place_only"]) == [
+        "generalized_place"
     ]
-    assert fit_result["motor_standardization"]["raw_feature_names"] == [
-        "speed",
-        "accel",
-        "hd_vel",
-        "hd_acc",
-        "abs_hd_vel",
-        "sin_hd",
-        "cos_hd",
+    assert list(design_info["blocks"]["generalized_task_progression_only"]) == [
+        "generalized_tp"
     ]
-    assert fit_result["coef"]["motor"]["coef_motor"].shape == (7, 2)
 
 
-def test_fit_motor_task_progression_place_epoch_adds_hd_acc_spline_feature(
+def test_full_refit_dataset_builds_with_spline_motor_features(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_motor_module(monkeypatch)
-    _install_fake_pynapple(monkeypatch)
-    monkeypatch.setattr(module, "compute_motor_covariates", lambda **_: _fake_covariates())
 
-    fit_result = module.fit_motor_task_progression_place_epoch(
-        **_make_fake_fit_inputs(module),
+    n_time = 8
+    data = {
+        "response": np.asarray(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        "unit_ids": np.asarray([11, 12], dtype=int),
+        "base_keep_mask": np.ones(n_time, dtype=bool),
+        "motor_covariates": _fake_covariates(),
+        "trajectory_labels": np.asarray([0, 1, 2, 3, 0, 1, 2, 3], dtype=int),
+        "task_progression": np.linspace(0.0, 1.0, n_time, dtype=float),
+        "generalized_place": np.linspace(0.0, 40.0, n_time, dtype=float),
+        "generalized_task_progression": np.linspace(1.0, 0.0, n_time, dtype=float),
+        "tp_bounds": (0.0, 1.0),
+        "bin_size_s": 0.05,
+    }
+    position_basis = {
+        "spatial_bin_size_cm": 4.0,
+        "spline_order": 3,
+        "trajectory_length_cm": 12.0,
+        "generalized_place_length_cm": 40.0,
+        "trajectory_n_splines": 3,
+        "generalized_place_n_splines": 5,
+        "trajectory_bounds": (0.0, 1.0),
+        "generalized_place_bounds": (0.0, 40.0),
+    }
+    full_fit = module.fit_full_refit_models(
+        data,
+        unit_mask=np.asarray([True, True]),
+        ridge_by_model={model_name: 1e-3 for model_name in module.MODEL_NAMES},
+        position_basis_by_model={
+            model_name: position_basis for model_name in module.MODEL_NAMES
+        },
         motor_feature_mode="spline",
-        n_folds=2,
-        tp_spline_k=3,
+        motor_zscore_eps=1e-12,
         motor_spline_k=3,
+        motor_spline_order=4,
+    )
+    ridge_cv_result = {
+        "info_bits_per_spike": np.zeros(
+            (len(module.MODEL_NAMES), 1, 1, 2),
+            dtype=float,
+        ),
+        "score_median": np.zeros((len(module.MODEL_NAMES), 1, 1), dtype=float),
+        "score_mean": np.zeros((len(module.MODEL_NAMES), 1, 1), dtype=float),
+        "score_n_finite": np.ones((len(module.MODEL_NAMES), 1, 1), dtype=int),
+        "spatial_bin_sizes_cm": np.asarray([4.0], dtype=float),
+        "ridge_values": np.asarray([1e-3], dtype=float),
+    }
+
+    dataset = module.build_full_refit_dataset(
+        full_fit,
+        ridge_cv_result,
+        data,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="run1",
+        movement_firing_rates=np.asarray([2.0, 3.0], dtype=float),
+        min_firing_rate_hz=0.5,
+        sources={},
+        fit_parameters={},
     )
 
-    assert fit_result["feature_names_motor"] == [
-        "speed_bs0",
-        "speed_bs1",
-        "speed_bs2",
-        "accel_bs0",
-        "accel_bs1",
-        "accel_bs2",
-        "hd_vel_bs0",
-        "hd_vel_bs1",
-        "hd_vel_bs2",
-        "hd_acc_bs0",
-        "hd_acc_bs1",
-        "hd_acc_bs2",
-        "abs_hd_vel_bs0",
-        "abs_hd_vel_bs1",
-        "abs_hd_vel_bs2",
-        "sin_hd",
-        "cos_hd",
-    ]
-    assert fit_result["motor_standardization"] is None
-    assert fit_result["coef"]["motor"]["coef_motor"].shape == (17, 2)
+    assert dataset["motor_spline_bounds"].shape == (
+        len(module.MOTOR_CONTINUOUS_FEATURE_NAMES),
+        2,
+    )
+    assert dataset["generalized_task_progression_rate_curve_hz"].shape == (200, 2)
 
 
 def test_build_histogram_bin_edges_always_includes_zero(
@@ -609,3 +778,49 @@ def test_plot_log_likelihood_difference_histograms_uses_two_rows_and_no_outlines
         assert hist_kwargs["edgecolor"] == "none"
         assert hist_kwargs["linewidth"] == 0.0
         assert np.any(np.isclose(np.asarray(hist_kwargs["bins"], dtype=float), 0.0))
+
+
+def test_plot_primary_delta_histograms_uses_four_panels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+    fake_pyplot = _FakePrimaryPyplot()
+    fake_matplotlib = types.ModuleType("matplotlib")
+    fake_matplotlib.pyplot = fake_pyplot
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    nested_dataset = _FakeNestedDataset(
+        {
+            "dll_motor_tp_vs_motor_bits_per_spike": np.asarray([0.1, 0.4]),
+            "dll_motor_place_vs_motor_bits_per_spike": np.asarray([0.2, 0.5]),
+            "dll_motor_generalized_place_vs_motor_bits_per_spike": np.asarray(
+                [0.3, 0.6]
+            ),
+            "dll_motor_generalized_task_progression_vs_motor_bits_per_spike": (
+                np.asarray([0.4, 0.7])
+            ),
+        }
+    )
+
+    module.plot_primary_delta_histograms(
+        nested_dataset,
+        out_path=Path("/tmp/task_progression_motor_primary_delta_hist.png"),
+    )
+
+    assert fake_pyplot.subplots_calls == [
+        {
+            "nrows": 1,
+            "ncols": 4,
+            "kwargs": {
+                "figsize": (20.0, 4.2),
+                "constrained_layout": True,
+                "sharey": True,
+            },
+        }
+    ]
+    for axis in fake_pyplot.axes:
+        assert len(axis.hist_calls) == 1
+        hist_kwargs = axis.hist_calls[0]["kwargs"]
+        assert hist_kwargs["edgecolor"] == "none"
+        assert hist_kwargs["linewidth"] == 0.0

@@ -48,6 +48,16 @@ def _make_cv_metrics(ll: float, info_bits: float, *, n_spikes: int = 7) -> dict[
     }
 
 
+class _FakeParquetTable:
+    """Minimal table stand-in that records parquet save paths."""
+
+    def __init__(self) -> None:
+        self.saved_paths: list[Any] = []
+
+    def to_parquet(self, path: Any) -> None:
+        self.saved_paths.append(path)
+
+
 def test_build_generalized_place_bins_uses_full_w_length_and_branch_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -187,3 +197,64 @@ def test_format_delta_histogram_stats_reports_fraction_mean_and_median() -> None
     assert "Frac < 0: 0.50" in text
     assert "Mean: 0.000" in text
     assert "Median: -0.050" in text
+
+
+def test_parse_arguments_accepts_place_bin_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_encoding_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "encoding_comparison.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--dark-epoch",
+            "run2",
+            "--place-bin-size-cm",
+            "2.5",
+        ],
+    )
+
+    args = module.parse_arguments()
+
+    assert args.place_bin_size_cm == 2.5
+
+
+def test_save_paths_include_place_bin_size_token(tmp_path) -> None:
+    module = _reload_encoding_module()
+    table = _FakeParquetTable()
+
+    epoch_paths = module.save_epoch_tables(
+        {"v1": {"run1": table}},
+        data_dir=tmp_path,
+        n_folds=5,
+        place_bin_size_cm=2.5,
+    )
+    comparison_paths = module.save_comparison_tables(
+        {"v1": {"run1": table}},
+        data_dir=tmp_path,
+        dark_epoch="run2",
+        n_folds=5,
+        place_bin_size_cm=2.5,
+    )
+    cross_paths = module.save_tp_cross_trajectory_tables(
+        {"v1": {"run1": table}},
+        data_dir=tmp_path,
+        n_folds=5,
+        place_bin_size_cm=2.5,
+    )
+
+    assert epoch_paths == [
+        tmp_path / "v1_run1_cv5_placebin2p5cm_encoding_summary.parquet"
+    ]
+    assert comparison_paths == [
+        tmp_path / "v1_run1_run2_cv5_placebin2p5cm_encoding_comparison.parquet"
+    ]
+    assert cross_paths == [
+        tmp_path / "v1_run1_cv5_placebin2p5cm_tp_cross_trajectory_encoding.parquet"
+    ]
+    assert table.saved_paths == epoch_paths + comparison_paths + cross_paths
