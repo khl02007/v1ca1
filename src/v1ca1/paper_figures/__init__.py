@@ -12,7 +12,16 @@ from v1ca1.paper_figures.style import (
     mm_to_inches,
     save_figure,
 )
-from v1ca1.paper_figures.datasets import get_processed_datasets
+
+
+def get_processed_datasets():
+    """Return configured paper-figure data sets."""
+    from v1ca1.paper_figures.datasets import (
+        get_processed_datasets as _get_processed_datasets,
+    )
+
+    return _get_processed_datasets()
+
 
 __all__ = [
     "DEFAULT_DPI",

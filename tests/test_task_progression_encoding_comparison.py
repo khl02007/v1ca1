@@ -224,6 +224,51 @@ def test_parse_arguments_accepts_place_bin_size(
     assert args.place_bin_size_cm == 2.5
 
 
+def test_parse_arguments_uses_region_firing_rate_threshold_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_encoding_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "encoding_comparison.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--dark-epoch",
+            "run2",
+        ],
+    )
+
+    args = module.parse_arguments()
+
+    assert args.v1_min_fr_hz == module.DEFAULT_REGION_FR_THRESHOLDS["v1"]
+    assert args.ca1_min_fr_hz == module.DEFAULT_REGION_FR_THRESHOLDS["ca1"]
+    assert module.DEFAULT_REGION_FR_THRESHOLDS == {"v1": 0.5, "ca1": 0.1}
+
+
+def test_get_unit_mask_uses_strict_movement_firing_rate_threshold() -> None:
+    module = _reload_encoding_module()
+
+    mask = module.get_unit_mask(
+        np.asarray([np.nan, 0.49, 0.5, 0.51], dtype=float),
+        threshold_hz=0.5,
+    )
+
+    assert mask.tolist() == [False, False, False, True]
+
+
+def test_empty_cv_by_model_has_required_models() -> None:
+    module = _reload_encoding_module()
+
+    table = module.cv_epoch_to_df(module.empty_cv_by_model())
+
+    assert table.empty
+    assert table.index.name == "unit"
+
+
 def test_save_paths_include_place_bin_size_token(tmp_path) -> None:
     module = _reload_encoding_module()
     table = _FakeParquetTable()

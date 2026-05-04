@@ -62,6 +62,35 @@ DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ = 0.5
 DEFAULT_MIN_BIN_COUNT = 5
 SUMMARY_MODES = ("mean_std", "median_iqr")
 ERROR_MODES = ("signed", "absolute")
+SAME_INBOUND_OUTBOUND_CROSS_ARM_FAMILY = "same_inbound_outbound_cross_arm"
+SAME_INBOUND_OUTBOUND_CROSS_ARM_PAIRS = (
+    ("center_to_left", "center_to_right"),
+    ("center_to_right", "center_to_left"),
+    ("left_to_center", "right_to_center"),
+    ("right_to_center", "left_to_center"),
+)
+
+
+def build_decoding_tp_transfer_pair_specs() -> tuple[dict[str, Any], ...]:
+    """Return directed TP transfer pairs used by the decoding comparison."""
+    pair_specs = [dict(pair_spec) for pair_spec in TP_TRANSFER_PAIR_SPECS]
+    pair_specs.extend(
+        {
+            "transfer_family": SAME_INBOUND_OUTBOUND_CROSS_ARM_FAMILY,
+            "source_trajectory": source_trajectory,
+            "target_trajectory": target_trajectory,
+            "flip_tuning_curve": False,
+        }
+        for source_trajectory, target_trajectory in SAME_INBOUND_OUTBOUND_CROSS_ARM_PAIRS
+    )
+    return tuple(pair_specs)
+
+
+DECODING_TP_TRANSFER_FAMILY_ORDER = (
+    *TP_TRANSFER_FAMILY_ORDER,
+    SAME_INBOUND_OUTBOUND_CROSS_ARM_FAMILY,
+)
+DECODING_TP_TRANSFER_PAIR_SPECS = build_decoding_tp_transfer_pair_specs()
 
 
 def _cross_trajectory_pair_key(
@@ -88,6 +117,7 @@ def _format_transfer_family_label(transfer_family: str) -> str:
         "same_turn_cross_arm": "same turn, cross arm",
         "opposite_turn_same_arm": "opposite turn, same arm",
         "opposite_turn_same_arm_flipped": "opposite turn, same arm, flipped",
+        SAME_INBOUND_OUTBOUND_CROSS_ARM_FAMILY: "same inbound/outbound, cross arm",
     }
     return labels.get(transfer_family, transfer_family.replace("_", " "))
 
@@ -289,6 +319,34 @@ def _subset_spikes(spikes: Any, unit_ids: list[Any]) -> Any:
     return nap.TsGroup({unit_id: spikes[unit_id] for unit_id in unit_ids}, time_units="s")
 
 
+def _filter_epochs_with_count_bins(
+    spikes: Any,
+    epochs: Any,
+    bin_size_s: float,
+) -> Any:
+    """Return epochs that produce at least one spike-count bin."""
+    import pynapple as nap
+
+    starts, ends = _intervalset_to_arrays(epochs)
+    if starts.size == 0:
+        return epochs
+
+    count_times = np.asarray(spikes.count(float(bin_size_s), ep=epochs).t, dtype=float)
+    keep_starts: list[float] = []
+    keep_ends: list[float] = []
+    for start, end in zip(starts, ends, strict=True):
+        has_count_bin = np.any((count_times >= start) & (count_times <= end))
+        if has_count_bin:
+            keep_starts.append(float(start))
+            keep_ends.append(float(end))
+
+    return nap.IntervalSet(
+        start=np.asarray(keep_starts, dtype=float),
+        end=np.asarray(keep_ends, dtype=float),
+        time_units="s",
+    )
+
+
 def decode_cv(
     spikes: Any,
     feature_by_epoch: dict[str, Any],
@@ -316,6 +374,9 @@ def decode_cv(
         train_fold = train_folds[fold].intersect(movement_interval)
         test_fold = test_folds[fold].intersect(movement_interval)
         if float(train_fold.tot_length()) <= 0.0 or float(test_fold.tot_length()) <= 0.0:
+            continue
+        test_fold = _filter_epochs_with_count_bins(spikes, test_fold, bin_size_s)
+        if float(test_fold.tot_length()) <= 0.0:
             continue
 
         tuning_curves = nap.compute_tuning_curves(
@@ -357,7 +418,7 @@ def decode_task_cross_trajectory(
     true_by_pair: dict[tuple[str, str, str], Any] = {}
     decoded_by_pair: dict[tuple[str, str, str], Any] = {}
     if not active_unit_ids:
-        for pair_spec in TP_TRANSFER_PAIR_SPECS:
+        for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS:
             key = _cross_trajectory_pair_key(
                 pair_spec["transfer_family"],
                 pair_spec["source_trajectory"],
@@ -369,7 +430,7 @@ def decode_task_cross_trajectory(
         return true_by_pair, decoded_by_pair
 
     selected_spikes = _subset_spikes(spikes, active_unit_ids)
-    for pair_spec in TP_TRANSFER_PAIR_SPECS:
+    for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS:
         transfer_family = pair_spec["transfer_family"]
         encoding_trajectory = pair_spec["source_trajectory"]
         decoding_trajectory = pair_spec["target_trajectory"]
@@ -382,6 +443,11 @@ def decode_task_cross_trajectory(
         train_epoch = trajectory_intervals[encoding_trajectory].intersect(movement_interval)
         test_epoch = trajectory_intervals[decoding_trajectory].intersect(movement_interval)
         if float(train_epoch.tot_length()) <= 0.0 or float(test_epoch.tot_length()) <= 0.0:
+            true_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
+            decoded_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
+            continue
+        test_epoch = _filter_epochs_with_count_bins(selected_spikes, test_epoch, bin_size_s)
+        if float(test_epoch.tot_length()) <= 0.0:
             true_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
             decoded_by_pair[key] = _make_empty_tsd(time_support=test_epoch)
             continue
@@ -1063,7 +1129,7 @@ def main() -> None:
                 ]
             )
             cross_rows: list[dict[str, Any]] = []
-            for pair_spec in TP_TRANSFER_PAIR_SPECS:
+            for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS:
                 transfer_family = pair_spec["transfer_family"]
                 encoding_trajectory = pair_spec["source_trajectory"]
                 decoding_trajectory = pair_spec["target_trajectory"]
@@ -1121,7 +1187,7 @@ def main() -> None:
             )
             saved_epoch_error_figures.append(figure_path)
 
-        for pair_spec in TP_TRANSFER_PAIR_SPECS:
+        for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS:
             transfer_family = pair_spec["transfer_family"]
             encoding_trajectory = pair_spec["source_trajectory"]
             decoding_trajectory = pair_spec["target_trajectory"]
@@ -1211,7 +1277,7 @@ def main() -> None:
                 saved_light_dark_figures.append(figure_path)
 
             cross_binned_comparison_tables[region][light_epoch] = {}
-            for pair_spec in TP_TRANSFER_PAIR_SPECS:
+            for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS:
                 transfer_family = pair_spec["transfer_family"]
                 encoding_trajectory = pair_spec["source_trajectory"]
                 decoding_trajectory = pair_spec["target_trajectory"]
@@ -1377,8 +1443,10 @@ def main() -> None:
             "sources": session["sources"],
             "run_epochs": session["run_epochs"],
             "min_lap_counts": min_lap_counts,
-            "tp_transfer_family_order": TP_TRANSFER_FAMILY_ORDER,
-            "tp_transfer_pair_specs": [dict(pair_spec) for pair_spec in TP_TRANSFER_PAIR_SPECS],
+            "tp_transfer_family_order": DECODING_TP_TRANSFER_FAMILY_ORDER,
+            "tp_transfer_pair_specs": [
+                dict(pair_spec) for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS
+            ],
             "saved_npz_paths": saved_npz_paths,
             "saved_epoch_metric_tables": saved_epoch_metric_tables,
             "saved_epoch_cross_metric_tables": saved_epoch_cross_metric_tables,

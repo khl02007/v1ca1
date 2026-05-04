@@ -52,6 +52,7 @@ from sklearn.model_selection import KFold
 from v1ca1.helper.session import (
     DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
     DEFAULT_CLEAN_DLC_POSITION_NAME,
+    compute_movement_firing_rates,
     get_run_epochs,
     load_clean_dlc_position_data,
     load_epoch_tags,
@@ -85,6 +86,7 @@ DEFAULT_BIN_SIZE_S = 0.02
 DEFAULT_SIGMA_BINS = 1.0
 DEFAULT_RANDOM_STATE = 47
 DEFAULT_MIN_PLOT_SPIKES = 50
+DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.1}
 
 
 def _format_float_token(value: float) -> str:
@@ -95,6 +97,22 @@ def _format_float_token(value: float) -> str:
 def format_place_bin_size_token(place_bin_size_cm: float) -> str:
     """Return the filename token for one place-bin-size setting."""
     return f"placebin{_format_float_token(place_bin_size_cm)}cm"
+
+
+def get_unit_mask(
+    movement_firing_rates: np.ndarray,
+    threshold_hz: float,
+) -> np.ndarray:
+    """Return the boolean mask of units above the requested movement-rate threshold."""
+    movement_firing_rates = np.asarray(movement_firing_rates, dtype=float)
+    return np.isfinite(movement_firing_rates) & (
+        movement_firing_rates > float(threshold_hz)
+    )
+
+
+def select_spikes_by_unit_mask(spikes: Any, unit_mask: np.ndarray) -> Any:
+    """Return a TsGroup-like object containing units selected by a boolean mask."""
+    return spikes[np.asarray(unit_mask, dtype=bool)]
 
 
 def smooth_pf_along_position_nan_aware(
@@ -973,6 +991,32 @@ def cv_epoch_to_df(
     return pd.DataFrame(rows).set_index("unit").sort_index()
 
 
+def empty_cv_by_model() -> dict[str, dict[Any, dict[str, Any]]]:
+    """Return an empty CV-result mapping with all required model keys."""
+    return {"place": {}, "generalized_place": {}, "tp": {}, "gtp": {}}
+
+
+def empty_tp_cross_trajectory_table() -> pd.DataFrame:
+    """Return an empty TP cross-trajectory table with the saved schema."""
+    return pd.DataFrame(
+        columns=[
+            "unit",
+            "transfer_family",
+            "source_turn_type",
+            "turn_type",
+            "source_trajectory",
+            "target_trajectory",
+            "n_spikes",
+            "ll_tp_cv_target",
+            "ll_tp_cross",
+            "ll_null",
+            "delta_bits_cross_vs_cv",
+            "delta_bits_cross_vs_null",
+            "delta_bits_cv_vs_null",
+        ]
+    )
+
+
 def filter_epoch_df(
     df: pd.DataFrame,
     *,
@@ -1490,6 +1534,24 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_SIGMA_BINS,
         help=f"Gaussian smoothing width in tuning-curve bins. Default: {DEFAULT_SIGMA_BINS}",
     )
+    parser.add_argument(
+        "--v1-min-fr-hz",
+        type=float,
+        default=DEFAULT_REGION_FR_THRESHOLDS["v1"],
+        help=(
+            "Minimum movement-period firing rate for V1 units. "
+            f"Default: {DEFAULT_REGION_FR_THRESHOLDS['v1']}"
+        ),
+    )
+    parser.add_argument(
+        "--ca1-min-fr-hz",
+        type=float,
+        default=DEFAULT_REGION_FR_THRESHOLDS["ca1"],
+        help=(
+            "Minimum movement-period firing rate for CA1 units. "
+            f"Default: {DEFAULT_REGION_FR_THRESHOLDS['ca1']}"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1500,6 +1562,10 @@ def main() -> None:
         raise ValueError("--generalized-place-branch-gap-cm must be non-negative.")
     if not np.isfinite(args.place_bin_size_cm) or args.place_bin_size_cm <= 0:
         raise ValueError("--place-bin-size-cm must be positive.")
+    if not np.isfinite(args.v1_min_fr_hz) or args.v1_min_fr_hz < 0:
+        raise ValueError("--v1-min-fr-hz must be non-negative.")
+    if not np.isfinite(args.ca1_min_fr_hz) or args.ca1_min_fr_hz < 0:
+        raise ValueError("--ca1-min-fr-hz must be non-negative.")
 
     selected_regions = tuple(args.regions)
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
@@ -1523,6 +1589,11 @@ def main() -> None:
         speed_threshold_cm_s=args.speed_threshold_cm_s,
         include_generalized_place=True,
         generalized_place_branch_gap_cm=args.generalized_place_branch_gap_cm,
+    )
+    movement_firing_rates = compute_movement_firing_rates(
+        session["spikes_by_region"],
+        session["movement_by_run"],
+        session["run_epochs"],
     )
     data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
@@ -1561,11 +1632,67 @@ def main() -> None:
     tp_cross_trajectory_skips: dict[str, dict[str, list[dict[str, Any]]]] = {
         region: {} for region in selected_regions
     }
+    unit_selection_summary: list[dict[str, Any]] = []
+    region_thresholds = {
+        "v1": float(args.v1_min_fr_hz),
+        "ca1": float(args.ca1_min_fr_hz),
+    }
 
     for region in selected_regions:
         for epoch in session["run_epochs"]:
+            epoch_unit_rates = np.asarray(
+                movement_firing_rates[region][epoch],
+                dtype=float,
+            )
+            unit_mask = get_unit_mask(
+                epoch_unit_rates,
+                threshold_hz=region_thresholds[region],
+            )
+            n_units_total = int(unit_mask.size)
+            n_units_selected = int(unit_mask.sum())
+            selected_rates = epoch_unit_rates[unit_mask]
+            unit_selection_summary.append(
+                {
+                    "region": region,
+                    "epoch": epoch,
+                    "threshold_hz": region_thresholds[region],
+                    "n_units_total": n_units_total,
+                    "n_units_selected": n_units_selected,
+                    "min_selected_movement_firing_rate_hz": (
+                        float(np.nanmin(selected_rates))
+                        if selected_rates.size
+                        else None
+                    ),
+                    "max_selected_movement_firing_rate_hz": (
+                        float(np.nanmax(selected_rates))
+                        if selected_rates.size
+                        else None
+                    ),
+                }
+            )
+            print(
+                f"{region.upper()} {epoch}: selected {n_units_selected}/{n_units_total} "
+                "units above the movement firing-rate threshold "
+                f"({region_thresholds[region]:.3f} Hz)."
+            )
+            if not np.any(unit_mask):
+                summary_tables[region][epoch] = cv_epoch_to_df(empty_cv_by_model())
+                tp_cross_trajectory_tables[region][epoch] = empty_tp_cross_trajectory_table()
+                tp_cross_trajectory_skips[region][epoch] = [
+                    {
+                        "reason": "no units passed the movement firing-rate threshold",
+                        "threshold_hz": region_thresholds[region],
+                        "n_units_total": n_units_total,
+                    }
+                ]
+                continue
+
+            selected_spikes = select_spikes_by_unit_mask(
+                session["spikes_by_region"][region],
+                unit_mask,
+            )
             cv_by_model = run_cross_validated_encoding(
-                spikes=session["spikes_by_region"][region],
+                spikes=selected_spikes,
                 linear_position=session["linear_position_by_run"][epoch],
                 generalized_place_position=session["generalized_place_position_by_run"][epoch],
                 task_progression=session["task_progression_by_run"][epoch],
@@ -1583,7 +1710,7 @@ def main() -> None:
             )
             summary_tables[region][epoch] = cv_epoch_to_df(cv_by_model)
             tp_cross_trajectory_table, skipped_pairs = run_tp_cross_trajectory_encoding(
-                spikes=session["spikes_by_region"][region],
+                spikes=selected_spikes,
                 task_progression_by_trajectory=session["task_progression_by_trajectory"][epoch],
                 movement_interval=session["movement_by_run"][epoch],
                 trajectory_intervals=session["trajectory_intervals"][epoch],
@@ -1811,12 +1938,15 @@ def main() -> None:
             "bin_size_s": args.bin_size_s,
             "place_bin_size_cm": args.place_bin_size_cm,
             "sigma_bins": args.sigma_bins,
+            "v1_min_fr_hz": args.v1_min_fr_hz,
+            "ca1_min_fr_hz": args.ca1_min_fr_hz,
             "random_state": DEFAULT_RANDOM_STATE,
         },
         outputs={
             "sources": session["sources"],
             "run_epochs": session["run_epochs"],
             "min_lap_counts": min_lap_counts,
+            "unit_selection_summary": unit_selection_summary,
             "saved_epoch_tables": saved_epoch_tables,
             "saved_comparison_tables": saved_comparison_tables,
             "saved_tp_cross_trajectory_tables": saved_tp_cross_trajectory_tables,
