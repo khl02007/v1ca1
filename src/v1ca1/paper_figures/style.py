@@ -36,6 +36,10 @@ PANEL_LABEL_KWARGS: dict[str, Any] = {
     "ha": "left",
     "va": "bottom",
 }
+REGION_COLORS: dict[str, str] = {
+    "v1": "#4C72B0",
+    "ca1": "#DD8452",
+}
 
 
 def mm_to_inches(length_mm: float) -> float:

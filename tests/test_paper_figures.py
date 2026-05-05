@@ -6,6 +6,7 @@ import v1ca1.paper_figures.datasets as datasets_module
 from v1ca1.paper_figures import (
     DEFAULT_DPI,
     PAPER_RC_PARAMS,
+    REGION_COLORS,
     figure_size,
     get_processed_datasets,
     mm_to_inches,
@@ -24,6 +25,7 @@ def test_paper_style_embeds_editable_text_for_vector_exports() -> None:
     assert DEFAULT_DPI == 300
     assert PAPER_RC_PARAMS["pdf.fonttype"] == 42
     assert PAPER_RC_PARAMS["svg.fonttype"] == "none"
+    assert REGION_COLORS == {"v1": "#4C72B0", "ca1": "#DD8452"}
 
 
 def test_get_processed_datasets_uses_paper_figure_registry() -> None:
@@ -33,6 +35,23 @@ def test_get_processed_datasets_uses_paper_figure_registry() -> None:
         ("L15", "20241121", "10_r5"),
         ("L19", "20250930", "08_r4"),
     ]
+
+
+def test_figure_2_epoch_registry_uses_light_dark_sleep_epochs() -> None:
+    assert datasets_module.get_dataset_light_epoch("L14") == "02_r1"
+    assert datasets_module.get_dataset_dark_epoch("L15") == "10_r5"
+    assert datasets_module.get_dataset_sleep_epoch("L14") == "07_s4"
+    assert datasets_module.get_processed_figure_epoch_datasets() == [
+        ("L12", "20240421", "02_r1", "08_r4", "07_s4"),
+        ("L14", "20240611", "02_r1", "08_r4", "07_s4"),
+        ("L15", "20241121", "02_r1", "10_r5", "07_s4"),
+        ("L19", "20250930", "02_r1", "08_r4", "07_s4"),
+    ]
+    assert datasets_module.make_figure_2_epoch_ids("L15", "20241121") == {
+        "light": ("L15", "20241121", "02_r1"),
+        "dark": ("L15", "20241121", "10_r5"),
+        "sleep": ("L15", "20241121", "07_s4"),
+    }
 
 
 def test_format_processed_datasets_supports_shell_arguments_with_dark_epoch() -> None:
@@ -54,3 +73,12 @@ def test_format_processed_datasets_infers_dark_epoch_for_old_two_field_tuples() 
     )
 
     assert formatted == "animal_name,date,dark_epoch\nL15,20241121,10_r5"
+
+
+def test_format_processed_figure_epoch_datasets_includes_light_and_sleep() -> None:
+    formatted = datasets_module.format_processed_figure_epoch_datasets(
+        [("L15", "20241121", "10_r5")],
+        output_format="plain",
+    )
+
+    assert formatted == "L15 20241121 02_r1 10_r5 07_s4"

@@ -34,16 +34,26 @@ from v1ca1.paper_figures.datasets import (
     make_dataset_id,
     normalize_dataset_id,
 )
-from v1ca1.paper_figures.style import apply_paper_style, figure_size, label_axis, save_figure
+from v1ca1.paper_figures.style import (
+    REGION_COLORS,
+    apply_paper_style,
+    figure_size,
+    label_axis,
+    save_figure,
+)
 from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
 from v1ca1.raster.plot_place_field_heatmap import (
     DEFAULT_SIGMA_BINS,
     align_and_normalize_panel_values,
     build_linear_position_by_trajectory,
+    compute_place_tuning_curve,
     compute_odd_even_place_tuning_curves,
     compute_unit_order,
-    get_guide_line_positions,
     prepare_heatmap_session,
+)
+from v1ca1.raster.plot_1d_place_field_trajectory import (
+    compute_trial_spike_positions,
+    make_linear_position_interpolator,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +82,33 @@ DEFAULT_PANEL_H_WIDTH_FRACTION = 1.0 / 3.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 RASTER_ASSET_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 NEURON_SCALE_BAR_COUNT = 100
+PANEL_E_EXAMPLES = (
+    ("L14", "20240611", "08_r4", "v1", 34),
+    ("L15", "20241121", "10_r5", "v1", 473),
+)
+PANEL_E_RASTER_TRAJECTORY_LAYOUT = (
+    ("center_to_left", "center_to_right"),
+    ("right_to_center", "left_to_center"),
+)
+PANEL_E_FR_TRAJECTORY_PAIRS = (
+    ("center_to_left", "right_to_center"),
+    ("center_to_right", "left_to_center"),
+)
+PANEL_E_TRAJECTORY_LABELS = {
+    "center_to_left": "C→L",
+    "center_to_right": "C→R",
+    "right_to_center": "R→C",
+    "left_to_center": "L→C",
+}
+PANEL_E_TRAJECTORY_COLORS = {
+    "center_to_left": "#4C72B0",
+    "center_to_right": "#C44E52",
+    "right_to_center": "#55A868",
+    "left_to_center": "#DD8452",
+}
+TASK_PROGRESSION_SEGMENT_BOUNDARIES = (0.4, 0.6)
+TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = "0.65"
+TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH = 0.45
 STABILITY_TABLE_RELATIVE_PATH = (
     Path("task_progression") / "stability" / "odd_even_task_progression_stability.parquet"
 )
@@ -87,10 +124,7 @@ ENCODING_COMPARISON_MIN_SPIKES = 0
 DECODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "decoding_comparison"
 DECODING_COMPARISON_REGION = "v1"
 STABILITY_REGIONS = ("v1", "ca1")
-STABILITY_REGION_COLORS = {
-    "v1": "#1f77b4",
-    "ca1": "#d95f02",
-}
+STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
@@ -121,7 +155,7 @@ DECODING_CROSS_TRAJECTORY_COMPARISONS = (
     ),
     (
         "opposite_turn_same_arm",
-        "Opposite\nsame arm",
+        "Opposite turn\nsame arm",
         "opposite_turn_same_arm",
         (
             ("center_to_left", "left_to_center"),
@@ -142,10 +176,11 @@ DECODING_CROSS_TRAJECTORY_COMPARISONS = (
         ),
     ),
 )
-DECODING_CROSS_TRAJECTORY_COLORS = {
-    "same_turn_cross_arm": "#4C72B0",
-    "opposite_turn_same_arm": "#DD8452",
-    "same_inbound_outbound_cross_arm": "#55A868",
+DECODING_ANIMAL_COLORS = {
+    "L14": "#4C72B0",
+    "L15": "#DD8452",
+    "L16": "#55A868",
+    "L19": "#C44E52",
 }
 DECODING_EXAMPLE_TRAIN_TRAJECTORY = "center_to_left"
 DECODING_EXAMPLE_TEST_TRAJECTORIES = {
@@ -153,6 +188,12 @@ DECODING_EXAMPLE_TEST_TRAJECTORIES = {
     "opposite_turn_same_arm": "left_to_center",
     "same_inbound_outbound_cross_arm": "center_to_right",
 }
+DECODING_TRAIN_SCHEMATIC_CENTER_X = -0.075
+DECODING_SCHEMATIC_Y = -0.55
+DECODING_SCHEMATIC_WIDTH = 0.12
+DECODING_SCHEMATIC_HEIGHT = 0.18
+DECODING_TRAIN_LABEL_Y = -0.38
+DECODING_YLABEL_FONTSIZE = 7.0
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
     "date",
@@ -982,6 +1023,147 @@ def compute_dark_epoch_tuning_curves(
     }
 
 
+def get_unit_spike_times(spikes: Any, unit_id: int) -> np.ndarray:
+    """Return spike times for one unit from a pynapple TsGroup-like object."""
+    if unit_id not in list(spikes.keys()):
+        raise ValueError(f"Unit {unit_id!r} was not found in the requested spikes.")
+    return np.asarray(spikes[unit_id].t, dtype=float)
+
+
+def extract_unit_rate_curve(
+    tuning_curve: Any | None,
+    unit_id: int,
+    fallback_position: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return normalized position and firing-rate values for one unit."""
+    fallback_position = np.asarray(fallback_position, dtype=float)
+    if tuning_curve is None:
+        return fallback_position, np.full(fallback_position.shape, np.nan, dtype=float)
+
+    if len(tuning_curve.dims) != 2:
+        raise ValueError(
+            "Expected a 2D tuning curve with unit and position dimensions. "
+            f"Got dims {tuning_curve.dims!r}."
+        )
+    unit_dim, position_dim = tuning_curve.dims
+    units = np.asarray(tuning_curve.coords[unit_dim].values)
+    matching_indices = np.flatnonzero(units == unit_id)
+    if matching_indices.size == 0:
+        return fallback_position, np.full(fallback_position.shape, np.nan, dtype=float)
+
+    values = np.asarray(
+        tuning_curve.transpose(unit_dim, position_dim).values,
+        dtype=float,
+    )
+    position = np.asarray(tuning_curve.coords[position_dim].values, dtype=float)
+    return position, values[int(matching_indices[0])]
+
+
+def orient_panel_e_task_progression(linear_position: Any, trajectory_type: str) -> Any:
+    """Orient normalized position so 0 is the trajectory start for panel E."""
+    import pynapple as nap
+
+    values = np.asarray(linear_position.d, dtype=float)
+    if trajectory_type.endswith("_to_center"):
+        values = 1.0 - values
+    return nap.Tsd(
+        t=np.asarray(linear_position.t, dtype=float),
+        d=values,
+        time_support=linear_position.time_support,
+        time_units="s",
+    )
+
+
+def load_panel_e_example_data(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    region: str,
+    unit_id: int,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+) -> dict[str, Any]:
+    """Load one panel E example unit with normalized-position rasters and rate curves."""
+    session = prepare_heatmap_session(
+        animal_name=animal_name,
+        date=date,
+        data_root=data_root,
+        regions=(region,),
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        requested_epoch=epoch,
+    )
+    selected_epoch = session["run_epochs"][0]
+    linear_position_by_trajectory = build_linear_position_by_trajectory(
+        animal_name,
+        session["position_by_epoch"][selected_epoch],
+        session["timestamps_position"][selected_epoch],
+        session["trajectory_intervals"][selected_epoch],
+        position_offset=position_offset,
+    )
+    normalized_position_by_trajectory = normalize_linear_position_by_trajectory(
+        animal_name,
+        linear_position_by_trajectory,
+    )
+    task_progression_by_trajectory = {
+        trajectory_type: orient_panel_e_task_progression(
+            normalized_position,
+            trajectory_type,
+        )
+        for trajectory_type, normalized_position in normalized_position_by_trajectory.items()
+    }
+
+    spikes = session["spikes_by_region"][region]
+    spike_times_s = get_unit_spike_times(spikes, unit_id)
+    bin_edges = build_normalized_position_bins(position_bin_count)
+    fallback_position = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    raster_positions: dict[str, list[np.ndarray]] = {}
+    firing_rates: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for trajectory_type in TRAJECTORY_TYPES:
+        task_progression = task_progression_by_trajectory[trajectory_type]
+        task_progression_interpolator = make_linear_position_interpolator(task_progression)
+        trial_positions = compute_trial_spike_positions(
+            spike_times_s,
+            session["trajectory_intervals"][selected_epoch][trajectory_type],
+            task_progression_interpolator,
+        )
+        raster_positions[trajectory_type] = [
+            positions[(positions >= 0.0) & (positions <= 1.0)]
+            for positions in trial_positions
+        ]
+
+        movement_epochs = session["trajectory_intervals"][selected_epoch][
+            trajectory_type
+        ].intersect(session["movement_by_run"][selected_epoch])
+        tuning_curve = compute_place_tuning_curve(
+            spikes,
+            task_progression,
+            movement_epochs,
+            bin_edges=bin_edges,
+            sigma_bins=sigma_bins,
+        )
+        firing_rates[trajectory_type] = extract_unit_rate_curve(
+            tuning_curve,
+            unit_id,
+            fallback_position,
+        )
+
+    return {
+        "animal_name": animal_name,
+        "date": date,
+        "epoch": selected_epoch,
+        "region": region,
+        "unit_id": unit_id,
+        "raster_positions": raster_positions,
+        "firing_rates": firing_rates,
+    }
+
+
 def _concatenate_unit_parts(parts: list[np.ndarray]) -> np.ndarray:
     """Concatenate pooled unit-key chunks."""
     if not parts:
@@ -1070,23 +1252,9 @@ def build_pooled_panel_values(
     return panels
 
 
-def get_pooled_guide_line_positions(datasets: Sequence[DatasetId]) -> np.ndarray:
-    """Return average normalized guide-line positions across plotted data sets."""
-    positions = []
-    for dataset in datasets:
-        animal_name, _date, _dark_epoch = normalize_dataset_id(dataset)
-        total_length_cm = float(get_wtrack_total_length(animal_name))
-        positions.append(get_guide_line_positions(animal_name) / total_length_cm)
-    if not positions:
-        return np.asarray([], dtype=float)
-    return np.nanmean(np.vstack(positions), axis=0)
-
-
 def plot_pooled_heatmap_grid(
     axes: np.ndarray,
     panels: dict[tuple[str, str], np.ndarray],
-    *,
-    guide_line_positions: np.ndarray,
 ) -> "AxesImage | None":
     """Plot one pooled 4x4 odd/even trajectory heatmap grid."""
     color_image = None
@@ -1102,14 +1270,13 @@ def plot_pooled_heatmap_grid(
             ax.set_ylim(y_limit, 0)
             ax.set_xticks([])
             ax.set_yticks([])
-            for position in guide_line_positions:
-                ax.axvline(position, color="black", alpha=0.35, linewidth=0.5)
 
             if row_index == len(TRAJECTORY_TYPES) - 1:
                 add_movement_axis_annotations(ax, plot_trajectory)
 
             panel_values = panels[(order_trajectory, plot_trajectory)]
             if not has_plottable_values(panel_values):
+                add_task_progression_segment_boundary_lines(ax)
                 continue
             image = ax.imshow(
                 panel_values,
@@ -1121,9 +1288,21 @@ def plot_pooled_heatmap_grid(
                 vmax=1.0,
                 cmap="viridis",
             )
+            add_task_progression_segment_boundary_lines(ax)
             if color_image is None:
                 color_image = image
     return color_image
+
+
+def add_task_progression_segment_boundary_lines(ax: "Axes") -> None:
+    """Draw normalized task-progression segment boundaries."""
+    for boundary in TASK_PROGRESSION_SEGMENT_BOUNDARIES:
+        ax.axvline(
+            boundary,
+            color=TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR,
+            linewidth=TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH,
+            zorder=1,
+        )
 
 
 def draw_neuron_scale_bar(
@@ -1215,7 +1394,7 @@ def draw_panel_a_assets(
     histology_image = load_panel_asset_image(histology_path)
 
     probe_ax = ax.inset_axes([0.00, 0.08, 0.15, 0.84])
-    histology_ax = ax.inset_axes([0.13, -0.12, 0.92, 1.24])
+    histology_ax = ax.inset_axes([0.08, -0.18, 1.02, 1.36])
     draw_image_asset(probe_ax, probe_image)
     draw_image_asset(histology_ax, histology_image)
 
@@ -1258,15 +1437,32 @@ def _scale_rect_to_axes(
     return x0, y0, x1 - x0, y1 - y0
 
 
+def _get_axes_display_aspect(ax: "Axes") -> float:
+    """Return physical width/height for one axes."""
+    fig_width, fig_height = ax.figure.get_size_inches()
+    box = ax.get_position()
+    height = box.height * fig_height
+    if height <= 0.0:
+        return 1.0
+    return (box.width * fig_width) / height
+
+
 def draw_visual_stimuli_schematic(ax: "Axes") -> None:
     """Draw a compact W-track and visual-stimulus sequence in panel B."""
-    from matplotlib.patches import Circle, Polygon, Rectangle
+    from matplotlib.patches import Ellipse, Polygon, Rectangle
 
     transform = ax.transAxes
-    outline, _points, dims = get_w_track_geometry()
-    track_bounds = (0.025, 0.035, 0.250, 0.225)
-    source_xlim = (dims["x0"], dims["x5"])
-    source_ylim = (dims["y0"], dims["y2"])
+    outline, points, dims = get_w_track_geometry()
+    source_xlim = (dims["x0"] - 0.35, dims["x5"] + 0.35)
+    source_ylim = (dims["y0"] - 0.55, dims["y2"] + 0.45)
+    axes_aspect = _get_axes_display_aspect(ax)
+    track_height = 0.235
+    track_width = track_height * (
+        (source_xlim[1] - source_xlim[0])
+        / (source_ylim[1] - source_ylim[0])
+        / axes_aspect
+    )
+    track_bounds = (0.045, 0.020, track_width, track_height)
     scaled_outline = _scale_points_to_axes(
         outline,
         bounds=track_bounds,
@@ -1284,9 +1480,9 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
         (dims["x4"] - 0.26, monitor_y, monitor_bar_w, monitor_h),
         (dims["x5"] + 0.10, monitor_y, monitor_bar_w, monitor_h),
         (
-            dims["x2"] - 0.08,
-            dims["y0"] - 0.22,
-            dims["x3"] - dims["x2"] + 0.16,
+            dims["x0"],
+            dims["y0"] - 0.42,
+            dims["x5"] - dims["x0"],
             monitor_bar_w,
         ),
     )
@@ -1309,15 +1505,48 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
                 zorder=1,
             )
         )
+    wall_top_y = dims["y2"] + 0.20
+    wall_bottom_y = dims["y1"] + 0.06
+    wall_color = "0.25"
+    wall_linewidth = 0.8
+    horizontal_wall = _scale_points_to_axes(
+        [
+            (dims["x0"] - 0.18, wall_top_y),
+            (dims["x5"] + 0.18, wall_top_y),
+        ],
+        bounds=track_bounds,
+        source_xlim=source_xlim,
+        source_ylim=source_ylim,
+    )
     ax.plot(
-        [track_bounds[0] - 0.012, track_bounds[0] + track_bounds[2] + 0.012],
-        [track_bounds[1] + track_bounds[3] + 0.012] * 2,
-        color="0.25",
-        linewidth=0.8,
+        [horizontal_wall[0][0], horizontal_wall[1][0]],
+        [horizontal_wall[0][1], horizontal_wall[1][1]],
+        color=wall_color,
+        linewidth=wall_linewidth,
         transform=transform,
         clip_on=False,
-        zorder=3,
+        zorder=4,
     )
+    wall_x_positions = (
+        (dims["x1"] + dims["x2"]) / 2,
+        (dims["x3"] + dims["x4"]) / 2,
+    )
+    for wall_x in wall_x_positions:
+        (x, y0), (_x, y1) = _scale_points_to_axes(
+            [(wall_x, wall_bottom_y), (wall_x, wall_top_y)],
+            bounds=track_bounds,
+            source_xlim=source_xlim,
+            source_ylim=source_ylim,
+        )
+        ax.plot(
+            [x, x],
+            [y0, y1],
+            color=wall_color,
+            linewidth=wall_linewidth,
+            transform=transform,
+            clip_on=False,
+            zorder=4,
+        )
     ax.add_patch(
         Polygon(
             scaled_outline,
@@ -1329,23 +1558,76 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             zorder=2,
         )
     )
+    label_points = _scale_points_to_axes(
+        [
+            (points["left"][0], wall_top_y + 0.10),
+            (points["center"][0], wall_top_y + 0.10),
+            (points["right"][0], wall_top_y + 0.10),
+        ],
+        bounds=track_bounds,
+        source_xlim=source_xlim,
+        source_ylim=source_ylim,
+    )
+    for (x, y), label in zip(label_points, ("L", "C", "R"), strict=True):
+        ax.text(
+            x,
+            y,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=5.2,
+            color="black",
+            transform=transform,
+            zorder=4,
+        )
+
+    screen_y = 0.015
+    screen_h = 0.105
+    screen_w = screen_h / axes_aspect * 1.10
+    screen_gap = 0.055
+    screen_specs = (
+        (0.405, "black"),
+        (0.405 + screen_w + screen_gap, "grating"),
+        (0.405 + 2 * (screen_w + screen_gap), "dots"),
+    )
+    stimulus_center = (screen_specs[0][0] + screen_specs[-1][0] + screen_w) / 2
+
+    def add_display_circle(
+        x: float,
+        y: float,
+        radius: float,
+        color: str,
+        *,
+        zorder: int = 3,
+    ) -> None:
+        ax.add_patch(
+            Ellipse(
+                (x, y),
+                width=2 * radius / axes_aspect,
+                height=2 * radius,
+                facecolor=color,
+                edgecolor="none",
+                transform=transform,
+                zorder=zorder,
+            )
+        )
 
     ax.text(
-        0.660,
-        0.235,
+        stimulus_center,
+        0.135,
         "Visual stimuli",
         ha="center",
         va="bottom",
-        fontsize=15.0,
+        fontsize=8.5,
         transform=transform,
         zorder=4,
     )
 
     ax.add_patch(
         Rectangle(
-            (0.315, 0.050),
+            (0.315, 0.025),
             0.014,
-            0.130,
+            0.100,
             facecolor=monitor_color,
             edgecolor="none",
             alpha=0.90,
@@ -1353,7 +1635,7 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             zorder=2,
         )
     )
-    for y in (0.095, 0.135):
+    for y in (0.060, 0.095):
         ax.add_patch(
             Rectangle(
                 (0.350, y),
@@ -1366,16 +1648,10 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             )
         )
 
-    screen_y = 0.035
-    screen_h = 0.125
-    screen_w = 0.155
-    screen_specs = (
-        (0.385, "gray"),
-        (0.565, "grating"),
-        (0.745, "dots"),
-    )
     for x0, screen_type in screen_specs:
-        if screen_type in {"gray", "dots"}:
+        if screen_type == "black":
+            facecolor = "black"
+        elif screen_type == "dots":
             facecolor = "0.65"
         else:
             facecolor = "white"
@@ -1407,38 +1683,26 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
                 )
         elif screen_type == "dots":
             dot_specs = (
-                (0.029, 0.087, 0.021, "white"),
-                (0.067, 0.040, 0.013, "white"),
-                (0.103, 0.086, 0.010, "black"),
-                (0.132, 0.078, 0.015, "white"),
-                (0.023, 0.024, 0.014, "black"),
-                (0.101, 0.023, 0.013, "white"),
-                (0.126, 0.030, 0.020, "black"),
-                (0.091, 0.054, 0.008, "black"),
+                (0.187, 0.696, 0.168, "white"),
+                (0.432, 0.320, 0.104, "white"),
+                (0.665, 0.688, 0.080, "black"),
+                (0.852, 0.624, 0.120, "white"),
+                (0.148, 0.192, 0.112, "black"),
+                (0.652, 0.184, 0.104, "white"),
+                (0.813, 0.240, 0.160, "black"),
+                (0.587, 0.432, 0.064, "black"),
             )
-            for dx, dy, radius, color in dot_specs:
-                ax.add_patch(
-                    Circle(
-                        (x0 + dx, screen_y + dy),
-                        radius,
-                        facecolor=color,
-                        edgecolor="none",
-                        transform=transform,
-                        zorder=3,
-                    )
+            for x_frac, y_frac, radius_frac, color in dot_specs:
+                add_display_circle(
+                    x0 + x_frac * screen_w,
+                    screen_y + y_frac * screen_h,
+                    radius_frac * screen_h,
+                    color,
                 )
 
-    for x in (0.925, 0.955, 0.985):
-        ax.add_patch(
-            Circle(
-                (x, 0.100),
-                0.006,
-                facecolor="black",
-                edgecolor="none",
-                transform=transform,
-                zorder=3,
-            )
-        )
+    ellipsis_start = screen_specs[-1][0] + screen_w + 0.050
+    for x in (ellipsis_start, ellipsis_start + 0.030, ellipsis_start + 0.060):
+        add_display_circle(x, screen_y + 0.52 * screen_h, 0.006, "black")
 
 
 def draw_w_track_cycle_panel(ax: "Axes") -> None:
@@ -1458,8 +1722,6 @@ def draw_w_track_cycle_panel(ax: "Axes") -> None:
             arrow_mutation_scale=13.0,
             fill_track=False,
         )
-        if trajectory_type == "center_to_right":
-            add_w_track_arm_endpoint_labels(inset)
 
     for start, end, rad in CYCLE_ARROW_SPECS:
         ax.annotate(
@@ -1843,41 +2105,85 @@ def plot_decoding_error_panel(
         tuple[str, str, str, Sequence[tuple[str, str]]]
     ] = DECODING_CROSS_TRAJECTORY_COMPARISONS,
 ) -> None:
-    """Plot pooled sample-level cross-trajectory decoding absolute errors."""
+    """Plot animal-level median and IQR cross-trajectory decoding errors."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    plot_ax = ax.inset_axes([0.13, 0.39, 0.85, 0.57])
+    plot_ax = ax.inset_axes([0.0, 0.0, 1.0, 1.0])
     positions = np.arange(1, len(comparisons) + 1, dtype=float)
     labels = [label for _comparison, label, _family, _pairs in comparisons]
-    medians = []
-    q25_values = []
-    q75_values = []
-    plot_positions = []
-    plot_colors = []
-    for position, (comparison, _label, _family, _pairs) in zip(
-        positions,
-        comparisons,
-        strict=True,
-    ):
-        values = np.asarray(
-            decoding_error_table.loc[
-                decoding_error_table["comparison"].astype(str) == comparison,
-                "absolute_error",
-            ],
-            dtype=float,
+    if "animal_name" in decoding_error_table.columns:
+        plot_table = decoding_error_table.copy()
+        plot_table["_plot_animal_name"] = plot_table["animal_name"].astype(str)
+        animal_names = list(
+            dict.fromkeys(plot_table["_plot_animal_name"].dropna().astype(str))
         )
-        values = values[np.isfinite(values)]
-        if values.size == 0:
-            continue
-        medians.append(float(np.median(values)))
-        q25_values.append(float(np.quantile(values, 0.25)))
-        q75_values.append(float(np.quantile(values, 0.75)))
-        plot_positions.append(position)
-        plot_colors.append(DECODING_CROSS_TRAJECTORY_COLORS.get(comparison, "0.5"))
+    else:
+        plot_table = decoding_error_table.copy()
+        plot_table["_plot_animal_name"] = "pooled"
+        animal_names = ["pooled"]
+    if not animal_names:
+        animal_names = ["pooled"]
 
-    if not medians:
+    offsets = np.zeros(len(animal_names), dtype=float)
+    if len(animal_names) > 1:
+        offsets = np.linspace(-0.18, 0.18, len(animal_names))
+
+    plotted_any = False
+    for animal_index, (animal_name, offset) in enumerate(
+        zip(animal_names, offsets, strict=True)
+    ):
+        medians = []
+        q25_values = []
+        q75_values = []
+        plot_positions = []
+        for position, (comparison, _label, _family, _pairs) in zip(
+            positions,
+            comparisons,
+            strict=True,
+        ):
+            values = np.asarray(
+                plot_table.loc[
+                    (plot_table["_plot_animal_name"].astype(str) == animal_name)
+                    & (plot_table["comparison"].astype(str) == comparison),
+                    "absolute_error",
+                ],
+                dtype=float,
+            )
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            medians.append(float(np.median(values)))
+            q25_values.append(float(np.quantile(values, 0.25)))
+            q75_values.append(float(np.quantile(values, 0.75)))
+            plot_positions.append(float(position) + float(offset))
+
+        if not medians:
+            continue
+        color = DECODING_ANIMAL_COLORS.get(animal_name, f"C{animal_index}")
+        plot_ax.vlines(
+            plot_positions,
+            q25_values,
+            q75_values,
+            colors=color,
+            linewidth=1.0,
+            alpha=0.75,
+            zorder=3,
+        )
+        plot_ax.scatter(
+            plot_positions,
+            medians,
+            c=color,
+            s=14,
+            edgecolors="black",
+            linewidths=0.3,
+            label=animal_name,
+            zorder=4,
+        )
+        plotted_any = True
+
+    if not plotted_any:
         plot_ax.text(
             0.5,
             0.5,
@@ -1887,46 +2193,47 @@ def plot_decoding_error_panel(
             transform=plot_ax.transAxes,
         )
     else:
-        plot_ax.vlines(
-            plot_positions,
-            q25_values,
-            q75_values,
-            colors=plot_colors,
-            linewidth=1.4,
-            alpha=0.75,
-            zorder=2,
-        )
-        plot_ax.scatter(
-            plot_positions,
-            medians,
-            c=plot_colors,
-            s=18,
-            edgecolors="black",
-            linewidths=0.35,
-            zorder=3,
+        plot_ax.legend(
+            frameon=False,
+            fontsize=5.2,
+            loc="upper left",
+            handlelength=1.0,
+            borderpad=0.1,
+            labelspacing=0.2,
         )
 
     plot_ax.set_xticks(positions)
     plot_ax.set_xticklabels(labels, fontsize=5.0)
     plot_ax.set_xlim(0.5, len(comparisons) + 0.5)
-    plot_ax.set_ylim(0.0, 1.0)
-    plot_ax.set_ylabel("Abs. error", fontsize=8, labelpad=2)
+    plot_ax.set_ylim(0.0, 0.5)
+    plot_ax.set_ylabel(
+        "Abs. norm. error",
+        fontsize=DECODING_YLABEL_FONTSIZE,
+        labelpad=2,
+    )
     plot_ax.spines["top"].set_visible(False)
     plot_ax.spines["right"].set_visible(False)
     plot_ax.tick_params(axis="y", labelsize=7, length=2, pad=1)
     plot_ax.tick_params(axis="x", length=0, pad=1)
 
-    train_center = 0.06
+    train_center = DECODING_TRAIN_SCHEMATIC_CENTER_X
     ax.text(
         train_center,
-        0.25,
+        DECODING_TRAIN_LABEL_Y,
         "Train",
         ha="center",
         va="bottom",
         fontsize=5.2,
         transform=ax.transAxes,
     )
-    train_ax = ax.inset_axes([train_center - 0.055, 0.03, 0.11, 0.20])
+    train_ax = ax.inset_axes(
+        [
+            train_center - DECODING_SCHEMATIC_WIDTH / 2,
+            DECODING_SCHEMATIC_Y,
+            DECODING_SCHEMATIC_WIDTH,
+            DECODING_SCHEMATIC_HEIGHT,
+        ]
+    )
     draw_w_track_schematic(
         train_ax,
         trajectory_name=DECODING_EXAMPLE_TRAIN_TRAJECTORY,
@@ -1937,10 +2244,10 @@ def plot_decoding_error_panel(
         fill_track=True,
     )
 
-    plot_left = 0.13
-    plot_width = 0.85
-    icon_width = 0.12
-    icon_height = 0.20
+    plot_left = 0.0
+    plot_width = 1.0
+    icon_width = DECODING_SCHEMATIC_WIDTH
+    icon_height = DECODING_SCHEMATIC_HEIGHT
     for position, (comparison, _label, _family, _pairs) in zip(
         positions,
         comparisons,
@@ -1953,7 +2260,7 @@ def plot_decoding_error_panel(
         icon_ax = ax.inset_axes(
             [
                 x_center - icon_width / 2,
-                0.03,
+                DECODING_SCHEMATIC_Y,
                 icon_width,
                 icon_height,
             ]
@@ -1966,6 +2273,181 @@ def plot_decoding_error_panel(
             trajectory_linewidth=0.65,
             arrow_mutation_scale=5.8,
             fill_track=True,
+        )
+
+
+def plot_position_aligned_raster_axis(
+    ax: "Axes",
+    trial_positions: Sequence[np.ndarray],
+    trajectory_type: str,
+    *,
+    show_ylabel: bool = False,
+) -> None:
+    """Plot spikes by normalized task progression across trajectory trials."""
+    for trial_index, positions in enumerate(trial_positions, start=1):
+        positions = np.asarray(positions, dtype=float)
+        if positions.size == 0:
+            continue
+        ax.plot(
+            positions,
+            np.full(positions.shape, trial_index, dtype=float),
+            "|",
+            color="black",
+            markersize=1.2,
+            markeredgewidth=0.45,
+        )
+
+    add_task_progression_segment_boundary_lines(ax)
+
+    n_trials = len(trial_positions)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, max(1, n_trials) + 1.0)
+    ax.set_xticks([0.0, 1.0])
+    ax.set_xticklabels([])
+    ax.set_yticks([])
+    if show_ylabel:
+        ax.set_ylabel("Trials", fontsize=4.8, labelpad=1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(length=0.9, width=0.35, pad=1)
+
+
+def draw_panel_e_raster_schematic(ax: "Axes", trajectory_type: str) -> None:
+    """Draw one compact dark-epoch trajectory icon for a panel E raster."""
+    draw_w_track_schematic(
+        ax,
+        trajectory_name=trajectory_type,
+        arrow_color="red",
+        track_linewidth=0.45,
+        trajectory_linewidth=0.65,
+        arrow_mutation_scale=5.8,
+        fill_track=True,
+    )
+
+
+def plot_panel_e_rate_axis(
+    ax: "Axes",
+    firing_rates: dict[str, tuple[np.ndarray, np.ndarray]],
+    trajectory_pair: Sequence[str],
+    *,
+    y_max: float,
+    show_ylabel: bool = False,
+) -> None:
+    """Plot occupancy-normalized firing rates for a pair of trajectories."""
+    for trajectory_type in trajectory_pair:
+        position, rate = firing_rates[trajectory_type]
+        ax.plot(
+            position,
+            rate,
+            color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+            linewidth=0.8,
+            label=PANEL_E_TRAJECTORY_LABELS[trajectory_type],
+        )
+
+    add_task_progression_segment_boundary_lines(ax)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, y_max)
+    ax.set_xticks([0.0, 1.0])
+    ax.set_yticks([0.0, y_max])
+    ax.set_yticklabels(["0", f"{y_max:g}"])
+    ax.set_xlabel("Nom. path progression", fontsize=4.8, labelpad=1)
+    if show_ylabel:
+        ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
+    ax.legend(frameon=False, fontsize=3.8, handlelength=0.9, borderpad=0.1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=4.5, length=0.9, width=0.35, pad=1)
+
+
+def plot_panel_e_example(
+    ax: "Axes",
+    example: dict[str, Any],
+    *,
+    title: str | None = None,
+) -> None:
+    """Plot one panel E example with trajectory rasters and firing-rate curves."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    if title is not None:
+        ax.text(
+            0.50,
+            0.995,
+            title,
+            ha="center",
+            va="top",
+            fontsize=5.8,
+            transform=ax.transAxes,
+        )
+
+    raster_positions = example["raster_positions"]
+    firing_rates = example["firing_rates"]
+    schematic_bounds = {
+        "center_to_left": (0.210, 0.880, 0.09, 0.070),
+        "center_to_right": (0.710, 0.880, 0.09, 0.070),
+        "right_to_center": (0.210, 0.580, 0.09, 0.070),
+        "left_to_center": (0.710, 0.580, 0.09, 0.070),
+    }
+    raster_bounds = {
+        "center_to_left": (0.05, 0.65, 0.41, 0.19),
+        "center_to_right": (0.55, 0.65, 0.41, 0.19),
+        "right_to_center": (0.05, 0.35, 0.41, 0.19),
+        "left_to_center": (0.55, 0.35, 0.41, 0.19),
+    }
+    for row in PANEL_E_RASTER_TRAJECTORY_LAYOUT:
+        for trajectory_type in row:
+            schematic_ax = ax.inset_axes(schematic_bounds[trajectory_type])
+            draw_panel_e_raster_schematic(schematic_ax, trajectory_type)
+            raster_ax = ax.inset_axes(raster_bounds[trajectory_type])
+            plot_position_aligned_raster_axis(
+                raster_ax,
+                raster_positions[trajectory_type],
+                trajectory_type,
+                show_ylabel=trajectory_type in {"center_to_left", "right_to_center"},
+            )
+
+    finite_rate_maxima = [
+        float(np.nanmax(rate))
+        for _position, rate in firing_rates.values()
+        if np.isfinite(rate).any()
+    ]
+    y_max = 1.0 if not finite_rate_maxima else max(1.0, np.ceil(max(finite_rate_maxima)))
+    rate_bounds = ((0.05, 0.08, 0.41, 0.25), (0.55, 0.08, 0.41, 0.25))
+    for pair_index, trajectory_pair in enumerate(PANEL_E_FR_TRAJECTORY_PAIRS):
+        rate_ax = ax.inset_axes(rate_bounds[pair_index])
+        plot_panel_e_rate_axis(
+            rate_ax,
+            firing_rates,
+            trajectory_pair,
+            y_max=y_max,
+            show_ylabel=pair_index == 0,
+        )
+
+
+def plot_panel_e_examples(
+    ax: "Axes",
+    examples: Sequence[dict[str, Any]],
+) -> None:
+    """Plot all panel E example units stacked in one panel axis."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    if not examples:
+        ax.text(0.5, 0.5, "No examples", ha="center", va="center", transform=ax.transAxes)
+        return
+
+    block_height = 0.47
+    y_positions = np.linspace(1.0 - block_height, 0.02, len(examples))
+    for example_index, (y0, example) in enumerate(
+        zip(y_positions, examples, strict=False),
+        start=1,
+    ):
+        example_ax = ax.inset_axes([0.0, float(y0), 1.0, block_height])
+        plot_panel_e_example(
+            example_ax,
+            example,
+            title=f"Example cell {example_index}",
         )
 
 
@@ -2040,7 +2522,22 @@ def make_figure_1(
         width_ratios=[0.48, *([1.0] * len(TRAJECTORY_TYPES))],
     )
     panel_e_axis = fig.add_subplot(bottom_grid[0, 1])
-    panel_e_axis.axis("off")
+    panel_e_examples = [
+        load_panel_e_example_data(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            region=region,
+            unit_id=unit_id,
+            position_bin_count=position_bin_count,
+            position_offset=position_offset,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+            sigma_bins=sigma_bins,
+        )
+        for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
+    ]
+    plot_panel_e_examples(panel_e_axis, panel_e_examples)
     label_axis(panel_e_axis, "E", x=-0.04, y=1.02)
 
     final_row_grid = outer_grid[2].subgridspec(
@@ -2108,7 +2605,6 @@ def make_figure_1(
             arrow_color="red",
         )
 
-    guide_line_positions = get_pooled_guide_line_positions(datasets)
     color_image = None
     for region_index, region in enumerate(regions):
         print(f"Building pooled dark-epoch heatmap for region {region}.")
@@ -2139,7 +2635,6 @@ def make_figure_1(
         image = plot_pooled_heatmap_grid(
             heatmap_axes[start_row:stop_row, :],
             panels,
-            guide_line_positions=guide_line_positions,
         )
         if color_image is None and image is not None:
             color_image = image

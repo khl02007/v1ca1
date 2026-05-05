@@ -22,9 +22,16 @@ from v1ca1.paper_figures.figure_1 import (
     DEFAULT_REGIONS,
     DEFAULT_TOP_ROW_HEIGHT_MM,
     DECODING_COMPARISON_RELATIVE_DIR,
+    DECODING_ANIMAL_COLORS,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
     DECODING_EXAMPLE_TEST_TRAJECTORIES,
     DECODING_EXAMPLE_TRAIN_TRAJECTORY,
+    DECODING_SCHEMATIC_HEIGHT,
+    DECODING_SCHEMATIC_WIDTH,
+    DECODING_SCHEMATIC_Y,
+    DECODING_TRAIN_LABEL_Y,
+    DECODING_TRAIN_SCHEMATIC_CENTER_X,
+    DECODING_YLABEL_FONTSIZE,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
     ENCODING_DPP_COMPARISON_COLORS,
@@ -34,7 +41,14 @@ from v1ca1.paper_figures.figure_1 import (
     MOTOR_DELTA_METRIC,
     MOTOR_NESTED_CV_RELATIVE_DIR,
     NEURON_SCALE_BAR_COUNT,
+    PANEL_E_EXAMPLES,
+    PANEL_E_FR_TRAJECTORY_PAIRS,
+    PANEL_E_RASTER_TRAJECTORY_LAYOUT,
     STABILITY_TABLE_RELATIVE_PATH,
+    TASK_PROGRESSION_SEGMENT_BOUNDARIES,
+    TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR,
+    TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH,
+    TRAJECTORY_TYPES,
     add_centered_axis_text,
     build_normalized_position_bins,
     build_output_path,
@@ -60,8 +74,11 @@ from v1ca1.paper_figures.figure_1 import (
     load_decoding_absolute_error_table,
     load_encoding_delta_table,
     load_motor_delta_table,
+    orient_panel_e_task_progression,
     plot_decoding_error_panel,
     plot_encoding_delta_panel,
+    plot_panel_e_examples,
+    plot_pooled_heatmap_grid,
     plot_motor_delta_panel,
     plot_stability_panel,
     get_trajectory_endpoint_labels,
@@ -413,6 +430,42 @@ def test_final_row_width_fractions_make_panels_f_g_h_equal() -> None:
     ) == pytest.approx(1.0)
 
 
+def test_panel_e_example_configuration_uses_requested_cells_and_layout() -> None:
+    assert PANEL_E_EXAMPLES == (
+        ("L14", "20240611", "08_r4", "v1", 34),
+        ("L15", "20241121", "10_r5", "v1", 473),
+    )
+    assert PANEL_E_RASTER_TRAJECTORY_LAYOUT == (
+        ("center_to_left", "center_to_right"),
+        ("right_to_center", "left_to_center"),
+    )
+    assert PANEL_E_FR_TRAJECTORY_PAIRS == (
+        ("center_to_left", "right_to_center"),
+        ("center_to_right", "left_to_center"),
+    )
+
+
+def test_orient_panel_e_task_progression_flips_inbound_trajectories() -> None:
+    nap = pytest.importorskip("pynapple")
+
+    outbound = nap.Tsd(
+        t=np.asarray([0.0, 1.0, 2.0]),
+        d=np.asarray([0.0, 0.25, 1.0]),
+        time_units="s",
+    )
+    inbound = nap.Tsd(
+        t=np.asarray([0.0, 1.0, 2.0]),
+        d=np.asarray([0.0, 0.25, 1.0]),
+        time_units="s",
+    )
+
+    outbound_oriented = orient_panel_e_task_progression(outbound, "center_to_left")
+    inbound_oriented = orient_panel_e_task_progression(inbound, "left_to_center")
+
+    assert np.asarray(outbound_oriented.d).tolist() == pytest.approx([0.0, 0.25, 1.0])
+    assert np.asarray(inbound_oriented.d).tolist() == pytest.approx([1.0, 0.75, 0.0])
+
+
 def test_default_figure_height_is_shorter_than_previous_layout() -> None:
     previous_height_mm = 182.0
     figure_height_mm = (
@@ -493,6 +546,39 @@ def test_add_centered_axis_text_places_figure_text() -> None:
     plt.close(fig)
 
 
+def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(
+        nrows=len(TRAJECTORY_TYPES),
+        ncols=len(TRAJECTORY_TYPES),
+    )
+    panels = {
+        (order_trajectory, plot_trajectory): np.ones((3, 5), dtype=float)
+        for order_trajectory in TRAJECTORY_TYPES
+        for plot_trajectory in TRAJECTORY_TYPES
+    }
+
+    image = plot_pooled_heatmap_grid(axes, panels)
+
+    assert image is not None
+    for ax in axes.ravel():
+        boundary_lines = ax.lines[-len(TASK_PROGRESSION_SEGMENT_BOUNDARIES) :]
+        assert [line.get_xdata()[0] for line in boundary_lines] == pytest.approx(
+            TASK_PROGRESSION_SEGMENT_BOUNDARIES
+        )
+        assert [line.get_color() for line in boundary_lines] == [
+            TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR
+        ] * len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
+        assert [line.get_linewidth() for line in boundary_lines] == pytest.approx(
+            [TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH]
+            * len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
+        )
+    plt.close(fig)
+
+
 def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
     tmp_path: Path,
 ) -> None:
@@ -520,6 +606,9 @@ def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
     assert ax.child_axes[1].get_position().width > ax.child_axes[0].get_position().width
     assert ax.child_axes[1].get_position().height > ax.get_position().height
     assert ax.child_axes[1].get_position().width > 0.9 * ax.get_position().width
+    assert ax.child_axes[1].get_position().x0 - ax.get_position().x0 < (
+        0.1 * ax.get_position().width
+    )
     probe_image = ax.child_axes[0].images[0].get_array()
     assert probe_image.shape[:2] == (6, 4)
     plt.close(fig)
@@ -534,8 +623,8 @@ def test_draw_w_track_cycle_panel_adds_four_inset_schematics() -> None:
     draw_w_track_cycle_panel(ax)
 
     assert len(ax.child_axes) == 4
-    assert len(ax.texts) == 5
-    assert "Visual stimuli" in [text.get_text() for text in ax.texts]
+    visible_text = [text.get_text() for text in ax.texts if text.get_text()]
+    assert visible_text == ["L", "C", "R", "Visual stimuli"]
     plt.close(fig)
 
 
@@ -543,7 +632,7 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon, Rectangle
+    from matplotlib.patches import Ellipse, Polygon, Rectangle
 
     fig, ax = plt.subplots()
     draw_visual_stimuli_schematic(ax)
@@ -555,37 +644,78 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
         if patch.get_facecolor()[:3]
         == pytest.approx((0.9647058824, 0.7098039216, 0.3725490196))
     ]
-    black_rectangles = [
+    screen_rectangles = [
         patch
         for patch in rectangles
-        if patch.get_x() == pytest.approx(0.385)
-        and patch.get_y() == pytest.approx(0.035)
+        if patch.get_y() == pytest.approx(0.015)
+        and patch.get_height() == pytest.approx(0.105)
+        and patch.get_edgecolor()[3] > 0.0
+    ]
+    black_screen_rectangles = [
+        patch
+        for patch in screen_rectangles
+        if patch.get_facecolor()[:3] == pytest.approx((0.0, 0.0, 0.0))
     ]
     dot_screen_rectangles = [
         patch
-        for patch in rectangles
-        if patch.get_x() == pytest.approx(0.745)
-        and patch.get_y() == pytest.approx(0.035)
+        for patch in screen_rectangles
+        if patch.get_facecolor()[:3] == pytest.approx((0.65, 0.65, 0.65))
     ]
     track_polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
+    dot_ellipses = [patch for patch in ax.patches if isinstance(patch, Ellipse)]
     assert len(yellow_monitor_rectangles) == 6
+    assert len(screen_rectangles) == 3
+    assert all(patch.get_width() < patch.get_height() for patch in screen_rectangles)
     assert track_polygons
     track_vertices = track_polygons[0].get_xy()
-    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.225)
-    assert black_rectangles
-    assert black_rectangles[0].get_facecolor()[:3] == pytest.approx(
-        (0.65, 0.65, 0.65)
+    axes_aspect = (ax.get_position().width * fig.get_figwidth()) / (
+        ax.get_position().height * fig.get_figheight()
     )
+    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.188)
+    assert (
+        np.ptp(track_vertices[:, 0]) / np.ptp(track_vertices[:, 1]) * axes_aspect
+    ) == pytest.approx(4.1 / 4.0)
+    bottom_monitor_rectangles = [
+        patch
+        for patch in yellow_monitor_rectangles
+        if patch.get_width() == pytest.approx(np.ptp(track_vertices[:, 0]))
+    ]
+    assert bottom_monitor_rectangles
+    assert (
+        bottom_monitor_rectangles[0].get_y() + bottom_monitor_rectangles[0].get_height()
+        < np.min(track_vertices[:, 1])
+    )
+    assert max(patch.get_width() for patch in yellow_monitor_rectangles) == pytest.approx(
+        np.ptp(track_vertices[:, 0])
+    )
+    assert black_screen_rectangles
     assert dot_screen_rectangles
-    assert dot_screen_rectangles[0].get_facecolor()[:3] == pytest.approx(
-        (0.65, 0.65, 0.65)
+    assert len(dot_ellipses) == 11
+    assert all(patch.width < patch.height for patch in dot_ellipses)
+    assert [text.get_text() for text in ax.texts] == ["L", "C", "R", "Visual stimuli"]
+    assert ax.texts[-1].get_fontsize() == pytest.approx(8.5)
+    assert ax.texts[-1].get_position()[1] == pytest.approx(0.135)
+    center_wall_lines = [
+        line
+        for line in ax.lines
+        if line.get_xdata()[0] == pytest.approx(line.get_xdata()[1])
+    ]
+    horizontal_wall_lines = [
+        line
+        for line in ax.lines
+        if line.get_ydata()[0] == pytest.approx(line.get_ydata()[1])
+    ]
+    assert len(ax.lines) == 3
+    assert len(center_wall_lines) == 2
+    assert len(horizontal_wall_lines) == 1
+    assert all(
+        text.get_position()[1] > horizontal_wall_lines[0].get_ydata()[0]
+        for text in ax.texts[:3]
     )
-    assert [text.get_text() for text in ax.texts] == ["Visual stimuli"]
-    assert len(ax.lines) == 1
     plt.close(fig)
 
 
-def test_cycle_panel_labels_only_upper_center_linearization_schematic() -> None:
+def test_cycle_panel_labels_bottom_left_linearization_schematic() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -597,7 +727,9 @@ def test_cycle_panel_labels_only_upper_center_linearization_schematic() -> None:
         [text.get_text() for text in inset.texts if text.get_text()]
         for inset in ax.child_axes
     ]
-    assert inset_label_texts == [[], ["L", "C", "R"], [], []]
+    assert inset_label_texts == [[], [], [], []]
+    visible_text = [text.get_text() for text in ax.texts if text.get_text()]
+    assert visible_text[:3] == ["L", "C", "R"]
     plt.close(fig)
 
 
@@ -627,6 +759,93 @@ def test_plot_stability_panel_draws_histograms_and_schematics() -> None:
 
     assert len(ax.child_axes) == 8
     assert ax.get_legend() is not None
+    plt.close(fig)
+
+
+def _fake_panel_e_example(animal_name: str, unit_id: int) -> dict[str, object]:
+    trajectories = (
+        "center_to_left",
+        "center_to_right",
+        "right_to_center",
+        "left_to_center",
+    )
+    return {
+        "animal_name": animal_name,
+        "date": "20240611",
+        "epoch": "08_r4",
+        "region": "v1",
+        "unit_id": unit_id,
+        "raster_positions": {
+            trajectory: [np.asarray([0.1, 0.4]), np.asarray([0.7])]
+            for trajectory in trajectories
+        },
+        "firing_rates": {
+            trajectory: (
+                np.asarray([0.0, 0.5, 1.0]),
+                np.asarray([0.0, 1.0, 0.5]),
+            )
+            for trajectory in trajectories
+        },
+    }
+
+
+def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    plot_panel_e_examples(
+        ax,
+        [
+            _fake_panel_e_example("L14", 34),
+            _fake_panel_e_example("L15", 38),
+        ],
+    )
+
+    assert len(ax.lines) == 0
+    assert len(ax.child_axes) == 2
+    for example_index, example_ax in enumerate(ax.child_axes, start=1):
+        assert len(example_ax.child_axes) == 10
+        assert [text.get_text() for text in example_ax.texts] == [
+            f"Example cell {example_index}"
+        ]
+        assert example_ax.texts[0].get_position()[0] == pytest.approx(0.50)
+        assert example_ax.texts[0].get_horizontalalignment() == "center"
+        assert all(child.get_title() == "" for child in example_ax.child_axes)
+        schematic_width = example_ax.child_axes[0].get_position().width
+        raster_width = example_ax.child_axes[1].get_position().width
+        assert schematic_width < 0.25 * raster_width
+        raster_axes = [example_ax.child_axes[index] for index in (1, 3, 5, 7)]
+        rate_axes = example_ax.child_axes[8:]
+        assert all(
+            rate_axis.get_xlabel() == "Nom. path progression"
+            for rate_axis in rate_axes
+        )
+        for panel_e_axis in [*raster_axes, *rate_axes]:
+            boundary_lines = panel_e_axis.lines[
+                -len(TASK_PROGRESSION_SEGMENT_BOUNDARIES) :
+            ]
+            assert [line.get_xdata()[0] for line in boundary_lines] == pytest.approx(
+                TASK_PROGRESSION_SEGMENT_BOUNDARIES
+            )
+            assert [line.get_color() for line in boundary_lines] == [
+                TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR
+            ] * len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
+        for panel_e_axis in [*raster_axes, *rate_axes]:
+            tick_lines = [
+                tick.tick1line
+                for axis in (panel_e_axis.xaxis, panel_e_axis.yaxis)
+                for tick in axis.majorTicks
+            ]
+            assert all(
+                tick_line.get_markersize() == pytest.approx(0.9)
+                for tick_line in tick_lines
+            )
+            assert all(
+                tick_line.get_markeredgewidth() == pytest.approx(0.35)
+                for tick_line in tick_lines
+            )
     plt.close(fig)
 
 
@@ -737,33 +956,72 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
     pd = pytest.importorskip("pandas")
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
     import matplotlib.pyplot as plt
 
     rows = []
-    for comparison, label, transfer_family, _pairs in DECODING_CROSS_TRAJECTORY_COMPARISONS:
-        rows.extend(
-            {
-                "comparison": comparison,
-                "comparison_label": label,
-                "transfer_family": transfer_family,
-                "absolute_error": value,
-            }
-            for value in (0.1, 0.2, 0.4)
-        )
+    animals = ("L14", "L15", "L16", "L19")
+    for animal_name in animals:
+        for comparison, label, transfer_family, _pairs in DECODING_CROSS_TRAJECTORY_COMPARISONS:
+            rows.extend(
+                {
+                    "animal_name": animal_name,
+                    "comparison": comparison,
+                    "comparison_label": label,
+                    "transfer_family": transfer_family,
+                    "absolute_error": value,
+                }
+                for value in (0.1, 0.2, 0.4)
+            )
     fig, ax = plt.subplots()
     plot_decoding_error_panel(ax, pd.DataFrame(rows))
 
     plot_ax = ax.child_axes[0]
     schematic_axes = ax.child_axes[1:]
-    assert plot_ax.get_ylabel() == "Abs. error"
-    assert plot_ax.get_ylim() == pytest.approx((0.0, 1.0))
+    assert plot_ax.get_ylabel() == "Abs. norm. error"
+    assert plot_ax.yaxis.label.get_fontsize() == pytest.approx(
+        DECODING_YLABEL_FONTSIZE
+    )
+    assert plot_ax.get_ylim() == pytest.approx((0.0, 0.5))
+    assert plot_ax.get_position().bounds == pytest.approx(ax.get_position().bounds)
     assert [text.get_text() for text in plot_ax.get_xticklabels()] == [
         label for _comparison, label, _family, _pairs in DECODING_CROSS_TRAJECTORY_COMPARISONS
     ]
-    assert len(plot_ax.collections) == 2
+    assert "Opposite turn\nsame arm" in [
+        text.get_text() for text in plot_ax.get_xticklabels()
+    ]
+    assert len(plot_ax.lines) == 0
+    assert len(plot_ax.collections) == 2 * len(animals)
+    legend = plot_ax.get_legend()
+    assert legend is not None
+    assert legend._loc == 2
+    assert [text.get_text() for text in legend.get_texts()] == list(animals)
+    animal_scatter = [
+        collection for collection in plot_ax.collections if collection.get_label() in animals
+    ]
+    for collection, animal_name in zip(animal_scatter, animals, strict=True):
+        assert tuple(collection.get_facecolors()[0]) == pytest.approx(
+            to_rgba(DECODING_ANIMAL_COLORS[animal_name])
+        )
     assert len(ax.patches) == 0
     assert len(schematic_axes) == 1 + len(DECODING_CROSS_TRAJECTORY_COMPARISONS)
+    assert all(
+        schematic_ax.get_position().y1 < plot_ax.get_position().y0
+        for schematic_ax in schematic_axes
+    )
     assert [text.get_text() for text in ax.texts] == ["Train"]
+    assert ax.texts[0].get_position()[0] == pytest.approx(
+        DECODING_TRAIN_SCHEMATIC_CENTER_X
+    )
+    assert DECODING_SCHEMATIC_Y == pytest.approx(-0.55)
+    assert ax.texts[0].get_position()[1] == pytest.approx(DECODING_TRAIN_LABEL_Y)
+    assert schematic_axes[0].get_position().x1 < plot_ax.get_position().x0
+    assert schematic_axes[0].get_position().width == pytest.approx(
+        DECODING_SCHEMATIC_WIDTH * ax.get_position().width
+    )
+    assert schematic_axes[0].get_position().height == pytest.approx(
+        DECODING_SCHEMATIC_HEIGHT * ax.get_position().height
+    )
     assert DECODING_EXAMPLE_TRAIN_TRAJECTORY == "center_to_left"
     assert DECODING_EXAMPLE_TEST_TRAJECTORIES == {
         "same_turn_cross_arm": "right_to_center",
