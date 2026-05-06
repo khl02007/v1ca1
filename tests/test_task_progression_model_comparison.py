@@ -221,6 +221,85 @@ def _fake_selected_dark_light_dataset(module, xr, *, model_name: str):
     )
 
 
+def _fake_selected_dark_field_dataset(module, xr):
+    dataset = _fake_selected_dark_light_dataset(
+        module,
+        xr,
+        model_name="task_segment_bump",
+    )
+    n_trajectories = int(dataset.sizes["trajectory"])
+    n_grid = int(dataset.sizes["tp_grid"])
+    coef_place_dark = np.zeros((n_trajectories, 3, 2), dtype=float)
+    coef_place_dark[:, 0, :] = np.log(np.asarray([2.0, 3.0], dtype=float))
+    dark_hz_grid = np.broadcast_to(
+        np.asarray([40.0, 60.0], dtype=float),
+        (n_trajectories, n_grid, 2),
+    ).copy()
+    train_light_hz_grid = np.broadcast_to(
+        np.asarray([100.0, 120.0], dtype=float),
+        (n_trajectories, n_grid, 2),
+    ).copy()
+    return dataset.assign(
+        {
+            "coef_intercept": (
+                ("trajectory", "unit"),
+                np.zeros((n_trajectories, 2), dtype=float),
+            ),
+            "coef_light_offset": (
+                ("trajectory", "unit"),
+                np.ones((n_trajectories, 2), dtype=float),
+            ),
+            "coef_place_dark": (
+                ("trajectory", "place_basis", "unit"),
+                coef_place_dark,
+            ),
+            "dark_hz_grid": (
+                ("trajectory", "tp_grid", "unit"),
+                dark_hz_grid,
+            ),
+            "train_light_hz_grid": (
+                ("trajectory", "tp_grid", "unit"),
+                train_light_hz_grid,
+            ),
+            "speed_feature_mode": (
+                ("trajectory",),
+                np.full((n_trajectories,), "none", dtype=object),
+            ),
+            "speed_basis": (
+                ("trajectory",),
+                np.full((n_trajectories,), "none", dtype=object),
+            ),
+            "n_speed_features": (
+                ("trajectory",),
+                np.zeros((n_trajectories,), dtype=int),
+            ),
+            "speed_spline_order": (
+                ("trajectory",),
+                np.full((n_trajectories,), np.nan, dtype=float),
+            ),
+            "speed_basis_bounds": (
+                ("trajectory", "speed_bound"),
+                np.full((n_trajectories, 2), np.nan, dtype=float),
+            ),
+            "speed_reference_value": (
+                ("trajectory",),
+                np.full((n_trajectories,), np.nan, dtype=float),
+            ),
+            "speed_mean": (
+                ("trajectory",),
+                np.full((n_trajectories,), np.nan, dtype=float),
+            ),
+            "speed_std": (
+                ("trajectory",),
+                np.full((n_trajectories,), np.nan, dtype=float),
+            ),
+        }
+    ).assign_coords(
+        place_basis=np.arange(3, dtype=int),
+        speed_bound=np.asarray(["lower", "upper"], dtype=str),
+    )
+
+
 def _with_linear_speed_metadata(dataset, *, speed_mean: float, speed_std: float):
     n_trajectories = int(dataset.sizes["trajectory"])
     dataset = dataset.assign(
@@ -420,6 +499,20 @@ def test_normalize_requested_models_adds_visual_baseline(
     assert messages == ["Added required baseline model 'visual'."]
 
 
+def test_selected_source_model_names_adds_dark_source_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+
+    source_names = module.selected_source_model_names(["visual", "dark"])
+
+    assert source_names == ["visual", "task_segment_bump"]
+    assert module.selected_source_model_name("dark") == "task_segment_bump"
+
+
 def test_validate_selected_dark_light_glms_accepts_matching_nan_speed_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -500,6 +593,67 @@ def test_validate_selected_dark_light_glms_rejects_stale_linear_speed_metadata(
             dark_train_epoch="08_r4",
             light_train_epoch="02_r1",
         )
+
+
+def test_evaluate_selected_dark_model_scores_changed_segment_without_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    xr = pytest.importorskip("xarray")
+    module = _reload_model_comparison_module(
+        monkeypatch,
+        ["swap_glm_comparison.py"],
+    )
+    monkeypatch.setattr(module, "BSplineEval", _FakeBasis)
+
+    def fail_if_swapped(**_kwargs):
+        raise AssertionError("dark model should not build swapped eta")
+
+    monkeypatch.setattr(module, "build_selected_swapped_eta", fail_if_swapped)
+    dataset = _fake_selected_dark_field_dataset(module, xr)
+    p_values = np.asarray([0.1, 0.4, 0.8], dtype=float)
+    y_values = np.asarray(
+        [
+            [1.0, 10.0],
+            [2.0, 20.0],
+            [3.0, 30.0],
+        ],
+        dtype=float,
+    )
+    test_inputs = {
+        trajectory: {"p": p_values, "y": y_values, "v": None}
+        for trajectory in module.TRAJECTORY_TYPES
+    }
+
+    results = module.evaluate_selected_model_on_test_epoch(
+        model_name="dark",
+        datasets_by_model={"dark": dataset},
+        test_inputs_by_traj=test_inputs,
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float),
+        bin_size_s=0.05,
+        n_splines=3,
+        spline_order=4,
+    )
+
+    center_to_left = results["center_to_left"]
+    left_to_center = results["left_to_center"]
+    assert center_to_left["test_light_swapped_segment_n_bins"] == 1
+    assert left_to_center["test_light_swapped_segment_n_bins"] == 1
+    assert np.allclose(
+        center_to_left["test_light_swapped_segment_swapped_metrics"]["spike_sum"],
+        [3.0, 30.0],
+    )
+    assert np.allclose(
+        left_to_center["test_light_swapped_segment_swapped_metrics"]["spike_sum"],
+        [1.0, 10.0],
+    )
+    assert np.allclose(
+        center_to_left["test_light_swapped_segment_swapped_metrics"]["raw_ll_sum"],
+        center_to_left["test_light_swapped_segment_unswapped_metrics"]["raw_ll_sum"],
+    )
+    assert np.allclose(
+        center_to_left["test_light_swapped_hz_grid"],
+        center_to_left["dark_hz_grid"],
+    )
 
 
 def test_output_stem_marks_no_light_offset_mode(

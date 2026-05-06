@@ -3,8 +3,10 @@ from __future__ import annotations
 """Generate Figure 1 panels for pooled dark-epoch place-field heatmaps."""
 
 import argparse
+import hashlib
 import html
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -35,7 +37,16 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.style import (
+    ANIMAL_COLORS,
+    COMPACT_HISTOGRAM_KWARGS,
+    EMPHASIS_HISTOGRAM_KWARGS,
+    ENCODING_COMPARISON_COLORS,
+    HISTOGRAM_KWARGS,
+    NEUTRAL_COLORS,
+    RASTER_TICK_KWARGS,
     REGION_COLORS,
+    SCHEMATIC_COLORS,
+    TRAJECTORY_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
@@ -73,12 +84,26 @@ DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_TOP_ROW_HEIGHT_MM = 40.0
 DEFAULT_HEATMAP_HEIGHT_MM = 84.0
+DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM = 0.5
 DEFAULT_BOTTOM_ROW_HEIGHT_MM = 30.0
 DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION = 0.7
 DEFAULT_PANEL_E_WIDTH_FRACTION = 0.3
 DEFAULT_PANEL_F_WIDTH_FRACTION = 1.0 / 3.0
 DEFAULT_PANEL_G_WIDTH_FRACTION = 1.0 / 3.0
 DEFAULT_PANEL_H_WIDTH_FRACTION = 1.0 / 3.0
+BOTTOM_ROW_PANEL_WSPACE = 0.05
+HEATMAP_COLORBAR_PAD = 0.001
+HEATMAP_COLORBAR_LABEL_FONTSIZE = 4.9
+HEATMAP_COLORBAR_LABELPAD = 0
+HEATMAP_TUNING_LABEL_OFFSET = -0.004
+HEATMAP_ORDER_LABEL_OFFSET = 0.007
+PANEL_D_CACHE_PREFIX = "figure_1_panel_d"
+PANEL_D_CACHE_VERSION = 1
+PANEL_D_CACHE_METADATA_KEY = "__metadata__"
+PANEL_D_CACHE_DATASET_TOKEN_LIMIT = 96
+PANEL_E_CACHE_PREFIX = "figure_1_panel_e"
+PANEL_E_CACHE_VERSION = 1
+PANEL_E_CACHE_METADATA_KEY = "__metadata__"
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 RASTER_ASSET_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 NEURON_SCALE_BAR_COUNT = 100
@@ -100,15 +125,18 @@ PANEL_E_TRAJECTORY_LABELS = {
     "right_to_center": "R→C",
     "left_to_center": "L→C",
 }
-PANEL_E_TRAJECTORY_COLORS = {
-    "center_to_left": "#4C72B0",
-    "center_to_right": "#C44E52",
-    "right_to_center": "#55A868",
-    "left_to_center": "#DD8452",
-}
+PANEL_E_TRAJECTORY_COLORS = TRAJECTORY_COLORS
+PANEL_E_RASTER_TICK_MARKERSIZE = RASTER_TICK_KWARGS["markersize"]
+PANEL_E_RASTER_TICK_MARKEREDGEWIDTH = RASTER_TICK_KWARGS["markeredgewidth"]
+PANEL_E_AXIS_LABEL_FONTSIZE = 5.4
+PANEL_E_TICK_LABEL_FONTSIZE = 5.0
 TASK_PROGRESSION_SEGMENT_BOUNDARIES = (0.4, 0.6)
-TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = "0.65"
+TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = NEUTRAL_COLORS["segment_boundary"]
 TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH = 0.45
+STABILITY_TRAJECTORY_LAYOUT = PANEL_E_RASTER_TRAJECTORY_LAYOUT
+STABILITY_LEGEND_FONTSIZE = 5.4
+STABILITY_AXIS_LABEL_FONTSIZE = 5.7
+STABILITY_TICK_LABEL_FONTSIZE = 5.5
 STABILITY_TABLE_RELATIVE_PATH = (
     Path("task_progression") / "stability" / "odd_even_task_progression_stability.parquet"
 )
@@ -137,10 +165,7 @@ ENCODING_DPP_COMPARISONS = (
         "delta_bits_gtp_vs_tp",
     ),
 )
-ENCODING_DPP_COMPARISON_COLORS = {
-    "dpp_vs_absolute_place": "#55A868",
-    "dpp_vs_absolute_task_progression": "#C44E52",
-}
+ENCODING_DPP_COMPARISON_COLORS = ENCODING_COMPARISON_COLORS
 DECODING_CROSS_TRAJECTORY_COMPARISONS = (
     (
         "same_turn_cross_arm",
@@ -176,12 +201,7 @@ DECODING_CROSS_TRAJECTORY_COMPARISONS = (
         ),
     ),
 )
-DECODING_ANIMAL_COLORS = {
-    "L14": "#4C72B0",
-    "L15": "#DD8452",
-    "L16": "#55A868",
-    "L19": "#C44E52",
-}
+DECODING_ANIMAL_COLORS = ANIMAL_COLORS
 DECODING_EXAMPLE_TRAIN_TRAJECTORY = "center_to_left"
 DECODING_EXAMPLE_TEST_TRAJECTORIES = {
     "same_turn_cross_arm": "right_to_center",
@@ -190,10 +210,11 @@ DECODING_EXAMPLE_TEST_TRAJECTORIES = {
 }
 DECODING_TRAIN_SCHEMATIC_CENTER_X = -0.075
 DECODING_SCHEMATIC_Y = -0.55
-DECODING_SCHEMATIC_WIDTH = 0.12
-DECODING_SCHEMATIC_HEIGHT = 0.18
-DECODING_TRAIN_LABEL_Y = -0.38
-DECODING_YLABEL_FONTSIZE = 7.0
+DECODING_SCHEMATIC_WIDTH = 0.132
+DECODING_SCHEMATIC_HEIGHT = 0.198
+DECODING_TRAIN_LABEL_Y = -0.32
+DECODING_YLABEL_FONTSIZE = 7.6
+DECODING_XTICK_LABEL_FONTSIZE = 5.6
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
     "date",
@@ -255,6 +276,8 @@ CYCLE_ARROW_SPECS = (
     ((0.77, 0.46), (0.64, 0.34), -0.25),
     ((0.36, 0.34), (0.23, 0.46), -0.25),
 )
+CYCLE_ARROW_LINEWIDTH = 1.08
+CYCLE_ARROW_MUTATION_SCALE = 12.6
 MOVEMENT_AXIS_Y = -0.13
 MOVEMENT_AXIS_ARROW_MARGIN = 0.12
 
@@ -1164,6 +1187,205 @@ def load_panel_e_example_data(
     }
 
 
+def build_panel_e_cache_metadata(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    region: str,
+    unit_id: int,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+) -> dict[str, Any]:
+    """Return metadata that identifies one Panel E example-cell cache."""
+    return {
+        "cache_version": PANEL_E_CACHE_VERSION,
+        "data_root": str(Path(data_root)),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(epoch),
+        "region": str(region),
+        "unit_id": int(unit_id),
+        "trajectory_types": list(TRAJECTORY_TYPES),
+        "position_bin_count": int(position_bin_count),
+        "position_offset": int(position_offset),
+        "speed_threshold_cm_s": float(speed_threshold_cm_s),
+        "sigma_bins": float(sigma_bins),
+    }
+
+
+def build_panel_e_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
+    """Return the descriptive cache path for one Panel E example-cell payload."""
+    dataset_token = "-".join(
+        _format_panel_d_cache_token(value)
+        for value in (
+            metadata["animal_name"],
+            metadata["date"],
+            metadata["epoch"],
+            metadata["region"],
+            f"unit{metadata['unit_id']}",
+        )
+    )
+    filename = (
+        f"{PANEL_E_CACHE_PREFIX}_{dataset_token}"
+        f"_posbins{int(metadata['position_bin_count'])}"
+        f"_offset{int(metadata['position_offset'])}"
+        f"_speed{_format_panel_d_cache_number(metadata['speed_threshold_cm_s'])}"
+        f"_sigma{_format_panel_d_cache_number(metadata['sigma_bins'])}"
+        f"_cachev{int(metadata['cache_version'])}.npz"
+    )
+    return Path(cache_dir) / filename
+
+
+def _panel_e_cache_trajectory_token(trajectory_type: str) -> str:
+    """Return a compact trajectory token for Panel E cache array names."""
+    return _format_panel_d_cache_token(trajectory_type)
+
+
+def save_panel_e_cache(
+    cache_path: Path,
+    example_data: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    """Write one Panel E example-cell cache as compressed NumPy arrays."""
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, np.ndarray] = {
+        PANEL_E_CACHE_METADATA_KEY: np.asarray(json.dumps(metadata, sort_keys=True))
+    }
+    for trajectory_type in TRAJECTORY_TYPES:
+        token = _panel_e_cache_trajectory_token(trajectory_type)
+        raster_trials = [
+            np.asarray(trial_positions, dtype=float)
+            for trial_positions in example_data["raster_positions"][trajectory_type]
+        ]
+        if raster_trials:
+            payload[f"raster_{token}_values"] = np.concatenate(raster_trials)
+            payload[f"raster_{token}_lengths"] = np.asarray(
+                [trial_positions.size for trial_positions in raster_trials],
+                dtype=int,
+            )
+        else:
+            payload[f"raster_{token}_values"] = np.asarray([], dtype=float)
+            payload[f"raster_{token}_lengths"] = np.asarray([], dtype=int)
+
+        rate_position, rate_values = example_data["firing_rates"][trajectory_type]
+        payload[f"rate_{token}_position"] = np.asarray(rate_position, dtype=float)
+        payload[f"rate_{token}_values"] = np.asarray(rate_values, dtype=float)
+
+    np.savez_compressed(cache_path, **payload)
+
+
+def load_panel_e_cache(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return cached Panel E example-cell data when metadata still matches."""
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=False) as data:
+            cached_metadata = json.loads(str(data[PANEL_E_CACHE_METADATA_KEY].item()))
+            if cached_metadata != expected_metadata:
+                print(f"Ignoring stale Panel E cache at {cache_path}.")
+                return None
+
+            raster_positions: dict[str, list[np.ndarray]] = {}
+            firing_rates: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            for trajectory_type in TRAJECTORY_TYPES:
+                token = _panel_e_cache_trajectory_token(trajectory_type)
+                values = np.asarray(data[f"raster_{token}_values"], dtype=float)
+                lengths = np.asarray(data[f"raster_{token}_lengths"], dtype=int)
+                split_points = np.cumsum(lengths)[:-1]
+                raster_positions[trajectory_type] = (
+                    [
+                        np.asarray(trial_positions, dtype=float)
+                        for trial_positions in np.split(values, split_points)
+                    ]
+                    if lengths.size
+                    else []
+                )
+                firing_rates[trajectory_type] = (
+                    np.asarray(data[f"rate_{token}_position"], dtype=float),
+                    np.asarray(data[f"rate_{token}_values"], dtype=float),
+                )
+    except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Ignoring unreadable Panel E cache at {cache_path}: {exc}")
+        return None
+
+    return {
+        "animal_name": str(expected_metadata["animal_name"]),
+        "date": str(expected_metadata["date"]),
+        "epoch": str(expected_metadata["epoch"]),
+        "region": str(expected_metadata["region"]),
+        "unit_id": int(expected_metadata["unit_id"]),
+        "raster_positions": raster_positions,
+        "firing_rates": firing_rates,
+    }
+
+
+def load_or_compute_panel_e_example_data(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    region: str,
+    unit_id: int,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_e_cache_dir: Path | None,
+    refresh_panel_e_cache: bool,
+) -> dict[str, Any]:
+    """Load cached Panel E example-cell data or compute and cache it."""
+    metadata = build_panel_e_cache_metadata(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        region=region,
+        unit_id=unit_id,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+    )
+    cache_path = (
+        build_panel_e_cache_path(panel_e_cache_dir, metadata)
+        if panel_e_cache_dir is not None
+        else None
+    )
+    if cache_path is not None and not refresh_panel_e_cache:
+        cached_example = load_panel_e_cache(cache_path, metadata)
+        if cached_example is not None:
+            print(f"Loaded Panel E cache from {cache_path}.")
+            return cached_example
+
+    example_data = load_panel_e_example_data(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        region=region,
+        unit_id=unit_id,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+    )
+    if cache_path is not None:
+        save_panel_e_cache(cache_path, example_data, metadata)
+        print(f"Saved Panel E cache to {cache_path}.")
+    return example_data
+
+
 def _concatenate_unit_parts(parts: list[np.ndarray]) -> np.ndarray:
     """Concatenate pooled unit-key chunks."""
     if not parts:
@@ -1250,6 +1472,271 @@ def build_pooled_panel_values(
                 unit_order,
             )
     return panels
+
+
+def _format_panel_d_cache_token(value: object) -> str:
+    """Return a filesystem-safe token for Panel D cache file names."""
+    text = str(value).strip()
+    cleaned = []
+    for character in text:
+        if character.isalnum() or character in {"-", "_"}:
+            cleaned.append(character)
+        elif character == ".":
+            cleaned.append("p")
+        else:
+            cleaned.append("-")
+    token = "".join(cleaned).strip("-")
+    while "--" in token:
+        token = token.replace("--", "-")
+    return token or "none"
+
+
+def _format_panel_d_cache_number(value: float | int) -> str:
+    """Return a compact numeric token for Panel D cache file names."""
+    return _format_panel_d_cache_token(f"{float(value):g}")
+
+
+def _build_panel_d_dataset_cache_token(
+    dataset_metadata: Sequence[dict[str, str]],
+) -> str:
+    """Return a descriptive cache token for the Panel D data-set list."""
+    dataset_tokens = [
+        _format_panel_d_cache_token(
+            f"{dataset['animal_name']}-{dataset['date']}-{dataset['dark_epoch']}"
+        )
+        for dataset in dataset_metadata
+    ]
+    token = "_".join(dataset_tokens) or "none"
+    if len(token) <= PANEL_D_CACHE_DATASET_TOKEN_LIMIT:
+        return token
+
+    digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:12]
+    prefix = "_".join(dataset_tokens[:2])
+    return _format_panel_d_cache_token(
+        f"{prefix}_{len(dataset_tokens)}datasets_{digest}"
+    )
+
+
+def build_panel_d_cache_metadata(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+) -> dict[str, Any]:
+    """Return metadata that identifies one Panel D heatmap cache."""
+    dataset_metadata = []
+    for dataset in datasets:
+        animal_name, date, dark_epoch = normalize_dataset_id(dataset)
+        dataset_metadata.append(
+            {
+                "animal_name": animal_name,
+                "date": date,
+                "dark_epoch": dark_epoch,
+            }
+        )
+
+    return {
+        "cache_version": PANEL_D_CACHE_VERSION,
+        "figure": DEFAULT_OUTPUT_NAME,
+        "panel": "D",
+        "data_root": str(Path(data_root)),
+        "region": str(region),
+        "datasets": dataset_metadata,
+        "trajectory_types": list(TRAJECTORY_TYPES),
+        "position_bin_count": int(position_bin_count),
+        "position_offset": int(position_offset),
+        "speed_threshold_cm_s": float(speed_threshold_cm_s),
+        "sigma_bins": float(sigma_bins),
+        "pooled_builder": "build_pooled_panel_values",
+    }
+
+
+def build_panel_d_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
+    """Return the descriptive cache path for one Panel D heatmap payload."""
+    region_token = _format_panel_d_cache_token(metadata["region"])
+    dataset_metadata = metadata["datasets"]
+    dark_epochs = [
+        _format_panel_d_cache_token(dataset["dark_epoch"])
+        for dataset in dataset_metadata
+    ]
+    unique_dark_epochs = list(dict.fromkeys(dark_epochs))
+    dark_epoch_token = (
+        unique_dark_epochs[0]
+        if len(unique_dark_epochs) == 1
+        else "mixed-" + "_".join(unique_dark_epochs)
+    )
+    dataset_token = _build_panel_d_dataset_cache_token(dataset_metadata)
+    filename = (
+        f"{PANEL_D_CACHE_PREFIX}_{region_token}_dark{dark_epoch_token}"
+        f"_datasets-{dataset_token}"
+        f"_posbins{int(metadata['position_bin_count'])}"
+        f"_offset{int(metadata['position_offset'])}"
+        f"_speed{_format_panel_d_cache_number(metadata['speed_threshold_cm_s'])}"
+        f"_sigma{_format_panel_d_cache_number(metadata['sigma_bins'])}"
+        f"_cachev{int(metadata['cache_version'])}.npz"
+    )
+    return Path(cache_dir) / filename
+
+
+def _panel_d_cache_array_name(order_trajectory: str, plot_trajectory: str) -> str:
+    """Return the array name for one Panel D heatmap matrix."""
+    return f"{order_trajectory}__{plot_trajectory}"
+
+
+def save_panel_d_cache(
+    cache_path: Path,
+    panels: dict[tuple[str, str], np.ndarray],
+    metadata: dict[str, Any],
+) -> None:
+    """Write one Panel D heatmap cache as compressed NumPy arrays."""
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        PANEL_D_CACHE_METADATA_KEY: np.asarray(json.dumps(metadata, sort_keys=True)),
+    }
+    for order_trajectory in TRAJECTORY_TYPES:
+        for plot_trajectory in TRAJECTORY_TYPES:
+            payload[_panel_d_cache_array_name(order_trajectory, plot_trajectory)] = (
+                np.asarray(panels[(order_trajectory, plot_trajectory)], dtype=float)
+            )
+    np.savez_compressed(cache_path, **payload)
+
+
+def load_panel_d_cache(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[tuple[str, str], np.ndarray] | None:
+    """Return cached Panel D heatmap matrices when metadata still matches."""
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=False) as data:
+            cached_metadata = json.loads(str(data[PANEL_D_CACHE_METADATA_KEY].item()))
+            if cached_metadata != expected_metadata:
+                print(f"Ignoring stale Panel D cache at {cache_path}.")
+                return None
+
+            panels: dict[tuple[str, str], np.ndarray] = {}
+            for order_trajectory in TRAJECTORY_TYPES:
+                for plot_trajectory in TRAJECTORY_TYPES:
+                    array_name = _panel_d_cache_array_name(
+                        order_trajectory,
+                        plot_trajectory,
+                    )
+                    panels[(order_trajectory, plot_trajectory)] = np.asarray(
+                        data[array_name],
+                        dtype=float,
+                    )
+            return panels
+    except Exception as exc:
+        print(f"Ignoring unreadable Panel D cache at {cache_path}: {exc}")
+        return None
+
+
+def load_or_compute_panel_d_heatmap_panels(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_d_cache_dir: Path | None,
+    refresh_panel_d_cache: bool,
+) -> dict[tuple[str, str], np.ndarray]:
+    """Load cached Panel D panels or compute and cache them."""
+    metadata = build_panel_d_cache_metadata(
+        data_root=data_root,
+        datasets=datasets,
+        region=region,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+    )
+    cache_path = (
+        build_panel_d_cache_path(panel_d_cache_dir, metadata)
+        if panel_d_cache_dir is not None
+        else None
+    )
+    if cache_path is not None and not refresh_panel_d_cache:
+        cached_panels = load_panel_d_cache(cache_path, metadata)
+        if cached_panels is not None:
+            print(f"Loaded Panel D cache from {cache_path}.")
+            return cached_panels
+
+    print(f"Building pooled dark-epoch heatmap for region {region}.")
+    curve_sets = []
+    for dataset in datasets:
+        animal_name, date, epoch = normalize_dataset_id(dataset)
+        print(f"  Loading {animal_name} {date} epoch {epoch}.")
+        curve_sets.append(
+            compute_dark_epoch_tuning_curves(
+                animal_name=animal_name,
+                date=date,
+                data_root=data_root,
+                region=region,
+                epoch=epoch,
+                position_bin_count=position_bin_count,
+                position_offset=position_offset,
+                speed_threshold_cm_s=speed_threshold_cm_s,
+                sigma_bins=sigma_bins,
+            )
+        )
+
+    panels = build_pooled_panel_values(
+        curve_sets,
+        position_bin_count=position_bin_count,
+    )
+    if cache_path is not None:
+        save_panel_d_cache(cache_path, panels, metadata)
+        print(f"Saved Panel D cache to {cache_path}.")
+    return panels
+
+
+def plot_dark_heatmap_regions(
+    heatmap_axes: np.ndarray,
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    regions: Sequence[str],
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_d_cache_dir: Path | None = None,
+    refresh_panel_d_cache: bool = False,
+) -> "AxesImage | None":
+    """Plot pooled dark-epoch heatmaps for all requested regions."""
+    color_image = None
+    for region_index, region in enumerate(regions):
+        panels = load_or_compute_panel_d_heatmap_panels(
+            data_root=data_root,
+            datasets=datasets,
+            region=region,
+            position_bin_count=position_bin_count,
+            position_offset=position_offset,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+            sigma_bins=sigma_bins,
+            panel_d_cache_dir=panel_d_cache_dir,
+            refresh_panel_d_cache=refresh_panel_d_cache,
+        )
+        start_row = region_index * len(TRAJECTORY_TYPES)
+        stop_row = start_row + len(TRAJECTORY_TYPES)
+        image = plot_pooled_heatmap_grid(
+            heatmap_axes[start_row:stop_row, :],
+            panels,
+        )
+        if color_image is None and image is not None:
+            color_image = image
+    return color_image
 
 
 def plot_pooled_heatmap_grid(
@@ -1470,7 +1957,7 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
         source_ylim=source_ylim,
     )
 
-    monitor_color = "#f6b55f"
+    monitor_color = SCHEMATIC_COLORS["visual_stimulus"]
     monitor_bar_w = 0.16
     monitor_y = dims["y1"] + 0.12
     monitor_h = dims["y2"] - dims["y1"] - 0.32
@@ -1716,7 +2203,7 @@ def draw_w_track_cycle_panel(ax: "Axes") -> None:
         draw_w_track_schematic(
             inset,
             trajectory_name=trajectory_type,
-            arrow_color="orangered",
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
             track_linewidth=1.2,
             trajectory_linewidth=1.4,
             arrow_mutation_scale=13.0,
@@ -1733,8 +2220,8 @@ def draw_w_track_cycle_panel(ax: "Axes") -> None:
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": "black",
-                "linewidth": 1.2,
-                "mutation_scale": 14,
+                "linewidth": CYCLE_ARROW_LINEWIDTH,
+                "mutation_scale": CYCLE_ARROW_MUTATION_SCALE,
                 "shrinkA": 0,
                 "shrinkB": 0,
                 "connectionstyle": f"arc3,rad={rad}",
@@ -1784,6 +2271,17 @@ def _format_delta_summary(values: np.ndarray, *, label: str | None = None) -> st
     fraction_positive = float(np.mean(values > 0.0))
     median = float(np.median(values))
     return f"{prefix}frac >0: {fraction_positive:.2f}\nmedian: {median:.2f}"
+
+
+def _format_delta_advantage_summary(values: np.ndarray, *, label: str) -> str:
+    """Return compact DPP-side summary text for delta log-likelihood values."""
+    values = np.asarray(values, dtype=float).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return f"{label}\nn/a >0, med. n/a"
+    fraction_positive = float(np.mean(values > 0.0))
+    median = float(np.median(values))
+    return f"{label}\n{fraction_positive:.0%} >0, med. {median:.2f}"
 
 
 def build_zero_including_histogram_bins(
@@ -1839,63 +2337,75 @@ def plot_stability_panel(
     legend_handles = []
     legend_labels = []
 
-    for index, trajectory_type in enumerate(TRAJECTORY_TYPES):
-        row = index // 2
-        col = index % 2
-        x0 = x_positions[col]
-        y0 = y_positions[row]
-        schematic_ax = ax.inset_axes([x0 + 0.16, y0 + cell_height * 0.67, 0.14, 0.17])
-        draw_w_track_schematic(
-            schematic_ax,
-            trajectory_name=trajectory_type,
-            arrow_color="red",
-            track_linewidth=0.5,
-            trajectory_linewidth=0.75,
-            arrow_mutation_scale=6.5,
-            fill_track=True,
-        )
-
-        hist_ax = ax.inset_axes([x0, y0, cell_width, cell_height * 0.62])
-        trajectory_rows = stability_table[
-            stability_table["trajectory_type"].astype(str) == trajectory_type
-        ]
-        for region in regions:
-            values = np.asarray(
-                trajectory_rows.loc[
-                    trajectory_rows["region"].astype(str) == region,
-                    "stability_correlation",
-                ],
-                dtype=float,
+    for row, trajectory_row in enumerate(STABILITY_TRAJECTORY_LAYOUT):
+        for col, trajectory_type in enumerate(trajectory_row):
+            x0 = x_positions[col]
+            y0 = y_positions[row]
+            schematic_ax = ax.inset_axes(
+                [x0 + 0.16, y0 + cell_height * 0.67, 0.14, 0.17]
             )
-            values = values[np.isfinite(values)]
-            if values.size == 0:
-                continue
-            counts, _edges, patches = hist_ax.hist(
-                values,
-                bins=bins,
-                weights=_fraction_histogram_weights(values),
-                color=STABILITY_REGION_COLORS.get(region),
-                alpha=0.55,
-                edgecolor="none",
+            draw_w_track_schematic(
+                schematic_ax,
+                trajectory_name=trajectory_type,
+                arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+                track_linewidth=0.5,
+                trajectory_linewidth=0.75,
+                arrow_mutation_scale=6.5,
+                fill_track=True,
             )
-            del counts
-            if index == 0 and len(patches) > 0:
-                legend_handles.append(patches[0])
-                legend_labels.append(region.upper())
 
-        hist_ax.set_xlim(-1.0, 1.0)
-        hist_ax.set_ylim(bottom=0.0)
-        hist_ax.spines["top"].set_visible(False)
-        hist_ax.spines["right"].set_visible(False)
-        hist_ax.tick_params(labelsize=5, length=2, pad=1)
-        if row == 1:
-            hist_ax.set_xlabel("Odd/even corr.", fontsize=5, labelpad=1)
-        else:
-            hist_ax.set_xticklabels([])
-        if col == 0:
-            hist_ax.set_ylabel("Frac.", fontsize=5, labelpad=1)
-        else:
-            hist_ax.set_yticklabels([])
+            hist_ax = ax.inset_axes([x0, y0, cell_width, cell_height * 0.62])
+            trajectory_rows = stability_table[
+                stability_table["trajectory_type"].astype(str) == trajectory_type
+            ]
+            for region in regions:
+                values = np.asarray(
+                    trajectory_rows.loc[
+                        trajectory_rows["region"].astype(str) == region,
+                        "stability_correlation",
+                    ],
+                    dtype=float,
+                )
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    continue
+                counts, _edges, patches = hist_ax.hist(
+                    values,
+                    bins=bins,
+                    weights=_fraction_histogram_weights(values),
+                    color=STABILITY_REGION_COLORS.get(region),
+                    **HISTOGRAM_KWARGS,
+                )
+                del counts
+                if row == 0 and col == 0 and len(patches) > 0:
+                    legend_handles.append(patches[0])
+                    legend_labels.append(region.upper())
+
+            hist_ax.set_xlim(-1.0, 1.0)
+            hist_ax.set_ylim(bottom=0.0)
+            hist_ax.spines["top"].set_visible(False)
+            hist_ax.spines["right"].set_visible(False)
+            hist_ax.tick_params(
+                labelsize=STABILITY_TICK_LABEL_FONTSIZE,
+                length=2,
+                pad=1,
+            )
+            if row == len(STABILITY_TRAJECTORY_LAYOUT) - 1:
+                hist_ax.set_xlabel(
+                    "Odd/even corr.",
+                    fontsize=STABILITY_AXIS_LABEL_FONTSIZE,
+                    labelpad=1,
+                )
+            else:
+                hist_ax.set_xticklabels([])
+            if col == 0:
+                hist_ax.set_ylabel(
+                    "Frac.",
+                    fontsize=STABILITY_AXIS_LABEL_FONTSIZE,
+                    labelpad=1,
+                )
+            else:
+                hist_ax.set_yticklabels([])
 
     if legend_handles:
         ax.legend(
@@ -1904,7 +2414,7 @@ def plot_stability_panel(
             loc="upper left",
             bbox_to_anchor=(0.0, 1.0),
             frameon=False,
-            fontsize=6,
+            fontsize=STABILITY_LEGEND_FONTSIZE,
             handlelength=1.0,
             borderpad=0.1,
             labelspacing=0.2,
@@ -1921,7 +2431,15 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     )
     values = values[np.isfinite(values)]
 
-    ax.axvline(0.0, color="0.25", linestyle="--", linewidth=0.8, zorder=1)
+    ax.axvspan(
+        x_limits[0],
+        0.0,
+        color=NEUTRAL_COLORS["dark_epoch_background"],
+        alpha=0.65,
+        linewidth=0,
+        zorder=0,
+    )
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=1)
     if values.size == 0:
         ax.text(
             0.5,
@@ -1936,9 +2454,8 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
             values,
             bins=bin_edges,
             weights=_fraction_histogram_weights(values),
-            color="#4C72B0",
-            alpha=0.65,
-            edgecolor="none",
+            color=REGION_COLORS.get(MOTOR_DELTA_REGION, REGION_COLORS["v1"]),
+            **EMPHASIS_HISTOGRAM_KWARGS,
             zorder=2,
         )
 
@@ -1961,20 +2478,14 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.text(
-        0.97,
+        0.68,
         0.74,
-        _format_delta_summary(values),
-        ha="right",
+        _format_delta_advantage_summary(values, label="Motor+DPP > motor"),
+        ha="left",
         va="top",
-        fontsize=5.0,
+        fontsize=4.8,
+        color=REGION_COLORS.get(MOTOR_DELTA_REGION, REGION_COLORS["v1"]),
         transform=ax.transAxes,
-        bbox={
-            "boxstyle": "square,pad=0.18",
-            "facecolor": "white",
-            "edgecolor": "0.65",
-            "linewidth": 0.4,
-            "alpha": 0.88,
-        },
     )
     ax.set_xlim(*x_limits)
     ax.set_xlabel("Delta log likelihood\n(bits/spike)", fontsize=7, labelpad=2)
@@ -1994,7 +2505,16 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     )
     all_values = all_values[np.isfinite(all_values)]
 
-    ax.axvline(0.0, color="0.25", linestyle="--", linewidth=0.8, zorder=1)
+    ax.axvspan(
+        x_limits[0],
+        0.0,
+        color=NEUTRAL_COLORS["dark_epoch_background"],
+        alpha=0.65,
+        linewidth=0,
+        zorder=0,
+    )
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=1)
+    summary_rows = []
     if all_values.size == 0:
         ax.text(
             0.5,
@@ -2016,15 +2536,23 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
             values = values[np.isfinite(values)]
             if values.size == 0:
                 continue
+            color = ENCODING_DPP_COMPARISON_COLORS.get(comparison, "0.4")
             ax.hist(
                 values,
                 bins=bin_edges,
                 weights=_fraction_histogram_weights(values),
-                color=ENCODING_DPP_COMPARISON_COLORS.get(comparison),
-                alpha=0.48,
-                edgecolor="none",
+                color=color,
                 label=label,
+                **COMPACT_HISTOGRAM_KWARGS,
                 zorder=2,
+            )
+            median = float(np.median(values))
+            summary_rows.append(
+                (
+                    comparison,
+                    f"{np.mean(values > 0.0):.0%} >0, med. {median:.2f}",
+                    color,
+                )
             )
 
     ax.text(
@@ -2048,47 +2576,30 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.text(
-        0.98,
+        0.67,
         0.97,
         "DPP better",
-        ha="right",
+        ha="left",
         va="top",
         fontsize=4.8,
         color="black",
         transform=ax.transAxes,
     )
-    summary_text = "\n".join(
-        _format_delta_summary(
-            np.asarray(
-                encoding_delta_table.loc[
-                    encoding_delta_table["comparison"].astype(str) == comparison,
-                    "delta_log_likelihood_bits_per_spike",
-                ],
-                dtype=float,
-            ),
-            label=summary_label,
+    summary_label_by_comparison = {
+        "dpp_vs_absolute_place": "DPP > abs place",
+        "dpp_vs_absolute_task_progression": "DPP > abs task prog.",
+    }
+    for row_index, (comparison, summary, color) in enumerate(summary_rows):
+        ax.text(
+            0.67,
+            0.74 - 0.28 * row_index,
+            f"{summary_label_by_comparison[comparison]}\n{summary}",
+            ha="left",
+            va="top",
+            fontsize=4.2,
+            color=color,
+            transform=ax.transAxes,
         )
-        for comparison, summary_label in (
-            ("dpp_vs_absolute_place", "Abs place"),
-            ("dpp_vs_absolute_task_progression", "Abs task prog."),
-        )
-    )
-    ax.text(
-        0.97,
-        0.70,
-        summary_text,
-        ha="right",
-        va="top",
-        fontsize=4.4,
-        transform=ax.transAxes,
-        bbox={
-            "boxstyle": "square,pad=0.18",
-            "facecolor": "white",
-            "edgecolor": "0.65",
-            "linewidth": 0.4,
-            "alpha": 0.88,
-        },
-    )
     ax.set_xlim(*x_limits)
     ax.set_xlabel("Delta log likelihood\n(bits/spike)", fontsize=7, labelpad=2)
     ax.set_ylabel("Frac.", fontsize=8, labelpad=2)
@@ -2203,7 +2714,7 @@ def plot_decoding_error_panel(
         )
 
     plot_ax.set_xticks(positions)
-    plot_ax.set_xticklabels(labels, fontsize=5.0)
+    plot_ax.set_xticklabels(labels, fontsize=DECODING_XTICK_LABEL_FONTSIZE)
     plot_ax.set_xlim(0.5, len(comparisons) + 0.5)
     plot_ax.set_ylim(0.0, 0.5)
     plot_ax.set_ylabel(
@@ -2237,7 +2748,7 @@ def plot_decoding_error_panel(
     draw_w_track_schematic(
         train_ax,
         trajectory_name=DECODING_EXAMPLE_TRAIN_TRAJECTORY,
-        arrow_color="red",
+        arrow_color=PANEL_E_TRAJECTORY_COLORS[DECODING_EXAMPLE_TRAIN_TRAJECTORY],
         track_linewidth=0.45,
         trajectory_linewidth=0.65,
         arrow_mutation_scale=5.8,
@@ -2268,7 +2779,7 @@ def plot_decoding_error_panel(
         draw_w_track_schematic(
             icon_ax,
             trajectory_name=test_trajectory,
-            arrow_color="red",
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[test_trajectory],
             track_linewidth=0.45,
             trajectory_linewidth=0.65,
             arrow_mutation_scale=5.8,
@@ -2292,9 +2803,8 @@ def plot_position_aligned_raster_axis(
             positions,
             np.full(positions.shape, trial_index, dtype=float),
             "|",
-            color="black",
-            markersize=1.2,
-            markeredgewidth=0.45,
+            color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+            **RASTER_TICK_KWARGS,
         )
 
     add_task_progression_segment_boundary_lines(ax)
@@ -2306,7 +2816,7 @@ def plot_position_aligned_raster_axis(
     ax.set_xticklabels([])
     ax.set_yticks([])
     if show_ylabel:
-        ax.set_ylabel("Trials", fontsize=4.8, labelpad=1)
+        ax.set_ylabel("Trials", fontsize=PANEL_E_AXIS_LABEL_FONTSIZE, labelpad=1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(length=0.9, width=0.35, pad=1)
@@ -2317,7 +2827,7 @@ def draw_panel_e_raster_schematic(ax: "Axes", trajectory_type: str) -> None:
     draw_w_track_schematic(
         ax,
         trajectory_name=trajectory_type,
-        arrow_color="red",
+        arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
         track_linewidth=0.45,
         trajectory_linewidth=0.65,
         arrow_mutation_scale=5.8,
@@ -2351,13 +2861,22 @@ def plot_panel_e_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel("Nom. path progression", fontsize=4.8, labelpad=1)
+    ax.set_xlabel(
+        "Nom. path progression",
+        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
+        labelpad=1,
+    )
     if show_ylabel:
-        ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
+        ax.set_ylabel("FR (Hz)", fontsize=PANEL_E_AXIS_LABEL_FONTSIZE, labelpad=1)
     ax.legend(frameon=False, fontsize=3.8, handlelength=0.9, borderpad=0.1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(labelsize=4.5, length=0.9, width=0.35, pad=1)
+    ax.tick_params(
+        labelsize=PANEL_E_TICK_LABEL_FONTSIZE,
+        length=0.9,
+        width=0.35,
+        pad=1,
+    )
 
 
 def plot_panel_e_example(
@@ -2386,8 +2905,8 @@ def plot_panel_e_example(
     schematic_bounds = {
         "center_to_left": (0.210, 0.880, 0.09, 0.070),
         "center_to_right": (0.710, 0.880, 0.09, 0.070),
-        "right_to_center": (0.210, 0.580, 0.09, 0.070),
-        "left_to_center": (0.710, 0.580, 0.09, 0.070),
+        "right_to_center": (0.210, 0.565, 0.09, 0.070),
+        "left_to_center": (0.710, 0.565, 0.09, 0.070),
     }
     raster_bounds = {
         "center_to_left": (0.05, 0.65, 0.41, 0.19),
@@ -2464,16 +2983,31 @@ def make_figure_1(
     sigma_bins: float,
     encoding_place_bin_size_cm: float,
     dpi: int,
+    panel_d_cache_dir: Path | None = None,
+    refresh_panel_d_cache: bool = False,
+    panel_e_cache_dir: Path | None = None,
+    refresh_panel_e_cache: bool = False,
 ) -> Path:
     """Build and save Figure 1."""
     import matplotlib.pyplot as plt
 
+    panel_d_cache_dir = (
+        Path(output_path).parent / "cache"
+        if panel_d_cache_dir is None
+        else Path(panel_d_cache_dir)
+    )
+    panel_e_cache_dir = (
+        Path(output_path).parent / "cache"
+        if panel_e_cache_dir is None
+        else Path(panel_e_cache_dir)
+    )
     apply_paper_style()
     n_region_rows = len(regions) * len(TRAJECTORY_TYPES)
     heatmap_height_mm = DEFAULT_HEATMAP_HEIGHT_MM * max(len(regions), 1)
     fig_height_mm = (
         DEFAULT_TOP_ROW_HEIGHT_MM
         + heatmap_height_mm
+        + DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM
         + DEFAULT_BOTTOM_ROW_HEIGHT_MM
     )
     fig = plt.figure(
@@ -2481,11 +3015,12 @@ def make_figure_1(
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=3,
+        nrows=4,
         ncols=1,
         height_ratios=[
             DEFAULT_TOP_ROW_HEIGHT_MM,
             heatmap_height_mm,
+            DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM,
             DEFAULT_BOTTOM_ROW_HEIGHT_MM,
         ],
     )
@@ -2503,27 +3038,28 @@ def make_figure_1(
         regions=STABILITY_REGIONS,
     )
     plot_stability_panel(top_axes[2], stability_table)
-    top_axes[2].set_title("Stability", fontsize=9, pad=2)
+    top_axes[2].set_title("Tuning stability", fontsize=9, pad=2)
     for ax, label in zip(top_axes, ("A", "B", "C"), strict=True):
         label_axis(ax, label, x=-0.04, y=1.02)
 
     bottom_grid = outer_grid[1].subgridspec(
         nrows=1,
         ncols=2,
+        wspace=BOTTOM_ROW_PANEL_WSPACE,
         width_ratios=[
-            DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
             DEFAULT_PANEL_E_WIDTH_FRACTION,
+            DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
         ],
     )
-    heatmap_grid = bottom_grid[0, 0].subgridspec(
+    heatmap_grid = bottom_grid[0, 1].subgridspec(
         nrows=n_region_rows + 1,
         ncols=len(TRAJECTORY_TYPES) + 1,
         height_ratios=[0.42, *([1.0] * n_region_rows)],
         width_ratios=[0.48, *([1.0] * len(TRAJECTORY_TYPES))],
     )
-    panel_e_axis = fig.add_subplot(bottom_grid[0, 1])
+    panel_e_axis = fig.add_subplot(bottom_grid[0, 0])
     panel_e_examples = [
-        load_panel_e_example_data(
+        load_or_compute_panel_e_example_data(
             data_root=data_root,
             animal_name=animal_name,
             date=date,
@@ -2534,13 +3070,19 @@ def make_figure_1(
             position_offset=position_offset,
             speed_threshold_cm_s=speed_threshold_cm_s,
             sigma_bins=sigma_bins,
+            panel_e_cache_dir=panel_e_cache_dir,
+            refresh_panel_e_cache=refresh_panel_e_cache,
         )
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
     plot_panel_e_examples(panel_e_axis, panel_e_examples)
-    label_axis(panel_e_axis, "E", x=-0.04, y=1.02)
+    panel_e_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
+    label_axis(panel_e_axis, "D", x=-0.04, y=1.02)
 
-    final_row_grid = outer_grid[2].subgridspec(
+    spacer_axis = fig.add_subplot(outer_grid[2])
+    spacer_axis.axis("off")
+
+    final_row_grid = outer_grid[3].subgridspec(
         nrows=1,
         ncols=3,
         width_ratios=[
@@ -2568,7 +3110,7 @@ def make_figure_1(
     )
     plot_encoding_delta_panel(panel_g_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
-    label_axis(panel_g_axis, "G", x=-0.04, y=1.02)
+    label_axis(panel_g_axis, "G", x=-0.08, y=1.02)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
         datasets=datasets,
@@ -2595,69 +3137,66 @@ def make_figure_1(
         draw_w_track_schematic(
             ax,
             trajectory_name=trajectory_type,
-            arrow_color="red",
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
             fill_track=True,
         )
     for row_index, ax in enumerate(order_schematic_axes):
         draw_order_schematic(
             ax,
             TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)],
-            arrow_color="red",
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[
+                TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)]
+            ],
         )
 
-    color_image = None
-    for region_index, region in enumerate(regions):
-        print(f"Building pooled dark-epoch heatmap for region {region}.")
-        curve_sets = []
-        for dataset in datasets:
-            animal_name, date, epoch = normalize_dataset_id(dataset)
-            print(f"  Loading {animal_name} {date} epoch {epoch}.")
-            curve_sets.append(
-                compute_dark_epoch_tuning_curves(
-                    animal_name=animal_name,
-                    date=date,
-                    data_root=data_root,
-                    region=region,
-                    epoch=epoch,
-                    position_bin_count=position_bin_count,
-                    position_offset=position_offset,
-                    speed_threshold_cm_s=speed_threshold_cm_s,
-                    sigma_bins=sigma_bins,
-                )
-            )
-
-        panels = build_pooled_panel_values(
-            curve_sets,
-            position_bin_count=position_bin_count,
-        )
-        start_row = region_index * len(TRAJECTORY_TYPES)
-        stop_row = start_row + len(TRAJECTORY_TYPES)
-        image = plot_pooled_heatmap_grid(
-            heatmap_axes[start_row:stop_row, :],
-            panels,
-        )
-        if color_image is None and image is not None:
-            color_image = image
+    color_image = plot_dark_heatmap_regions(
+        heatmap_axes,
+        data_root=data_root,
+        datasets=datasets,
+        regions=regions,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+        panel_d_cache_dir=panel_d_cache_dir,
+        refresh_panel_d_cache=refresh_panel_d_cache,
+    )
 
     if color_image is not None:
         colorbar = fig.colorbar(
             color_image,
             ax=heatmap_axes.ravel().tolist(),
             shrink=0.24,
-            pad=0.01,
+            pad=HEATMAP_COLORBAR_PAD,
             aspect=7,
             ticks=[0.0, 1.0],
         )
         colorbar.ax.set_yticklabels(["0", "1"])
         colorbar.ax.tick_params(length=2)
-        colorbar.set_label("Norm. FR", rotation=90, labelpad=4)
+        colorbar.set_label(
+            "Norm. FR",
+            rotation=90,
+            labelpad=HEATMAP_COLORBAR_LABELPAD,
+            fontsize=HEATMAP_COLORBAR_LABEL_FONTSIZE,
+        )
 
     draw_neuron_scale_bar(heatmap_axes[-1, -1])
 
     fig.canvas.draw()
-    add_centered_axis_text(fig, tuning_schematic_axes, "Tuning", y_offset=0.005)
-    add_centered_axis_text(fig, order_schematic_axes, "Order", y_offset=0.018, rotation=90)
-    label_axis(corner_axis, "D", x=-0.12, y=1.04)
+    add_centered_axis_text(
+        fig,
+        tuning_schematic_axes,
+        "Tuning",
+        y_offset=HEATMAP_TUNING_LABEL_OFFSET,
+    )
+    add_centered_axis_text(
+        fig,
+        order_schematic_axes,
+        "Order",
+        y_offset=HEATMAP_ORDER_LABEL_OFFSET,
+        rotation=90,
+    )
+    label_axis(corner_axis, "E", x=-0.12, y=1.04)
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 1 to {output_path}")
@@ -2691,6 +3230,34 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-name",
         default=DEFAULT_OUTPUT_NAME,
         help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
+    )
+    parser.add_argument(
+        "--panel-d-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for cached Panel D heatmap matrices. "
+            "Default: <output-dir>/cache."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-panel-d-cache",
+        action="store_true",
+        help="Recompute Panel D and overwrite its cache even when a matching cache exists.",
+    )
+    parser.add_argument(
+        "--panel-e-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for cached Panel E example-cell data. "
+            "Default: <output-dir>/cache."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-panel-e-cache",
+        action="store_true",
+        help="Recompute Panel E and overwrite its cache even when a matching cache exists.",
     )
     parser.add_argument(
         "--format",
@@ -2775,6 +3342,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_name,
         args.output_format,
     )
+    panel_d_cache_dir = (
+        args.panel_d_cache_dir
+        if args.panel_d_cache_dir is not None
+        else args.output_dir / "cache"
+    )
+    panel_e_cache_dir = (
+        args.panel_e_cache_dir
+        if args.panel_e_cache_dir is not None
+        else args.output_dir / "cache"
+    )
     make_figure_1(
         data_root=args.data_root,
         asset_dir=args.asset_dir,
@@ -2787,6 +3364,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         sigma_bins=args.sigma_bins,
         encoding_place_bin_size_cm=args.encoding_place_bin_size_cm,
         dpi=args.dpi,
+        panel_d_cache_dir=panel_d_cache_dir,
+        refresh_panel_d_cache=args.refresh_panel_d_cache,
+        panel_e_cache_dir=panel_e_cache_dir,
+        refresh_panel_e_cache=args.refresh_panel_e_cache,
     )
 
 

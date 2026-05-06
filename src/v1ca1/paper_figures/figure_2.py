@@ -18,7 +18,13 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.style import (
+    COMPACT_HISTOGRAM_KWARGS,
+    EPOCH_TYPE_COLORS,
+    HISTOGRAM_KWARGS,
+    MODEL_CLASS_COLORS,
+    NEUTRAL_COLORS,
     REGION_COLORS,
+    SCHEMATIC_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
@@ -49,6 +55,7 @@ RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
 RIPPLE_LFP_RELATIVE_DIR = Path("ripple") / "ripple_channels_lfp"
 RIPPLE_MODULATION_RELATIVE_DIR = Path("ripple") / "ripple_modulation"
 RIPPLE_GLM_RELATIVE_DIR = Path("ripple_glm")
+RIPPLE_DECODING_COMPARISON_RELATIVE_DIR = Path("ripple_decoding_comparison")
 ENCODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "encoding_comparison"
 TUNING_ANALYSIS_RELATIVE_DIR = Path("task_progression") / "tuning_analysis"
 DEFAULT_RIPPLE_THRESHOLD_ZSCORE = 2.0
@@ -77,6 +84,20 @@ DEFAULT_PANEL_D_PLACE_BIN_SIZE_CM = 4.0
 DEFAULT_PANEL_D_ENCODING_SOURCE_COLUMN = "delta_bits_generalized_place_vs_tp"
 DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC = "correlation"
 DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL = "pooled_same_turn"
+NEURON_SCALE_BAR_COUNT = 100
+PANEL_E_CATEGORICAL_METRICS = (
+    ("place", "turn_group"),
+    ("place", "arm_identity"),
+)
+PANEL_E_EPOCH_ORDER = ("light", "dark")
+PANEL_E_METRIC_LABELS = {
+    ("place", "turn_group"): "Turn group",
+    ("place", "arm_identity"): "Arm",
+}
+PANEL_E_CHANCE_LEVELS = {
+    "turn_group": 0.5,
+    "arm_identity": 1.0 / 3.0,
+}
 HEATMAP_EPOCH_ORDER = ("light", "dark", "sleep")
 HEATMAP_EPOCH_LABELS = {
     "light": "Light run",
@@ -86,13 +107,9 @@ HEATMAP_EPOCH_LABELS = {
 XCORR_RELATIVE_DIR = Path("xcorr") / "screen_pairs"
 XCORR_SUMMARY_FILENAME = "xcorr_summary.parquet"
 XCORR_DATASET_FILENAME = "xcorr.nc"
-MODEL_COLOR = "#55A868"
-GLM_EPOCH_COLORS = {
-    "light": "#4C72B0",
-    "dark": "#55A868",
-    "sleep": "#C44E52",
-}
-NONSIGNIFICANT_COLOR = "0.70"
+MODEL_COLOR = MODEL_CLASS_COLORS["visual"]
+GLM_EPOCH_COLORS = EPOCH_TYPE_COLORS
+NONSIGNIFICANT_COLOR = NEUTRAL_COLORS["nonsignificant"]
 SIGNIFICANCE_P_VALUE = 0.05
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
 
@@ -317,6 +334,24 @@ def get_tuning_similarity_path(
         get_dataset_analysis_path(data_root, animal_name, date)
         / TUNING_ANALYSIS_RELATIVE_DIR
         / f"{region}_{epoch}_{similarity_metric}_within_epoch_similarity.parquet"
+    )
+
+
+def get_ripple_decoding_comparison_summary_path(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    representation: str,
+    train_epoch: str,
+    decode_epoch: str,
+) -> Path:
+    """Return the ripple CA1-V1 Bayesian decoding comparison summary path."""
+    filename = f"{representation}_train-{train_epoch}_decode-{decode_epoch}_epoch_summary.parquet"
+    return (
+        get_dataset_analysis_path(data_root, animal_name, date)
+        / RIPPLE_DECODING_COMPARISON_RELATIVE_DIR
+        / filename
     )
 
 
@@ -1310,6 +1345,153 @@ def load_glm_behavior_association_tables(
     }
 
 
+def load_ripple_decoding_comparison_panel_tables(
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    *,
+    light_epoch: str | None = None,
+    dark_epoch: str | None = None,
+    categorical_metrics: Sequence[tuple[str, str]] = PANEL_E_CATEGORICAL_METRICS,
+) -> dict[str, Any]:
+    """Load CA1-V1 Bayesian ripple decoding categorical agreement summaries."""
+    import pandas as pd
+
+    summary_rows: list[dict[str, Any]] = []
+    missing_artifacts: list[dict[str, str]] = []
+    metrics = tuple((str(representation), str(label_scheme)) for representation, label_scheme in categorical_metrics)
+    base_required_columns = {
+        "representation",
+        "train_epoch",
+        "decode_epoch",
+        "n_ripples",
+        "n_ripple_bins",
+        "n_effective_shuffles",
+    }
+
+    for dataset_id in datasets:
+        animal_name, date, dataset_dark_epoch = normalize_dataset_id(dataset_id)
+        epoch_ids = make_figure_2_epoch_ids(
+            animal_name=animal_name,
+            date=date,
+            light_epoch=light_epoch,
+            dark_epoch=dataset_dark_epoch if dark_epoch is None else dark_epoch,
+        )
+        for epoch_type in PANEL_E_EPOCH_ORDER:
+            _epoch_animal, _epoch_date, epoch = normalize_dataset_id(epoch_ids[epoch_type])
+            for representation, label_scheme in metrics:
+                summary_path = get_ripple_decoding_comparison_summary_path(
+                    data_root,
+                    animal_name=animal_name,
+                    date=date,
+                    representation=representation,
+                    train_epoch=epoch,
+                    decode_epoch=epoch,
+                )
+                if not summary_path.exists():
+                    missing_artifacts.append(
+                        {
+                            "artifact": "ripple_decoding_comparison",
+                            "animal_name": animal_name,
+                            "date": date,
+                            "epoch": epoch,
+                            "representation": str(representation),
+                            "label_scheme": str(label_scheme),
+                            "path": str(summary_path),
+                        }
+                    )
+                    continue
+
+                table = pd.read_parquet(summary_path)
+                metric_columns = {
+                    f"{label_scheme}_scheme_applicable",
+                    f"{label_scheme}_scheme_reason",
+                    f"{label_scheme}_n_valid_ripples",
+                    f"{label_scheme}_match_rate",
+                    f"{label_scheme}_match_rate_shuffle_mean",
+                    f"{label_scheme}_match_rate_shuffle_sd",
+                    f"{label_scheme}_match_rate_p_value",
+                }
+                required_columns = base_required_columns | metric_columns
+                missing_columns = sorted(required_columns.difference(table.columns))
+                if missing_columns:
+                    raise ValueError(
+                        f"Ripple decoding comparison summary {summary_path} is missing "
+                        f"columns {missing_columns!r}."
+                    )
+                table = table[
+                    (table["representation"].astype(str) == representation)
+                    & (table["train_epoch"].astype(str) == epoch)
+                    & (table["decode_epoch"].astype(str) == epoch)
+                ].copy()
+                if table.empty:
+                    raise ValueError(
+                        "Ripple decoding comparison summary did not contain the requested "
+                        f"row: {summary_path}"
+                    )
+                row = table.iloc[0]
+                if not bool(row[f"{label_scheme}_scheme_applicable"]):
+                    missing_artifacts.append(
+                        {
+                            "artifact": "ripple_decoding_comparison_scheme",
+                            "animal_name": animal_name,
+                            "date": date,
+                            "epoch": epoch,
+                            "representation": str(representation),
+                            "label_scheme": str(label_scheme),
+                            "reason": str(row[f"{label_scheme}_scheme_reason"]),
+                            "path": str(summary_path),
+                        }
+                    )
+                    continue
+
+                chance_level = PANEL_E_CHANCE_LEVELS.get(str(label_scheme), np.nan)
+                summary_rows.append(
+                    {
+                        "animal_name": animal_name,
+                        "date": date,
+                        "representation": representation,
+                        "train_epoch": epoch,
+                        "decode_epoch": epoch,
+                        "epoch_type": epoch_type,
+                        "epoch_label": HEATMAP_EPOCH_LABELS[epoch_type],
+                        "label_scheme": label_scheme,
+                        "metric_label": PANEL_E_METRIC_LABELS.get(
+                            (representation, label_scheme),
+                            str(label_scheme).replace("_", " ").title(),
+                        ),
+                        "n_ripples": int(row["n_ripples"]),
+                        "n_ripple_bins": int(row["n_ripple_bins"]),
+                        "n_effective_shuffles": int(row["n_effective_shuffles"]),
+                        "categorical_n_valid_ripples": int(
+                            row[f"{label_scheme}_n_valid_ripples"]
+                        ),
+                        "categorical_match_rate": float(row[f"{label_scheme}_match_rate"]),
+                        "categorical_match_rate_shuffle_mean": float(
+                            row[f"{label_scheme}_match_rate_shuffle_mean"]
+                        ),
+                        "categorical_match_rate_shuffle_sd": float(
+                            row[f"{label_scheme}_match_rate_shuffle_sd"]
+                        ),
+                        "categorical_match_rate_p_value": float(
+                            row[f"{label_scheme}_match_rate_p_value"]
+                        ),
+                        "chance_level": float(chance_level),
+                        "source_path": str(summary_path),
+                    }
+                )
+
+    summary_table = (
+        pd.DataFrame(summary_rows)
+        if summary_rows
+        else pd.DataFrame()
+    )
+    return {
+        "summary_table": summary_table,
+        "missing_artifacts": missing_artifacts,
+        "categorical_metrics": metrics,
+    }
+
+
 def load_example_glm_prediction(
     data_root: Path,
     *,
@@ -1418,77 +1600,162 @@ def load_first_available_glm_prediction(
 
 
 def draw_ripple_glm_schematic(ax: "Axes") -> None:
-    """Draw a compact CA1-to-V1 ripple GLM schematic."""
+    """Draw a compact schematic of the CA1-to-V1 ripple count GLM."""
     from matplotlib.patches import FancyArrowPatch, Rectangle
 
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
     transform = ax.transAxes
-    ca1_rect = Rectangle(
-        (0.07, 0.32),
-        0.25,
-        0.36,
-        facecolor="#f6efe6",
-        edgecolor="black",
-        linewidth=0.7,
-        transform=transform,
-    )
-    v1_rect = Rectangle(
-        (0.68, 0.32),
-        0.25,
-        0.36,
-        facecolor="#e7eef8",
-        edgecolor="black",
-        linewidth=0.7,
-        transform=transform,
-    )
-    window_rect = Rectangle(
-        (0.40, 0.43),
-        0.20,
-        0.14,
-        facecolor="#e8f3e8",
-        edgecolor="0.25",
-        linewidth=0.6,
-        transform=transform,
-    )
-    ax.add_patch(ca1_rect)
-    ax.add_patch(v1_rect)
-    ax.add_patch(window_rect)
-    ax.text(0.195, 0.50, "CA1\ncounts", ha="center", va="center", transform=transform)
-    ax.text(0.805, 0.50, "V1\ncounts", ha="center", va="center", transform=transform)
-    ax.text(0.50, 0.50, "0.2 s\nripple", ha="center", va="center", fontsize=6, transform=transform)
+
+    ca1_color = REGION_COLORS["ca1"]
+    v1_color = REGION_COLORS["v1"]
+    window_x0 = 0.30
+    window_x1 = 0.67
+    timeline_x0 = 0.12
+    timeline_x1 = 0.90
+
+    ax.text(0.50, 0.96, "For each ripple", ha="center", va="top", fontsize=6.2, transform=transform)
     ax.add_patch(
-        FancyArrowPatch(
-            (0.32, 0.50),
-            (0.40, 0.50),
-            arrowstyle="-|>",
-            mutation_scale=11,
-            linewidth=0.8,
-            color="black",
+        Rectangle(
+            (window_x0, 0.60),
+            window_x1 - window_x0,
+            0.26,
+            facecolor=SCHEMATIC_COLORS["ripple_window_fill"],
+            edgecolor="0.70",
+            linewidth=0.45,
             transform=transform,
+            zorder=0,
         )
     )
-    ax.add_patch(
-        FancyArrowPatch(
-            (0.60, 0.50),
-            (0.68, 0.50),
-            arrowstyle="-|>",
-            mutation_scale=11,
-            linewidth=0.8,
-            color="black",
-            transform=transform,
-        )
-    )
+    ax.plot([timeline_x0, timeline_x1], [0.82, 0.82], color="0.35", linewidth=0.55, transform=transform)
+    ax.plot([window_x0, window_x0], [0.58, 0.88], color="0.10", linewidth=0.7, transform=transform)
+    ax.plot([window_x1, window_x1], [0.60, 0.86], color="0.55", linewidth=0.45, transform=transform)
+    ax.text(window_x0, 0.90, "onset", ha="center", va="bottom", fontsize=4.9, transform=transform)
     ax.text(
-        0.50,
-        0.18,
-        "Ridge Poisson GLM, held-out ripples",
+        (window_x0 + window_x1) / 2.0,
+        0.875,
+        "0-200 ms",
         ha="center",
-        va="center",
-        fontsize=6,
+        va="bottom",
+        fontsize=5.5,
         transform=transform,
     )
+
+    ripple_x = np.linspace(timeline_x0, timeline_x1, 80)
+    ripple_y = 0.80 + 0.018 * np.sin(np.linspace(0.0, 9.0 * np.pi, ripple_x.size))
+    ripple_y += 0.026 * np.exp(-((ripple_x - 0.42) / 0.13) ** 2) * np.sin(
+        np.linspace(0.0, 18.0 * np.pi, ripple_x.size)
+    )
+    ax.plot(
+        ripple_x,
+        ripple_y,
+        color=SCHEMATIC_COLORS["ripple_trace"],
+        linewidth=0.55,
+        transform=transform,
+    )
+
+    def _draw_raster_row(y_center: float, color: str, spike_times: Sequence[Sequence[float]]) -> None:
+        for row_index, row_spikes in enumerate(spike_times):
+            y0 = y_center - 0.035 + row_index * 0.035
+            for spike_x in row_spikes:
+                ax.plot(
+                    [spike_x, spike_x],
+                    [y0 - 0.010, y0 + 0.010],
+                    color=color,
+                    linewidth=0.8,
+                    solid_capstyle="butt",
+                    transform=transform,
+                )
+
+    ca1_spikes = (
+        (0.33, 0.38, 0.54, 0.61),
+        (0.36, 0.43, 0.58),
+        (0.31, 0.49, 0.63),
+    )
+    v1_spikes = (
+        (0.34, 0.53),
+        (0.41, 0.46, 0.62),
+        (0.37, 0.60),
+    )
+    ax.text(0.09, 0.70, "CA1", ha="right", va="center", fontsize=5.8, color=ca1_color, transform=transform)
+    ax.text(0.09, 0.62, "V1", ha="right", va="center", fontsize=5.8, color=v1_color, transform=transform)
+    _draw_raster_row(0.69, ca1_color, ca1_spikes)
+    _draw_raster_row(0.61, v1_color, v1_spikes)
+
+    count_box_specs = (
+        (
+            0.08,
+            0.39,
+            0.34,
+            0.11,
+            SCHEMATIC_COLORS["ca1_count_fill"],
+            ca1_color,
+            "CA1 count\nvector X_r",
+        ),
+        (
+            0.58,
+            0.39,
+            0.34,
+            0.11,
+            SCHEMATIC_COLORS["v1_count_fill"],
+            v1_color,
+            "V1 count\ntarget y_r",
+        ),
+    )
+    for x0, y0, width, height, facecolor, edgecolor, label in count_box_specs:
+        ax.add_patch(
+            Rectangle(
+                (x0, y0),
+                width,
+                height,
+                facecolor=facecolor,
+                edgecolor=edgecolor,
+                linewidth=0.65,
+                transform=transform,
+            )
+        )
+        ax.text(
+            x0 + width / 2.0,
+            y0 + height / 2.0,
+            label,
+            ha="center",
+            va="center",
+            fontsize=5.1,
+            color="black",
+            transform=transform,
+        )
+
+    glm_rect = Rectangle(
+        (0.30, 0.18),
+        0.40,
+        0.12,
+        facecolor=SCHEMATIC_COLORS["glm_fill"],
+        edgecolor="0.25",
+        linewidth=0.65,
+        transform=transform,
+    )
+    ax.add_patch(glm_rect)
+    ax.text(0.50, 0.24, "Poisson GLM\npredict y_V1", ha="center", va="center", fontsize=5.3, transform=transform)
+
+    arrow_specs = (
+        ((0.25, 0.39), (0.42, 0.30)),
+        ((0.50, 0.30), (0.50, 0.39)),
+        ((0.70, 0.24), (0.86, 0.39)),
+    )
+    for start, end in arrow_specs:
+        ax.add_patch(
+            FancyArrowPatch(
+                start,
+                end,
+                arrowstyle="-|>",
+                mutation_scale=8,
+                linewidth=0.7,
+                color="0.15",
+                transform=transform,
+            )
+        )
+    ax.text(0.50, 0.08, "Evaluate on held-out ripples", ha="center", va="center", fontsize=5.5, transform=transform)
 
 
 def plot_ripple_lfp_panel(ax: "Axes", trace: dict[str, Any]) -> None:
@@ -1499,11 +1766,11 @@ def plot_ripple_lfp_panel(ax: "Axes", trace: dict[str, Any]) -> None:
     ax.axvspan(
         0.0,
         float(trace["ripple_duration_s"]),
-        color="#d9a441",
+        color=SCHEMATIC_COLORS["ripple_span"],
         alpha=0.28,
         linewidth=0,
     )
-    ax.axvline(0.0, color="#9a6a00", linewidth=0.7)
+    ax.axvline(0.0, color=SCHEMATIC_COLORS["ripple_onset"], linewidth=0.7)
     ax.set_xlabel("Time from ripple start (s)")
     ax.set_ylabel("Ripple-band LFP")
     ax.set_title(
@@ -1594,6 +1861,53 @@ def plot_peri_ripple_heatmap_panel(
         colorbar.set_label("Norm. FR", fontsize=5, labelpad=2)
 
 
+def draw_neuron_scale_bar(
+    ax: "Axes",
+    *,
+    neuron_count: int = NEURON_SCALE_BAR_COUNT,
+    x: float = 1.02,
+) -> None:
+    """Draw a vertical data-scaled neuron count bar beside one heatmap axis."""
+    from matplotlib.transforms import blended_transform_factory
+
+    if neuron_count <= 0:
+        raise ValueError("neuron_count must be positive.")
+
+    y_limits = [float(value) for value in ax.get_ylim()]
+    y_min = min(y_limits)
+    y_max = max(y_limits)
+    y_span = y_max - y_min
+    margin = max(8.0, 0.28 * y_span)
+    if y_span >= neuron_count + margin:
+        y_bottom = y_max - margin
+        y_top = y_bottom - float(neuron_count)
+    else:
+        y_top = y_min
+        y_bottom = min(y_max, y_min + float(neuron_count))
+
+    transform = blended_transform_factory(ax.transAxes, ax.transData)
+    ax.plot(
+        [x, x],
+        [y_bottom, y_top],
+        color="black",
+        linewidth=1.0,
+        solid_capstyle="butt",
+        transform=transform,
+        clip_on=False,
+    )
+    ax.text(
+        x + 0.035,
+        (y_bottom + y_top) / 2,
+        f"{neuron_count} neurons",
+        ha="left",
+        va="center",
+        rotation=90,
+        fontsize=5,
+        transform=transform,
+        clip_on=False,
+    )
+
+
 def plot_epoch_ripple_heatmap_panel(
     ax: "Axes",
     epoch_tables: Sequence[dict[str, Any]],
@@ -1621,6 +1935,7 @@ def plot_epoch_ripple_heatmap_panel(
     cell_width = (right - left - column_gap * (n_epochs - 1)) / n_epochs
     cell_height = (heatmap_top - heatmap_bottom - row_gap * (n_regions - 1)) / n_regions
     image = None
+    last_heatmap_ax = None
 
     for col_index, epoch_payload in enumerate(epoch_tables):
         x0 = left + col_index * (cell_width + column_gap)
@@ -1637,6 +1952,7 @@ def plot_epoch_ripple_heatmap_panel(
         for row_index, region in enumerate(regions):
             y0 = heatmap_top - (row_index + 1) * cell_height - row_index * row_gap
             heatmap_ax = ax.inset_axes([x0, y0, cell_width, cell_height])
+            last_heatmap_ax = heatmap_ax
             payload = build_peri_ripple_heatmap_payload(firing_rate_table, region=region)
             matrix = np.asarray(payload["mean_rate_hz"], dtype=float)
             time_s = np.asarray(payload["time_s"], dtype=float)
@@ -1688,7 +2004,9 @@ def plot_epoch_ripple_heatmap_panel(
         )
 
     if image is not None:
-        colorbar_ax = ax.inset_axes([0.955, heatmap_bottom, 0.018, heatmap_top - heatmap_bottom])
+        if last_heatmap_ax is not None:
+            draw_neuron_scale_bar(last_heatmap_ax)
+        colorbar_ax = ax.inset_axes([0.975, heatmap_bottom, 0.018, heatmap_top - heatmap_bottom])
         colorbar = ax.figure.colorbar(image, cax=colorbar_ax, ticks=[0.0, 1.0])
         colorbar.ax.tick_params(labelsize=5, length=2, pad=1)
         colorbar.set_label("Norm. FR", fontsize=5, labelpad=2)
@@ -1750,9 +2068,8 @@ def _plot_modulation_histogram_inset(
             bins=bins,
             weights=_fraction_histogram_weights(values),
             color=REGION_COLORS.get(region, "0.5"),
-            alpha=0.48,
-            edgecolor="none",
             label=region.upper(),
+            **COMPACT_HISTOGRAM_KWARGS,
             zorder=2,
         )
     if not has_values:
@@ -1878,9 +2195,8 @@ def plot_modulation_index_panel(
                 bins=bins,
                 weights=_fraction_histogram_weights(values),
                 color=REGION_COLORS.get(region, "0.5"),
-                alpha=0.52,
-                edgecolor="none",
                 label=region.upper(),
+                **HISTOGRAM_KWARGS,
                 zorder=2,
             )
         summary_lines.append(f"{region.upper()}: {_format_region_summary(values)}")
@@ -1920,7 +2236,7 @@ def plot_ripple_count_panel(ax: "Axes", count_table: Any) -> None:
     ax.bar(
         positions,
         count_table["n_ripples"].to_numpy(dtype=float),
-        color="#9c755f",
+        color=SCHEMATIC_COLORS["ripple_trace"],
         alpha=0.82,
         width=0.7,
     )
@@ -1979,7 +2295,7 @@ def plot_glm_analysis_panel(
         ax.text(0.5, 0.5, "No GLM data", ha="center", va="center", transform=ax.transAxes)
         return
 
-    schematic_ax = ax.inset_axes([0.02, 0.16, 0.25, 0.70])
+    schematic_ax = ax.inset_axes([0.01, 0.08, 0.30, 0.82])
     draw_ripple_glm_schematic(schematic_ax)
 
     all_neglog_p: list[np.ndarray] = []
@@ -1997,8 +2313,8 @@ def plot_glm_analysis_panel(
     x_max = 0.5
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
-    plot_left = 0.34
-    plot_right = 0.98
+    plot_left = 0.37
+    plot_right = 0.99
     scatter_bottom = 0.39
     scatter_top = 0.82
     box_bottom = 0.13
@@ -2371,24 +2687,290 @@ def plot_metric_significance_distributions(
     ax.tick_params(axis="y", length=0, pad=1)
 
 
-def plot_glm_behavior_association_panel(
+def plot_ripple_decoding_comparison_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
 ) -> None:
-    """Plot dark same-turn tuning similarity by ripple-GLM significance."""
+    """Plot CA1-V1 Bayesian categorical ripple decoding agreement."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    similarity_ax = ax.inset_axes([0.12, 0.18, 0.78, 0.68])
-    plot_metric_significance_distributions(
+    table = payload.get("summary_table")
+    if table is None or len(table) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No decoding\ncomparison data",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+        return
+
+    categorical_metrics = tuple(
+        payload.get("categorical_metrics", PANEL_E_CATEGORICAL_METRICS)
+    )
+    axis_height = 0.34
+    axis_gap = 0.09
+    top = 0.84
+    rng = np.random.default_rng(19)
+    x_by_epoch = {"light": 1.0, "dark": 2.0}
+    for metric_index, (representation, label_scheme) in enumerate(categorical_metrics):
+        bottom = top - axis_height - metric_index * (axis_height + axis_gap)
+        metric_ax = ax.inset_axes([0.18, bottom, 0.76, axis_height])
+        metric_rows = table[
+            (table["representation"].astype(str) == str(representation))
+            & (table["label_scheme"].astype(str) == str(label_scheme))
+        ].copy()
+        if not metric_rows.empty:
+            metric_rows["match_rate_over_shuffle"] = (
+                metric_rows["categorical_match_rate"].astype(float)
+                - metric_rows["categorical_match_rate_shuffle_mean"].astype(float)
+            )
+
+        metric_ax.axhline(
+            0.0,
+            color="0.35",
+            linestyle="--",
+            linewidth=0.65,
+            zorder=0,
+        )
+        metric_ax.text(
+            2.43,
+            0.002,
+            "shuffle",
+            ha="right",
+            va="bottom",
+            fontsize=4.6,
+            color="0.35",
+        )
+
+        for (_animal_name, _date), session_rows in metric_rows.groupby(["animal_name", "date"]):
+            delta_by_epoch: dict[str, float] = {}
+            for epoch_type in PANEL_E_EPOCH_ORDER:
+                epoch_rows = session_rows[session_rows["epoch_type"].astype(str) == epoch_type]
+                if epoch_rows.empty:
+                    continue
+                value = float(epoch_rows["match_rate_over_shuffle"].iloc[0])
+                if np.isfinite(value):
+                    delta_by_epoch[epoch_type] = value
+            if all(epoch_type in delta_by_epoch for epoch_type in PANEL_E_EPOCH_ORDER):
+                metric_ax.plot(
+                    [x_by_epoch[epoch_type] for epoch_type in PANEL_E_EPOCH_ORDER],
+                    [delta_by_epoch[epoch_type] for epoch_type in PANEL_E_EPOCH_ORDER],
+                    color="0.80",
+                    linewidth=0.55,
+                    zorder=1,
+                )
+
+        for epoch_type in PANEL_E_EPOCH_ORDER:
+            epoch_rows = metric_rows[metric_rows["epoch_type"].astype(str) == epoch_type]
+            delta = np.asarray(epoch_rows["match_rate_over_shuffle"], dtype=float)
+            valid_delta = np.isfinite(delta)
+            if not np.any(valid_delta):
+                continue
+
+            x_position = x_by_epoch[epoch_type]
+            jitter = rng.uniform(-0.055, 0.055, size=int(np.sum(valid_delta)))
+            color = GLM_EPOCH_COLORS.get(epoch_type, MODEL_COLOR)
+            metric_ax.scatter(
+                np.full(int(np.sum(valid_delta)), x_position) + jitter,
+                delta[valid_delta],
+                s=11,
+                color=color,
+                alpha=0.78,
+                edgecolors="white",
+                linewidths=0.25,
+                zorder=4,
+            )
+        delta_values = (
+            np.asarray(metric_rows.get("match_rate_over_shuffle", []), dtype=float)
+            if not metric_rows.empty
+            else np.array([], dtype=float)
+        )
+        finite_delta = np.abs(delta_values[np.isfinite(delta_values)])
+        y_extent = 0.02
+        if finite_delta.size:
+            y_extent = max(y_extent, float(np.nanmax(finite_delta)) * 1.35)
+        y_extent = float(np.ceil(y_extent / 0.01) * 0.01)
+        metric_ax.set_xlim(0.55, 2.45)
+        metric_ax.set_ylim(-y_extent, y_extent)
+        metric_ax.set_title(
+            PANEL_E_METRIC_LABELS.get(
+                (str(representation), str(label_scheme)),
+                str(label_scheme).replace("_", " ").title(),
+            ),
+            fontsize=6.0,
+            pad=1.2,
+        )
+        metric_ax.set_xticks([1.0, 2.0])
+        if metric_index == len(categorical_metrics) - 1:
+            metric_ax.set_xticklabels(["Light", "Dark"], fontsize=5)
+            metric_ax.set_xlabel("Decode epoch", fontsize=5.2, labelpad=0.5)
+        else:
+            metric_ax.set_xticklabels([])
+        metric_ax.set_ylabel("Above\nshuffle", fontsize=5.2, labelpad=1.2)
+        metric_ax.spines["top"].set_visible(False)
+        metric_ax.spines["right"].set_visible(False)
+        metric_ax.tick_params(axis="x", length=0, pad=1)
+        metric_ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
+
+
+def _plot_deviance_metric_quartiles(
+    ax: "Axes",
+    table: Any,
+    *,
+    y_column: str,
+    y_label: str,
+    title: str,
+    y_limits: tuple[float, float] | None = None,
+    y_scale: str = "linear",
+    y_axis_side: str = "left",
+    epoch_type: str = "light",
+) -> None:
+    """Plot one metric across significant positive ripple-GLM deviance quartiles."""
+    if table is None or len(table) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No joined\nunits",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    else:
+        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
+        x_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
+        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+        y_values = np.asarray(epoch_rows[y_column], dtype=float)
+        valid = (
+            np.isfinite(x_values)
+            & np.isfinite(p_values)
+            & np.isfinite(y_values)
+            & (x_values > 0.0)
+            & (p_values < SIGNIFICANCE_P_VALUE)
+        )
+        if y_scale == "log":
+            valid &= y_values > 0.0
+        color = GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)
+        if np.any(valid):
+            valid_indices = np.flatnonzero(valid)
+            sorted_indices = valid_indices[np.argsort(x_values[valid_indices])]
+            quartile_indices = np.array_split(sorted_indices, 4)
+            point_x_values = []
+            point_y_values = []
+            median_x_values = []
+            median_y_values = []
+            for quartile_index, group_indices in enumerate(quartile_indices, start=1):
+                if group_indices.size == 0:
+                    continue
+                group_y_values = y_values[group_indices]
+                if group_indices.size == 1:
+                    offsets = np.array([0.0])
+                else:
+                    offsets = np.linspace(-0.16, 0.16, group_indices.size)
+                point_x_values.append(quartile_index + offsets)
+                point_y_values.append(group_y_values)
+                quartile_low, quartile_median, quartile_high = np.nanpercentile(
+                    group_y_values,
+                    [25.0, 50.0, 75.0],
+                )
+                median_x_values.append(float(quartile_index))
+                median_y_values.append(float(quartile_median))
+                ax.plot(
+                    [quartile_index, quartile_index],
+                    [quartile_low, quartile_high],
+                    color="black",
+                    linewidth=0.65,
+                    solid_capstyle="round",
+                    zorder=4,
+                )
+            ax.scatter(
+                np.concatenate(point_x_values),
+                np.concatenate(point_y_values),
+                s=4,
+                color=color,
+                alpha=0.22,
+                edgecolors="none",
+                zorder=2,
+            )
+            ax.plot(
+                median_x_values,
+                median_y_values,
+                color="black",
+                marker="o",
+                markersize=2.4,
+                markerfacecolor="white",
+                markeredgewidth=0.6,
+                linewidth=0.7,
+                zorder=5,
+            )
+
+    ax.set_xlim(0.55, 4.45)
+    ax.set_xticks([1.0, 2.0, 3.0, 4.0])
+    ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    if y_scale == "log":
+        ax.set_yscale("log")
+        ax.set_yticks([1.0, 10.0, 100.0])
+        ax.set_yticklabels(["1", "10", "100"], fontsize=4.4)
+    if y_scale == "linear":
+        ax.set_yticks([0.0, 0.5, 1.0])
+    if y_axis_side == "right":
+        ax.yaxis.tick_right()
+        ax.yaxis.set_label_position("right")
+        ax.spines["left"].set_visible(False)
+        ax.spines["right"].set_visible(True)
+    else:
+        ax.spines["right"].set_visible(False)
+    ax.set_title(title, fontsize=5.4, pad=0.8)
+    ax.set_ylabel(y_label, fontsize=5.0, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
+
+
+def plot_glm_behavior_association_panel(
+    ax: "Axes",
+    payload: Mapping[str, Any],
+) -> None:
+    """Plot dark tuning and firing-rate metrics against ripple-GLM deviance."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    table = payload.get("similarity_table")
+    similarity_ax = ax.inset_axes([0.04, 0.18, 0.30, 0.68])
+    firing_rate_ax = ax.inset_axes([0.68, 0.18, 0.29, 0.68])
+    _plot_deviance_metric_quartiles(
         similarity_ax,
-        payload.get("similarity_table"),
-        metric_column="same_turn_tuning_similarity",
-        x_label="Dark same-turn\ntuning similarity",
-        title="Dark same-turn tuning",
-        x_limits=(-0.1, 1.0),
-        bin_edges=np.linspace(-0.1, 1.0, 23),
+        table,
+        y_column="same_turn_tuning_similarity",
+        y_label="Dark DPP\ncorr.",
+        title="DPP",
+        y_limits=(-0.1, 1.0),
+    )
+    _plot_deviance_metric_quartiles(
+        firing_rate_ax,
+        table,
+        y_column="firing_rate_hz",
+        y_label="Dark FR\n(Hz)",
+        title="Dark activity",
+        y_limits=(0.5, 120.0),
+        y_scale="log",
+    )
+    ax.text(
+        0.50,
+        0.035,
+        "Light deviance quartile\n(p<0.05, devexp>0)",
+        ha="center",
+        va="bottom",
+        fontsize=5.0,
+        transform=ax.transAxes,
     )
 
 
@@ -2505,6 +3087,12 @@ def make_figure_2(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
+    panel_e_payload = load_ripple_decoding_comparison_panel_tables(
+        data_root,
+        datasets,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+    )
 
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
@@ -2512,15 +3100,16 @@ def make_figure_2(
     )
     outer_grid = fig.add_gridspec(
         nrows=2,
-        ncols=3,
+        ncols=4,
         height_ratios=[1.12, 1.0],
-        width_ratios=[1.0, 1.0, 1.0],
+        width_ratios=[1.1, 1.1, 0.9, 0.9],
     )
     axes = [
         fig.add_subplot(outer_grid[0, :2]),
-        fig.add_subplot(outer_grid[0, 2]),
+        fig.add_subplot(outer_grid[0, 2:]),
         fig.add_subplot(outer_grid[1, :2]),
         fig.add_subplot(outer_grid[1, 2]),
+        fig.add_subplot(outer_grid[1, 3]),
     ]
 
     plot_epoch_ripple_heatmap_panel(axes[0], heatmap_epoch_tables, regions=regions)
@@ -2530,9 +3119,11 @@ def make_figure_2(
     plot_glm_analysis_panel(axes[2], glm_epoch_tables)
     axes[2].set_title("CA1-to-V1 ripple GLM", fontsize=8, pad=2)
     plot_glm_behavior_association_panel(axes[3], panel_d_payload)
-    axes[3].set_title("Dark tuning in ripple-significant V1 units", fontsize=8, pad=2)
+    axes[3].set_title("Light ripple GLM associations", fontsize=7.2, pad=2)
+    plot_ripple_decoding_comparison_panel(axes[4], panel_e_payload)
+    axes[4].set_title("Decoded ripple identity", fontsize=7.2, pad=2)
 
-    for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
+    for ax, label in zip(axes, ("A", "B", "C", "D", "E"), strict=True):
         label_axis(ax, label, x=-0.10, y=1.04)
 
     save_figure(fig, output_path, dpi=dpi)
@@ -2543,6 +3134,16 @@ def make_figure_2(
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
         )
+    for missing in panel_e_payload["missing_artifacts"]:
+        print(
+            "Panel E missing "
+            f"{missing['artifact']} for {missing['animal_name']} "
+            f"{missing['date']} {missing['epoch']} "
+            f"{missing.get('representation', '')} {missing['label_scheme']}: "
+            f"{missing['path']}"
+        )
+        if missing.get("reason"):
+            print(f"  Reason: {missing['reason']}")
     print(f"Saved Figure 2 to {output_path}")
     return output_path
 

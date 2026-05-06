@@ -12,6 +12,7 @@ Supported models:
 - `task_segment_bump`: dark field plus segment raised-cosine light gain
 - `task_segment_scalar`: dark field plus segment scalar light gain
 - `task_dense_gain`: dark field plus dense spline light gain
+- `dark`: dark field from `task_segment_bump`, with no swap or light component
 """
 
 import argparse
@@ -55,7 +56,9 @@ DEFAULT_MODEL_NAMES = (
     "task_segment_bump",
     "task_segment_scalar",
     "task_dense_gain",
+    "dark",
 )
+DERIVED_SELECTED_MODEL_SOURCES = {"dark": "task_segment_bump"}
 DEFAULT_SEGMENT_OVERLAP_FRAC = 0.0
 DEFAULT_BIN_SIZE_S = 0.02
 DEFAULT_N_SPLINES = 25
@@ -350,7 +353,7 @@ def _format_speed_outputs(
 
 
 def normalize_requested_models(model_names: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Return selected-file model names, always including the visual baseline."""
+    """Return comparison model names, always including the visual baseline."""
     normalized: list[str] = []
     messages: list[str] = []
     for model_name in model_names:
@@ -365,6 +368,21 @@ def normalize_requested_models(model_names: Sequence[str]) -> tuple[list[str], l
         normalized.insert(0, "visual")
         messages.append("Added required baseline model 'visual'.")
     return normalized, messages
+
+
+def selected_source_model_name(model_name: str) -> str:
+    """Return the selected-file model that provides one comparison model."""
+    return DERIVED_SELECTED_MODEL_SOURCES.get(str(model_name), str(model_name))
+
+
+def selected_source_model_names(model_names: Sequence[str]) -> list[str]:
+    """Return unique selected-file model names required for comparison models."""
+    source_names: list[str] = []
+    for model_name in model_names:
+        source_name = selected_source_model_name(str(model_name))
+        if source_name not in source_names:
+            source_names.append(source_name)
+    return source_names
 
 
 def selected_dark_light_glm_dir(analysis_path: Path) -> Path:
@@ -1517,6 +1535,42 @@ def predict_selected_light_eta(
     }
 
 
+def predict_selected_dark_eta(
+    *,
+    dataset: "xr.Dataset",
+    trajectory: str,
+    p_eval: np.ndarray,
+    speed_values: np.ndarray | None,
+    n_splines: int,
+    spline_order: int,
+    allow_missing_speed: bool = False,
+) -> dict[str, np.ndarray]:
+    """Predict the selected source model's dark field for one trajectory."""
+    p_eval = np.asarray(p_eval, dtype=float).reshape(-1)
+    n_units = int(np.asarray(dataset.coords["unit"].values).size)
+    intercept = _selected_var_by_trajectory(dataset, "coef_intercept", trajectory)
+    coef_place_dark = _selected_var_by_trajectory(dataset, "coef_place_dark", trajectory)
+    speed_eta = _selected_speed_effect(
+        dataset,
+        trajectory,
+        speed_values,
+        n_rows=p_eval.size,
+        n_units=n_units,
+        allow_missing_speed=allow_missing_speed,
+    )
+    place_basis = _place_basis(
+        p_eval,
+        n_splines=n_splines,
+        spline_order=spline_order,
+    )
+    dark_component = place_basis @ coef_place_dark
+    return {
+        "dark_eta": intercept[None, :] + dark_component + speed_eta,
+        "dark_component": dark_component,
+        "basis": place_basis,
+    }
+
+
 def build_selected_swapped_eta(
     *,
     model_name: str,
@@ -1606,6 +1660,70 @@ def build_selected_swapped_eta(
     raise ValueError(f"Unknown model_name: {model_name!r}")
 
 
+def evaluate_selected_dark_model_on_test_epoch(
+    *,
+    dataset: "xr.Dataset",
+    test_inputs_by_traj: dict[str, dict[str, Any]],
+    segment_edges: np.ndarray,
+    n_splines: int,
+    spline_order: int,
+) -> dict[str, dict[str, Any]]:
+    """Compute raw held-out metrics for the unswapped dark-field model."""
+    results: dict[str, dict[str, Any]] = {}
+    for trajectory in TRAJECTORY_TYPES:
+        swap_info = SWAP_CONFIG[trajectory]
+        paired_trajectory = str(swap_info["source_trajectory"])
+        swap_segment_index = int(swap_info["segment_index"])
+        test_inputs = test_inputs_by_traj[trajectory]
+        p_test = np.asarray(test_inputs["p"], dtype=float)
+        y_test = np.asarray(test_inputs["y"], dtype=float)
+        swap_mask = _segment_mask(p_test, segment_edges, swap_segment_index)
+
+        dark_prediction = predict_selected_dark_eta(
+            dataset=dataset,
+            trajectory=trajectory,
+            p_eval=p_test,
+            speed_values=test_inputs["v"],
+            n_splines=n_splines,
+            spline_order=spline_order,
+        )
+        dark_count = np.exp(dark_prediction["dark_eta"])
+        dark_grid_hz = _selected_var_by_trajectory(
+            dataset,
+            "dark_hz_grid",
+            trajectory,
+        )
+
+        y_segment = y_test[swap_mask] if np.any(swap_mask) else y_test[:0]
+        dark_segment_count = (
+            dark_count[swap_mask] if np.any(swap_mask) else dark_count[:0]
+        )
+        dark_segment_metrics = summarize_raw_poisson_metrics(
+            y_segment,
+            dark_segment_count,
+        )
+        dark_full_metrics = summarize_raw_poisson_metrics(y_test, dark_count)
+
+        results[trajectory] = {
+            "unit_ids": np.asarray(dataset.coords["unit"].values),
+            "swap_source_trajectory": paired_trajectory,
+            "swap_segment_index_1based": int(swap_segment_index + 1),
+            "swap_segment_start": float(segment_edges[swap_segment_index]),
+            "swap_segment_end": float(segment_edges[swap_segment_index + 1]),
+            "dark_hz_grid": dark_grid_hz,
+            "train_light_hz_grid": dark_grid_hz,
+            "test_light_unswapped_hz_grid": dark_grid_hz,
+            "test_light_swapped_hz_grid": dark_grid_hz,
+            "test_light_full_unswapped_metrics": dark_full_metrics,
+            "test_light_full_swapped_metrics": dark_full_metrics,
+            "test_light_swapped_segment_unswapped_metrics": dark_segment_metrics,
+            "test_light_swapped_segment_swapped_metrics": dark_segment_metrics,
+            "test_light_full_n_bins": int(y_test.shape[0]),
+            "test_light_swapped_segment_n_bins": int(y_segment.shape[0]),
+        }
+    return results
+
+
 def evaluate_selected_model_on_test_epoch(
     *,
     model_name: str,
@@ -1619,6 +1737,15 @@ def evaluate_selected_model_on_test_epoch(
 ) -> dict[str, dict[str, Any]]:
     """Compute raw held-out swap metrics for one selected model."""
     dataset = datasets_by_model[model_name]
+    if model_name == "dark":
+        return evaluate_selected_dark_model_on_test_epoch(
+            dataset=dataset,
+            test_inputs_by_traj=test_inputs_by_traj,
+            segment_edges=segment_edges,
+            n_splines=n_splines,
+            spline_order=spline_order,
+        )
+
     results: dict[str, dict[str, Any]] = {}
     for trajectory in TRAJECTORY_TYPES:
         swap_info = SWAP_CONFIG[trajectory]
@@ -3798,6 +3925,13 @@ def build_selected_swap_dataset(
             ("model",),
             np.asarray([str(selected_paths[model_name]) for model_name in model_names], dtype=str),
         ),
+        "selected_source_model": (
+            ("model",),
+            np.asarray(
+                [selected_source_model_name(model_name) for model_name in model_names],
+                dtype=str,
+            ),
+        ),
         "selected_ridge": (
             ("model",),
             np.asarray(
@@ -3994,6 +4128,10 @@ def build_selected_swap_dataset(
             "n_speed_features": int(shared_metadata["n_speed_features"]),
             "speed_spline_order": float(shared_metadata["speed_spline_order"]),
             "swap_rule_json": json.dumps(SWAP_CONFIG, sort_keys=True),
+            "derived_model_sources_json": json.dumps(
+                DERIVED_SELECTED_MODEL_SOURCES,
+                sort_keys=True,
+            ),
             "sources_json": json.dumps(sources, sort_keys=True),
             "fit_parameters_json": json.dumps(fit_parameters, sort_keys=True),
         },
@@ -4319,26 +4457,35 @@ def main() -> None:
         print(
             f"Loading selected dark/light GLMs for {region.upper()} from {selected_dir}."
         )
-        selected_datasets: dict[str, Any] = {}
-        selected_paths: dict[str, Path] = {}
-        for model_name in model_names:
+        source_model_names = selected_source_model_names(model_names)
+        source_selected_datasets: dict[str, Any] = {}
+        source_selected_paths: dict[str, Path] = {}
+        for source_model_name in source_model_names:
             dataset, path = load_selected_dark_light_glm(
                 selected_dir,
                 region=region,
                 light_train_epoch=args.light_train_epoch,
                 dark_train_epoch=args.dark_train_epoch,
-                model_name=model_name,
+                model_name=source_model_name,
             )
-            selected_datasets[model_name] = dataset
-            selected_paths[model_name] = path
+            source_selected_datasets[source_model_name] = dataset
+            source_selected_paths[source_model_name] = path
         shared_metadata = validate_selected_dark_light_glms(
-            selected_datasets,
+            source_selected_datasets,
             animal_name=args.animal_name,
             date=args.date,
             region=region,
             dark_train_epoch=args.dark_train_epoch,
             light_train_epoch=args.light_train_epoch,
         )
+        selected_datasets = {
+            model_name: source_selected_datasets[selected_source_model_name(model_name)]
+            for model_name in model_names
+        }
+        selected_paths = {
+            model_name: source_selected_paths[selected_source_model_name(model_name)]
+            for model_name in model_names
+        }
         selected_files_by_region[region] = {
             model_name: str(path) for model_name, path in selected_paths.items()
         }
@@ -4382,10 +4529,17 @@ def main() -> None:
 
         results_by_model: dict[str, dict[str, dict[str, Any]]] = {}
         for model_name in model_names:
-            print(
-                f"  Scoring {model_name} on all movement bins in "
-                f"{args.light_test_epoch}."
-            )
+            source_model_name = selected_source_model_name(model_name)
+            if model_name == "dark":
+                print(
+                    f"  Scoring dark field from {source_model_name} on changed "
+                    f"segments in {args.light_test_epoch}."
+                )
+            else:
+                print(
+                    f"  Scoring {model_name} on all movement bins in "
+                    f"{args.light_test_epoch}."
+                )
             results_by_model[model_name] = evaluate_selected_model_on_test_epoch(
                 model_name=model_name,
                 datasets_by_model=selected_datasets,
@@ -4401,6 +4555,10 @@ def main() -> None:
         sources["dark_light_glm_selected"] = {
             model_name: str(path) for model_name, path in selected_paths.items()
         }
+        sources["dark_light_glm_selected_sources"] = {
+            model_name: selected_source_model_name(model_name)
+            for model_name in model_names
+        }
         fit_parameters = {
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -4414,6 +4572,7 @@ def main() -> None:
                 if args.swap_light_offset
                 else "local_model_component_without_scalar_light_offset"
             ),
+            "derived_model_sources": DERIVED_SELECTED_MODEL_SOURCES,
         }
         dataset = build_selected_swap_dataset(
             model_names=model_names,
@@ -4460,7 +4619,7 @@ def main() -> None:
             print(f"Saved primary delta LL histogram to {figure_path}.")
 
         dataset.close()
-        for dataset in selected_datasets.values():
+        for dataset in source_selected_datasets.values():
             dataset.close()
 
     log_path = write_run_log(

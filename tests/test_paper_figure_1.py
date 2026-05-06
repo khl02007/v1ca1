@@ -6,15 +6,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import v1ca1.paper_figures.figure_1 as figure_1_module
 from v1ca1.paper_figures.figure_1 import (
+    CYCLE_ARROW_LINEWIDTH,
+    CYCLE_ARROW_MUTATION_SCALE,
     CYCLE_ARROW_SPECS,
     CYCLE_TRAJECTORY_LAYOUT,
+    BOTTOM_ROW_PANEL_WSPACE,
     DEFAULT_ASSET_DIR,
     DEFAULT_DARK_EPOCH,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_BOTTOM_ROW_HEIGHT_MM,
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
     DEFAULT_HEATMAP_HEIGHT_MM,
+    DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM,
     DEFAULT_PANEL_E_WIDTH_FRACTION,
     DEFAULT_PANEL_F_WIDTH_FRACTION,
     DEFAULT_PANEL_G_WIDTH_FRACTION,
@@ -31,19 +36,37 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_SCHEMATIC_Y,
     DECODING_TRAIN_LABEL_Y,
     DECODING_TRAIN_SCHEMATIC_CENTER_X,
+    DECODING_XTICK_LABEL_FONTSIZE,
     DECODING_YLABEL_FONTSIZE,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
     ENCODING_DPP_COMPARISON_COLORS,
     ENCODING_DPP_COMPARISONS,
+    HEATMAP_COLORBAR_LABELPAD,
+    HEATMAP_COLORBAR_LABEL_FONTSIZE,
+    HEATMAP_COLORBAR_PAD,
+    HEATMAP_ORDER_LABEL_OFFSET,
+    HEATMAP_TUNING_LABEL_OFFSET,
     MOVEMENT_AXIS_ARROW_MARGIN,
     MOVEMENT_AXIS_Y,
     MOTOR_DELTA_METRIC,
     MOTOR_NESTED_CV_RELATIVE_DIR,
     NEURON_SCALE_BAR_COUNT,
     PANEL_E_EXAMPLES,
+    PANEL_E_AXIS_LABEL_FONTSIZE,
+    PANEL_E_CACHE_VERSION,
     PANEL_E_FR_TRAJECTORY_PAIRS,
+    PANEL_E_RASTER_TICK_MARKEREDGEWIDTH,
+    PANEL_E_RASTER_TICK_MARKERSIZE,
     PANEL_E_RASTER_TRAJECTORY_LAYOUT,
+    PANEL_E_TICK_LABEL_FONTSIZE,
+    PANEL_E_TRAJECTORY_COLORS,
+    PANEL_D_CACHE_VERSION,
+    SCHEMATIC_COLORS,
+    STABILITY_AXIS_LABEL_FONTSIZE,
+    STABILITY_LEGEND_FONTSIZE,
+    STABILITY_TICK_LABEL_FONTSIZE,
+    STABILITY_TRAJECTORY_LAYOUT,
     STABILITY_TABLE_RELATIVE_PATH,
     TASK_PROGRESSION_SEGMENT_BOUNDARIES,
     TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR,
@@ -51,6 +74,10 @@ from v1ca1.paper_figures.figure_1 import (
     TRAJECTORY_TYPES,
     add_centered_axis_text,
     build_normalized_position_bins,
+    build_panel_d_cache_metadata,
+    build_panel_d_cache_path,
+    build_panel_e_cache_metadata,
+    build_panel_e_cache_path,
     build_output_path,
     build_unit_keys,
     build_zero_including_histogram_bins,
@@ -74,13 +101,19 @@ from v1ca1.paper_figures.figure_1 import (
     load_decoding_absolute_error_table,
     load_encoding_delta_table,
     load_motor_delta_table,
+    load_or_compute_panel_e_example_data,
     orient_panel_e_task_progression,
     plot_decoding_error_panel,
+    plot_dark_heatmap_regions,
     plot_encoding_delta_panel,
     plot_panel_e_examples,
     plot_pooled_heatmap_grid,
     plot_motor_delta_panel,
     plot_stability_panel,
+    save_panel_d_cache,
+    load_panel_d_cache,
+    save_panel_e_cache,
+    load_panel_e_cache,
     get_trajectory_endpoint_labels,
     parse_arguments,
     parse_dataset_id,
@@ -136,6 +169,209 @@ def test_build_normalized_position_bins_spans_zero_to_one() -> None:
     bins = build_normalized_position_bins(4)
 
     assert np.allclose(bins, [0.0, 0.25, 0.5, 0.75, 1.0])
+
+
+def test_panel_d_cache_path_is_descriptive() -> None:
+    metadata = build_panel_d_cache_metadata(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        position_bin_count=100,
+        position_offset=5,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    cache_path = build_panel_d_cache_path(Path("paper_figures/output/cache"), metadata)
+
+    assert metadata["cache_version"] == PANEL_D_CACHE_VERSION
+    assert metadata["data_root"] == "/analysis"
+    assert metadata["datasets"] == [
+        {
+            "animal_name": "L14",
+            "date": "20240611",
+            "dark_epoch": "08_r4",
+        }
+    ]
+    assert cache_path == Path(
+        "paper_figures/output/cache/"
+        "figure_1_panel_d_v1_dark08_r4_datasets-L14-20240611-08_r4"
+        "_posbins100_offset5_speed4_sigma1p5_cachev1.npz"
+    )
+
+
+def test_panel_d_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
+    metadata = build_panel_d_cache_metadata(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    panels = {}
+    for index, order_trajectory in enumerate(TRAJECTORY_TYPES):
+        for plot_trajectory in TRAJECTORY_TYPES:
+            panels[(order_trajectory, plot_trajectory)] = np.full(
+                (index + 1, 3),
+                index,
+                dtype=float,
+            )
+    cache_path = build_panel_d_cache_path(tmp_path, metadata)
+
+    save_panel_d_cache(cache_path, panels, metadata)
+    loaded = load_panel_d_cache(cache_path, metadata)
+
+    assert loaded is not None
+    for key, expected in panels.items():
+        assert np.array_equal(loaded[key], expected)
+
+    stale_metadata = dict(metadata)
+    stale_metadata["position_bin_count"] = 4
+    assert load_panel_d_cache(cache_path, stale_metadata) is None
+
+
+def test_panel_e_cache_path_is_descriptive() -> None:
+    metadata = build_panel_e_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        region="v1",
+        unit_id=34,
+        position_bin_count=50,
+        position_offset=5,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    cache_path = build_panel_e_cache_path(Path("paper_figures/output/cache"), metadata)
+
+    assert metadata["cache_version"] == PANEL_E_CACHE_VERSION
+    assert metadata["data_root"] == "/analysis"
+    assert metadata["unit_id"] == 34
+    assert cache_path == Path(
+        "paper_figures/output/cache/"
+        "figure_1_panel_e_L14-20240611-08_r4-v1-unit34"
+        "_posbins50_offset5_speed4_sigma1p5_cachev1.npz"
+    )
+
+
+def test_panel_e_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
+    metadata = build_panel_e_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        region="v1",
+        unit_id=34,
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    example_data = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "epoch": "08_r4",
+        "region": "v1",
+        "unit_id": 34,
+        "raster_positions": {
+            trajectory_type: [np.asarray([0.1, 0.2]), np.asarray([], dtype=float)]
+            for trajectory_type in TRAJECTORY_TYPES
+        },
+        "firing_rates": {
+            trajectory_type: (
+                np.asarray([0.0, 0.5, 1.0]),
+                np.asarray([0.0, 1.0, 0.5]),
+            )
+            for trajectory_type in TRAJECTORY_TYPES
+        },
+    }
+    cache_path = build_panel_e_cache_path(tmp_path, metadata)
+
+    save_panel_e_cache(cache_path, example_data, metadata)
+    loaded = load_panel_e_cache(cache_path, metadata)
+
+    assert loaded is not None
+    assert loaded["animal_name"] == "L14"
+    assert loaded["unit_id"] == 34
+    for trajectory_type in TRAJECTORY_TYPES:
+        assert len(loaded["raster_positions"][trajectory_type]) == 2
+        assert loaded["raster_positions"][trajectory_type][0].tolist() == pytest.approx(
+            [0.1, 0.2]
+        )
+        assert loaded["raster_positions"][trajectory_type][1].size == 0
+        position, firing_rate = loaded["firing_rates"][trajectory_type]
+        assert position.tolist() == pytest.approx([0.0, 0.5, 1.0])
+        assert firing_rate.tolist() == pytest.approx([0.0, 1.0, 0.5])
+
+    stale_metadata = dict(metadata)
+    stale_metadata["unit_id"] = 35
+    assert load_panel_e_cache(cache_path, stale_metadata) is None
+
+
+def test_load_or_compute_panel_e_example_data_uses_matching_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata = build_panel_e_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        region="v1",
+        unit_id=34,
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    example_data = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "epoch": "08_r4",
+        "region": "v1",
+        "unit_id": 34,
+        "raster_positions": {
+            trajectory_type: [np.asarray([0.1])]
+            for trajectory_type in TRAJECTORY_TYPES
+        },
+        "firing_rates": {
+            trajectory_type: (
+                np.asarray([0.0, 1.0]),
+                np.asarray([0.5, 0.25]),
+            )
+            for trajectory_type in TRAJECTORY_TYPES
+        },
+    }
+    save_panel_e_cache(build_panel_e_cache_path(tmp_path, metadata), example_data, metadata)
+    monkeypatch.setattr(
+        figure_1_module,
+        "load_panel_e_example_data",
+        lambda **_kwargs: pytest.fail("Panel E cache was not used."),
+    )
+
+    loaded = load_or_compute_panel_e_example_data(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        region="v1",
+        unit_id=34,
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+        panel_e_cache_dir=tmp_path,
+        refresh_panel_e_cache=False,
+    )
+
+    assert loaded["raster_positions"]["center_to_left"][0].tolist() == pytest.approx(
+        [0.1]
+    )
+    position, firing_rate = loaded["firing_rates"]["center_to_left"]
+    assert position.tolist() == pytest.approx([0.0, 1.0])
+    assert firing_rate.tolist() == pytest.approx([0.5, 0.25])
 
 
 def test_get_stability_table_path_uses_task_progression_output_location() -> None:
@@ -403,6 +639,10 @@ def test_default_region_is_v1() -> None:
     assert args.region is None
     assert args.output_dir == Path("paper_figures") / "output"
     assert args.asset_dir == DEFAULT_ASSET_DIR
+    assert args.panel_d_cache_dir is None
+    assert args.refresh_panel_d_cache is False
+    assert args.panel_e_cache_dir is None
+    assert args.refresh_panel_e_cache is False
 
 
 def test_default_figure_width_fits_letter_page_with_one_inch_margins() -> None:
@@ -414,6 +654,7 @@ def test_default_figure_width_fits_letter_page_with_one_inch_margins() -> None:
 def test_bottom_row_width_fractions_reserve_panel_e_space() -> None:
     assert DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION == pytest.approx(0.7)
     assert DEFAULT_PANEL_E_WIDTH_FRACTION == pytest.approx(0.3)
+    assert BOTTOM_ROW_PANEL_WSPACE == pytest.approx(0.05)
     assert (
         DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION + DEFAULT_PANEL_E_WIDTH_FRACTION
     ) == pytest.approx(1.0)
@@ -430,6 +671,14 @@ def test_final_row_width_fractions_make_panels_f_g_h_equal() -> None:
     ) == pytest.approx(1.0)
 
 
+def test_panel_d_colorbar_label_size_uses_requested_scale() -> None:
+    assert HEATMAP_COLORBAR_LABEL_FONTSIZE == pytest.approx(4.9)
+    assert HEATMAP_COLORBAR_PAD == pytest.approx(0.001)
+    assert HEATMAP_COLORBAR_LABELPAD == pytest.approx(0)
+    assert HEATMAP_TUNING_LABEL_OFFSET == pytest.approx(-0.004)
+    assert HEATMAP_ORDER_LABEL_OFFSET == pytest.approx(0.007)
+
+
 def test_panel_e_example_configuration_uses_requested_cells_and_layout() -> None:
     assert PANEL_E_EXAMPLES == (
         ("L14", "20240611", "08_r4", "v1", 34),
@@ -443,6 +692,7 @@ def test_panel_e_example_configuration_uses_requested_cells_and_layout() -> None
         ("center_to_left", "right_to_center"),
         ("center_to_right", "left_to_center"),
     )
+    assert STABILITY_TRAJECTORY_LAYOUT == PANEL_E_RASTER_TRAJECTORY_LAYOUT
 
 
 def test_orient_panel_e_task_progression_flips_inbound_trajectories() -> None:
@@ -471,10 +721,12 @@ def test_default_figure_height_is_shorter_than_previous_layout() -> None:
     figure_height_mm = (
         DEFAULT_TOP_ROW_HEIGHT_MM
         + DEFAULT_HEATMAP_HEIGHT_MM
+        + DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM
         + DEFAULT_BOTTOM_ROW_HEIGHT_MM
     )
 
-    assert figure_height_mm == pytest.approx(154.0)
+    assert DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM == pytest.approx(0.5)
+    assert figure_height_mm == pytest.approx(154.5)
     assert figure_height_mm < previous_height_mm
 
 
@@ -494,6 +746,8 @@ def test_cycle_panel_arrow_curvatures_are_flipped_consistently() -> None:
         -0.25,
         -0.25,
     ]
+    assert CYCLE_ARROW_LINEWIDTH == pytest.approx(1.08)
+    assert CYCLE_ARROW_MUTATION_SCALE == pytest.approx(12.6)
 
 
 def test_trajectory_axis_labels_mark_center_and_side() -> None:
@@ -579,6 +833,66 @@ def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
     plt.close(fig)
 
 
+def test_plot_dark_heatmap_regions_uses_matching_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    metadata = build_panel_d_cache_metadata(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    panels = {
+        (order_trajectory, plot_trajectory): np.ones((2, 3), dtype=float)
+        for order_trajectory in TRAJECTORY_TYPES
+        for plot_trajectory in TRAJECTORY_TYPES
+    }
+    save_panel_d_cache(build_panel_d_cache_path(tmp_path, metadata), panels, metadata)
+
+    monkeypatch.setattr(
+        figure_1_module,
+        "compute_dark_epoch_tuning_curves",
+        lambda **_kwargs: pytest.fail("Panel D cache was not used."),
+    )
+    observed = {}
+
+    def _fake_plot_pooled_heatmap_grid(_axes, cached_panels):
+        observed["panels"] = cached_panels
+        return None
+
+    monkeypatch.setattr(
+        figure_1_module,
+        "plot_pooled_heatmap_grid",
+        _fake_plot_pooled_heatmap_grid,
+    )
+
+    fig, axes = plt.subplots(nrows=4, ncols=4)
+    plot_dark_heatmap_regions(
+        np.asarray(axes, dtype=object),
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        regions=("v1",),
+        position_bin_count=3,
+        position_offset=0,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+        panel_d_cache_dir=tmp_path,
+    )
+
+    assert observed["panels"] is not None
+    for key in panels:
+        assert np.array_equal(observed["panels"][key], panels[key])
+    plt.close(fig)
+
+
 def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
     tmp_path: Path,
 ) -> None:
@@ -623,6 +937,20 @@ def test_draw_w_track_cycle_panel_adds_four_inset_schematics() -> None:
     draw_w_track_cycle_panel(ax)
 
     assert len(ax.child_axes) == 4
+    arrow_patches = [
+        text.arrow_patch
+        for text in ax.texts
+        if getattr(text, "arrow_patch", None) is not None
+    ]
+    assert len(arrow_patches) == 4
+    assert all(
+        patch.get_mutation_scale() == pytest.approx(CYCLE_ARROW_MUTATION_SCALE)
+        for patch in arrow_patches
+    )
+    assert all(
+        patch.get_linewidth() == pytest.approx(CYCLE_ARROW_LINEWIDTH)
+        for patch in arrow_patches
+    )
     visible_text = [text.get_text() for text in ax.texts if text.get_text()]
     assert visible_text == ["L", "C", "R", "Visual stimuli"]
     plt.close(fig)
@@ -631,6 +959,7 @@ def test_draw_w_track_cycle_panel_adds_four_inset_schematics() -> None:
 def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
     import matplotlib.pyplot as plt
     from matplotlib.patches import Ellipse, Polygon, Rectangle
 
@@ -638,11 +967,11 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     draw_visual_stimuli_schematic(ax)
 
     rectangles = [patch for patch in ax.patches if isinstance(patch, Rectangle)]
+    visual_stimulus_color = to_rgba(SCHEMATIC_COLORS["visual_stimulus"])[:3]
     yellow_monitor_rectangles = [
         patch
         for patch in rectangles
-        if patch.get_facecolor()[:3]
-        == pytest.approx((0.9647058824, 0.7098039216, 0.3725490196))
+        if patch.get_facecolor()[:3] == pytest.approx(visual_stimulus_color)
     ]
     screen_rectangles = [
         patch
@@ -758,7 +1087,40 @@ def test_plot_stability_panel_draws_histograms_and_schematics() -> None:
     plot_stability_panel(ax, pd.DataFrame(rows))
 
     assert len(ax.child_axes) == 8
-    assert ax.get_legend() is not None
+    schematic_axes = ax.child_axes[::2]
+    hist_axes = ax.child_axes[1::2]
+    expected_trajectories = [
+        trajectory
+        for trajectory_row in STABILITY_TRAJECTORY_LAYOUT
+        for trajectory in trajectory_row
+    ]
+    assert [
+        schematic_ax.lines[0].get_color() for schematic_ax in schematic_axes
+    ] == [PANEL_E_TRAJECTORY_COLORS[trajectory] for trajectory in expected_trajectories]
+    legend = ax.get_legend()
+    assert legend is not None
+    assert all(
+        text.get_fontsize() == pytest.approx(STABILITY_LEGEND_FONTSIZE)
+        for text in legend.get_texts()
+    )
+    assert all(
+        hist_axis.xaxis.label.get_fontsize()
+        == pytest.approx(STABILITY_AXIS_LABEL_FONTSIZE)
+        for hist_axis in hist_axes
+        if hist_axis.get_xlabel()
+    )
+    assert all(
+        hist_axis.yaxis.label.get_fontsize()
+        == pytest.approx(STABILITY_AXIS_LABEL_FONTSIZE)
+        for hist_axis in hist_axes
+        if hist_axis.get_ylabel()
+    )
+    assert all(
+        tick.get_fontsize() == pytest.approx(STABILITY_TICK_LABEL_FONTSIZE)
+        for hist_axis in hist_axes
+        for tick in [*hist_axis.get_xticklabels(), *hist_axis.get_yticklabels()]
+        if tick.get_text()
+    )
     plt.close(fig)
 
 
@@ -816,11 +1178,34 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
         schematic_width = example_ax.child_axes[0].get_position().width
         raster_width = example_ax.child_axes[1].get_position().width
         assert schematic_width < 0.25 * raster_width
+        assert example_ax.child_axes[4].get_position().y1 < (
+            example_ax.child_axes[1].get_position().y0
+        )
+        assert example_ax.child_axes[6].get_position().y1 < (
+            example_ax.child_axes[3].get_position().y0
+        )
         raster_axes = [example_ax.child_axes[index] for index in (1, 3, 5, 7)]
+        raster_trajectories = [
+            "center_to_left",
+            "center_to_right",
+            "right_to_center",
+            "left_to_center",
+        ]
         rate_axes = example_ax.child_axes[8:]
         assert all(
             rate_axis.get_xlabel() == "Nom. path progression"
             for rate_axis in rate_axes
+        )
+        assert all(
+            rate_axis.xaxis.label.get_fontsize()
+            == pytest.approx(PANEL_E_AXIS_LABEL_FONTSIZE)
+            for rate_axis in rate_axes
+        )
+        assert all(
+            panel_e_axis.yaxis.label.get_fontsize()
+            == pytest.approx(PANEL_E_AXIS_LABEL_FONTSIZE)
+            for panel_e_axis in [*raster_axes, *rate_axes]
+            if panel_e_axis.get_ylabel()
         )
         for panel_e_axis in [*raster_axes, *rate_axes]:
             boundary_lines = panel_e_axis.lines[
@@ -832,6 +1217,28 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
             assert [line.get_color() for line in boundary_lines] == [
                 TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR
             ] * len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
+        for raster_axis, trajectory_type in zip(
+            raster_axes,
+            raster_trajectories,
+            strict=True,
+        ):
+            raster_tick_lines = raster_axis.lines[
+                : -len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
+            ]
+            assert raster_tick_lines
+            assert all(
+                line.get_color() == PANEL_E_TRAJECTORY_COLORS[trajectory_type]
+                for line in raster_tick_lines
+            )
+            assert all(
+                line.get_markersize() == pytest.approx(PANEL_E_RASTER_TICK_MARKERSIZE)
+                for line in raster_tick_lines
+            )
+            assert all(
+                line.get_markeredgewidth()
+                == pytest.approx(PANEL_E_RASTER_TICK_MARKEREDGEWIDTH)
+                for line in raster_tick_lines
+            )
         for panel_e_axis in [*raster_axes, *rate_axes]:
             tick_lines = [
                 tick.tick1line
@@ -846,6 +1253,12 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
                 tick_line.get_markeredgewidth() == pytest.approx(0.35)
                 for tick_line in tick_lines
             )
+        assert all(
+            tick.get_fontsize() == pytest.approx(PANEL_E_TICK_LABEL_FONTSIZE)
+            for rate_axis in rate_axes
+            for tick in [*rate_axis.get_xticklabels(), *rate_axis.get_yticklabels()]
+            if tick.get_text()
+        )
     plt.close(fig)
 
 
@@ -887,13 +1300,17 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
     assert "Motor+DPP better" in text_labels
-    assert "frac >0: 0.50\nmedian: 0.10" in text_labels
+    assert "Motor+DPP > motor\n50% >0, med. 0.10" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
     assert ax.texts[0].get_position()[0] == pytest.approx(0.03)
     assert ax.texts[1].get_horizontalalignment() == "right"
     assert ax.texts[1].get_position()[0] == pytest.approx(0.97)
-    assert ax.texts[2].get_bbox_patch() is not None
-    assert len(ax.patches) == 20
+    assert ax.texts[2].get_horizontalalignment() == "left"
+    assert ax.texts[2].get_position()[0] == pytest.approx(0.68)
+    assert ax.texts[2].get_bbox_patch() is None
+    assert len(ax.patches) == 21
+    assert ax.patches[0].get_extents().x1 <= ax.transData.transform((0.0, 0.0))[0]
+    assert ax.lines[0].get_color() == "black"
     plt.close(fig)
 
 
@@ -932,10 +1349,8 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     assert "Abs place better" in text_labels
     assert "Abs task progression\nbetter" in text_labels
     assert text_labels.count("DPP better") == 1
-    assert (
-        "Abs place\nfrac >0: 0.50\nmedian: 0.05\n"
-        "Abs task prog.\nfrac >0: 0.50\nmedian: -0.10"
-    ) in text_labels
+    assert "DPP > abs place\n50% >0, med. 0.05" in text_labels
+    assert "DPP > abs task prog.\n50% >0, med. -0.10" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"
     ]
@@ -945,10 +1360,23 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     assert ax.texts[0].get_horizontalalignment() == "left"
     assert ax.texts[1].get_horizontalalignment() == "left"
     assert ax.texts[2].get_color() == "black"
-    assert ax.texts[2].get_position()[0] == pytest.approx(0.98)
-    assert ax.texts[3].get_bbox_patch() is not None
+    assert ax.texts[2].get_horizontalalignment() == "left"
+    assert ax.texts[2].get_position()[0] == pytest.approx(0.67)
+    assert all(text.get_bbox_patch() is None for text in ax.texts)
+    assert ax.texts[3].get_color() == ENCODING_DPP_COMPARISON_COLORS[
+        "dpp_vs_absolute_place"
+    ]
+    assert ax.texts[4].get_color() == ENCODING_DPP_COMPARISON_COLORS[
+        "dpp_vs_absolute_task_progression"
+    ]
+    assert ax.texts[3].get_horizontalalignment() == "left"
+    assert ax.texts[4].get_horizontalalignment() == "left"
+    assert ax.texts[3].get_position()[0] == pytest.approx(0.67)
+    assert ax.texts[4].get_position()[0] == pytest.approx(0.67)
+    assert ax.lines[0].get_color() == "black"
     assert ax.get_legend() is None
-    assert len(ax.patches) == 40
+    assert len(ax.patches) == 41
+    assert len(ax.lines) == 1
     plt.close(fig)
 
 
@@ -990,6 +1418,10 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
     assert "Opposite turn\nsame arm" in [
         text.get_text() for text in plot_ax.get_xticklabels()
     ]
+    assert all(
+        text.get_fontsize() == pytest.approx(DECODING_XTICK_LABEL_FONTSIZE)
+        for text in plot_ax.get_xticklabels()
+    )
     assert len(plot_ax.lines) == 0
     assert len(plot_ax.collections) == 2 * len(animals)
     legend = plot_ax.get_legend()
@@ -1014,7 +1446,11 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
         DECODING_TRAIN_SCHEMATIC_CENTER_X
     )
     assert DECODING_SCHEMATIC_Y == pytest.approx(-0.55)
+    assert DECODING_TRAIN_LABEL_Y == pytest.approx(-0.32)
     assert ax.texts[0].get_position()[1] == pytest.approx(DECODING_TRAIN_LABEL_Y)
+    assert DECODING_TRAIN_LABEL_Y > (
+        DECODING_SCHEMATIC_Y + DECODING_SCHEMATIC_HEIGHT
+    )
     assert schematic_axes[0].get_position().x1 < plot_ax.get_position().x0
     assert schematic_axes[0].get_position().width == pytest.approx(
         DECODING_SCHEMATIC_WIDTH * ax.get_position().width

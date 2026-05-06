@@ -17,10 +17,12 @@ from v1ca1.ripple.ripple_glm import (
     _format_nemos_solver_selection_message,
     _prepare_ripple_glm_epoch_inputs,
     _resolve_nemos_population_glm_solver,
+    _resolve_model_window_parameters,
     build_epoch_fit_dataset,
     build_metric_figure_data,
     empirical_p_values,
     fit_ripple_glm_train_on_ripple,
+    format_model_window_suffix,
     get_epoch_skip_reason,
     keep_single_ripple_windows,
     load_ripple_tables,
@@ -270,6 +272,55 @@ def test_build_ripple_sample_windows_applies_offset() -> None:
     assert np.allclose(ends, [1.05, 1.1])
 
 
+def test_resolve_model_window_parameters_preserves_legacy_shifted_window() -> None:
+    parameters = _resolve_model_window_parameters(
+        ripple_window_s=0.2,
+        ripple_window_offset_s=-0.2,
+    )
+
+    assert parameters["source_window_s"] == pytest.approx(0.2)
+    assert parameters["source_window_offset_s"] == pytest.approx(-0.2)
+    assert parameters["target_window_s"] == pytest.approx(0.2)
+    assert parameters["target_window_offset_s"] == pytest.approx(-0.2)
+    assert parameters["windows_differ"] is False
+
+
+def test_resolve_model_window_parameters_defaults_source_to_ripple_onset_when_target_given() -> None:
+    parameters = _resolve_model_window_parameters(
+        ripple_window_s=0.2,
+        ripple_window_offset_s=0.0,
+        target_window_offset_s=-0.2,
+    )
+
+    assert parameters["source_window_s"] == pytest.approx(0.2)
+    assert parameters["source_window_offset_s"] == pytest.approx(0.0)
+    assert parameters["target_window_s"] == pytest.approx(0.2)
+    assert parameters["target_window_offset_s"] == pytest.approx(-0.2)
+    assert parameters["windows_differ"] is True
+
+
+def test_format_model_window_suffix_keeps_legacy_name_for_matching_windows() -> None:
+    suffix = format_model_window_suffix(
+        source_window_s=0.2,
+        source_window_offset_s=-0.2,
+        target_window_s=0.2,
+        target_window_offset_s=-0.2,
+    )
+
+    assert suffix == "rw_0p2s_off_m0p2s"
+
+
+def test_format_model_window_suffix_names_asymmetric_source_target_windows() -> None:
+    suffix = format_model_window_suffix(
+        source_window_s=0.2,
+        source_window_offset_s=0.0,
+        target_window_s=0.2,
+        target_window_offset_s=-0.2,
+    )
+
+    assert suffix == "src_rw_0p2s_tgt_rw_0p2s_off_m0p2s"
+
+
 def test_count_spikes_in_windows_preserves_overlapping_rows() -> None:
     class FakeTs:
         def __init__(self, timestamps: list[float]) -> None:
@@ -301,6 +352,58 @@ def test_count_spikes_in_windows_preserves_overlapping_rows() -> None:
     assert np.array_equal(unit_ids, [101, 102])
     assert counts.shape == (2, 2)
     assert np.allclose(counts, [[2.0, 1.0], [1.0, 1.0]])
+
+
+def test_prepare_epoch_inputs_counts_source_and_target_windows_separately() -> None:
+    class FakeTs:
+        def __init__(self, timestamps: list[float]) -> None:
+            self.t = np.asarray(timestamps, dtype=float)
+
+    class FakeTsGroup:
+        def __init__(self, spikes_by_unit: dict[int, list[float]]) -> None:
+            self._spikes_by_unit = {
+                unit_id: FakeTs(timestamps) for unit_id, timestamps in spikes_by_unit.items()
+            }
+
+        def keys(self):
+            return list(self._spikes_by_unit)
+
+        def __getitem__(self, unit_id: int) -> FakeTs:
+            return self._spikes_by_unit[unit_id]
+
+    spikes = {
+        "ca1": FakeTsGroup({101: [0.55, 0.65, 1.05]}),
+        "v1": FakeTsGroup({11: [0.35, 0.85, 0.95]}),
+    }
+    prepared = _prepare_ripple_glm_epoch_inputs(
+        "02_r1",
+        spikes=spikes,
+        epoch_interval=SimpleNamespace(start=np.array([0.0]), end=np.array([1.4])),
+        ripple_table=pd.DataFrame(
+            {
+                "start_time": [0.1, 0.5, 1.0, 1.3],
+                "end_time": [0.2, 0.6, 1.1, 1.4],
+            }
+        ),
+        min_spikes_per_ripple=0.0,
+        min_ca1_spikes_per_ripple=0.0,
+        ripple_window_s=0.2,
+        n_splits=2,
+        target_window_offset_s=-0.2,
+    )
+
+    assert prepared["n_ripples"] == 2
+    assert prepared["n_ripples_before_window_bounds"] == 4
+    assert prepared["n_ripples_removed_by_window_bounds"] == 2
+    assert np.allclose(prepared["ripple_start_times"], [0.5, 1.0])
+    assert np.allclose(prepared["source_window_starts"], [0.5, 1.0])
+    assert np.allclose(prepared["source_window_ends"], [0.7, 1.2])
+    assert np.allclose(prepared["target_window_starts"], [0.3, 0.8])
+    assert np.allclose(prepared["target_window_ends"], [0.5, 1.0])
+    assert np.allclose(prepared["ripple_starts"], [0.3, 0.8])
+    assert np.allclose(prepared["ripple_ends"], [0.5, 1.0])
+    assert np.allclose(prepared["X_r"], [[2.0], [1.0]])
+    assert np.allclose(prepared["y_r"], [[1.0], [2.0]])
 
 
 def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
@@ -389,6 +492,10 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset["ripple_start_time_s"].dims == ("sample",)
     assert dataset["ripple_window_start_s"].dims == ("sample",)
     assert dataset["ripple_window_end_s"].dims == ("sample",)
+    assert dataset["source_window_start_s"].dims == ("sample",)
+    assert dataset["source_window_end_s"].dims == ("sample",)
+    assert dataset["target_window_start_s"].dims == ("sample",)
+    assert dataset["target_window_end_s"].dims == ("sample",)
     assert dataset["ripple_fold_index"].dims == ("sample",)
     assert dataset["ripple_observed_count_oof"].dims == ("sample", "unit")
     assert dataset["ripple_predicted_count_oof"].dims == ("sample", "unit")
@@ -399,6 +506,10 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert np.allclose(dataset["ripple_start_time_s"].values, [1.0, 2.0, 3.0])
     assert np.allclose(dataset["ripple_window_start_s"].values, [1.05, 2.05, 3.05])
     assert np.allclose(dataset["ripple_window_end_s"].values, [1.25, 2.25, 3.25])
+    assert np.allclose(dataset["source_window_start_s"].values, [1.05, 2.05, 3.05])
+    assert np.allclose(dataset["source_window_end_s"].values, [1.25, 2.25, 3.25])
+    assert np.allclose(dataset["target_window_start_s"].values, [1.05, 2.05, 3.05])
+    assert np.allclose(dataset["target_window_end_s"].values, [1.25, 2.25, 3.25])
     assert np.array_equal(dataset["ripple_fold_index"].values, [0, 1, 0])
     assert np.allclose(
         dataset["ripple_observed_count_oof"].values,
@@ -421,13 +532,20 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
-    assert dataset.attrs["schema_version"] == "6"
+    assert dataset.attrs["schema_version"] == "7"
     assert dataset.attrs["ripple_selection_mode"] == "single"
     assert dataset.attrs["n_ripples_before_selection"] == 10
     assert dataset.attrs["n_ripples_removed_by_selection"] == 2
     assert dataset.attrs["n_ripples_after_selection"] == 8
     assert dataset.attrs["ripple_window_s"] == pytest.approx(0.2)
     assert dataset.attrs["ripple_window_offset_s"] == pytest.approx(0.05)
+    assert dataset.attrs["source_window_s"] == pytest.approx(0.2)
+    assert dataset.attrs["source_window_offset_s"] == pytest.approx(0.05)
+    assert dataset.attrs["target_window_s"] == pytest.approx(0.2)
+    assert dataset.attrs["target_window_offset_s"] == pytest.approx(0.05)
+    assert dataset.attrs["n_ripples_before_window_bounds"] == 8
+    assert dataset.attrs["n_ripples_removed_by_window_bounds"] == 0
+    assert dataset.attrs["n_ripples_after_window_bounds"] == 8
     assert dataset.attrs["coef_ca1_full_all_space"] == "preprocessed_predictor"
     assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
     assert json.loads(dataset.attrs["fit_parameters_json"]) == {
@@ -537,9 +655,16 @@ def test_fit_ripple_glm_returns_full_fit_coefficients(
     assert np.array_equal(results["ca1_unit_ids"], [101, 102, 103])
     assert np.array_equal(results["coef_ca1_unit_ids"], [101, 102])
     assert results["ripple_window_offset_s"] == pytest.approx(0.0)
+    assert results["source_window_offset_s"] == pytest.approx(0.0)
+    assert results["target_window_offset_s"] == pytest.approx(0.0)
+    assert results["windows_differ"] is False
     assert np.allclose(results["ripple_start_time_s"], [1.0, 2.0, 3.0, 4.0])
     assert np.allclose(results["ripple_window_start_s"], [1.0, 2.0, 3.0, 4.0])
     assert np.allclose(results["ripple_window_end_s"], [1.2, 2.2, 3.2, 4.2])
+    assert np.allclose(results["source_window_start_s"], [1.0, 2.0, 3.0, 4.0])
+    assert np.allclose(results["source_window_end_s"], [1.2, 2.2, 3.2, 4.2])
+    assert np.allclose(results["target_window_start_s"], [1.0, 2.0, 3.0, 4.0])
+    assert np.allclose(results["target_window_end_s"], [1.2, 2.2, 3.2, 4.2])
     assert np.array_equal(results["ripple_fold_index"], [0, 0, 1, 1])
     assert results["ripple_observed_count_oof"].shape == (4, 2)
     assert results["ripple_predicted_count_oof"].shape == (4, 2)
@@ -670,6 +795,11 @@ def test_prepared_epoch_fit_matches_public_wrapper_without_shuffles(
             "n_shuffles_ripple",
             "ripple_window_s",
             "ripple_window_offset_s",
+            "source_window_s",
+            "source_window_offset_s",
+            "target_window_s",
+            "target_window_offset_s",
+            "windows_differ",
             "n_ripples",
             "n_cells",
             "n_ca1_cells",
@@ -678,6 +808,10 @@ def test_prepared_epoch_fit_matches_public_wrapper_without_shuffles(
             "ripple_start_time_s",
             "ripple_window_start_s",
             "ripple_window_end_s",
+            "source_window_start_s",
+            "source_window_end_s",
+            "target_window_start_s",
+            "target_window_end_s",
             "v1_unit_ids",
             "ca1_unit_ids",
             "coef_ca1_unit_ids",
@@ -816,6 +950,11 @@ def test_prepared_epoch_fit_matches_public_wrapper_with_shuffles(
             "n_shuffles_ripple",
             "ripple_window_s",
             "ripple_window_offset_s",
+            "source_window_s",
+            "source_window_offset_s",
+            "target_window_s",
+            "target_window_offset_s",
+            "windows_differ",
             "n_ripples",
             "n_cells",
             "n_ca1_cells",
@@ -824,6 +963,10 @@ def test_prepared_epoch_fit_matches_public_wrapper_with_shuffles(
             "ripple_start_time_s",
             "ripple_window_start_s",
             "ripple_window_end_s",
+            "source_window_start_s",
+            "source_window_end_s",
+            "target_window_start_s",
+            "target_window_end_s",
             "v1_unit_ids",
             "ca1_unit_ids",
             "coef_ca1_unit_ids",
@@ -1031,6 +1174,29 @@ def test_parse_arguments_rejects_removed_pre_flags(monkeypatch) -> None:
 
     with pytest.raises(SystemExit):
         parse_arguments()
+
+
+def test_parse_arguments_accepts_source_target_window_flags(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--source-window-offset-s",
+            "0",
+            "--target-window-offset-s",
+            "-0.2",
+        ],
+    )
+
+    args = parse_arguments()
+    validate_arguments(args)
+
+    assert args.source_window_offset_s == pytest.approx(0.0)
+    assert args.target_window_offset_s == pytest.approx(-0.2)
 
 
 def test_save_epoch_figures_returns_metric_and_prediction_paths(monkeypatch, tmp_path) -> None:

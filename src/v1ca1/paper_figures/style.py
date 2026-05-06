@@ -37,8 +37,84 @@ PANEL_LABEL_KWARGS: dict[str, Any] = {
     "va": "bottom",
 }
 REGION_COLORS: dict[str, str] = {
-    "v1": "#4C72B0",
-    "ca1": "#DD8452",
+    "v1": "#2166AC",
+    "ca1": "#B35806",
+}
+EPOCH_TYPE_COLORS: dict[str, str] = {
+    "light": "#E6AB02",
+    "dark": "#252525",
+    "sleep": "#7B3294",
+}
+VISUAL_CONDITION_COLORS: dict[str, str] = {
+    "02_r1": "#1B9E77",
+    "06_r3": "#D01C8B",
+    "dark": EPOCH_TYPE_COLORS["dark"],
+}
+TRAJECTORY_COLORS: dict[str, str] = {
+    "center_to_left": "#5DA5DA",
+    "center_to_right": "#F15854",
+    "right_to_center": "#60BD68",
+    "left_to_center": "#B2912F",
+}
+MODEL_CLASS_COLORS: dict[str, str] = {
+    "visual": "#4D4D4D",
+    "task_segment_bump": "#E7298A",
+}
+ENCODING_COMPARISON_COLORS: dict[str, str] = {
+    "dpp_vs_absolute_place": "#7570B3",
+    "dpp_vs_absolute_task_progression": "#A6761D",
+}
+ANIMAL_COLORS: dict[str, str] = {
+    "L14": "#66C2A5",
+    "L15": "#FC8D62",
+    "L16": "#8DA0CB",
+    "L19": "#E78AC3",
+}
+NEUTRAL_COLORS: dict[str, str] = {
+    "empirical": "black",
+    "axis": "#404040",
+    "segment_boundary": "#A6A6A6",
+    "nonsignificant": "#B3B3B3",
+    "dark_epoch_background": "#F2F2F2",
+}
+SCHEMATIC_COLORS: dict[str, str] = {
+    "visual_stimulus": "#E6AB02",
+    "light_basis": EPOCH_TYPE_COLORS["light"],
+    "dark_basis": "#737373",
+    "trajectory_arrow": "#F15854",
+    "ripple_trace": "#6A51A3",
+    "ripple_span": "#E6AB02",
+    "ripple_onset": "#B35806",
+    "ripple_window_fill": "#F1F1F1",
+    "ca1_count_fill": "#F8EFE7",
+    "v1_count_fill": "#E8EEF8",
+    "glm_fill": "#E8F3E8",
+}
+RASTER_TICK_KWARGS: dict[str, Any] = {
+    "markersize": 0.55,
+    "markeredgewidth": 0.21,
+}
+HISTOGRAM_KWARGS: dict[str, Any] = {
+    "alpha": 0.52,
+    "edgecolor": "none",
+}
+COMPACT_HISTOGRAM_KWARGS: dict[str, Any] = {
+    "alpha": 0.48,
+    "edgecolor": "none",
+}
+EMPHASIS_HISTOGRAM_KWARGS: dict[str, Any] = {
+    "alpha": 0.65,
+    "edgecolor": "none",
+}
+OUTLINED_HISTOGRAM_KWARGS: dict[str, Any] = {
+    "alpha": 0.60,
+    "edgecolor": "white",
+    "linewidth": 0.25,
+}
+EPOCH_HISTOGRAM_ALPHA: dict[str, float] = {
+    "light": 0.48,
+    "dark": 0.34,
+    "sleep": 0.40,
 }
 
 

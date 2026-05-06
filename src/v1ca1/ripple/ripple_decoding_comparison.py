@@ -15,6 +15,7 @@ from v1ca1.helper.run_logging import write_run_log
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
     get_analysis_path,
+    load_ephys_timestamps_by_epoch,
     load_trajectory_intervals,
 )
 from v1ca1.ripple._decoding import (
@@ -1919,17 +1920,19 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    epoch_intervals = build_epoch_intervals_from_timestamps(
-        session["timestamps_ephys_by_epoch"]
+    _epoch_tags, timestamps_ephys_by_epoch, ephys_source = load_ephys_timestamps_by_epoch(
+        analysis_path
     )
+    epoch_intervals = build_epoch_intervals_from_timestamps(timestamps_ephys_by_epoch)
     ripple_tables, ripple_source = load_ripple_tables_for_session(analysis_path)
 
     sources = dict(session["sources"])
+    sources["timestamps_ephys_by_epoch"] = ephys_source
     sources["ripple_events"] = ripple_source
     fit_parameters = {
         "animal_name": args.animal_name,
         "date": args.date,
-        "data_root": args.data_root,
+        "data_root": str(args.data_root),
         "representations": list(REPRESENTATIONS),
         "epoch_pairs": [
             {"decode_epoch": decode_epoch, "train_epoch": train_epoch}

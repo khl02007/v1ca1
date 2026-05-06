@@ -26,6 +26,7 @@ from v1ca1.helper.session import (
     REGIONS,
     TRAJECTORY_TYPES,
     get_analysis_path,
+    load_ephys_timestamps_by_epoch,
 )
 from v1ca1.ripple._decoding import (
     build_region_unit_mask_table,
@@ -1597,7 +1598,10 @@ def main() -> None:
         session["movement_by_run"],
         session["run_epochs"],
     )
-    epoch_intervals = build_epoch_intervals(session["timestamps_ephys_by_epoch"])
+    _epoch_tags, timestamps_ephys_by_epoch, ephys_source = load_ephys_timestamps_by_epoch(
+        analysis_path
+    )
+    epoch_intervals = build_epoch_intervals(timestamps_ephys_by_epoch)
     ripple_tables, ripple_source = load_ripple_tables(analysis_path)
 
     data_dir = analysis_path / "ripple_trajectory_identity"
@@ -1606,6 +1610,7 @@ def main() -> None:
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     sources = dict(session["sources"])
+    sources["timestamps_ephys_by_epoch"] = ephys_source
     sources["ripple_events"] = ripple_source
     fit_parameters = {
         "animal_name": args.animal_name,
