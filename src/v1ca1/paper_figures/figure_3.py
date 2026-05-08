@@ -35,9 +35,7 @@ from v1ca1.paper_figures.figure_1 import (
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_PANEL_E_WIDTH_FRACTION,
-    DECODING_ANIMAL_COLORS,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
-    DECODING_YLABEL_FONTSIZE,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
     HEATMAP_COLORBAR_LABELPAD,
     add_centered_axis_text,
@@ -94,7 +92,7 @@ DEFAULT_OUTPUT_NAME = "figure_3"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_PANEL_A_HEIGHT_MM = 44.8
+DEFAULT_PANEL_A_HEIGHT_MM = 42.56
 DEFAULT_PANEL_BC_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
 DEFAULT_PANEL_DEF_HEIGHT_MM = 30.0
 DEFAULT_PANEL_GH_HEIGHT_MM = 42.0
@@ -106,6 +104,13 @@ DEFAULT_FIGURE_HEIGHT_MM = (
 )
 DEFAULT_PANEL_B_WIDTH_FRACTION = DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION
 DEFAULT_PANEL_C_WIDTH_FRACTION = DEFAULT_PANEL_E_WIDTH_FRACTION
+PANEL_DEF_WIDTH_RATIOS = (0.86, 1.30, 1.58)
+PANEL_DEF_WSPACE = 0.22
+PANEL_DEF_AXIS_BOTTOM = 0.13
+PANEL_DEF_AXIS_HEIGHT = 0.70
+PANEL_D_AXIS_BOUNDS = (0.30, PANEL_DEF_AXIS_BOTTOM, 0.82, PANEL_DEF_AXIS_HEIGHT)
+PANEL_E_AXIS_BOUNDS = (0.06, PANEL_DEF_AXIS_BOTTOM, 0.92, PANEL_DEF_AXIS_HEIGHT)
+PANEL_GH_WIDTH_RATIOS = (0.4, 0.6)
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 PANEL_C_COLORBAR_PAD = 0.002
 PANEL_C_NEURON_SCALE_BAR_X = 1.02
@@ -156,6 +161,15 @@ PANEL_C_EPOCH_LABELS = {
     "light": "Light",
 }
 PANEL_C_DARK_EPOCH_BACKGROUND = NEUTRAL_COLORS["dark_epoch_background"]
+PANEL_B_EXAMPLE_BLOCK_HEIGHT = 0.66
+PANEL_B_EXAMPLE_TOP = 1.16
+PANEL_B_EXAMPLE_BOTTOM = -0.044
+PANEL_B_FIRST_EXAMPLE_Y_SHIFT = 0.09
+PANEL_B_TITLE_Y = 1.30
+PANEL_B_EXAMPLE_RASTER_Y = 0.48
+PANEL_B_EXAMPLE_RASTER_HEIGHT = 0.34
+PANEL_B_EXAMPLE_RATE_Y = 0.16
+PANEL_B_EXAMPLE_RATE_HEIGHT = 0.31
 PANEL_QUANT_EPOCH_ORDER = ("light", "dark")
 PANEL_QUANT_EPOCH_LABELS = {
     "light": "Light",
@@ -183,13 +197,14 @@ PANEL_E_X_LIMITS = (-0.75, 0.75)
 PANEL_F_DECODING_MODELS = ("task_progression", "place")
 PANEL_F_DECODING_METRIC = "median_abs_error"
 PANEL_F_PLACE_MODEL_NAME = "place"
+PANEL_F_POOLED_LABEL = "pooled"
 PANEL_F_CROSS_COMPARISONS = DECODING_CROSS_TRAJECTORY_COMPARISONS[:1]
-PANEL_F_EPOCH_MARKERS = {
-    "light": "o",
-    "dark": "s",
-}
 PANEL_F_NORM_ERROR_YLIM = (0.0, 0.5)
-PANEL_F_PLACE_ERROR_YLIM = (0.0, 0.04)
+PANEL_F_PLACE_ERROR_YLIM = (0.0, 0.12)
+PANEL_F_YLABEL_FONTSIZE = 5.8
+PANEL_F_CROSS_AXIS_BOUNDS = (0.04, PANEL_DEF_AXIS_BOTTOM, 0.42, PANEL_DEF_AXIS_HEIGHT)
+PANEL_F_PLACE_AXIS_BOUNDS = (0.56, PANEL_DEF_AXIS_BOTTOM, 0.42, PANEL_DEF_AXIS_HEIGHT)
+PANEL_F_SUMMARY_TEXT_FONTSIZE = 4.2
 PANEL_F_ERROR_SUMMARY_COLUMNS = (
     "animal_name",
     "date",
@@ -206,16 +221,22 @@ PANEL_F_ERROR_SUMMARY_COLUMNS = (
 PANEL_G_MODELS = ("visual", "task_segment_bump")
 PANEL_G_MODEL_LABELS = {
     "visual": "Independent",
-    "task_segment_bump": "Bump gain",
+    "task_segment_bump": "Shared scaffold",
 }
 PANEL_G_MODEL_COLORS = MODEL_CLASS_COLORS
 PANEL_G_SCHEMATIC_WIDTH_FRACTION = 1.00
 PANEL_G_EXAMPLE_WIDTH_FRACTION = 1.00
-PANEL_G_SCHEMATIC_HEIGHT_FRACTION = 0.58
-PANEL_G_EXAMPLE_HEIGHT_FRACTION = 0.36
+PANEL_G_SCHEMATIC_HEIGHT_FRACTION = 0.66
+PANEL_G_EXAMPLE_HEIGHT_FRACTION = 0.30
+PANEL_G_EXAMPLES = (
+    ("L15", "20241121", "v1", 426, "center_to_right"),
+    ("L14", "20240611", "v1", 99, "center_to_left"),
+)
 PANEL_G_BASIS_DARK_COLOR = SCHEMATIC_COLORS["dark_basis"]
 PANEL_G_BASIS_LIGHT_COLOR = SCHEMATIC_COLORS["light_basis"]
 PANEL_G_ARROW_COLOR = SCHEMATIC_COLORS["trajectory_arrow"]
+PANEL_G_SHARED_SCAFFOLD_BASIS_LINEWIDTH = 0.10
+PANEL_G_SHARED_SCAFFOLD_OVAL_LINEWIDTH = 0.45
 PANEL_G_EMPIRICAL_COLOR = NEUTRAL_COLORS["empirical"]
 PANEL_G_EXAMPLE_MODEL_COLORS = MODEL_CLASS_COLORS
 PANEL_G_EXAMPLE_COUNT = 2
@@ -226,14 +247,26 @@ PANEL_H_SWAP_DELTA_VARIABLE = (
     "test_light_swapped_segment_swapped_delta_model_minus_visual_raw_ll_bits_per_spike"
 )
 PANEL_H_DELTA_X_LIMITS = (-1.0, 1.0)
-PANEL_H_SCHEMATIC_TRACK_LINEWIDTH = 0.32
-PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH = 0.46
-PANEL_H_SCHEMATIC_BASIS_LINEWIDTH = 0.32
-PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH = 0.44
-PANEL_H_SCHEMATIC_OVAL_LINEWIDTH = 0.42
-PANEL_H_SCHEMATIC_ARROW_SCALE = 4.3
-PANEL_H_SCHEMATIC_BASIS_RADIUS = 0.27
+PANEL_H_DELTA_TRAJECTORIES = (
+    "center_to_left",
+    "center_to_right",
+    "left_to_center",
+    "right_to_center",
+)
+PANEL_H_EXAMPLES = (
+    ("L15", "20241121", "v1", 27, "center_to_right"),
+    ("L14", "20240611", "v1", 368, "right_to_center"),
+)
+PANEL_H_SCHEMATIC_TRACK_LINEWIDTH = 0.55
+PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH = 0.85
+PANEL_H_SCHEMATIC_BASIS_LINEWIDTH = 0.145
+PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH = 0.25
+PANEL_H_SCHEMATIC_OVAL_LINEWIDTH = 0.45
+PANEL_H_SCHEMATIC_ARROW_SCALE = 6.5
+PANEL_H_SCHEMATIC_BASIS_RADIUS = 0.30
 PANEL_H_SCHEMATIC_BASIS_SPACING = 0.34
+PANEL_H_SCHEMATIC_AXIS_BOUNDS = (-0.025, 0.01, 0.34, 0.96)
+PANEL_H_DELTA_AXIS_BOUNDS = (0.32, 0.04, 0.45, 0.88)
 
 
 def get_dark_epoch(animal_name: str, date: str, dark_epoch: str | None = None) -> str:
@@ -1296,7 +1329,7 @@ def plot_panel_a_example(ax: "Axes", example: dict[str, Any]) -> None:
         if trajectory_index == 0:
             raster_ax.set_ylabel("")
 
-        rate_ax = ax.inset_axes([left, 0.07, column_width, 0.20])
+        rate_ax = ax.inset_axes([left, 0.147, column_width, 0.16])
         plot_panel_a_rate_axis(
             rate_ax,
             example,
@@ -1612,6 +1645,7 @@ def plot_panel_c_example(
     example: dict[str, Any],
     *,
     title: str | None = None,
+    y_shift: float = 0.0,
 ) -> None:
     """Plot one panel-C example cell with dark and light rate curves."""
     ax.set_xlim(0.0, 1.0)
@@ -1620,7 +1654,7 @@ def plot_panel_c_example(
     if title is not None:
         ax.text(
             0.50,
-            0.995,
+            0.885 + y_shift,
             title,
             ha="center",
             va="top",
@@ -1630,8 +1664,8 @@ def plot_panel_c_example(
 
     trajectories = validate_panel_c_trajectories(example["trajectories"])
     y_max = _get_panel_c_y_max(example)
-    raster_y = 0.50
-    raster_height = 0.28
+    raster_y = PANEL_B_EXAMPLE_RASTER_Y + y_shift
+    raster_height = PANEL_B_EXAMPLE_RASTER_HEIGHT
     schematic_height = 0.075
     schematic_gap = 0.020 if len(trajectories) > 1 else 0.0
     schematic_total_height = len(trajectories) * schematic_height + (
@@ -1671,8 +1705,12 @@ def plot_panel_c_example(
         show_title=True,
     )
 
-    dark_ax = ax.inset_axes([0.10, 0.08, 0.40, 0.25])
-    light_ax = ax.inset_axes([0.56, 0.08, 0.40, 0.25])
+    dark_ax = ax.inset_axes(
+        [0.10, PANEL_B_EXAMPLE_RATE_Y + y_shift, 0.40, PANEL_B_EXAMPLE_RATE_HEIGHT]
+    )
+    light_ax = ax.inset_axes(
+        [0.56, PANEL_B_EXAMPLE_RATE_Y + y_shift, 0.40, PANEL_B_EXAMPLE_RATE_HEIGHT]
+    )
     dark_ax.set_facecolor(PANEL_C_DARK_EPOCH_BACKGROUND)
     plot_epoch_path_rate_axis(
         dark_ax,
@@ -1705,8 +1743,12 @@ def plot_panel_c_examples(
         ax.text(0.5, 0.5, "No examples", ha="center", va="center", transform=ax.transAxes)
         return
 
-    block_height = 0.47
-    y_positions = np.linspace(1.0 - block_height, 0.02, len(examples))
+    block_height = PANEL_B_EXAMPLE_BLOCK_HEIGHT
+    y_positions = np.linspace(
+        PANEL_B_EXAMPLE_TOP - block_height,
+        PANEL_B_EXAMPLE_BOTTOM,
+        len(examples),
+    )
     for example_index, (y0, example) in enumerate(
         zip(y_positions, examples, strict=False),
         start=1,
@@ -1716,6 +1758,7 @@ def plot_panel_c_examples(
             example_ax,
             example,
             title=f"Example cell {example_index}",
+            y_shift=PANEL_B_FIRST_EXAMPLE_Y_SHIFT if example_index == 1 else 0.0,
         )
 
 
@@ -2223,7 +2266,7 @@ def _summarize_panel_f_errors(
     comparison: str,
     comparison_label: str,
 ) -> dict[str, Any] | None:
-    """Return one animal-level Panel F median/IQR error row."""
+    """Return one Panel F median/IQR error row."""
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
     if values.size == 0:
@@ -2255,13 +2298,14 @@ def load_panel_f_decoding_error_table(
         tuple[str, str, str, Sequence[tuple[str, str]]]
     ] = PANEL_F_CROSS_COMPARISONS,
 ) -> Any:
-    """Load animal-level normalized decoding-error medians and IQRs for Panel F."""
+    """Load pooled normalized decoding-error medians and IQRs for Panel F."""
     import pandas as pd
 
-    rows: list[dict[str, Any]] = []
+    pooled_place_values: dict[str, list[np.ndarray]] = {}
+    pooled_cross_values: dict[tuple[str, str, str], list[np.ndarray]] = {}
     for dataset in datasets:
         animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
-        place_normalization = get_wtrack_total_length(animal_name) * len(TRAJECTORY_TYPES)
+        place_normalization = get_wtrack_total_length(animal_name)
         for epoch_type, epoch in build_panel_quant_epoch_specs(
             animal_name,
             date,
@@ -2281,18 +2325,8 @@ def load_panel_f_decoding_error_table(
                 decoded_place_path,
                 normalization=place_normalization,
             )
-            place_row = _summarize_panel_f_errors(
-                place_values,
-                animal_name=animal_name,
-                date=date,
-                epoch_type=epoch_type,
-                epoch=epoch,
-                analysis="place",
-                comparison="place",
-                comparison_label="Place",
-            )
-            if place_row is not None:
-                rows.append(place_row)
+            if place_values.size > 0:
+                pooled_place_values.setdefault(epoch_type, []).append(place_values)
 
             for comparison, label, transfer_family, trajectory_pairs in comparisons:
                 comparison_values = []
@@ -2321,18 +2355,43 @@ def load_panel_f_decoding_error_table(
                 ]
                 if not finite_values:
                     continue
-                cross_row = _summarize_panel_f_errors(
-                    np.concatenate(finite_values),
-                    animal_name=animal_name,
-                    date=date,
-                    epoch_type=epoch_type,
-                    epoch=epoch,
-                    analysis="cross_trajectory",
-                    comparison=comparison,
-                    comparison_label=label,
-                )
-                if cross_row is not None:
-                    rows.append(cross_row)
+                pooled_cross_values.setdefault(
+                    (epoch_type, comparison, label),
+                    [],
+                ).append(np.concatenate(finite_values))
+
+    rows: list[dict[str, Any]] = []
+    for epoch_type, values in pooled_place_values.items():
+        row = _summarize_panel_f_errors(
+            np.concatenate(values),
+            animal_name=PANEL_F_POOLED_LABEL,
+            date=PANEL_F_POOLED_LABEL,
+            epoch_type=epoch_type,
+            epoch=PANEL_F_POOLED_LABEL,
+            analysis="place",
+            comparison="place",
+            comparison_label="Place",
+        )
+        if row is not None:
+            rows.append(row)
+
+    for (
+        epoch_type,
+        comparison,
+        comparison_label,
+    ), values in pooled_cross_values.items():
+        row = _summarize_panel_f_errors(
+            np.concatenate(values),
+            animal_name=PANEL_F_POOLED_LABEL,
+            date=PANEL_F_POOLED_LABEL,
+            epoch_type=epoch_type,
+            epoch=PANEL_F_POOLED_LABEL,
+            analysis="cross_trajectory",
+            comparison=comparison,
+            comparison_label=comparison_label,
+        )
+        if row is not None:
+            rows.append(row)
 
     if not rows:
         return pd.DataFrame(columns=PANEL_F_ERROR_SUMMARY_COLUMNS)
@@ -2554,6 +2613,62 @@ def _panel_g_candidate_examples_from_pair(
     return candidates
 
 
+def _select_requested_panel_g_examples(
+    candidates: Sequence[dict[str, Any]],
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    example_count: int,
+) -> list[dict[str, Any]]:
+    """Return configured Panel G examples when they belong to the requested inputs."""
+    dataset_keys = {
+        normalize_dataset_id(dataset)[:2]
+        for dataset in datasets
+    }
+    requested = [
+        (animal_name, date, requested_region, int(unit_id), trajectory)
+        for animal_name, date, requested_region, unit_id, trajectory in PANEL_G_EXAMPLES
+        if (animal_name, date) in dataset_keys and requested_region == region
+    ][: max(int(example_count), 0)]
+    if not requested:
+        return []
+
+    selected: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for animal_name, date, requested_region, unit_id, trajectory in requested:
+        matching = [
+            candidate
+            for candidate in candidates
+            if str(candidate["animal_name"]) == animal_name
+            and str(candidate["date"]) == date
+            and str(candidate["region"]) == requested_region
+            and int(candidate["unit_id"]) == unit_id
+            and str(candidate["trajectory"]) == trajectory
+        ]
+        matching.sort(key=lambda candidate: candidate["score"], reverse=True)
+        for candidate in matching:
+            enriched_candidate = _add_panel_g_empirical_curves(
+                candidate,
+                data_root=data_root,
+            )
+            if enriched_candidate is not None:
+                selected.append(enriched_candidate)
+                break
+        else:
+            missing.append(
+                f"{animal_name} {requested_region.upper()} cell {unit_id} "
+                f"{PANEL_TRAJECTORY_LABELS.get(trajectory, trajectory)}"
+            )
+
+    if missing:
+        raise ValueError(
+            "Configured Panel G dark_light_glm example(s) were not available: "
+            + ", ".join(missing)
+        )
+    return selected
+
+
 def load_panel_g_dark_light_glm_examples(
     *,
     data_root: Path,
@@ -2609,6 +2724,16 @@ def load_panel_g_dark_light_glm_examples(
         )
 
     candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
+    requested_examples = _select_requested_panel_g_examples(
+        candidates,
+        data_root=data_root,
+        datasets=datasets,
+        region=region,
+        example_count=example_count,
+    )
+    if requested_examples:
+        return requested_examples
+
     selected: list[dict[str, Any]] = []
     seen_units: set[tuple[str, str, int]] = set()
     for candidate in candidates:
@@ -2763,57 +2888,106 @@ def _panel_h_swap_examples_from_dataset(
     examples: list[dict[str, Any]] = []
     for flat_index in ordered_indices[: max(int(example_count), 0)]:
         trajectory_index, unit_index = np.unravel_index(flat_index, delta.shape)
-        trajectory = str(dataset_obj.coords["trajectory"].values[trajectory_index])
-        unit_id = int(np.asarray(dataset_obj.coords["unit"].values)[unit_index])
-        segment_start = float(
-            dataset_obj["swap_segment_start"].isel(trajectory=trajectory_index).values
-        )
-        segment_end = float(
-            dataset_obj["swap_segment_end"].isel(trajectory=trajectory_index).values
-        )
-        observed_rate = np.asarray(
-            dataset_obj["test_light_observed_rate_hz"].isel(
-                trajectory=trajectory_index,
-                unit=unit_index,
-            ).values,
-            dtype=float,
-        )
-        models = {}
-        for model_name in ("visual", "task_segment_bump"):
-            models[model_name] = np.asarray(
-                dataset_obj["test_light_swapped_hz_grid"]
-                .sel(model=model_name)
-                .isel(trajectory=trajectory_index, unit=unit_index)
-                .values,
-                dtype=float,
-            )
-
         examples.append(
-            {
-                "animal_name": animal_name,
-                "date": date,
-                "region": region,
-                "dark_epoch": dark_epoch,
-                "light_train_epoch": light_train_epoch,
-                "light_test_epoch": light_test_epoch,
-                "trajectory": trajectory,
-                "unit_id": unit_id,
-                "delta_ll_bits_per_spike": float(delta[trajectory_index, unit_index]),
-                "segment_start": segment_start,
-                "segment_end": segment_end,
-                "tp_grid": tp_grid,
-                "observed_position": observed_position,
-                "observed_rate_hz": observed_rate,
-                "models": models,
-                "swap_source_trajectory": str(
-                    dataset_obj["swap_source_trajectory"]
-                    .isel(trajectory=trajectory_index)
-                    .values
-                ),
-                "source_path": str(source_path),
-            }
+            _panel_h_swap_example_from_indices(
+                dataset_obj,
+                animal_name=animal_name,
+                date=date,
+                region=region,
+                dark_epoch=dark_epoch,
+                light_train_epoch=light_train_epoch,
+                light_test_epoch=light_test_epoch,
+                source_path=source_path,
+                trajectory_index=int(trajectory_index),
+                unit_index=int(unit_index),
+                tp_grid=tp_grid,
+                observed_position=observed_position,
+                delta=delta,
+            )
         )
     return examples
+
+
+def _panel_h_swap_example_from_indices(
+    dataset_obj: Any,
+    *,
+    animal_name: str,
+    date: str,
+    region: str,
+    dark_epoch: str,
+    light_train_epoch: str,
+    light_test_epoch: str,
+    source_path: Path,
+    trajectory_index: int,
+    unit_index: int,
+    tp_grid: np.ndarray | None = None,
+    observed_position: np.ndarray | None = None,
+    delta: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Return one switched-segment example at explicit trajectory/unit indices."""
+    if tp_grid is None:
+        tp_grid = np.asarray(dataset_obj.coords["tp_grid"].values, dtype=float)
+    if observed_position is None:
+        observed_position = np.asarray(
+            dataset_obj.coords["tp_observed_bin"].values,
+            dtype=float,
+        )
+    if delta is None:
+        delta = np.asarray(
+            dataset_obj[PANEL_H_SWAP_DELTA_VARIABLE]
+            .sel(model="task_segment_bump")
+            .values,
+            dtype=float,
+        )
+
+    trajectory = str(dataset_obj.coords["trajectory"].values[trajectory_index])
+    unit_id = int(np.asarray(dataset_obj.coords["unit"].values)[unit_index])
+    segment_start = float(
+        dataset_obj["swap_segment_start"].isel(trajectory=trajectory_index).values
+    )
+    segment_end = float(
+        dataset_obj["swap_segment_end"].isel(trajectory=trajectory_index).values
+    )
+    observed_rate = np.asarray(
+        dataset_obj["test_light_observed_rate_hz"].isel(
+            trajectory=trajectory_index,
+            unit=unit_index,
+        ).values,
+        dtype=float,
+    )
+    models = {}
+    for model_name in ("visual", "task_segment_bump"):
+        models[model_name] = np.asarray(
+            dataset_obj["test_light_swapped_hz_grid"]
+            .sel(model=model_name)
+            .isel(trajectory=trajectory_index, unit=unit_index)
+            .values,
+            dtype=float,
+        )
+
+    return {
+        "animal_name": animal_name,
+        "date": date,
+        "region": region,
+        "dark_epoch": dark_epoch,
+        "light_train_epoch": light_train_epoch,
+        "light_test_epoch": light_test_epoch,
+        "trajectory": trajectory,
+        "unit_id": unit_id,
+        "delta_ll_bits_per_spike": float(delta[trajectory_index, unit_index]),
+        "segment_start": segment_start,
+        "segment_end": segment_end,
+        "tp_grid": tp_grid,
+        "observed_position": observed_position,
+        "observed_rate_hz": observed_rate,
+        "models": models,
+        "swap_source_trajectory": str(
+            dataset_obj["swap_source_trajectory"]
+            .isel(trajectory=trajectory_index)
+            .values
+        ),
+        "source_path": str(source_path),
+    }
 
 
 def _panel_h_swap_example_from_dataset(
@@ -2877,6 +3051,14 @@ def load_panel_h_swap_examples(
     """Load top switched-segment examples for Panel H."""
     import xarray as xr
 
+    dataset_keys = {normalize_dataset_id(dataset)[:2] for dataset in datasets}
+    requested = [
+        (animal_name, date, requested_region, int(unit_id), trajectory)
+        for animal_name, date, requested_region, unit_id, trajectory in PANEL_H_EXAMPLES
+        if (animal_name, date) in dataset_keys and requested_region == region
+    ][: max(int(example_count), 0)]
+    requested_examples: list[dict[str, Any]] = []
+    missing_requested: list[str] = []
     candidates: list[dict[str, Any]] = []
     for dataset in datasets:
         animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
@@ -2893,6 +3075,52 @@ def load_panel_h_swap_examples(
         if not path.exists():
             continue
         with xr.open_dataset(path) as dataset_obj:
+            for (
+                requested_animal,
+                requested_date,
+                requested_region,
+                requested_unit,
+                requested_trajectory,
+            ) in requested:
+                if (
+                    requested_animal != animal_name
+                    or requested_date != date
+                    or requested_region != region
+                ):
+                    continue
+                trajectories = [
+                    str(value) for value in dataset_obj.coords["trajectory"].values
+                ]
+                units = np.asarray(dataset_obj.coords["unit"].values, dtype=int)
+                if requested_trajectory not in trajectories or requested_unit not in set(units):
+                    missing_requested.append(
+                        f"{requested_animal} {requested_region.upper()} "
+                        f"{requested_unit} "
+                        f"{PANEL_TRAJECTORY_LABELS.get(requested_trajectory, requested_trajectory)}"
+                    )
+                    continue
+                trajectory_index = trajectories.index(requested_trajectory)
+                unit_index = int(np.flatnonzero(units == requested_unit)[0])
+                requested_example = _panel_h_swap_example_from_indices(
+                    dataset_obj,
+                    animal_name=animal_name,
+                    date=date,
+                    region=region,
+                    dark_epoch=dataset_dark_epoch,
+                    light_train_epoch=light_train_epoch,
+                    light_test_epoch=light_test_epoch,
+                    source_path=path,
+                    trajectory_index=trajectory_index,
+                    unit_index=unit_index,
+                )
+                if np.isfinite(float(requested_example["delta_ll_bits_per_spike"])):
+                    requested_examples.append(requested_example)
+                else:
+                    missing_requested.append(
+                        f"{requested_animal} {requested_region.upper()} "
+                        f"{requested_unit} "
+                        f"{PANEL_TRAJECTORY_LABELS.get(requested_trajectory, requested_trajectory)}"
+                    )
             candidates.extend(
                 _panel_h_swap_examples_from_dataset(
                     dataset_obj,
@@ -2906,6 +3134,41 @@ def load_panel_h_swap_examples(
                     example_count=example_count,
                 )
             )
+    if missing_requested:
+        raise ValueError(
+            "Configured Panel H swap example(s) were not available: "
+            + ", ".join(missing_requested)
+        )
+    if requested_examples:
+        requested_order = {
+            (
+                animal_name,
+                date,
+                requested_region,
+                int(unit_id),
+                trajectory,
+            ): requested_index
+            for requested_index, (
+                animal_name,
+                date,
+                requested_region,
+                unit_id,
+                trajectory,
+            ) in enumerate(requested)
+        }
+        requested_examples.sort(
+            key=lambda example: requested_order[
+                (
+                    str(example["animal_name"]),
+                    str(example["date"]),
+                    str(example["region"]),
+                    int(example["unit_id"]),
+                    str(example["trajectory"]),
+                )
+            ]
+        )
+        return requested_examples[: max(int(example_count), 0)]
+
     candidates.sort(
         key=lambda example: float(example["delta_ll_bits_per_spike"]),
         reverse=True,
@@ -3101,6 +3364,7 @@ def plot_panel_d_similarity(ax: "Axes", similarity_table: Any) -> None:
 
     ax.set_xlim(-1.0, 1.0)
     ax.set_ylim(-1.0, 1.0)
+    ax.set_aspect("equal", adjustable="box", anchor="S")
     ax.set_xlabel("Light same-turn\ntuning corr.", fontsize=6.2, labelpad=1.5)
     ax.set_ylabel("Dark same-turn\ntuning corr.", fontsize=6.2, labelpad=1.5)
     ax.spines["top"].set_visible(False)
@@ -3117,13 +3381,15 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
     )
     bin_edges = np.linspace(PANEL_E_X_LIMITS[0], PANEL_E_X_LIMITS[1], 27)
 
-    ax.axvline(0.0, color="0.35", linestyle="--", linewidth=0.6, zorder=1)
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.6, zorder=1)
     if values.size:
         hist_kwargs = OUTLINED_HISTOGRAM_KWARGS.copy()
         hist_kwargs["alpha"] = EPOCH_HISTOGRAM_ALPHA.get(
             epoch_type,
             OUTLINED_HISTOGRAM_KWARGS["alpha"],
         )
+        hist_kwargs["edgecolor"] = "none"
+        hist_kwargs["linewidth"] = 0.0
         ax.hist(
             values,
             bins=bin_edges,
@@ -3134,12 +3400,6 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
             zorder=2,
         )
         median_value = float(np.nanmedian(values))
-        ax.axvline(
-            median_value,
-            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
-            linewidth=0.85,
-            zorder=3,
-        )
         summary_text = (
             f"{PANEL_QUANT_EPOCH_LABELS[epoch_type]}: "
             f"n={values.size}, med={median_value:.2f}"
@@ -3184,20 +3444,6 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=5.6, length=1.8, pad=1)
-
-
-def _panel_f_animal_names(table: Any) -> list[str]:
-    """Return animal names in plot order for a Panel F summary table."""
-    if table is None or "animal_name" not in table:
-        return []
-    return list(dict.fromkeys(table["animal_name"].dropna().astype(str)))
-
-
-def _panel_f_animal_offsets(animal_names: Sequence[str], width: float) -> np.ndarray:
-    """Return deterministic horizontal offsets for animal-colored Panel F points."""
-    if len(animal_names) <= 1:
-        return np.asarray([0.0], dtype=float)
-    return np.linspace(-width, width, len(animal_names), dtype=float)
 
 
 def _set_panel_f_error_ylim(ax: "Axes", table: Any) -> None:
@@ -3267,15 +3513,42 @@ def _plot_panel_f_interval_point(
 def _style_panel_f_error_axis(ax: "Axes", ylabel: str | None = "Abs. norm. error") -> None:
     """Apply compact normalized-error axis styling for Panel F."""
     if ylabel is not None:
-        ax.set_ylabel(ylabel, fontsize=DECODING_YLABEL_FONTSIZE, labelpad=1.4)
+        ax.set_ylabel(ylabel, fontsize=PANEL_F_YLABEL_FONTSIZE, labelpad=0.8)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
     ax.tick_params(axis="x", labelsize=4.7, length=0, pad=1)
 
 
-def _plot_panel_f_place_axis(ax: "Axes", decoding_error_table: Any) -> None:
-    """Plot within-epoch place-decoding median/IQR errors by animal and epoch."""
+def _add_panel_f_error_summary_text(ax: "Axes", table: Any) -> None:
+    """Add compact median summaries following the Figure 1 Panel F style."""
+    if table.empty:
+        return
+    for row_index, epoch_type in enumerate(PANEL_QUANT_EPOCH_ORDER):
+        rows = table[table["epoch_type"].astype(str) == epoch_type]
+        if rows.empty:
+            continue
+        row = rows.iloc[0]
+        ax.text(
+            0.97,
+            0.95 - 0.13 * row_index,
+            f"{PANEL_QUANT_EPOCH_LABELS[epoch_type]} med. "
+            f"{float(row['median_error']):.2f}",
+            ha="right",
+            va="top",
+            fontsize=PANEL_F_SUMMARY_TEXT_FONTSIZE,
+            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            transform=ax.transAxes,
+        )
+
+
+def _plot_panel_f_place_axis(
+    ax: "Axes",
+    decoding_error_table: Any,
+    *,
+    ylabel: str | None = "Abs. norm. error",
+) -> None:
+    """Plot pooled within-epoch place-decoding median/IQR errors by epoch."""
     table = decoding_error_table[
         decoding_error_table["analysis"].astype(str) == "place"
     ].copy()
@@ -3286,138 +3559,79 @@ def _plot_panel_f_place_axis(ax: "Axes", decoding_error_table: Any) -> None:
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
     ax.set_ylim(*PANEL_F_PLACE_ERROR_YLIM)
-    ax.set_title("Within-epoch place", fontsize=5.8, pad=1.5)
+    ax.set_title("Trajectory-specific\nplace decoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No place\ndecoding", ha="center", va="center")
-        _style_panel_f_error_axis(ax)
+        _style_panel_f_error_axis(ax, ylabel=ylabel)
         return
 
-    animal_names = _panel_f_animal_names(table)
-    offsets = _panel_f_animal_offsets(animal_names, 0.14)
-    for animal_index, (animal_name, offset) in enumerate(
-        zip(animal_names, offsets, strict=True)
-    ):
-        color = DECODING_ANIMAL_COLORS.get(animal_name, f"C{animal_index}")
-        for position, epoch_type in zip(positions, PANEL_QUANT_EPOCH_ORDER, strict=True):
-            rows = table[
-                (table["animal_name"].astype(str) == animal_name)
-                & (table["epoch_type"].astype(str) == epoch_type)
-            ]
-            if rows.empty:
-                continue
-            row = rows.iloc[0]
-            x = float(position) + float(offset)
-            _plot_panel_f_interval_point(
-                ax,
-                x=x,
-                q25=float(row["q25_error"]),
-                median=float(row["median_error"]),
-                q75=float(row["q75_error"]),
-                color=color,
-                label=animal_name if epoch_type == PANEL_QUANT_EPOCH_ORDER[0] else None,
-            )
+    for position, epoch_type in zip(positions, PANEL_QUANT_EPOCH_ORDER, strict=True):
+        rows = table[table["epoch_type"].astype(str) == epoch_type]
+        if rows.empty:
+            continue
+        row = rows.iloc[0]
+        _plot_panel_f_interval_point(
+            ax,
+            x=float(position),
+            q25=float(row["q25_error"]),
+            median=float(row["median_error"]),
+            q75=float(row["q75_error"]),
+            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            marker="o",
+        )
 
-    ax.legend(
-        frameon=False,
-        fontsize=4.7,
-        loc="upper left",
-        handlelength=0.8,
-        borderpad=0.1,
-        labelspacing=0.2,
-    )
-    _style_panel_f_error_axis(ax)
+    _add_panel_f_error_summary_text(ax, table)
+    _style_panel_f_error_axis(ax, ylabel=ylabel)
 
 
-def _plot_panel_f_cross_axis(ax: "Axes", decoding_error_table: Any) -> None:
-    """Plot cross-trajectory TP decoding median/IQR errors by animal and epoch."""
-    from matplotlib.lines import Line2D
-
+def _plot_panel_f_cross_axis(
+    ax: "Axes",
+    decoding_error_table: Any,
+    *,
+    ylabel: str | None = "Abs. norm. error",
+) -> None:
+    """Plot pooled cross-trajectory TP decoding median/IQR errors by epoch."""
     table = decoding_error_table[
         decoding_error_table["analysis"].astype(str) == "cross_trajectory"
     ].copy()
     comparisons = list(PANEL_F_CROSS_COMPARISONS)
-    positions = np.arange(1, len(comparisons) + 1, dtype=float)
-    labels = [label for _comparison, label, _family, _pairs in comparisons]
+    positions = np.arange(1, len(PANEL_QUANT_EPOCH_ORDER) + 1, dtype=float)
     ax.set_xticks(positions)
-    ax.set_xticklabels(labels, fontsize=4.0)
-    ax.set_xlim(0.5, len(comparisons) + 0.5)
-    ax.set_title("Same-turn cross-arm DPP", fontsize=5.8, pad=1.5)
+    ax.set_xticklabels(
+        [PANEL_QUANT_EPOCH_LABELS[epoch_type] for epoch_type in PANEL_QUANT_EPOCH_ORDER]
+    )
+    ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
+    ax.set_title("Cross trajectory\ndecoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No cross-trajectory\ndecoding", ha="center", va="center")
         _set_panel_f_error_ylim(ax, table)
-        _style_panel_f_error_axis(ax, ylabel=None)
+        _style_panel_f_error_axis(ax, ylabel=ylabel)
         return
 
-    animal_names = _panel_f_animal_names(table)
-    animal_offsets = _panel_f_animal_offsets(animal_names, 0.045)
-    epoch_offsets = {
-        epoch_type: offset
-        for epoch_type, offset in zip(
-            PANEL_QUANT_EPOCH_ORDER,
-            np.linspace(-0.17, 0.17, len(PANEL_QUANT_EPOCH_ORDER)),
-            strict=True,
+    comparison = comparisons[0][0] if comparisons else None
+    for position, epoch_type in zip(positions, PANEL_QUANT_EPOCH_ORDER, strict=True):
+        rows = table[table["epoch_type"].astype(str) == epoch_type]
+        if comparison is not None:
+            rows = rows[rows["comparison"].astype(str) == comparison]
+        if rows.empty:
+            continue
+        row = rows.iloc[0]
+        _plot_panel_f_interval_point(
+            ax,
+            x=float(position),
+            q25=float(row["q25_error"]),
+            median=float(row["median_error"]),
+            q75=float(row["q75_error"]),
+            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            marker="o",
+            size=11,
+            linewidth=0.85,
+            alpha=0.70,
         )
-    }
-    for animal_index, (animal_name, animal_offset) in enumerate(
-        zip(animal_names, animal_offsets, strict=True)
-    ):
-        color = DECODING_ANIMAL_COLORS.get(animal_name, f"C{animal_index}")
-        for position, (comparison, _label, _family, _pairs) in zip(
-            positions,
-            comparisons,
-            strict=True,
-        ):
-            for epoch_type in PANEL_QUANT_EPOCH_ORDER:
-                rows = table[
-                    (table["animal_name"].astype(str) == animal_name)
-                    & (table["comparison"].astype(str) == comparison)
-                    & (table["epoch_type"].astype(str) == epoch_type)
-                ]
-                if rows.empty:
-                    continue
-                row = rows.iloc[0]
-                x = (
-                    float(position)
-                    + float(epoch_offsets[epoch_type])
-                    + float(animal_offset)
-                )
-                _plot_panel_f_interval_point(
-                    ax,
-                    x=x,
-                    q25=float(row["q25_error"]),
-                    median=float(row["median_error"]),
-                    q75=float(row["q75_error"]),
-                    color=color,
-                    marker=PANEL_F_EPOCH_MARKERS[epoch_type],
-                    size=11,
-                    linewidth=0.85,
-                    alpha=0.70,
-                )
 
-    epoch_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=PANEL_F_EPOCH_MARKERS[epoch_type],
-            color="none",
-            markerfacecolor="white",
-            markeredgecolor="0.25",
-            markersize=4.0,
-            label=PANEL_QUANT_EPOCH_LABELS[epoch_type],
-        )
-        for epoch_type in PANEL_QUANT_EPOCH_ORDER
-    ]
-    ax.legend(
-        handles=epoch_handles,
-        frameon=False,
-        fontsize=4.5,
-        loc="upper left",
-        handlelength=0.8,
-        borderpad=0.1,
-        labelspacing=0.2,
-    )
+    _add_panel_f_error_summary_text(ax, table)
     _set_panel_f_error_ylim(ax, table)
-    _style_panel_f_error_axis(ax, ylabel=None)
+    _style_panel_f_error_axis(ax, ylabel=ylabel)
 
 
 def plot_panel_f_decoding_error(ax: "Axes", decoding_error_table: Any) -> None:
@@ -3425,10 +3639,10 @@ def plot_panel_f_decoding_error(ax: "Axes", decoding_error_table: Any) -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    place_ax = ax.inset_axes([0.08, 0.22, 0.34, 0.64])
-    cross_ax = ax.inset_axes([0.52, 0.22, 0.45, 0.64])
-    _plot_panel_f_place_axis(place_ax, decoding_error_table)
+    cross_ax = ax.inset_axes(PANEL_F_CROSS_AXIS_BOUNDS)
+    place_ax = ax.inset_axes(PANEL_F_PLACE_AXIS_BOUNDS)
     _plot_panel_f_cross_axis(cross_ax, decoding_error_table)
+    _plot_panel_f_place_axis(place_ax, decoding_error_table, ylabel=None)
 
 
 def _panel_g_basis_styles(
@@ -3465,7 +3679,7 @@ def _panel_basis_styles_with_highlighted_segments(
                     "edge_color": "black",
                     "fill_color": PANEL_G_BASIS_LIGHT_COLOR,
                     "fill_alpha": 0.76,
-                    "linewidth": 0.58,
+                    "linewidth": 0.145,
                     "radius": 0.30,
                     "spacing": 0.34,
                 }
@@ -3476,7 +3690,7 @@ def _panel_basis_styles_with_highlighted_segments(
                     "edge_color": "black",
                     "fill_color": "none",
                     "fill_alpha": 1.0,
-                    "linewidth": 0.58,
+                    "linewidth": 0.145,
                     "radius": 0.30,
                     "spacing": 0.34,
                 }
@@ -3491,7 +3705,7 @@ def _panel_g_oval_styles(count: int) -> list[dict[str, Any]]:
             "edge_color": PANEL_G_BASIS_LIGHT_COLOR,
             "fill_color": PANEL_G_BASIS_LIGHT_COLOR,
             "fill_alpha": 0.38,
-            "linewidth": 0.95,
+            "linewidth": PANEL_G_SHARED_SCAFFOLD_OVAL_LINEWIDTH,
         }
         for _index in range(count)
     ]
@@ -3502,9 +3716,10 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    ax.plot([0.18, 0.82], [0.18, 0.18], color="black", linewidth=0.85)
-    ax.plot([0.42, 0.42], [0.18, 0.86], color="black", linewidth=1.4)
-    ax.plot([0.58, 0.58], [0.18, 0.86], color="black", linewidth=1.4)
+    line_kwargs = {"color": "black", "linewidth": 1.05, "solid_capstyle": "butt"}
+    ax.plot([0.36, 0.64], [0.18, 0.18], **line_kwargs)
+    ax.plot([0.45, 0.45], [0.18, 0.86], **line_kwargs)
+    ax.plot([0.55, 0.55], [0.18, 0.86], **line_kwargs)
 
 
 def _draw_panel_g_track(
@@ -3530,7 +3745,7 @@ def _draw_panel_g_track(
                 edge_color=PANEL_G_BASIS_DARK_COLOR,
                 fill_color="none",
                 fill_alpha=1.0,
-                linewidth=1.0,
+                linewidth=0.25,
             ),
             arrow_color=trajectory_color,
             track_linewidth=0.55,
@@ -3547,7 +3762,7 @@ def _draw_panel_g_track(
                 edge_color="black",
                 fill_color=PANEL_G_BASIS_LIGHT_COLOR,
                 fill_alpha=0.76,
-                linewidth=0.58,
+                linewidth=0.145,
             )
         )
         draw_w_track_basis_schematic(
@@ -3597,7 +3812,7 @@ def _draw_panel_g_track(
                 edge_color=PANEL_G_BASIS_DARK_COLOR,
                 fill_color="none",
                 fill_alpha=1.0,
-                linewidth=0.78,
+                linewidth=PANEL_G_SHARED_SCAFFOLD_BASIS_LINEWIDTH,
             ),
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
@@ -3787,8 +4002,30 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    ax.text(0.32, 0.98, "Dark field", ha="center", va="top", fontsize=5.8)
-    ax.text(0.84, 0.98, "Light field", ha="center", va="top", fontsize=5.8)
+    def _bounds_from_center(
+        center_x: float,
+        center_y: float,
+        width: float,
+        height: float,
+    ) -> list[float]:
+        return [center_x - width / 2.0, center_y - height / 2.0, width, height]
+
+    dark_center_x = 0.25
+    light_center_x = 0.78
+    independent_basis_center_x = 0.5 * (dark_center_x + light_center_x)
+    top_center_y = 0.715
+    bottom_center_y = 0.255
+    dark_bounds = {
+        "width": 0.16,
+        "height": 0.31,
+    }
+    light_bounds = {
+        "width": 0.18,
+        "height": 0.34,
+    }
+
+    ax.text(dark_center_x, 0.98, "Dark field", ha="center", va="top", fontsize=5.8)
+    ax.text(light_center_x, 0.98, "Light field", ha="center", va="top", fontsize=5.8)
     ax.text(
         0.08,
         0.72,
@@ -3808,7 +4045,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
         fontweight="bold",
     )
     ax.text(
-        0.55,
+        independent_basis_center_x,
         0.78,
         "Independent\nbasis functions",
         ha="center",
@@ -3816,7 +4053,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
         fontsize=3.7,
     )
     ax.text(
-        0.60,
+        0.55,
         0.47,
         "Segment-specific modulation",
         ha="center",
@@ -3824,26 +4061,61 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
         fontsize=3.7,
     )
 
-    _draw_panel_g_track(ax.inset_axes([0.25, 0.56, 0.16, 0.31]), track_kind="dark")
-    basis_ax = ax.inset_axes([0.51, 0.57, 0.08, 0.15])
+    _draw_panel_g_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                dark_center_x,
+                top_center_y,
+                dark_bounds["width"],
+                dark_bounds["height"],
+            )
+        ),
+        track_kind="dark",
+    )
+    basis_width = 0.08
+    basis_ax = ax.inset_axes(
+        [
+            independent_basis_center_x - basis_width / 2.0,
+            0.57,
+            basis_width,
+            0.15,
+        ]
+    )
     _draw_panel_g_basis_icon(basis_ax)
     _draw_panel_g_track(
-        ax.inset_axes([0.76, 0.53, 0.20, 0.36]),
+        ax.inset_axes(
+            _bounds_from_center(
+                light_center_x,
+                top_center_y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="independent_light",
         show_labels=True,
     )
 
-    _draw_panel_g_track(ax.inset_axes([0.25, 0.10, 0.16, 0.31]), track_kind="dark")
-    ax.text(0.47, 0.25, "+", ha="center", va="center", fontsize=8.0)
     _draw_panel_g_track(
-        ax.inset_axes([0.52, 0.08, 0.18, 0.34]),
+        ax.inset_axes(
+            _bounds_from_center(
+                dark_center_x,
+                bottom_center_y,
+                dark_bounds["width"],
+                dark_bounds["height"],
+            )
+        ),
+        track_kind="dark",
+    )
+    ax.text(0.39, 0.25, "+", ha="center", va="center", fontsize=8.0)
+    _draw_panel_g_track(
+        ax.inset_axes([0.44, 0.08, 0.18, 0.34]),
         track_kind="segment_modulation",
         show_labels=True,
     )
     ax.annotate(
         "",
-        xy=(0.77, 0.26),
-        xytext=(0.72, 0.26),
+        xy=(0.67, 0.26),
+        xytext=(0.62, 0.26),
         xycoords=ax.transAxes,
         textcoords=ax.transAxes,
         arrowprops={
@@ -3856,7 +4128,14 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
         },
     )
     _draw_panel_g_track(
-        ax.inset_axes([0.79, 0.08, 0.18, 0.34]),
+        ax.inset_axes(
+            _bounds_from_center(
+                light_center_x,
+                bottom_center_y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="shared_light",
         show_labels=True,
     )
@@ -3892,6 +4171,8 @@ def _plot_panel_g_example_field_axis(
     show_ylabel: bool = False,
     show_title: bool = False,
     show_legend: bool = False,
+    legend_loc: str = "upper right",
+    legend_bbox_to_anchor: tuple[float, float] | None = None,
 ) -> None:
     """Plot empirical and fitted fields for one Panel G example epoch."""
     empirical_position, empirical_rate = example["empirical"][epoch_key]
@@ -3900,7 +4181,7 @@ def _plot_panel_g_example_field_axis(
         empirical_rate,
         color=PANEL_G_EMPIRICAL_COLOR,
         linewidth=0.9,
-        label="Emp.",
+        label="Empirical",
         zorder=4,
     )
     field_key = f"{epoch_key}_hz"
@@ -3923,14 +4204,18 @@ def _plot_panel_g_example_field_axis(
     if show_title:
         ax.set_title(PANEL_QUANT_EPOCH_LABELS[epoch_key], fontsize=4.8, pad=0.8)
     if show_ylabel:
-        ax.set_ylabel("Hz", fontsize=4.4, labelpad=0.8)
+        ax.set_ylabel("FR (Hz)", fontsize=4.4, labelpad=0.8)
     if show_legend:
+        legend_kwargs: dict[str, Any] = {
+            "frameon": False,
+            "fontsize": 3.4,
+            "handlelength": 0.9,
+            "loc": legend_loc,
+        }
+        if legend_bbox_to_anchor is not None:
+            legend_kwargs["bbox_to_anchor"] = legend_bbox_to_anchor
         ax.legend(
-            frameon=False,
-            fontsize=3.8,
-            handlelength=0.9,
-            borderpad=0.1,
-            loc="upper right",
+            **legend_kwargs,
         )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -3949,47 +4234,37 @@ def _plot_panel_g_example_columns(
         ax.text(0.5, 0.5, "No GLM\nexamples", ha="center", va="center", fontsize=5.0)
         return
 
-    ax.text(0.06, 0.99, "Emp.", color=PANEL_G_EMPIRICAL_COLOR, fontsize=3.6, va="top")
-    ax.text(
-        0.16,
-        0.99,
-        "Independent",
-        color=PANEL_G_EXAMPLE_MODEL_COLORS["visual"],
-        fontsize=3.6,
-        va="top",
-    )
-    ax.text(
-        0.34,
-        0.99,
-        "Bump gain",
-        color=PANEL_G_EXAMPLE_MODEL_COLORS["task_segment_bump"],
-        fontsize=3.6,
-        va="top",
-    )
-
-    column_width = 0.47
-    column_gap = 0.06
+    column_width = 0.46
+    column_gap = 0.04
     for example_index, example in enumerate(examples[:2], start=1):
         column_left = (example_index - 1) * (column_width + column_gap)
         y_max = _panel_g_examples_y_max([example])
-        label = (
-            f"Ex. {example_index}: {example['animal_name']} "
-            f"{example['region'].upper()} {example['unit_id']}, "
-            f"{PANEL_TRAJECTORY_LABELS[example['trajectory']]}"
+        icon_ax = ax.inset_axes([column_left - 0.045, 0.23, 0.085, 0.26])
+        draw_w_track_schematic(
+            icon_ax,
+            trajectory_name=example["trajectory"],
+            arrow_color=PANEL_C_TRAJECTORY_COLORS[example["trajectory"]],
+            track_linewidth=0.42,
+            trajectory_linewidth=0.65,
+            arrow_mutation_scale=5.4,
+            fill_track=False,
         )
         ax.text(
-            column_left,
-            0.82,
-            label,
-            ha="left",
+            column_left + 0.29,
+            0.93,
+            f"Example {example_index}",
+            ha="center",
             va="top",
-            fontsize=3.8,
+            fontsize=5.6,
             transform=ax.transAxes,
         )
-        dark_ax = ax.inset_axes([column_left, 0.05, column_width * 0.44, 0.58])
+        plot_left = column_left + 0.12
+        field_width = 0.14
+        dark_ax = ax.inset_axes([plot_left, 0.05, field_width, 0.58])
         light_ax = ax.inset_axes(
-            [column_left + column_width * 0.54, 0.05, column_width * 0.44, 0.58]
+            [plot_left + field_width + 0.035, 0.05, field_width, 0.58]
         )
+        dark_ax.set_facecolor(PANEL_C_DARK_EPOCH_BACKGROUND)
         _plot_panel_g_example_field_axis(
             dark_ax,
             example,
@@ -4004,9 +4279,12 @@ def _plot_panel_g_example_columns(
             epoch_key="light",
             y_max=y_max,
             show_title=True,
+            show_legend=example_index == 2,
+            legend_loc="center left",
+            legend_bbox_to_anchor=(1.02, 0.5),
         )
-        dark_ax.set_xlabel("Norm. TP", fontsize=4.0, labelpad=0.6)
-        light_ax.set_xlabel("Norm. TP", fontsize=4.0, labelpad=0.6)
+        dark_ax.set_xlabel("Norm. path progression", fontsize=3.7, labelpad=0.6)
+        light_ax.set_xlabel("Norm. path progression", fontsize=3.7, labelpad=0.6)
 
 
 def plot_panel_g_model_architecture(
@@ -4233,15 +4511,29 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    ax.text(0.42, 0.98, "Train: AB", ha="center", va="top", fontsize=3.6)
-    ax.text(0.80, 0.98, "Predict: BA", ha="center", va="top", fontsize=3.6)
+
+    def _bounds_from_center(
+        center_x: float,
+        center_y: float,
+        width: float,
+        height: float,
+    ) -> list[float]:
+        return [center_x - width / 2.0, center_y - height / 2.0, width, height]
+
+    train_center_x = 0.36
+    predict_center_x = 0.78
+    light_bounds = {"width": 0.38, "height": 0.23}
+    dark_bounds = {"width": 0.34, "height": 0.21}
+
+    ax.text(train_center_x, 0.98, "Train: AB", ha="center", va="top", fontsize=5.8)
+    ax.text(predict_center_x, 0.98, "Predict: BA", ha="center", va="top", fontsize=5.8)
     ax.text(
         0.08,
         0.72,
         "Independent\nmodel",
         ha="center",
         va="center",
-        fontsize=3.4,
+        fontsize=4.1,
         fontweight="bold",
     )
     ax.text(
@@ -4250,66 +4542,101 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         "Shared-scaffold\nmodel",
         ha="center",
         va="center",
-        fontsize=3.2,
+        fontsize=3.8,
         fontweight="bold",
     )
     _draw_panel_h_track(
-        ax.inset_axes([0.34, 0.58, 0.19, 0.32]),
+        ax.inset_axes(
+            _bounds_from_center(
+                train_center_x,
+                0.725,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="independent_light",
         show_labels=True,
         trajectory_name="center_to_left",
         stimulus_layout="stim1",
         highlighted_segments=(3,),
-        label_fontsize=3.4,
+        label_fontsize=4.8,
     )
     _draw_panel_h_track(
-        ax.inset_axes([0.70, 0.58, 0.20, 0.32]),
+        ax.inset_axes(
+            _bounds_from_center(
+                predict_center_x,
+                0.725,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="independent_light",
         show_labels=True,
         trajectory_name="center_to_right",
         stimulus_layout="stim2",
         highlighted_segments=(3,),
-        label_fontsize=3.4,
+        label_fontsize=4.8,
     )
     ax.text(
-        0.80,
-        0.52,
+        predict_center_x,
+        0.55,
         "\"Light activity is like the other arm\nwith the same visual landmark\"",
         ha="center",
         va="top",
-        fontsize=2.1,
+        fontsize=3.0,
         linespacing=0.9,
     )
     _draw_panel_h_track(
-        ax.inset_axes([0.36, 0.31, 0.16, 0.27]),
+        ax.inset_axes(
+            _bounds_from_center(
+                train_center_x,
+                0.475,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="segment_modulation",
         show_labels=True,
         trajectory_name="center_to_left",
         stimulus_layout="stim1",
         oval_regions=["left_arm"],
-        label_fontsize=3.3,
+        label_fontsize=4.8,
     )
     _draw_panel_h_track(
-        ax.inset_axes([0.36, 0.05, 0.16, 0.27]),
+        ax.inset_axes(
+            _bounds_from_center(
+                train_center_x,
+                0.195,
+                dark_bounds["width"],
+                dark_bounds["height"],
+            )
+        ),
         track_kind="dark",
         trajectory_name="center_to_right",
     )
     _draw_panel_h_track(
-        ax.inset_axes([0.70, 0.13, 0.20, 0.32]),
+        ax.inset_axes(
+            _bounds_from_center(
+                predict_center_x,
+                0.335,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="shared_light",
         show_labels=True,
         trajectory_name="center_to_right",
         stimulus_layout="stim2",
         oval_regions=["right_arm"],
-        label_fontsize=3.4,
+        label_fontsize=4.8,
     )
     ax.text(
-        0.80,
+        predict_center_x,
         0.05,
         "\"Light activity is like the same arm\ndark activity with visual modulation\"",
         ha="center",
         va="bottom",
-        fontsize=2.1,
+        fontsize=3.0,
         linespacing=0.9,
     )
 
@@ -4326,54 +4653,141 @@ def _filter_panel_h_heldout_delta(swap_delta_table: Any) -> Any:
     return table
 
 
-def _plot_panel_h_delta_axis(ax: "Axes", swap_delta_table: Any) -> None:
+def _format_panel_h_delta_summary(values: np.ndarray) -> str:
+    """Return compact fraction-positive and median text for Panel H."""
+    values = np.asarray(values, dtype=float).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return "n/a >0, med. n/a"
+    fraction_positive = float(np.mean(values > 0.0))
+    median = float(np.median(values))
+    return f"{fraction_positive:.0%} >0, med. {median:.2f}"
+
+
+def _plot_panel_h_delta_axis(
+    ax: "Axes",
+    swap_delta_table: Any,
+    *,
+    trajectory_type: str | None = None,
+    show_xticklabels: bool = True,
+    show_yticklabels: bool = True,
+) -> None:
     """Plot held-out 06_r3 segment-bump minus independent delta LL values."""
     heldout_table = _filter_panel_h_heldout_delta(swap_delta_table)
+    if (
+        trajectory_type is not None
+        and heldout_table is not None
+        and "trajectory" in heldout_table
+    ):
+        heldout_table = heldout_table[
+            heldout_table["trajectory"].astype(str) == str(trajectory_type)
+        ]
     values = _finite_column_values(heldout_table, "delta_ll_bits_per_spike")
-    ax.axvline(0.0, color="0.35", linestyle="--", linewidth=0.65, zorder=1)
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.65, zorder=1)
     if values.size:
         x_limits = PANEL_H_DELTA_X_LIMITS
         bin_edges = np.linspace(x_limits[0], x_limits[1], 29)
+        hist_kwargs = OUTLINED_HISTOGRAM_KWARGS.copy()
+        hist_kwargs["edgecolor"] = "none"
+        hist_kwargs["linewidth"] = 0.0
         ax.hist(
             values,
             bins=bin_edges,
             weights=_fraction_histogram_weights(values),
             color=PANEL_G_MODEL_COLORS["task_segment_bump"],
-            **OUTLINED_HISTOGRAM_KWARGS,
+            **hist_kwargs,
             zorder=2,
         )
-        median_value = float(np.nanmedian(values))
-        ax.axvline(
-            median_value,
-            color=PANEL_G_MODEL_COLORS["task_segment_bump"],
-            linewidth=0.9,
-            zorder=3,
-        )
         ax.text(
-            0.97,
-            0.95,
-            f"n={values.size}\nmed={median_value:.2f}\nfrac>0={np.mean(values > 0.0):.2f}",
-            ha="right",
+            0.62,
+            0.92,
+            _format_panel_h_delta_summary(values),
+            ha="left",
             va="top",
-            fontsize=4.7,
+            fontsize=3.4,
+            color=PANEL_G_MODEL_COLORS["task_segment_bump"],
             transform=ax.transAxes,
         )
         ax.set_xlim(*x_limits)
     else:
         ax.text(0.5, 0.5, "No swap\nvalues", ha="center", va="center")
         ax.set_xlim(*PANEL_H_DELTA_X_LIMITS)
-    ax.set_xlabel("Segment bump - independent LL\n(bits/spike)", fontsize=4.9, labelpad=1.2)
-    ax.set_ylabel("Frac. traj-units", fontsize=4.9, labelpad=1.2)
-    ax.set_title(f"Held-out {PANEL_H_HELDOUT_LIGHT_EPOCH}", fontsize=5.0, pad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(labelsize=4.6, length=1.4, pad=0.8)
+    if not show_xticklabels:
+        ax.tick_params(labelbottom=False)
+    if not show_yticklabels:
+        ax.tick_params(labelleft=False)
+    ax.tick_params(labelsize=3.4, length=1.0, pad=0.6)
+
+
+def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
+    """Plot Panel H delta LL histograms split by trajectory."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    grid_bounds = (
+        (0.08, 0.55, 0.40, 0.31),
+        (0.56, 0.55, 0.40, 0.31),
+        (0.08, 0.12, 0.40, 0.31),
+        (0.56, 0.12, 0.40, 0.31),
+    )
+    for trajectory_index, (trajectory_type, bounds) in enumerate(
+        zip(PANEL_H_DELTA_TRAJECTORIES, grid_bounds, strict=True)
+    ):
+        icon_ax = ax.inset_axes(
+            [
+                bounds[0] + bounds[2] * 0.31,
+                bounds[1] + bounds[3] + 0.008,
+                bounds[2] * 0.38,
+                0.105,
+            ]
+        )
+        draw_w_track_schematic(
+            icon_ax,
+            trajectory_name=trajectory_type,
+            arrow_color=PANEL_C_TRAJECTORY_COLORS[trajectory_type],
+            track_linewidth=0.42,
+            trajectory_linewidth=0.68,
+            arrow_mutation_scale=5.4,
+            fill_track=False,
+        )
+        delta_ax = ax.inset_axes(bounds)
+        _plot_panel_h_delta_axis(
+            delta_ax,
+            swap_delta_table,
+            trajectory_type=trajectory_type,
+            show_xticklabels=trajectory_index >= 2,
+            show_yticklabels=trajectory_index in (0, 2),
+        )
+
+    ax.text(
+        0.53,
+        0.02,
+        "Delta log likelihood (bits/spike)",
+        ha="center",
+        va="bottom",
+        fontsize=4.3,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.01,
+        0.52,
+        "Frac. traj-units",
+        ha="left",
+        va="center",
+        rotation=90,
+        fontsize=4.3,
+        transform=ax.transAxes,
+    )
 
 
 def _plot_panel_h_switched_segment_example(
     ax: "Axes",
     swap_example: dict[str, Any] | None,
     *,
+    example_label: str | None = None,
     show_xlabel: bool = True,
     show_ylabel: bool = True,
     show_legend: bool = True,
@@ -4429,16 +4843,38 @@ def _plot_panel_h_switched_segment_example(
         ax.tick_params(labelbottom=False)
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
+    delta_ll = swap_example.get("delta_ll_bits_per_spike")
+    delta_label = ""
+    if delta_ll is not None and np.isfinite(float(delta_ll)):
+        delta_label = f"ΔLL={float(delta_ll):.2f}"
+        ax.text(
+            0.04,
+            0.06,
+            delta_label,
+            ha="left",
+            va="bottom",
+            fontsize=3.8,
+            transform=ax.transAxes,
+        )
     ax.set_title(
-        f"{swap_example['animal_name']} {swap_example['region'].upper()} {swap_example['unit_id']}\n"
-        f"{PANEL_TRAJECTORY_LABELS[swap_example['trajectory']]}",
-        fontsize=4.5,
+        "Example" if example_label is None else example_label,
+        fontsize=5.0,
         pad=0.8,
+    )
+    icon_ax = ax.inset_axes([-0.35, 0.32, 0.28, 0.34])
+    draw_w_track_schematic(
+        icon_ax,
+        trajectory_name=swap_example["trajectory"],
+        arrow_color=PANEL_C_TRAJECTORY_COLORS[swap_example["trajectory"]],
+        track_linewidth=0.34,
+        trajectory_linewidth=0.55,
+        arrow_mutation_scale=4.8,
+        fill_track=False,
     )
     if show_xlabel:
         ax.set_xlabel("Switched segment", fontsize=4.5, labelpad=0.8)
     if show_ylabel:
-        ax.set_ylabel("Hz", fontsize=4.5, labelpad=0.8)
+        ax.set_ylabel("FR (Hz)", fontsize=4.5, labelpad=0.8)
     if show_legend:
         ax.legend(frameon=False, fontsize=3.4, handlelength=0.9, loc="upper right")
     ax.spines["top"].set_visible(False)
@@ -4455,20 +4891,21 @@ def plot_panel_h_swap_delta(
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    schematic_ax = ax.inset_axes([0.00, 0.19, 0.43, 0.64])
-    delta_ax = ax.inset_axes([0.47, 0.13, 0.22, 0.70])
+    schematic_ax = ax.inset_axes(PANEL_H_SCHEMATIC_AXIS_BOUNDS)
+    delta_ax = ax.inset_axes(PANEL_H_DELTA_AXIS_BOUNDS)
     example_axes = [
-        ax.inset_axes([0.75, 0.55, 0.24, 0.36]),
-        ax.inset_axes([0.75, 0.10, 0.24, 0.36]),
+        ax.inset_axes([0.82, 0.56, 0.17, 0.34]),
+        ax.inset_axes([0.82, 0.11, 0.17, 0.34]),
     ]
     _draw_panel_h_swap_schematic(schematic_ax)
-    _plot_panel_h_delta_axis(delta_ax, swap_delta_table)
+    _plot_panel_h_delta_grid(delta_ax, swap_delta_table)
     examples = _coerce_panel_h_swap_examples(swap_examples)[:2]
     for example_index, example_ax in enumerate(example_axes):
         example = examples[example_index] if example_index < len(examples) else None
         _plot_panel_h_switched_segment_example(
             example_ax,
             example,
+            example_label=f"Example {example_index + 1}",
             show_xlabel=example_index == 1,
             show_ylabel=example_index == 0,
             show_legend=example_index == 0,
@@ -4556,11 +4993,24 @@ def make_figure_3(
         middle_grid[0, 1],
         regions=regions,
     )
-    bottom_grid = outer_grid[2, 0].subgridspec(nrows=1, ncols=3)
-    panel_d_axis = fig.add_subplot(bottom_grid[0, 0])
-    panel_e_axis = fig.add_subplot(bottom_grid[0, 1])
+    bottom_grid = outer_grid[2, 0].subgridspec(
+        nrows=1,
+        ncols=3,
+        width_ratios=PANEL_DEF_WIDTH_RATIOS,
+        wspace=PANEL_DEF_WSPACE,
+    )
+    panel_d_container_axis = fig.add_subplot(bottom_grid[0, 0])
+    panel_e_container_axis = fig.add_subplot(bottom_grid[0, 1])
     panel_f_axis = fig.add_subplot(bottom_grid[0, 2])
-    glm_grid = outer_grid[3, 0].subgridspec(nrows=1, ncols=2, width_ratios=[1.0, 1.0])
+    panel_d_container_axis.axis("off")
+    panel_e_container_axis.axis("off")
+    panel_d_axis = panel_d_container_axis.inset_axes(PANEL_D_AXIS_BOUNDS)
+    panel_e_axis = panel_e_container_axis.inset_axes(PANEL_E_AXIS_BOUNDS)
+    glm_grid = outer_grid[3, 0].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=PANEL_GH_WIDTH_RATIOS,
+    )
     panel_g_axis = fig.add_subplot(glm_grid[0, 0])
     panel_h_axis = fig.add_subplot(glm_grid[0, 1])
 
@@ -4681,28 +5131,41 @@ def make_figure_3(
         rotation=90,
     )
     label_axis(panel_a_axis, "A", x=-0.02, y=1.00)
-    label_axis(panel_b["corner_axis"], "C", x=-0.12, y=1.04)
-    label_axis(panel_c_axis, "B", x=-0.07, y=1.04)
-    label_axis(panel_d_axis, "D", x=-0.18, y=1.12)
-    label_axis(panel_e_axis, "E", x=-0.06, y=1.02)
-    label_axis(panel_f_axis, "F", x=-0.06, y=1.02)
+    label_axis(panel_b["corner_axis"], "C", x=-0.12, y=0.52)
+    label_axis(panel_c_axis, "B", x=-0.07, y=1.267)
+    label_axis(panel_d_container_axis, "D", x=0.00, y=0.98)
+    label_axis(panel_e_container_axis, "E", x=0.00, y=0.98)
+    label_axis(panel_f_axis, "F", x=0.00, y=0.98)
     label_axis(panel_g_axis, "G", x=-0.035, y=1.02)
     label_axis(panel_h_axis, "H", x=-0.06, y=1.02)
+    panel_c_axis.text(
+        0.5,
+        PANEL_B_TITLE_Y,
+        "Example DPP cells in\ndifferent visual conditions",
+        ha="center",
+        va="top",
+        fontsize=7.2,
+        linespacing=1.0,
+        transform=panel_c_axis.transAxes,
+        clip_on=False,
+    )
     panel_a_axis.set_title(
         "Example visual cell in different visual conditions",
         fontsize=8,
         pad=2,
     )
-    panel_c_axis.set_title(
-        "Example DPP cells in\ndifferent visual conditions",
-        fontsize=7.2,
-        pad=1,
-    )
     panel_d_axis.set_title("Same-turn tuning similarity", fontsize=8, pad=5)
     panel_e_axis.set_title("Encoding comparison", fontsize=8, pad=2)
-    panel_f_axis.set_title("Decoding error", fontsize=8, pad=2)
-    panel_g_axis.set_title("Dark-light GLM models", fontsize=8, pad=2)
-    panel_h_axis.set_title("Swapped segment LL", fontsize=8, pad=2)
+    panel_g_axis.set_title(
+        "Two possible models that relate dark and light activity",
+        fontsize=8,
+        pad=2,
+    )
+    panel_h_axis.set_title(
+        "Predicting activity in held-out light epoch",
+        fontsize=8,
+        pad=2,
+    )
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)

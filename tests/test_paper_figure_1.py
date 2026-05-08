@@ -27,7 +27,6 @@ from v1ca1.paper_figures.figure_1 import (
     DEFAULT_REGIONS,
     DEFAULT_TOP_ROW_HEIGHT_MM,
     DECODING_COMPARISON_RELATIVE_DIR,
-    DECODING_ANIMAL_COLORS,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
     DECODING_EXAMPLE_TEST_TRAJECTORIES,
     DECODING_EXAMPLE_TRAIN_TRAJECTORY,
@@ -61,6 +60,7 @@ from v1ca1.paper_figures.figure_1 import (
     PANEL_E_RASTER_TRAJECTORY_LAYOUT,
     PANEL_E_TICK_LABEL_FONTSIZE,
     PANEL_E_TRAJECTORY_COLORS,
+    PANEL_H_DECODING_ANIMALS,
     PANEL_D_CACHE_VERSION,
     SCHEMATIC_COLORS,
     STABILITY_AXIS_LABEL_FONTSIZE,
@@ -87,6 +87,7 @@ from v1ca1.paper_figures.figure_1 import (
     draw_w_track_cycle_panel,
     find_encoding_summary_path,
     find_motor_nested_cv_path,
+    filter_datasets_by_animals,
     format_place_bin_size_token,
     get_cross_trajectory_decoding_tsd_paths,
     get_decoding_comparison_dir,
@@ -132,6 +133,24 @@ def test_parse_dataset_id_requires_animal_and_date() -> None:
 
     with pytest.raises(argparse.ArgumentTypeError, match="animal:date"):
         parse_dataset_id("L14")
+
+
+def test_filter_datasets_by_animals_normalizes_and_keeps_requested_animals() -> None:
+    datasets = [
+        ("L12", "20240421"),
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "02_r1", "10_r5", "07_s4"),
+        ("L19", "20250930", "08_r4"),
+    ]
+
+    filtered = filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS)
+
+    assert filtered == [
+        ("L12", "20240421", "08_r4"),
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+        ("L19", "20250930", "08_r4"),
+    ]
 
 
 def test_build_output_path_uses_requested_format() -> None:
@@ -1300,11 +1319,11 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
     assert "Motor+DPP better" in text_labels
-    assert "Motor+DPP > motor\n50% >0, med. 0.10" in text_labels
+    assert "50% >0, med. 0.10" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
     assert ax.texts[0].get_position()[0] == pytest.approx(0.03)
-    assert ax.texts[1].get_horizontalalignment() == "right"
-    assert ax.texts[1].get_position()[0] == pytest.approx(0.97)
+    assert ax.texts[1].get_horizontalalignment() == "left"
+    assert ax.texts[1].get_position()[0] == pytest.approx(0.68)
     assert ax.texts[2].get_horizontalalignment() == "left"
     assert ax.texts[2].get_position()[0] == pytest.approx(0.68)
     assert ax.texts[2].get_bbox_patch() is None
@@ -1423,18 +1442,13 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
         for text in plot_ax.get_xticklabels()
     )
     assert len(plot_ax.lines) == 0
-    assert len(plot_ax.collections) == 2 * len(animals)
+    assert len(plot_ax.collections) == 2
     legend = plot_ax.get_legend()
-    assert legend is not None
-    assert legend._loc == 2
-    assert [text.get_text() for text in legend.get_texts()] == list(animals)
-    animal_scatter = [
-        collection for collection in plot_ax.collections if collection.get_label() in animals
-    ]
-    for collection, animal_name in zip(animal_scatter, animals, strict=True):
-        assert tuple(collection.get_facecolors()[0]) == pytest.approx(
-            to_rgba(DECODING_ANIMAL_COLORS[animal_name])
-        )
+    assert legend is None
+    scatter = plot_ax.collections[1]
+    assert tuple(scatter.get_facecolors()[0]) == pytest.approx(
+        to_rgba(figure_1_module.REGION_COLORS["v1"])
+    )
     assert len(ax.patches) == 0
     assert len(schematic_axes) == 1 + len(DECODING_CROSS_TRAJECTORY_COMPARISONS)
     assert all(

@@ -28,6 +28,7 @@ from v1ca1.paper_figures.figure_2 import (
     compute_significance_distribution_comparison,
     draw_neuron_scale_bar,
     draw_ripple_glm_schematic,
+    format_glm_model_window_suffix,
     format_ridge_strength_suffix,
     format_ripple_window_suffix,
     get_encoding_comparison_summary_path,
@@ -35,12 +36,14 @@ from v1ca1.paper_figures.figure_2 import (
     HEATMAP_EPOCH_ORDER,
     get_ripple_event_path,
     get_ripple_glm_path,
+    get_ripple_glm_model_window_path,
     get_ripple_lfp_path,
     get_ripple_modulation_paths,
     get_ripple_decoding_comparison_summary_path,
     get_screen_xcorr_paths,
     get_tuning_similarity_path,
     load_glm_behavior_association_tables,
+    load_glm_offset_panel_tables,
     load_example_glm_prediction,
     load_example_ripple_lfp_trace,
     load_first_available_glm_prediction,
@@ -58,6 +61,7 @@ from v1ca1.paper_figures.figure_2 import (
     plot_epoch_ripple_heatmap_panel,
     plot_glm_behavior_association_panel,
     plot_glm_analysis_panel,
+    plot_glm_offset_panel,
     plot_modulation_index_panel,
     plot_observed_predicted_panel,
     plot_peri_ripple_heatmap_panel,
@@ -143,6 +147,41 @@ def test_ripple_glm_path_matches_samplewise_output_name(tmp_path: Path) -> None:
         / "20240611"
         / "ripple_glm"
         / "08_r4_rw_0p2s_allripples_ridge_1e-1_samplewise_ripple_glm.nc"
+    )
+
+
+def test_ripple_glm_model_window_path_matches_asymmetric_output_name(
+    tmp_path: Path,
+) -> None:
+    assert (
+        format_glm_model_window_suffix(
+            source_window_s=0.2,
+            source_window_offset_s=0.0,
+            target_window_s=0.2,
+            target_window_offset_s=0.2,
+        )
+        == "src_rw_0p2s_tgt_rw_0p2s_off_0p2s"
+    )
+
+    path = get_ripple_glm_model_window_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="02_r1",
+        source_window_s=0.2,
+        source_window_offset_s=0.0,
+        target_window_s=0.2,
+        target_window_offset_s=0.2,
+        ripple_selection="allripples",
+        ridge_strength=1e-1,
+    )
+
+    assert path == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple_glm"
+        / "02_r1_src_rw_0p2s_tgt_rw_0p2s_off_0p2s_allripples_ridge_1e-1_samplewise_ripple_glm.nc"
     )
 
 
@@ -465,6 +504,39 @@ def test_draw_neuron_scale_bar_uses_data_height() -> None:
     plt.close(fig)
 
 
+def test_plot_epoch_ripple_heatmap_panel_scales_region_height_by_unit_count() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pd.DataFrame(
+        {
+            "region": ["v1"] * 6 + ["ca1"] * 2,
+            "unit_id": [1, 1, 2, 2, 3, 3, 101, 101],
+            "time_s": [-0.02, 0.0] * 4,
+            "mean_rate_hz": [1.0, 2.0, 2.0, 1.0, 3.0, 4.0, 1.5, 2.5],
+        }
+    )
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "firing_rate_table": table,
+            "summary_table": None,
+        }
+    ]
+
+    fig, ax = plt.subplots()
+    plot_epoch_ripple_heatmap_panel(ax, epoch_tables, regions=("v1", "ca1"))
+    fig.canvas.draw()
+
+    v1_height = ax.child_axes[0].get_position().height
+    ca1_height = ax.child_axes[1].get_position().height
+    assert v1_height / ca1_height == pytest.approx(3.0)
+    plt.close(fig)
+
+
 def _write_ripple_glm_dataset(
     tmp_path: Path,
     *,
@@ -501,6 +573,39 @@ def _write_ripple_glm_dataset(
     return path
 
 
+def _write_ripple_glm_offset_dataset(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str,
+    target_window_offset_s: float,
+) -> Path:
+    xr = pytest.importorskip("xarray")
+    path = get_ripple_glm_model_window_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        source_window_s=0.2,
+        source_window_offset_s=0.0,
+        target_window_s=0.2,
+        target_window_offset_s=target_window_offset_s,
+        ripple_selection="allripples",
+        ridge_strength=1e-1,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        data_vars={
+            "ripple_devexp_mean": (("unit",), np.array([0.1, 0.2, -0.1])),
+            "ripple_devexp_p_value": (("unit",), np.array([0.01, 0.2, 0.03])),
+        },
+        coords={"unit": np.array([11, 12, 13])},
+        attrs={"n_ripples_after_selection": 5},
+    ).to_netcdf(path)
+    return path
+
+
 def test_load_ripple_glm_summary_table_reads_per_unit_metrics(tmp_path: Path) -> None:
     path = _write_ripple_glm_dataset(tmp_path)
 
@@ -514,6 +619,78 @@ def test_load_ripple_glm_summary_table_reads_per_unit_metrics(tmp_path: Path) ->
     assert np.allclose(table["ripple_devexp_p_value"], [0.2, 0.01])
     assert table["n_ripples"].tolist() == [3, 3]
     assert table["source_path"].tolist() == [str(path), str(path)]
+
+
+def test_load_glm_offset_panel_tables_uses_complete_offset_sets(
+    tmp_path: Path,
+) -> None:
+    for epoch in ("02_r1", "08_r4", "07_s4"):
+        for target_offset_s in (-0.4, -0.2, 0.0, 0.2):
+            _write_ripple_glm_offset_dataset(
+                tmp_path,
+                epoch=epoch,
+                target_window_offset_s=target_offset_s,
+            )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    summary_table = payload["summary_table"]
+    unit_table = payload["unit_table"]
+    assert payload["missing_artifacts"] == []
+    assert payload["skipped_comparisons"] == []
+    assert len(summary_table) == 12
+    assert len(unit_table) == 36
+    assert set(summary_table["epoch_type"]) == {"light", "dark", "sleep"}
+    assert set(summary_table["target_window_offset_s"]) == {-0.4, -0.2, 0.0, 0.2}
+    assert np.allclose(summary_table["fraction_significant_positive"], 1.0 / 3.0)
+    assert np.allclose(summary_table["median_devexp_significant"], 0.1)
+
+
+def test_load_glm_offset_panel_tables_can_select_light_epoch_only(
+    tmp_path: Path,
+) -> None:
+    for target_offset_s in (-0.4, -0.2, 0.0, 0.2):
+        _write_ripple_glm_offset_dataset(
+            tmp_path,
+            epoch="02_r1",
+            target_window_offset_s=target_offset_s,
+        )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+        epoch_types=("light",),
+    )
+
+    summary_table = payload["summary_table"]
+    assert payload["missing_artifacts"] == []
+    assert payload["skipped_comparisons"] == []
+    assert len(summary_table) == 4
+    assert set(summary_table["epoch_type"]) == {"light"}
+
+
+def test_load_glm_offset_panel_tables_skips_incomplete_offset_sets(
+    tmp_path: Path,
+) -> None:
+    for target_offset_s in (-0.4, -0.2, 0.0):
+        _write_ripple_glm_offset_dataset(
+            tmp_path,
+            epoch="02_r1",
+            target_window_offset_s=target_offset_s,
+        )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    assert payload["summary_table"].empty
+    assert payload["unit_table"].empty
+    assert payload["missing_artifacts"]
+    assert payload["skipped_comparisons"][0]["epoch_type"] == "light"
 
 
 def test_load_glm_epoch_summary_tables_reads_light_dark_sleep(tmp_path: Path) -> None:
@@ -594,12 +771,46 @@ def _write_tuning_similarity_table(
     return path
 
 
+def _write_motor_nested_cv_dataset(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str = "08_r4",
+) -> Path:
+    xr = pytest.importorskip("xarray")
+    path = (
+        tmp_path
+        / animal_name
+        / date
+        / "task_progression"
+        / "motor"
+        / "nested_lap_cv"
+        / f"v1_{epoch}_nested_lapcv_bin0p05s_tp40_zscore_outer5_inner3_ridge0p1-1em06n6.nc"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        data_vars={
+            "pooled_delta_bits_per_spike": (
+                ("delta_metric", "unit"),
+                np.array([[0.05, -0.02]], dtype=float),
+            ),
+        },
+        coords={
+            "delta_metric": np.array(["dll_motor_tp_vs_motor_bits_per_spike"], dtype=object),
+            "unit": np.array([11, 12]),
+        },
+    ).to_netcdf(path)
+    return path
+
+
 def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     tmp_path: Path,
 ) -> None:
     for epoch in ("02_r1", "08_r4", "07_s4"):
         _write_ripple_glm_dataset(tmp_path, epoch=epoch)
     _write_tuning_similarity_table(tmp_path)
+    _write_motor_nested_cv_dataset(tmp_path)
 
     payload = load_glm_behavior_association_tables(
         tmp_path,
@@ -613,6 +824,7 @@ def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     assert set(similarity_table["tuning_epoch"]) == {"08_r4"}
     assert sorted(similarity_table["unit"].unique().tolist()) == [11, 12]
     assert sorted(similarity_table["same_turn_tuning_similarity"].unique().tolist()) == [0.3, 0.6]
+    assert sorted(similarity_table["motor_dpp_advantage_bits_per_spike"].unique().tolist()) == [-0.02, 0.05]
 
 
 def test_load_glm_behavior_association_tables_reports_missing_tuning(
@@ -885,6 +1097,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
                 ],
                 "same_turn_tuning_similarity": [0.1, 0.5, 0.7, 0.9, 0.7, 0.8, 0.4, 0.9],
                 "firing_rate_hz": [1.0, 2.5, 4.5, 9.0, 5.0, 8.0, 3.5, 12.0],
+                "motor_dpp_advantage_bits_per_spike": [0.0, 0.03, 0.08, 0.12, 0.02, 0.04, -0.01, 0.06],
                 "ripple_devexp_mean": [0.05, 0.2, 0.3, 0.4, 0.1, 0.3, 0.15, 0.25],
                 "ripple_devexp_p_value": [0.01, 0.01, 0.03, 0.02, 0.03, 0.4, 0.02, 0.6],
             }
@@ -913,6 +1126,36 @@ def test_plot_helpers_draw_expected_axes() -> None:
         ),
         "categorical_metrics": (("place", "turn_group"), ("place", "arm_identity")),
         "missing_artifacts": [],
+    }
+    offset_payload = {
+        "summary_table": pd.DataFrame(
+            {
+                "animal_name": ["L14"] * 8,
+                "date": ["20240611"] * 8,
+                "epoch": ["02_r1"] * 4 + ["08_r4"] * 4,
+                "epoch_type": ["light"] * 4 + ["dark"] * 4,
+                "epoch_label": ["Light run"] * 4 + ["Dark run"] * 4,
+                "target_window_offset_s": [-0.4, -0.2, 0.0, 0.2] * 2,
+                "target_window_label": [
+                    "-400 to -200",
+                    "-200 to 0",
+                    "0 to 200",
+                    "200 to 400",
+                ]
+                * 2,
+                "fraction_significant_positive": [0.1, 0.2, 0.3, 0.25, 0.05, 0.1, 0.2, 0.15],
+                "median_devexp_significant": [0.03, 0.04, 0.06, 0.05, 0.02, 0.03, 0.04, 0.035],
+                "n_units": [10] * 8,
+                "n_significant_positive": [1, 2, 3, 2, 1, 1, 2, 2],
+            }
+        ),
+        "unit_table": pd.DataFrame(),
+        "missing_artifacts": [],
+        "skipped_comparisons": [],
+        "target_window_offsets_s": (-0.4, -0.2, 0.0, 0.2),
+        "source_window_s": 0.2,
+        "source_window_offset_s": 0.0,
+        "target_window_s": 0.2,
     }
 
     epoch_tables = [
@@ -961,6 +1204,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(axes[2, 1].images) == 0
     assert len(axes[2, 1].child_axes) == 3
     assert all(len(child_axis.images) == 1 for child_axis in axes[2, 1].child_axes[:2])
+    assert all(child_axis.get_xlabel() == "" for child_axis in axes[2, 1].child_axes[:2])
+    assert "Lag (s)" in [text.get_text() for text in axes[2, 1].texts]
     assert len(axes[1, 0].patches) >= 3
     assert len(axes[1, 1].collections) == 1
     assert len(axes[1, 2].collections) == 1
@@ -975,17 +1220,26 @@ def test_plot_helpers_draw_expected_axes() -> None:
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
-    assert len(ax.child_axes) == 2
+    assert len(ax.child_axes) == 3
     assert ax.child_axes[0].get_ylabel() == "Dark DPP\ncorr."
     assert ax.child_axes[1].get_ylabel() == "Dark FR\n(Hz)"
+    assert ax.child_axes[2].get_ylabel() == "DPP model\nadv."
     assert ax.child_axes[1].get_yscale() == "log"
     assert ax.child_axes[1].yaxis.get_label_position() == "left"
     assert ax.texts[-1].get_text() == "Light deviance quartile\n(p<0.05, devexp>0)"
     assert len(ax.child_axes[0].collections) == 1
     assert len(ax.child_axes[1].collections) == 1
+    assert len(ax.child_axes[2].collections) == 1
     assert len(ax.child_axes[0].lines) >= 3
     assert len(ax.child_axes[1].lines) >= 3
+    assert len(ax.child_axes[2].lines) >= 3
     assert [tick.get_text() for tick in ax.child_axes[0].get_xticklabels()] == [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+    ]
+    assert [tick.get_text() for tick in ax.child_axes[2].get_xticklabels()] == [
         "Q1",
         "Q2",
         "Q3",
@@ -1001,6 +1255,13 @@ def test_plot_helpers_draw_expected_axes() -> None:
         "Arm",
     ]
     assert ax.child_axes[1].get_xlabel() == "Decode epoch"
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_offset_panel(ax, offset_payload)
+    assert len(ax.child_axes) == 2
+    assert ax.child_axes[0].get_title() == "CA1 0-200 ms -> V1 target window"
+    assert ax.child_axes[1].get_xlabel() == "V1 target window (ms)"
     plt.close(fig)
 
 

@@ -31,6 +31,7 @@ from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures.datasets import (
     DEFAULT_DARK_EPOCH,
     DatasetId,
+    FigureEpochDatasetId,
     get_dataset_dark_epoch,
     get_processed_datasets,
     make_dataset_id,
@@ -91,6 +92,7 @@ DEFAULT_PANEL_E_WIDTH_FRACTION = 0.3
 DEFAULT_PANEL_F_WIDTH_FRACTION = 1.0 / 3.0
 DEFAULT_PANEL_G_WIDTH_FRACTION = 1.0 / 3.0
 DEFAULT_PANEL_H_WIDTH_FRACTION = 1.0 / 3.0
+PANEL_H_DECODING_ANIMALS = ("L12", "L14", "L15", "L19")
 BOTTOM_ROW_PANEL_WSPACE = 0.05
 HEATMAP_COLORBAR_PAD = 0.001
 HEATMAP_COLORBAR_LABEL_FONTSIZE = 4.9
@@ -780,6 +782,19 @@ def load_decoding_absolute_error_table(
     if not tables:
         return pd.DataFrame(columns=DECODING_ABSOLUTE_ERROR_TABLE_COLUMNS)
     return pd.concat(tables, axis=0, ignore_index=True)
+
+
+def filter_datasets_by_animals(
+    datasets: Sequence[DatasetId | FigureEpochDatasetId | tuple[str, str]],
+    animal_names: Sequence[str],
+) -> list[DatasetId]:
+    """Return normalized data-set IDs for selected animals."""
+    selected_animals = {str(animal_name) for animal_name in animal_names}
+    return [
+        normalized_dataset
+        for dataset in datasets
+        if (normalized_dataset := normalize_dataset_id(dataset))[0] in selected_animals
+    ]
 
 
 def load_dark_epoch_stability_table(
@@ -2273,15 +2288,20 @@ def _format_delta_summary(values: np.ndarray, *, label: str | None = None) -> st
     return f"{prefix}frac >0: {fraction_positive:.2f}\nmedian: {median:.2f}"
 
 
-def _format_delta_advantage_summary(values: np.ndarray, *, label: str) -> str:
+def _format_delta_advantage_summary(
+    values: np.ndarray,
+    *,
+    label: str | None = None,
+) -> str:
     """Return compact DPP-side summary text for delta log-likelihood values."""
     values = np.asarray(values, dtype=float).reshape(-1)
     values = values[np.isfinite(values)]
+    prefix = "" if label is None else f"{label}\n"
     if values.size == 0:
-        return f"{label}\nn/a >0, med. n/a"
+        return f"{prefix}n/a >0, med. n/a"
     fraction_positive = float(np.mean(values > 0.0))
     median = float(np.median(values))
-    return f"{label}\n{fraction_positive:.0%} >0, med. {median:.2f}"
+    return f"{prefix}{fraction_positive:.0%} >0, med. {median:.2f}"
 
 
 def build_zero_including_histogram_bins(
@@ -2469,10 +2489,10 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.text(
-        0.97,
+        0.68,
         0.97,
         "Motor+DPP better",
-        ha="right",
+        ha="left",
         va="top",
         fontsize=5.5,
         transform=ax.transAxes,
@@ -2480,7 +2500,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     ax.text(
         0.68,
         0.74,
-        _format_delta_advantage_summary(values, label="Motor+DPP > motor"),
+        _format_delta_advantage_summary(values),
         ha="left",
         va="top",
         fontsize=4.8,
@@ -2616,7 +2636,7 @@ def plot_decoding_error_panel(
         tuple[str, str, str, Sequence[tuple[str, str]]]
     ] = DECODING_CROSS_TRAJECTORY_COMPARISONS,
 ) -> None:
-    """Plot animal-level median and IQR cross-trajectory decoding errors."""
+    """Plot pooled median and IQR cross-trajectory decoding errors."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -2624,55 +2644,34 @@ def plot_decoding_error_panel(
     plot_ax = ax.inset_axes([0.0, 0.0, 1.0, 1.0])
     positions = np.arange(1, len(comparisons) + 1, dtype=float)
     labels = [label for _comparison, label, _family, _pairs in comparisons]
-    if "animal_name" in decoding_error_table.columns:
-        plot_table = decoding_error_table.copy()
-        plot_table["_plot_animal_name"] = plot_table["animal_name"].astype(str)
-        animal_names = list(
-            dict.fromkeys(plot_table["_plot_animal_name"].dropna().astype(str))
-        )
-    else:
-        plot_table = decoding_error_table.copy()
-        plot_table["_plot_animal_name"] = "pooled"
-        animal_names = ["pooled"]
-    if not animal_names:
-        animal_names = ["pooled"]
-
-    offsets = np.zeros(len(animal_names), dtype=float)
-    if len(animal_names) > 1:
-        offsets = np.linspace(-0.18, 0.18, len(animal_names))
-
-    plotted_any = False
-    for animal_index, (animal_name, offset) in enumerate(
-        zip(animal_names, offsets, strict=True)
+    plot_table = decoding_error_table.copy()
+    medians = []
+    q25_values = []
+    q75_values = []
+    plot_positions = []
+    for position, (comparison, _label, _family, _pairs) in zip(
+        positions,
+        comparisons,
+        strict=True,
     ):
-        medians = []
-        q25_values = []
-        q75_values = []
-        plot_positions = []
-        for position, (comparison, _label, _family, _pairs) in zip(
-            positions,
-            comparisons,
-            strict=True,
-        ):
-            values = np.asarray(
-                plot_table.loc[
-                    (plot_table["_plot_animal_name"].astype(str) == animal_name)
-                    & (plot_table["comparison"].astype(str) == comparison),
-                    "absolute_error",
-                ],
-                dtype=float,
-            )
-            values = values[np.isfinite(values)]
-            if values.size == 0:
-                continue
-            medians.append(float(np.median(values)))
-            q25_values.append(float(np.quantile(values, 0.25)))
-            q75_values.append(float(np.quantile(values, 0.75)))
-            plot_positions.append(float(position) + float(offset))
-
-        if not medians:
+        values = np.asarray(
+            plot_table.loc[
+                plot_table["comparison"].astype(str) == comparison,
+                "absolute_error",
+            ],
+            dtype=float,
+        )
+        values = values[np.isfinite(values)]
+        if values.size == 0:
             continue
-        color = DECODING_ANIMAL_COLORS.get(animal_name, f"C{animal_index}")
+        medians.append(float(np.median(values)))
+        q25_values.append(float(np.quantile(values, 0.25)))
+        q75_values.append(float(np.quantile(values, 0.75)))
+        plot_positions.append(float(position))
+
+    plotted_any = bool(medians)
+    if plotted_any:
+        color = REGION_COLORS.get(DECODING_COMPARISON_REGION, REGION_COLORS["v1"])
         plot_ax.vlines(
             plot_positions,
             q25_values,
@@ -2689,10 +2688,8 @@ def plot_decoding_error_panel(
             s=14,
             edgecolors="black",
             linewidths=0.3,
-            label=animal_name,
             zorder=4,
         )
-        plotted_any = True
 
     if not plotted_any:
         plot_ax.text(
@@ -2702,15 +2699,6 @@ def plot_decoding_error_panel(
             ha="center",
             va="center",
             transform=plot_ax.transAxes,
-        )
-    else:
-        plot_ax.legend(
-            frameon=False,
-            fontsize=5.2,
-            loc="upper left",
-            handlelength=1.0,
-            borderpad=0.1,
-            labelspacing=0.2,
         )
 
     plot_ax.set_xticks(positions)
@@ -3113,7 +3101,7 @@ def make_figure_1(
     label_axis(panel_g_axis, "G", x=-0.08, y=1.02)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
-        datasets=datasets,
+        datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
         region=DECODING_COMPARISON_REGION,
     )
     plot_decoding_error_panel(panel_h_axis, decoding_error_table)
