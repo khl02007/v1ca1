@@ -80,6 +80,7 @@ DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_ASSET_DIR = Path("paper_figures") / "assets" / "figure_1"
 DEFAULT_PROBE_ASSET_NAME = "probe.jpg"
 DEFAULT_HISTOLOGY_ASSET_NAME = "histology.svg"
+DEFAULT_BEHAVIOR_ASSET_NAME = "behavior.png"
 DEFAULT_POSITION_BIN_COUNT = 50
 DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
@@ -217,6 +218,7 @@ DECODING_SCHEMATIC_HEIGHT = 0.198
 DECODING_TRAIN_LABEL_Y = -0.32
 DECODING_YLABEL_FONTSIZE = 7.6
 DECODING_XTICK_LABEL_FONTSIZE = 5.6
+DELTA_LOG_LIKELIHOOD_AXIS_LABEL = "Δ log likelihood\n(bits/spike)"
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
     "date",
@@ -1884,20 +1886,25 @@ def draw_panel_a_assets(
     asset_dir: Path,
     probe_asset_name: str = DEFAULT_PROBE_ASSET_NAME,
     histology_asset_name: str = DEFAULT_HISTOLOGY_ASSET_NAME,
+    behavior_asset_name: str = DEFAULT_BEHAVIOR_ASSET_NAME,
 ) -> None:
-    """Draw panel A with a rotated probe beside the histology asset."""
+    """Draw panel A external assets: probe, behavior, and histology."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
     probe_path = get_figure_1_asset_path(asset_dir, probe_asset_name)
     histology_path = get_figure_1_asset_path(asset_dir, histology_asset_name)
+    behavior_path = get_figure_1_asset_path(asset_dir, behavior_asset_name)
     probe_image = np.rot90(load_panel_asset_image(probe_path))
     histology_image = load_panel_asset_image(histology_path)
+    behavior_image = load_panel_asset_image(behavior_path)
 
-    probe_ax = ax.inset_axes([0.00, 0.08, 0.15, 0.84])
-    histology_ax = ax.inset_axes([0.08, -0.18, 1.02, 1.36])
+    probe_ax = ax.inset_axes([0.12, 0.508, 0.24, 0.624])
+    behavior_ax = ax.inset_axes([0.00, -0.18, 0.48, 0.76])
+    histology_ax = ax.inset_axes([0.47, -0.18, 0.86, 1.36])
     draw_image_asset(probe_ax, probe_image)
+    draw_image_asset(behavior_ax, behavior_image)
     draw_image_asset(histology_ax, histology_image)
 
 
@@ -2304,6 +2311,33 @@ def _format_delta_advantage_summary(
     return f"{prefix}{fraction_positive:.0%} >0, med. {median:.2f}"
 
 
+def _format_cell_animal_count(
+    table: Any,
+    *,
+    value_column: str | None = None,
+) -> str:
+    """Return a compact unique cell and animal count label for panel annotations."""
+    columns = set(getattr(table, "columns", []))
+    count_table = table
+    if value_column is not None and value_column in columns:
+        count_table = table[np.isfinite(np.asarray(table[value_column], dtype=float))]
+
+    if {"animal_name", "date", "unit"}.issubset(columns):
+        cell_columns = ["animal_name", "date", "unit"]
+        n_cells = int(count_table.loc[:, cell_columns].drop_duplicates().shape[0])
+    elif "unit" in columns:
+        n_cells = int(count_table["unit"].nunique())
+    else:
+        n_cells = int(len(count_table))
+
+    n_animals = (
+        int(count_table["animal_name"].nunique()) if "animal_name" in columns else 0
+    )
+    cell_word = "cell" if n_cells == 1 else "cells"
+    animal_word = "animal" if n_animals == 1 else "animals"
+    return f"n = {n_cells} {cell_word}\n{n_animals} {animal_word}"
+
+
 def build_zero_including_histogram_bins(
     values: np.ndarray,
     *,
@@ -2507,8 +2541,21 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
         color=REGION_COLORS.get(MOTOR_DELTA_REGION, REGION_COLORS["v1"]),
         transform=ax.transAxes,
     )
+    ax.text(
+        0.03,
+        0.06,
+        _format_cell_animal_count(
+            motor_delta_table,
+            value_column="delta_log_likelihood_bits_per_spike",
+        ),
+        ha="left",
+        va="bottom",
+        fontsize=4.8,
+        color="0.25",
+        transform=ax.transAxes,
+    )
     ax.set_xlim(*x_limits)
-    ax.set_xlabel("Delta log likelihood\n(bits/spike)", fontsize=7, labelpad=2)
+    ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
     ax.set_ylabel("Frac.", fontsize=8, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -2620,8 +2667,21 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
             color=color,
             transform=ax.transAxes,
         )
+    ax.text(
+        0.03,
+        0.06,
+        _format_cell_animal_count(
+            encoding_delta_table,
+            value_column="delta_log_likelihood_bits_per_spike",
+        ),
+        ha="left",
+        va="bottom",
+        fontsize=4.8,
+        color="0.25",
+        transform=ax.transAxes,
+    )
     ax.set_xlim(*x_limits)
-    ax.set_xlabel("Delta log likelihood\n(bits/spike)", fontsize=7, labelpad=2)
+    ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
     ax.set_ylabel("Frac.", fontsize=8, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

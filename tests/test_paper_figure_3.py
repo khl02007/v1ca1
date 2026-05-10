@@ -35,6 +35,7 @@ from v1ca1.paper_figures.figure_3 import (
     PANEL_F_NORM_ERROR_YLIM,
     PANEL_F_PLACE_ERROR_YLIM,
     PANEL_G_ARROW_COLOR,
+    PANEL_G_BASIS_DARK_COLOR,
     PANEL_G_EXAMPLE_HEIGHT_FRACTION,
     PANEL_G_EXAMPLE_WIDTH_FRACTION,
     PANEL_G_EXAMPLES,
@@ -47,6 +48,7 @@ from v1ca1.paper_figures.figure_3 import (
     PANEL_H_SCHEMATIC_AXIS_BOUNDS,
     PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
     PANEL_H_SWAP_DELTA_VARIABLE,
+    PANEL_QUANT_EPOCH_COLORS,
     PANEL_EXAMPLE_CACHE_VERSION,
     SEGMENT_BOUNDARIES,
     build_panel_b_cache_metadata,
@@ -627,7 +629,7 @@ def test_plot_panel_a_example_draws_epoch_rasters_and_bottom_rate_axes() -> None
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Circle, Polygon
 
     fig, ax = plt.subplots()
     plot_panel_a_example(ax, _fake_panel_a_example())
@@ -706,7 +708,7 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Circle, Polygon
 
     fig, ax = plt.subplots()
     examples = [
@@ -989,6 +991,9 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert axes[0].lines[0].get_xdata().tolist() == [-1.0, 1.0]
     assert axes[0].lines[0].get_ydata().tolist() == [-1.0, 1.0]
     assert [text.get_text() for text in axes[0].texts] == ["n=2"]
+    assert axes[0].texts[0].get_position() == pytest.approx((0.96, 0.04))
+    assert axes[0].texts[0].get_horizontalalignment() == "right"
+    assert axes[0].texts[0].get_verticalalignment() == "bottom"
     assert len(axes[0].collections) == 1
     assert axes[0].collections[0].get_alpha() == pytest.approx(PANEL_D_SCATTER_ALPHA)
     assert axes[0].collections[0].get_sizes().tolist() == pytest.approx(
@@ -999,7 +1004,14 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
         text.get_text() for text in axes[1].texts
     ]
     assert "DPP better" in [text.get_text() for text in axes[1].texts]
-    assert any(text.get_text().startswith("Light: n=2") for text in axes[1].texts)
+    dpp_text = next(text for text in axes[1].texts if text.get_text() == "DPP better")
+    summary_text = next(
+        text for text in axes[1].texts if text.get_text() == "100% >0\nmed. 0.15"
+    )
+    assert dpp_text.get_horizontalalignment() == "left"
+    assert summary_text.get_horizontalalignment() == "left"
+    assert summary_text.get_position()[0] == pytest.approx(dpp_text.get_position()[0])
+    assert summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
     assert axes[1].get_legend() is None
     assert axes[1].get_xlim() == pytest.approx(PANEL_E_X_LIMITS)
     assert len(axes[1].lines) == 1
@@ -1108,7 +1120,7 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Circle, Polygon
 
     swap_delta_table = pandas.DataFrame(
         {
@@ -1218,6 +1230,10 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         position = axis.get_position()
         return position.x0 + position.width / 2.0
 
+    def _axis_center_y(axis):
+        position = axis.get_position()
+        return position.y0 + position.height / 2.0
+
     assert _axis_center_x(panel_g_top_dark_ax) == pytest.approx(
         _axis_center_x(panel_g_bottom_dark_ax)
     )
@@ -1230,6 +1246,24 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
             _axis_center_x(panel_g_top_dark_ax)
             + _axis_center_x(panel_g_top_light_ax)
         )
+    )
+    assert _axis_center_y(panel_g_bottom_dark_ax) < (
+        _axis_center_y(panel_g_top_dark_ax)
+        - schematic_ax.get_position().height * 0.45
+    )
+    assert panel_g_basis_ax.lines[0].get_xdata().tolist() == pytest.approx([0.21, 0.79])
+    assert panel_g_basis_ax.lines[1].get_xdata().tolist() == pytest.approx([0.42, 0.42])
+    assert panel_g_basis_ax.lines[2].get_xdata().tolist() == pytest.approx([0.58, 0.58])
+    dark_basis_patches = [
+        patch
+        for track_ax in (panel_g_top_dark_ax, panel_g_bottom_dark_ax)
+        for patch in track_ax.patches
+        if isinstance(patch, Circle)
+    ]
+    assert len(dark_basis_patches) > 0
+    assert all(
+        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 1.0))
+        for patch in dark_basis_patches
     )
     track_patches = [
         patch
@@ -1286,6 +1320,22 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         any(line.get_color() == PANEL_G_ARROW_COLOR for line in track_ax.lines)
         for track_ax in schematic_h_ax.child_axes
     )
+    def _axis_center_y(axis):
+        position = axis.get_position()
+        return position.y0 + position.height / 2.0
+
+    panel_h_independent_train_ax = schematic_h_ax.child_axes[0]
+    panel_h_segment_modulation_ax = schematic_h_ax.child_axes[2]
+    panel_h_dark_ax = schematic_h_ax.child_axes[3]
+    panel_h_shared_light_ax = schematic_h_ax.child_axes[4]
+    assert _axis_center_y(panel_h_segment_modulation_ax) < (
+        _axis_center_y(panel_h_independent_train_ax)
+        - schematic_h_position.height * 0.36
+    )
+    assert _axis_center_y(panel_h_dark_ax) < _axis_center_y(panel_h_segment_modulation_ax)
+    assert _axis_center_y(panel_h_shared_light_ax) < _axis_center_y(
+        panel_h_segment_modulation_ax
+    )
     assert delta_h_ax.get_title() == ""
     assert len(delta_h_ax.child_axes) == 8
     icon_axes = delta_h_ax.child_axes[::2]
@@ -1294,24 +1344,26 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     assert all(hist_ax.get_title() == "" for hist_ax in hist_axes)
     assert all(len(icon_ax.lines) > 0 for icon_ax in icon_axes)
     assert any(
-        text.get_text() == "Delta log likelihood (bits/spike)"
+        text.get_text() == "Δ log likelihood (bits/spike)"
         for text in delta_h_ax.texts
     )
-    assert any(text.get_text() == "Frac. traj-units" for text in delta_h_ax.texts)
+    assert any(text.get_text() == "Frac." for text in delta_h_ax.texts)
     for child_delta_ax in hist_axes:
         assert child_delta_ax.lines[0].get_linestyle() == "--"
         assert child_delta_ax.lines[0].get_color() == "black"
         assert len(child_delta_ax.lines) == 1
-        assert any("% >0, med." in text.get_text() for text in child_delta_ax.texts)
+        assert any("% >0\nmed." in text.get_text() for text in child_delta_ax.texts)
         assert all("n=" not in text.get_text() for text in child_delta_ax.texts)
         assert all(">0=" not in text.get_text() for text in child_delta_ax.texts)
         assert len(child_delta_ax.patches) > 0
         assert child_delta_ax.patches[0].get_edgecolor()[3] == pytest.approx(0.0)
+        assert child_delta_ax.patches[0].get_linewidth() == pytest.approx(0.0)
     assert first_example_h_ax.get_xlabel() == ""
     assert second_example_h_ax.get_xlabel() == "Switched segment"
     assert first_example_h_ax.get_title() == "Example 1"
     assert second_example_h_ax.get_title() == "Example 2"
     assert first_example_h_ax.get_ylabel() == "FR (Hz)"
+    assert second_example_h_ax.get_ylabel() == "FR (Hz)"
     first_delta_text = next(
         text for text in first_example_h_ax.texts if text.get_text() == "ΔLL=0.25"
     )
@@ -1322,12 +1374,25 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     assert second_delta_text.get_position() == pytest.approx((0.04, 0.06))
     assert first_delta_text.get_verticalalignment() == "bottom"
     assert first_example_h_ax.get_legend() is not None
-    assert first_example_h_ax.get_legend()._loc == 1
+    assert [text.get_text() for text in first_example_h_ax.get_legend().get_texts()] == [
+        "Empirical",
+        "Independent",
+        "Shared scaffold",
+    ]
+    assert first_example_h_ax.get_legend()._loc == 2
     assert second_example_h_ax.get_legend() is None
     assert len(first_example_h_ax.child_axes) == 1
     assert len(second_example_h_ax.child_axes) == 1
-    assert first_example_h_ax.child_axes[0].get_position().x1 < first_example_h_ax.get_position().x0
-    assert second_example_h_ax.child_axes[0].get_position().x1 < second_example_h_ax.get_position().x0
+    assert first_example_h_ax.child_axes[0].get_position().x0 > first_example_h_ax.get_position().x1
+    assert second_example_h_ax.child_axes[0].get_position().x0 > second_example_h_ax.get_position().x1
+    assert first_example_h_ax.child_axes[0].get_position().y1 < (
+        first_example_h_ax.get_position().y0
+        + first_example_h_ax.get_position().height * 0.5
+    )
+    assert second_example_h_ax.child_axes[0].get_position().y1 < (
+        second_example_h_ax.get_position().y0
+        + second_example_h_ax.get_position().height * 0.5
+    )
     assert all(
         len(icon_ax.lines) > 0
         for icon_ax in (

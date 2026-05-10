@@ -3351,11 +3351,11 @@ def plot_panel_d_similarity(ax: "Axes", similarity_table: Any) -> None:
         y_values = paired["similarity_dark"].to_numpy(dtype=float)
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         ax.text(
-            0.04,
             0.96,
+            0.04,
             f"n={int(np.sum(valid))}",
-            ha="left",
-            va="top",
+            ha="right",
+            va="bottom",
             fontsize=5.0,
             transform=ax.transAxes,
         )
@@ -3400,10 +3400,8 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
             zorder=2,
         )
         median_value = float(np.nanmedian(values))
-        summary_text = (
-            f"{PANEL_QUANT_EPOCH_LABELS[epoch_type]}: "
-            f"n={values.size}, med={median_value:.2f}"
-        )
+        fraction_positive = float(np.mean(values > 0.0))
+        summary_text = f"{fraction_positive:.0%} >0\nmed. {median_value:.2f}"
         ax.text(
             0.03,
             0.97,
@@ -3414,21 +3412,22 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
             transform=ax.transAxes,
         )
         ax.text(
-            0.97,
+            0.67,
             0.97,
             "DPP better",
-            ha="right",
+            ha="left",
             va="top",
             fontsize=4.8,
             transform=ax.transAxes,
         )
         ax.text(
-            0.98,
+            0.67,
             0.76,
             summary_text,
-            ha="right",
+            ha="left",
             va="top",
             fontsize=4.8,
+            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
             transform=ax.transAxes,
         )
     else:
@@ -3717,9 +3716,9 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
     line_kwargs = {"color": "black", "linewidth": 1.05, "solid_capstyle": "butt"}
-    ax.plot([0.36, 0.64], [0.18, 0.18], **line_kwargs)
-    ax.plot([0.45, 0.45], [0.18, 0.86], **line_kwargs)
-    ax.plot([0.55, 0.55], [0.18, 0.86], **line_kwargs)
+    ax.plot([0.21, 0.79], [0.18, 0.18], **line_kwargs)
+    ax.plot([0.42, 0.42], [0.18, 0.86], **line_kwargs)
+    ax.plot([0.58, 0.58], [0.18, 0.86], **line_kwargs)
 
 
 def _draw_panel_g_track(
@@ -3743,7 +3742,7 @@ def _draw_panel_g_track(
             show_basis=True,
             basis_segment_styles=_panel_g_basis_styles(
                 edge_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_color="none",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
                 fill_alpha=1.0,
                 linewidth=0.25,
             ),
@@ -4014,7 +4013,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     light_center_x = 0.78
     independent_basis_center_x = 0.5 * (dark_center_x + light_center_x)
     top_center_y = 0.715
-    bottom_center_y = 0.255
+    bottom_center_y = 0.205
     dark_bounds = {
         "width": 0.16,
         "height": 0.31,
@@ -4028,7 +4027,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     ax.text(light_center_x, 0.98, "Light field", ha="center", va="top", fontsize=5.8)
     ax.text(
         0.08,
-        0.72,
+        0.78,
         "Independent\nmodel",
         ha="center",
         va="center",
@@ -4037,7 +4036,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     )
     ax.text(
         0.08,
-        0.28,
+        0.26,
         "Shared-scaffold\nmodel",
         ha="center",
         va="center",
@@ -4054,7 +4053,7 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     )
     ax.text(
         0.55,
-        0.47,
+        0.42,
         "Segment-specific modulation",
         ha="center",
         va="center",
@@ -4106,16 +4105,16 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
         ),
         track_kind="dark",
     )
-    ax.text(0.39, 0.25, "+", ha="center", va="center", fontsize=8.0)
+    ax.text(0.39, 0.20, "+", ha="center", va="center", fontsize=8.0)
     _draw_panel_g_track(
-        ax.inset_axes([0.44, 0.08, 0.18, 0.34]),
+        ax.inset_axes([0.44, 0.03, 0.18, 0.34]),
         track_kind="segment_modulation",
         show_labels=True,
     )
     ax.annotate(
         "",
-        xy=(0.67, 0.26),
-        xytext=(0.62, 0.26),
+        xy=(0.67, 0.21),
+        xytext=(0.62, 0.21),
         xycoords=ax.transAxes,
         textcoords=ax.transAxes,
         arrowprops={
@@ -4538,7 +4537,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     )
     ax.text(
         0.08,
-        0.28,
+        0.235,
         "Shared-scaffold\nmodel",
         ha="center",
         va="center",
@@ -4549,7 +4548,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.725,
+                0.765,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4565,7 +4564,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 predict_center_x,
-                0.725,
+                0.765,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4579,7 +4578,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     )
     ax.text(
         predict_center_x,
-        0.55,
+        0.61,
         "\"Light activity is like the other arm\nwith the same visual landmark\"",
         ha="center",
         va="top",
@@ -4590,7 +4589,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.475,
+                0.380,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4606,7 +4605,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.195,
+                0.120,
                 dark_bounds["width"],
                 dark_bounds["height"],
             )
@@ -4618,7 +4617,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 predict_center_x,
-                0.335,
+                0.250,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4632,7 +4631,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     )
     ax.text(
         predict_center_x,
-        0.05,
+        0.02,
         "\"Light activity is like the same arm\ndark activity with visual modulation\"",
         ha="center",
         va="bottom",
@@ -4654,14 +4653,14 @@ def _filter_panel_h_heldout_delta(swap_delta_table: Any) -> Any:
 
 
 def _format_panel_h_delta_summary(values: np.ndarray) -> str:
-    """Return compact fraction-positive and median text for Panel H."""
+    """Return two-line fraction-positive and median text for Panel H."""
     values = np.asarray(values, dtype=float).reshape(-1)
     values = values[np.isfinite(values)]
     if values.size == 0:
-        return "n/a >0, med. n/a"
+        return "n/a >0\nmed. n/a"
     fraction_positive = float(np.mean(values > 0.0))
     median = float(np.median(values))
-    return f"{fraction_positive:.0%} >0, med. {median:.2f}"
+    return f"{fraction_positive:.0%} >0\nmed. {median:.2f}"
 
 
 def _plot_panel_h_delta_axis(
@@ -4688,8 +4687,7 @@ def _plot_panel_h_delta_axis(
         x_limits = PANEL_H_DELTA_X_LIMITS
         bin_edges = np.linspace(x_limits[0], x_limits[1], 29)
         hist_kwargs = OUTLINED_HISTOGRAM_KWARGS.copy()
-        hist_kwargs["edgecolor"] = "none"
-        hist_kwargs["linewidth"] = 0.0
+        hist_kwargs.update({"edgecolor": "none", "linewidth": 0.0})
         ax.hist(
             values,
             bins=bin_edges,
@@ -4765,7 +4763,7 @@ def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
     ax.text(
         0.53,
         0.02,
-        "Delta log likelihood (bits/spike)",
+        "Δ log likelihood (bits/spike)",
         ha="center",
         va="bottom",
         fontsize=4.3,
@@ -4774,7 +4772,7 @@ def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
     ax.text(
         0.01,
         0.52,
-        "Frac. traj-units",
+        "Frac.",
         ha="left",
         va="center",
         rotation=90,
@@ -4822,7 +4820,7 @@ def _plot_panel_h_switched_segment_example(
         observed_rate[observed_mask],
         color=PANEL_G_EMPIRICAL_COLOR,
         linewidth=0.9,
-        label="Emp.",
+        label="Empirical",
         zorder=4,
     )
     for model_name in ("visual", "task_segment_bump"):
@@ -4861,7 +4859,7 @@ def _plot_panel_h_switched_segment_example(
         fontsize=5.0,
         pad=0.8,
     )
-    icon_ax = ax.inset_axes([-0.35, 0.32, 0.28, 0.34])
+    icon_ax = ax.inset_axes([1.05, 0.04, 0.28, 0.34])
     draw_w_track_schematic(
         icon_ax,
         trajectory_name=swap_example["trajectory"],
@@ -4876,7 +4874,14 @@ def _plot_panel_h_switched_segment_example(
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.5, labelpad=0.8)
     if show_legend:
-        ax.legend(frameon=False, fontsize=3.4, handlelength=0.9, loc="upper right")
+        ax.legend(
+            frameon=False,
+            fontsize=3.4,
+            handlelength=0.9,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.02),
+            borderaxespad=0.0,
+        )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=4.1, length=1.2, pad=0.7)
@@ -4907,7 +4912,7 @@ def plot_panel_h_swap_delta(
             example,
             example_label=f"Example {example_index + 1}",
             show_xlabel=example_index == 1,
-            show_ylabel=example_index == 0,
+            show_ylabel=True,
             show_legend=example_index == 0,
             show_xticklabels=example_index == 1,
         )

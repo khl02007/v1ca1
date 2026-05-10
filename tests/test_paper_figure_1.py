@@ -14,6 +14,7 @@ from v1ca1.paper_figures.figure_1 import (
     CYCLE_TRAJECTORY_LAYOUT,
     BOTTOM_ROW_PANEL_WSPACE,
     DEFAULT_ASSET_DIR,
+    DEFAULT_BEHAVIOR_ASSET_NAME,
     DEFAULT_DARK_EPOCH,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_BOTTOM_ROW_HEIGHT_MM,
@@ -37,6 +38,7 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_TRAIN_SCHEMATIC_CENTER_X,
     DECODING_XTICK_LABEL_FONTSIZE,
     DECODING_YLABEL_FONTSIZE,
+    DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
     ENCODING_DPP_COMPARISON_COLORS,
@@ -912,7 +914,7 @@ def test_plot_dark_heatmap_regions_uses_matching_cache(
     plt.close(fig)
 
 
-def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
+def test_draw_panel_a_assets_places_probe_and_behavior_left_of_histology(
     tmp_path: Path,
 ) -> None:
     matplotlib = pytest.importorskip("matplotlib")
@@ -921,8 +923,10 @@ def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
     import matplotlib.pyplot as plt
 
     probe_path = tmp_path / "probe.png"
+    behavior_path = tmp_path / "behavior.png"
     histology_path = tmp_path / "histology.png"
     mpimg.imsave(probe_path, np.ones((4, 6, 3)))
+    mpimg.imsave(behavior_path, np.ones((5, 4, 3)))
     mpimg.imsave(histology_path, np.ones((5, 6, 3)))
 
     fig, ax = plt.subplots()
@@ -930,17 +934,36 @@ def test_draw_panel_a_assets_places_rotated_probe_left_of_histology(
         ax,
         asset_dir=tmp_path,
         probe_asset_name="probe.png",
+        behavior_asset_name="behavior.png",
         histology_asset_name="histology.png",
     )
 
-    assert len(ax.child_axes) == 2
-    assert ax.child_axes[0].get_position().x0 < ax.child_axes[1].get_position().x0
-    assert ax.child_axes[1].get_position().height > ax.child_axes[0].get_position().height
-    assert ax.child_axes[1].get_position().width > ax.child_axes[0].get_position().width
-    assert ax.child_axes[1].get_position().height > ax.get_position().height
-    assert ax.child_axes[1].get_position().width > 0.9 * ax.get_position().width
-    assert ax.child_axes[1].get_position().x0 - ax.get_position().x0 < (
-        0.1 * ax.get_position().width
+    assert DEFAULT_BEHAVIOR_ASSET_NAME == "behavior.png"
+    assert len(ax.child_axes) == 3
+    probe_ax, behavior_ax, histology_ax = ax.child_axes
+    assert probe_ax.get_position().x0 < histology_ax.get_position().x0
+    assert behavior_ax.get_position().x0 < histology_ax.get_position().x0
+    assert behavior_ax.get_position().y0 < probe_ax.get_position().y0
+    probe_center = probe_ax.get_position().x0 + probe_ax.get_position().width / 2
+    behavior_center = (
+        behavior_ax.get_position().x0 + behavior_ax.get_position().width / 2
+    )
+    assert probe_center == pytest.approx(behavior_center)
+    assert behavior_ax.get_position().y0 == pytest.approx(
+        histology_ax.get_position().y0
+    )
+    assert behavior_ax.get_position().width == pytest.approx(
+        0.48 * ax.get_position().width
+    )
+    assert behavior_ax.get_position().height == pytest.approx(
+        0.76 * ax.get_position().height
+    )
+    assert histology_ax.get_position().height > probe_ax.get_position().height
+    assert histology_ax.get_position().width > probe_ax.get_position().width
+    assert histology_ax.get_position().height > ax.get_position().height
+    assert histology_ax.get_position().width > 0.85 * ax.get_position().width
+    assert histology_ax.get_position().x0 - ax.get_position().x0 > (
+        0.15 * ax.get_position().width
     )
     probe_image = ax.child_axes[0].images[0].get_array()
     assert probe_image.shape[:2] == (6, 4)
@@ -1305,14 +1328,23 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
 
     table = pd.DataFrame(
         {
-            "delta_log_likelihood_bits_per_spike": [-0.1, 0.0, 0.2, 0.3],
+            "animal_name": ["L14", "L14", "L15", "L15", "L16"],
+            "date": [
+                "20240611",
+                "20240611",
+                "20241121",
+                "20241121",
+                "20250302",
+            ],
+            "unit": [1, 2, 1, 2, 1],
+            "delta_log_likelihood_bits_per_spike": [-0.1, 0.0, 0.2, 0.3, np.nan],
         }
     )
     fig, ax = plt.subplots()
     plot_motor_delta_panel(ax, table)
 
     assert ax.get_ylabel() == "Frac."
-    assert ax.get_xlabel() == "Delta log likelihood\n(bits/spike)"
+    assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
@@ -1320,6 +1352,7 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     assert "Motor only better" in text_labels
     assert "Motor+DPP better" in text_labels
     assert "50% >0, med. 0.10" in text_labels
+    assert "n = 4 cells\n2 animals" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
     assert ax.texts[0].get_position()[0] == pytest.approx(0.03)
     assert ax.texts[1].get_horizontalalignment() == "left"
@@ -1341,26 +1374,37 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
 
     table = pd.DataFrame(
         {
+            "animal_name": ["L14", "L15", "L14", "L15", "L16"],
+            "date": [
+                "20240611",
+                "20241121",
+                "20240611",
+                "20241121",
+                "20250302",
+            ],
+            "unit": [1, 2, 1, 2, 3],
             "comparison": [
                 "dpp_vs_absolute_place",
                 "dpp_vs_absolute_place",
                 "dpp_vs_absolute_task_progression",
                 "dpp_vs_absolute_task_progression",
+                "dpp_vs_absolute_place",
             ],
             "comparison_label": [
                 "DPP - absolute place",
                 "DPP - absolute place",
                 "DPP - absolute task progression",
                 "DPP - absolute task progression",
+                "DPP - absolute place",
             ],
-            "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1],
+            "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
     )
     fig, ax = plt.subplots()
     plot_encoding_delta_panel(ax, table)
 
     assert ax.get_ylabel() == "Frac."
-    assert ax.get_xlabel() == "Delta log likelihood\n(bits/spike)"
+    assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
@@ -1370,6 +1414,7 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     assert text_labels.count("DPP better") == 1
     assert "DPP > abs place\n50% >0, med. 0.05" in text_labels
     assert "DPP > abs task prog.\n50% >0, med. -0.10" in text_labels
+    assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"
     ]
