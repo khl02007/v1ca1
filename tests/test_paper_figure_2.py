@@ -31,7 +31,6 @@ from v1ca1.paper_figures.figure_2 import (
     format_glm_model_window_suffix,
     format_ridge_strength_suffix,
     format_ripple_window_suffix,
-    get_encoding_comparison_summary_path,
     HEATMAP_EPOCH_LABELS,
     HEATMAP_EPOCH_ORDER,
     get_ripple_event_path,
@@ -715,33 +714,6 @@ def test_load_glm_epoch_summary_tables_reads_light_dark_sleep(tmp_path: Path) ->
     assert len(epoch_tables[2]["summary_table"]) == 4
 
 
-def _write_encoding_summary_table(
-    tmp_path: Path,
-    *,
-    animal_name: str = "L14",
-    date: str = "20240611",
-    epoch: str = "08_r4",
-) -> Path:
-    pytest.importorskip("pyarrow")
-    path = get_encoding_comparison_summary_path(
-        tmp_path,
-        animal_name=animal_name,
-        date=date,
-        region="v1",
-        epoch=epoch,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pd.DataFrame(
-        {
-            "n_spikes": [100, 200],
-            "delta_bits_generalized_place_vs_tp": [-0.2, 0.1],
-        },
-        index=pd.Index([11, 12], name="unit"),
-    )
-    table.to_parquet(path)
-    return path
-
-
 def _write_tuning_similarity_table(
     tmp_path: Path,
     *,
@@ -771,46 +743,12 @@ def _write_tuning_similarity_table(
     return path
 
 
-def _write_motor_nested_cv_dataset(
-    tmp_path: Path,
-    *,
-    animal_name: str = "L14",
-    date: str = "20240611",
-    epoch: str = "08_r4",
-) -> Path:
-    xr = pytest.importorskip("xarray")
-    path = (
-        tmp_path
-        / animal_name
-        / date
-        / "task_progression"
-        / "motor"
-        / "nested_lap_cv"
-        / f"v1_{epoch}_nested_lapcv_bin0p05s_tp40_zscore_outer5_inner3_ridge0p1-1em06n6.nc"
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    xr.Dataset(
-        data_vars={
-            "pooled_delta_bits_per_spike": (
-                ("delta_metric", "unit"),
-                np.array([[0.05, -0.02]], dtype=float),
-            ),
-        },
-        coords={
-            "delta_metric": np.array(["dll_motor_tp_vs_motor_bits_per_spike"], dtype=object),
-            "unit": np.array([11, 12]),
-        },
-    ).to_netcdf(path)
-    return path
-
-
 def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     tmp_path: Path,
 ) -> None:
     for epoch in ("02_r1", "08_r4", "07_s4"):
         _write_ripple_glm_dataset(tmp_path, epoch=epoch)
     _write_tuning_similarity_table(tmp_path)
-    _write_motor_nested_cv_dataset(tmp_path)
 
     payload = load_glm_behavior_association_tables(
         tmp_path,
@@ -824,7 +762,6 @@ def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     assert set(similarity_table["tuning_epoch"]) == {"08_r4"}
     assert sorted(similarity_table["unit"].unique().tolist()) == [11, 12]
     assert sorted(similarity_table["same_turn_tuning_similarity"].unique().tolist()) == [0.3, 0.6]
-    assert sorted(similarity_table["motor_dpp_advantage_bits_per_spike"].unique().tolist()) == [-0.02, 0.05]
 
 
 def test_load_glm_behavior_association_tables_reports_missing_tuning(
@@ -1027,7 +964,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     glm_epoch_table = pd.DataFrame(
         {
             "ripple_devexp_mean": [-2.0, 0.4],
-            "ripple_devexp_p_value": [0.2, 0.01],
+            "ripple_devexp_p_value": [0.2, 0.001],
         }
     )
     glm_epoch_tables = [
@@ -1097,9 +1034,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
                 ],
                 "same_turn_tuning_similarity": [0.1, 0.5, 0.7, 0.9, 0.7, 0.8, 0.4, 0.9],
                 "firing_rate_hz": [1.0, 2.5, 4.5, 9.0, 5.0, 8.0, 3.5, 12.0],
-                "motor_dpp_advantage_bits_per_spike": [0.0, 0.03, 0.08, 0.12, 0.02, 0.04, -0.01, 0.06],
                 "ripple_devexp_mean": [0.05, 0.2, 0.3, 0.4, 0.1, 0.3, 0.15, 0.25],
-                "ripple_devexp_p_value": [0.01, 0.01, 0.03, 0.02, 0.03, 0.4, 0.02, 0.6],
+                "ripple_devexp_p_value": [0.001, 0.002, 0.003, 0.004, 0.003, 0.4, 0.002, 0.6],
             }
         ),
         "missing_artifacts": [],
@@ -1210,36 +1146,38 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(axes[1, 1].collections) == 1
     assert len(axes[1, 2].collections) == 1
     assert len(axes[2, 2].child_axes) == 7
-    assert axes[2, 2].child_axes[1].get_xlim()[0] == pytest.approx(-0.1)
-    assert axes[2, 2].child_axes[1].get_xlim()[1] == pytest.approx(0.5)
+    assert axes[2, 2].child_axes[1].get_xlim()[0] == pytest.approx(-0.05)
+    assert axes[2, 2].child_axes[1].get_xlim()[1] == pytest.approx(0.40)
     assert len(axes[2, 2].child_axes[1].collections) == 2
-    assert axes[2, 2].child_axes[2].get_xlim()[0] == pytest.approx(-0.1)
-    assert axes[2, 2].child_axes[2].get_xlim()[1] == pytest.approx(0.5)
+    assert axes[2, 2].child_axes[2].get_xlim()[0] == pytest.approx(-0.05)
+    assert axes[2, 2].child_axes[2].get_xlim()[1] == pytest.approx(0.40)
     assert len(axes[2, 2].child_axes[2].patches) == 2
+    assert [tick.get_text() for tick in axes[2, 2].child_axes[2].get_yticklabels()] == [
+        "n.s.",
+        "p<0.005",
+    ]
     plt.close(fig)
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
-    assert len(ax.child_axes) == 3
-    assert ax.child_axes[0].get_ylabel() == "Dark DPP\ncorr."
-    assert ax.child_axes[1].get_ylabel() == "Dark FR\n(Hz)"
-    assert ax.child_axes[2].get_ylabel() == "DPP model\nadv."
-    assert ax.child_axes[1].get_yscale() == "log"
-    assert ax.child_axes[1].yaxis.get_label_position() == "left"
-    assert ax.texts[-1].get_text() == "Light deviance quartile\n(p<0.05, devexp>0)"
+    assert len(ax.child_axes) == 2
+    assert ax.child_axes[0].get_ylabel() == "Dark activity\n(Hz)"
+    assert ax.child_axes[1].get_ylabel() == "Dark DPP\ncorr."
+    assert ax.child_axes[0].get_yscale() == "log"
+    assert ax.child_axes[0].yaxis.get_label_position() == "left"
+    assert ax.texts[-1].get_text() == "Light deviance quartile\n(p<0.005, devexp>0)"
     assert len(ax.child_axes[0].collections) == 1
     assert len(ax.child_axes[1].collections) == 1
-    assert len(ax.child_axes[2].collections) == 1
+    assert len(ax.child_axes[0].collections[0].get_offsets()) == 4
     assert len(ax.child_axes[0].lines) >= 3
     assert len(ax.child_axes[1].lines) >= 3
-    assert len(ax.child_axes[2].lines) >= 3
     assert [tick.get_text() for tick in ax.child_axes[0].get_xticklabels()] == [
         "Q1",
         "Q2",
         "Q3",
         "Q4",
     ]
-    assert [tick.get_text() for tick in ax.child_axes[2].get_xticklabels()] == [
+    assert [tick.get_text() for tick in ax.child_axes[1].get_xticklabels()] == [
         "Q1",
         "Q2",
         "Q3",

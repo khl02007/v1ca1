@@ -240,6 +240,44 @@ def test_validate_arguments_rejects_conflicting_ripple_selection_modes() -> None
         validate_arguments(args)
 
 
+def test_validate_arguments_rejects_blank_session_identifiers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "",
+            "--date",
+            "20240611",
+        ],
+    )
+
+    args = parse_arguments()
+
+    with pytest.raises(ValueError, match="--animal-name must not be blank"):
+        validate_arguments(args)
+
+
+def test_validate_arguments_rejects_blank_requested_epochs(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--epochs",
+            "",
+        ],
+    )
+
+    args = parse_arguments()
+
+    with pytest.raises(ValueError, match="--epochs must not be blank"):
+        validate_arguments(args)
+
+
 def test_build_ripple_sample_windows_preserves_overlapping_fixed_windows() -> None:
     ripple_table = pd.DataFrame(
         {

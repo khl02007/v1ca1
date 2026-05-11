@@ -100,6 +100,12 @@ NEMOS_LEGACY_SOLVER_NAME = "LBFGS"
 NEMOS_JAXOPT_SOLVER_NAME = "LBFGS[jaxopt]"
 
 
+def _validate_nonblank_cli_text(value: str | None, flag_name: str) -> None:
+    """Require a CLI text value to contain at least one non-whitespace character."""
+    if value is None or not str(value).strip():
+        raise ValueError(f"--{flag_name} must not be blank.")
+
+
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI argument ranges."""
     if args.remove_duplicate_ripples and args.keep_single_ripple_windows:
@@ -108,6 +114,11 @@ def validate_arguments(args: argparse.Namespace) -> None:
             "exclusive because they define different ripple-selection rules. "
             "Choose only one."
         )
+    _validate_nonblank_cli_text(getattr(args, "animal_name", None), "animal-name")
+    _validate_nonblank_cli_text(getattr(args, "date", None), "date")
+    if args.epochs is not None:
+        for epoch in args.epochs:
+            _validate_nonblank_cli_text(epoch, "epochs")
     if not np.isfinite(args.ripple_window_offset_s):
         raise ValueError("--ripple-window-offset-s must be finite.")
     if args.ripple_window_s <= 0:

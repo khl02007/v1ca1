@@ -118,6 +118,9 @@ MODEL_COLOR = MODEL_CLASS_COLORS["visual"]
 GLM_EPOCH_COLORS = EPOCH_TYPE_COLORS
 NONSIGNIFICANT_COLOR = NEUTRAL_COLORS["nonsignificant"]
 SIGNIFICANCE_P_VALUE = 0.05
+PANEL_C_SIGNIFICANCE_P_VALUE = 0.005
+PANEL_D_SIGNIFICANCE_P_VALUE = PANEL_C_SIGNIFICANCE_P_VALUE
+PANEL_D_MIN_DEVIANCE_EXPLAINED = 0.0
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
 
 
@@ -1269,7 +1272,6 @@ def load_glm_behavior_association_tables(
     region: str = DEFAULT_PANEL_D_REGION,
     tuning_similarity_metric: str = DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
     tuning_comparison_label: str = DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL,
-    motor_delta_metric: str = DEFAULT_PANEL_D_MOTOR_DELTA_METRIC,
     ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
     ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
@@ -1277,7 +1279,6 @@ def load_glm_behavior_association_tables(
 ) -> dict[str, Any]:
     """Load dark same-turn tuning similarity joined to light/dark/sleep GLM significance."""
     import pandas as pd
-    import xarray as xr
 
     similarity_rows: list[Any] = []
     missing_artifacts: list[dict[str, str]] = []
@@ -1359,81 +1360,6 @@ def load_glm_behavior_association_tables(
         tuning_rows = tuning_rows.rename(
             columns={"similarity": "same_turn_tuning_similarity"}
         )
-        motor_path: Path | None = None
-        motor_rows = pd.DataFrame(columns=session_unit_columns)
-        try:
-            motor_path = find_motor_nested_cv_path(
-                data_root,
-                animal_name=animal_name,
-                date=date,
-                region=region,
-                epoch=dark_tuning_epoch,
-            )
-        except FileNotFoundError as exc:
-            missing_artifacts.append(
-                {
-                    "artifact": "motor_nested_cv",
-                    "animal_name": animal_name,
-                    "date": date,
-                    "epoch": dark_tuning_epoch,
-                    "path": str(exc),
-                }
-            )
-        if motor_path is not None:
-            motor_dataset = xr.open_dataset(motor_path)
-            try:
-                if "pooled_delta_bits_per_spike" not in motor_dataset:
-                    raise ValueError(
-                        f"Motor nested-CV output {motor_path} is missing "
-                        "'pooled_delta_bits_per_spike'."
-                    )
-                if "delta_metric" not in motor_dataset.coords:
-                    raise ValueError(
-                        f"Motor nested-CV output {motor_path} is missing "
-                        "'delta_metric' coordinates."
-                    )
-                delta_metrics = {
-                    str(value)
-                    for value in np.asarray(motor_dataset.coords["delta_metric"].values)
-                }
-                if str(motor_delta_metric) not in delta_metrics:
-                    raise ValueError(
-                        f"Motor nested-CV output {motor_path} does not contain "
-                        f"delta_metric={motor_delta_metric!r}."
-                    )
-                motor_values = np.asarray(
-                    motor_dataset["pooled_delta_bits_per_spike"]
-                    .sel(delta_metric=str(motor_delta_metric))
-                    .values,
-                    dtype=float,
-                ).reshape(-1)
-                motor_units = np.asarray(motor_dataset.coords["unit"].values)
-            finally:
-                motor_dataset.close()
-            motor_rows = pd.DataFrame(
-                {
-                    "animal_name": animal_name,
-                    "date": date,
-                    "unit": motor_units,
-                    "motor_dpp_advantage_bits_per_spike": motor_values,
-                    "motor_source_path": str(motor_path),
-                }
-            )
-            motor_rows["unit"] = pd.to_numeric(motor_rows["unit"], errors="coerce")
-            motor_rows = motor_rows[
-                np.isfinite(motor_rows["unit"].to_numpy(dtype=float))
-            ].copy()
-            motor_rows["unit"] = motor_rows["unit"].astype(int)
-
-        if len(motor_rows):
-            tuning_rows = tuning_rows.merge(
-                motor_rows,
-                on=session_unit_columns,
-                how="left",
-            )
-        else:
-            tuning_rows["motor_dpp_advantage_bits_per_spike"] = np.nan
-            tuning_rows["motor_source_path"] = ""
 
         for epoch_type in HEATMAP_EPOCH_ORDER:
             _glm_animal, _glm_date, glm_epoch = normalize_dataset_id(epoch_ids[epoch_type])
@@ -2711,8 +2637,8 @@ def plot_glm_analysis_panel(
     finite_neglog_p = np.concatenate([values for values in all_neglog_p if values.size]) if any(
         values.size for values in all_neglog_p
     ) else np.asarray([], dtype=float)
-    x_min = -0.1
-    x_max = 0.5
+    x_min = -0.05
+    x_max = 0.40
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
     plot_left = 0.37
@@ -2739,7 +2665,7 @@ def plot_glm_analysis_panel(
         epoch_color = GLM_EPOCH_COLORS.get(epoch_payload["epoch_type"], MODEL_COLOR)
         plot_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
         plot_ax.axhline(
-            -np.log10(SIGNIFICANCE_P_VALUE),
+            -np.log10(PANEL_C_SIGNIFICANCE_P_VALUE),
             color="0.25",
             linestyle="--",
             linewidth=0.55,
@@ -2749,7 +2675,7 @@ def plot_glm_analysis_panel(
             finite_values = values[valid]
             finite_p_values = p_values[valid]
             neglog_p = -np.log10(np.clip(finite_p_values, 1e-12, 1.0))
-            significant = finite_p_values < SIGNIFICANCE_P_VALUE
+            significant = finite_p_values < PANEL_C_SIGNIFICANCE_P_VALUE
             if np.any(~significant):
                 plot_ax.scatter(
                     finite_values[~significant],
@@ -2816,8 +2742,10 @@ def plot_glm_analysis_panel(
         if np.any(valid):
             finite_values = values[valid]
             finite_p_values = p_values[valid]
-            nonsig_values = finite_values[finite_p_values >= SIGNIFICANCE_P_VALUE]
-            sig_values = finite_values[finite_p_values < SIGNIFICANCE_P_VALUE]
+            nonsig_values = finite_values[
+                finite_p_values >= PANEL_C_SIGNIFICANCE_P_VALUE
+            ]
+            sig_values = finite_values[finite_p_values < PANEL_C_SIGNIFICANCE_P_VALUE]
             box_data = []
             box_positions = []
             box_colors = []
@@ -2862,7 +2790,7 @@ def plot_glm_analysis_panel(
         box_ax.set_ylim(0.45, 2.55)
         box_ax.set_yticks([1, 2])
         if index == 0:
-            box_ax.set_yticklabels(["n.s.", "p<0.05"], fontsize=4.8)
+            box_ax.set_yticklabels(["n.s.", "p<0.005"], fontsize=4.8)
         else:
             box_ax.set_yticklabels([])
         if index == 1:
@@ -3417,6 +3345,7 @@ def _plot_deviance_metric_quartiles(
     y_axis_side: str = "left",
     reference_y: float | None = None,
     epoch_type: str = "light",
+    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
 ) -> None:
     """Plot one metric across significant positive ripple-GLM deviance quartiles."""
     if reference_y is not None:
@@ -3446,8 +3375,8 @@ def _plot_deviance_metric_quartiles(
             np.isfinite(x_values)
             & np.isfinite(p_values)
             & np.isfinite(y_values)
-            & (x_values > 0.0)
-            & (p_values < SIGNIFICANCE_P_VALUE)
+            & (x_values > float(min_devexp))
+            & (p_values < PANEL_D_SIGNIFICANCE_P_VALUE)
         )
         if y_scale == "log":
             valid &= y_values > 0.0
@@ -3528,6 +3457,141 @@ def _plot_deviance_metric_quartiles(
     ax.set_title(title, fontsize=5.4, pad=0.8)
     ax.set_ylabel(y_label, fontsize=5.0, labelpad=1.0)
     ax.spines["top"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
+
+
+def _plot_deviance_metric_quartile_overlays(
+    ax: "Axes",
+    table: Any,
+    *,
+    metrics: Sequence[tuple[str, str, str]],
+    y_label: str,
+    title: str,
+    y_limits: tuple[float, float] | None = None,
+    y_ticks: Sequence[float] | None = None,
+    reference_y: float | None = None,
+    epoch_type: str = "light",
+    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
+) -> None:
+    """Plot multiple metrics across shared ripple-GLM deviance quartiles."""
+    if reference_y is not None:
+        ax.axhline(
+            float(reference_y),
+            color="0.45",
+            linestyle="--",
+            linewidth=0.55,
+            zorder=0,
+        )
+    if table is None or len(table) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No joined\nunits",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    else:
+        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
+        x_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
+        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+        y_arrays = [
+            np.asarray(epoch_rows[column], dtype=float)
+            for column, _label, _color in metrics
+        ]
+        valid = (
+            np.isfinite(x_values)
+            & np.isfinite(p_values)
+            & (x_values > float(min_devexp))
+            & (p_values < PANEL_D_SIGNIFICANCE_P_VALUE)
+        )
+        for values in y_arrays:
+            valid &= np.isfinite(values)
+
+        if np.any(valid):
+            valid_indices = np.flatnonzero(valid)
+            sorted_indices = valid_indices[np.argsort(x_values[valid_indices])]
+            quartile_indices = np.array_split(sorted_indices, 4)
+            metric_offsets = (
+                np.linspace(-0.07, 0.07, len(metrics))
+                if len(metrics) > 1
+                else np.array([0.0])
+            )
+            for metric_index, (column, label, color) in enumerate(metrics):
+                y_values = np.asarray(epoch_rows[column], dtype=float)
+                point_x_values = []
+                point_y_values = []
+                median_x_values = []
+                median_y_values = []
+                x_offset = float(metric_offsets[metric_index])
+                for quartile_index, group_indices in enumerate(quartile_indices, start=1):
+                    if group_indices.size == 0:
+                        continue
+                    group_y_values = y_values[group_indices]
+                    if group_indices.size == 1:
+                        offsets = np.array([0.0])
+                    else:
+                        offsets = np.linspace(-0.09, 0.09, group_indices.size)
+                    point_x_values.append(quartile_index + x_offset + offsets)
+                    point_y_values.append(group_y_values)
+                    quartile_low, quartile_median, quartile_high = np.nanpercentile(
+                        group_y_values,
+                        [25.0, 50.0, 75.0],
+                    )
+                    median_x = float(quartile_index + x_offset)
+                    median_x_values.append(median_x)
+                    median_y_values.append(float(quartile_median))
+                    ax.plot(
+                        [median_x, median_x],
+                        [quartile_low, quartile_high],
+                        color=color,
+                        linewidth=0.65,
+                        solid_capstyle="round",
+                        zorder=4,
+                    )
+                ax.scatter(
+                    np.concatenate(point_x_values),
+                    np.concatenate(point_y_values),
+                    s=3.2,
+                    color=color,
+                    alpha=0.16,
+                    edgecolors="none",
+                    zorder=2,
+                )
+                ax.plot(
+                    median_x_values,
+                    median_y_values,
+                    color=color,
+                    marker="o",
+                    markersize=2.3,
+                    markerfacecolor="white",
+                    markeredgewidth=0.6,
+                    linewidth=0.7,
+                    label=label,
+                    zorder=5,
+                )
+            ax.legend(
+                frameon=False,
+                fontsize=3.8,
+                handlelength=1.0,
+                loc="upper left",
+                borderpad=0.1,
+                labelspacing=0.2,
+            )
+
+    ax.set_xlim(0.55, 4.45)
+    ax.set_xticks([1.0, 2.0, 3.0, 4.0])
+    ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    if y_ticks is not None:
+        ax.set_yticks(y_ticks)
+    ax.set_title(title, fontsize=5.4, pad=0.8)
+    ax.set_ylabel(y_label, fontsize=5.0, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
     ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
 
@@ -3659,9 +3723,17 @@ def plot_glm_behavior_association_panel(
     ax.axis("off")
 
     table = payload.get("similarity_table")
-    similarity_ax = ax.inset_axes([0.04, 0.20, 0.25, 0.66])
-    firing_rate_ax = ax.inset_axes([0.40, 0.20, 0.25, 0.66])
-    motor_dpp_ax = ax.inset_axes([0.75, 0.20, 0.23, 0.66])
+    firing_rate_ax = ax.inset_axes([0.08, 0.20, 0.38, 0.66])
+    similarity_ax = ax.inset_axes([0.58, 0.20, 0.34, 0.66])
+    _plot_deviance_metric_quartiles(
+        firing_rate_ax,
+        table,
+        y_column="firing_rate_hz",
+        y_label="Dark activity\n(Hz)",
+        title="Dark activity",
+        y_limits=(0.5, 120.0),
+        y_scale="log",
+    )
     _plot_deviance_metric_quartiles(
         similarity_ax,
         table,
@@ -3670,29 +3742,10 @@ def plot_glm_behavior_association_panel(
         title="DPP",
         y_limits=(-0.1, 1.0),
     )
-    _plot_deviance_metric_quartiles(
-        firing_rate_ax,
-        table,
-        y_column="firing_rate_hz",
-        y_label="Dark FR\n(Hz)",
-        title="Dark activity",
-        y_limits=(0.5, 120.0),
-        y_scale="log",
-    )
-    _plot_deviance_metric_quartiles(
-        motor_dpp_ax,
-        table,
-        y_column="motor_dpp_advantage_bits_per_spike",
-        y_label="DPP model\nadv.",
-        title="DPP model",
-        y_limits=(-0.05, 0.8),
-        y_ticks=[0.0, 0.25, 0.5, 0.75],
-        reference_y=0.0,
-    )
     ax.text(
         0.50,
         0.035,
-        "Light deviance quartile\n(p<0.05, devexp>0)",
+        "Light deviance quartile\n(p<0.005, devexp>0)",
         ha="center",
         va="bottom",
         fontsize=5.0,
@@ -3813,17 +3866,6 @@ def make_figure_2(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
-    panel_e_payload = load_glm_offset_panel_tables(
-        data_root,
-        datasets,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        sleep_epoch=sleep_epoch,
-        epoch_types=PANEL_E_GLM_EPOCH_ORDER,
-        ripple_selection=ripple_selection,
-        ridge_strength=ridge_strength,
-    )
-
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
@@ -3838,8 +3880,7 @@ def make_figure_2(
         fig.add_subplot(outer_grid[0, :2]),
         fig.add_subplot(outer_grid[0, 2:]),
         fig.add_subplot(outer_grid[1, :2]),
-        fig.add_subplot(outer_grid[1, 2]),
-        fig.add_subplot(outer_grid[1, 3]),
+        fig.add_subplot(outer_grid[1, 2:]),
     ]
 
     plot_epoch_ripple_heatmap_panel(axes[0], heatmap_epoch_tables, regions=regions)
@@ -3849,11 +3890,9 @@ def make_figure_2(
     plot_glm_analysis_panel(axes[2], glm_epoch_tables)
     axes[2].set_title("CA1-to-V1 ripple GLM", fontsize=8, pad=2)
     plot_glm_behavior_association_panel(axes[3], panel_d_payload)
-    axes[3].set_title("Light ripple GLM associations", fontsize=7.2, pad=2)
-    plot_glm_offset_panel(axes[4], panel_e_payload)
-    axes[4].set_title("Ripple GLM timing", fontsize=7.2, pad=2)
+    axes[3].set_title("Light ripple GLM associations", fontsize=8, pad=2)
 
-    for ax, label in zip(axes, ("A", "B", "C", "D", "E"), strict=True):
+    for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
         label_axis(ax, label, x=-0.10, y=1.04)
 
     save_figure(fig, output_path, dpi=dpi)
@@ -3863,23 +3902,6 @@ def make_figure_2(
             "Panel D missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
-        )
-    for missing in panel_e_payload["missing_artifacts"]:
-        print(
-            "Panel E missing "
-            f"{missing['artifact']} for {missing['animal_name']} "
-            f"{missing['date']} {missing['epoch']} "
-            f"target_offset={missing.get('target_window_offset_s', '')}: "
-            f"{missing['path']}"
-        )
-        if missing.get("reason"):
-            print(f"  Reason: {missing['reason']}")
-    for skipped in panel_e_payload.get("skipped_comparisons", []):
-        print(
-            "Panel E skipped incomplete offset comparison for "
-            f"{skipped['animal_name']} {skipped['date']} {skipped['epoch']} "
-            f"({skipped['epoch_type']}): missing offsets "
-            f"{skipped['missing_target_window_offsets_s']}"
         )
     print(f"Saved Figure 2 to {output_path}")
     return output_path
