@@ -31,6 +31,8 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
     DECODING_EXAMPLE_TEST_TRAJECTORIES,
     DECODING_EXAMPLE_TRAIN_TRAJECTORY,
+    DECODING_MEDIAN_LABEL_FONTSIZE,
+    DECODING_MEDIAN_LABEL_X_OFFSET,
     DECODING_SCHEMATIC_HEIGHT,
     DECODING_SCHEMATIC_WIDTH,
     DECODING_SCHEMATIC_Y,
@@ -1488,6 +1490,34 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
     )
     assert len(plot_ax.lines) == 0
     assert len(plot_ax.collections) == 2
+    assert [text.get_text() for text in plot_ax.texts] == [
+        "med. 0.20",
+        "med. 0.20",
+        "med. 0.20",
+    ]
+    assert all(
+        text.get_fontsize() == pytest.approx(DECODING_MEDIAN_LABEL_FONTSIZE)
+        for text in plot_ax.texts
+    )
+    assert [text.get_horizontalalignment() for text in plot_ax.texts] == [
+        "left",
+        "left",
+        "left",
+    ]
+    assert [text.get_verticalalignment() for text in plot_ax.texts] == [
+        "center",
+        "center",
+        "center",
+    ]
+    assert [text.get_position()[0] for text in plot_ax.texts] == pytest.approx(
+        [
+            position + DECODING_MEDIAN_LABEL_X_OFFSET
+            for position in (1.0, 2.0, 3.0)
+        ]
+    )
+    assert [text.get_position()[1] for text in plot_ax.texts] == pytest.approx(
+        [0.2, 0.2, 0.2]
+    )
     legend = plot_ax.get_legend()
     assert legend is None
     scatter = plot_ax.collections[1]

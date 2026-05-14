@@ -11,6 +11,9 @@ import pytest
 
 import v1ca1.ripple.ripple_glm as ripple_glm_module
 from v1ca1.ripple.ripple_glm import (
+    DEFAULT_SOURCE_PREDICTOR_MODE,
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
     _build_ripple_sample_windows,
     _count_spikes_in_windows,
     _fit_ripple_glm_on_prepared_epoch,
@@ -18,11 +21,13 @@ from v1ca1.ripple.ripple_glm import (
     _prepare_ripple_glm_epoch_inputs,
     _resolve_nemos_population_glm_solver,
     _resolve_model_window_parameters,
+    apply_source_predictor_mode,
     build_epoch_fit_dataset,
     build_metric_figure_data,
     empirical_p_values,
     fit_ripple_glm_train_on_ripple,
     format_model_window_suffix,
+    format_source_predictor_mode_suffix,
     get_epoch_skip_reason,
     keep_single_ripple_windows,
     load_ripple_tables,
@@ -276,6 +281,67 @@ def test_validate_arguments_rejects_blank_requested_epochs(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="--epochs must not be blank"):
         validate_arguments(args)
+
+
+def test_source_predictor_mode_suffix_preserves_default_filename() -> None:
+    assert format_source_predictor_mode_suffix(DEFAULT_SOURCE_PREDICTOR_MODE) == ""
+    assert format_source_predictor_mode_suffix(SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY) == "mean_ca1"
+
+
+def test_apply_source_predictor_mode_collapses_to_mean_activity() -> None:
+    X_r = np.array(
+        [
+            [1.0, 2.0, 4.0],
+            [0.0, 3.0, 6.0],
+        ],
+        dtype=float,
+    )
+    ca1_unit_ids = np.array([101, 102, 103], dtype=int)
+
+    unit_vector = apply_source_predictor_mode(
+        X_r,
+        ca1_unit_ids,
+        source_predictor_mode=SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
+    )
+    mean_activity = apply_source_predictor_mode(
+        X_r,
+        ca1_unit_ids,
+        source_predictor_mode=SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+    )
+
+    assert np.allclose(unit_vector["X_r"], X_r)
+    assert np.array_equal(unit_vector["coef_ca1_unit_ids"], ca1_unit_ids)
+    assert np.array_equal(
+        unit_vector["source_predictor_feature_names"],
+        ["ca1_unit_101", "ca1_unit_102", "ca1_unit_103"],
+    )
+    assert np.allclose(mean_activity["X_r"], [[7.0 / 3.0], [3.0]])
+    assert np.array_equal(mean_activity["coef_ca1_unit_ids"], [-1])
+    assert np.array_equal(
+        mean_activity["source_predictor_feature_names"],
+        ["mean_ca1_activity"],
+    )
+    assert mean_activity["n_source_predictor_features"] == 1
+
+
+def test_parse_arguments_accepts_mean_activity_source_predictor_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ripple_glm.py",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--source-predictor-mode",
+            "mean_activity",
+        ],
+    )
+
+    args = parse_arguments()
+    validate_arguments(args)
+
+    assert args.source_predictor_mode == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY
 
 
 def test_build_ripple_sample_windows_preserves_overlapping_fixed_windows() -> None:
@@ -540,6 +606,7 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset["pseudo_r2_ripple_folds"].dims == ("fold", "unit")
     assert dataset["pseudo_r2_ripple_shuff_folds"].dims == ("fold", "shuffle", "unit")
     assert dataset["coef_ca1_full_all"].dims == ("coef_source_unit", "unit")
+    assert dataset["coef_source_feature_name"].dims == ("coef_source_unit",)
     assert dataset["coef_intercept_full_all"].dims == ("unit",)
     assert np.allclose(dataset["ripple_start_time_s"].values, [1.0, 2.0, 3.0])
     assert np.allclose(dataset["ripple_window_start_s"].values, [1.05, 2.05, 3.05])
@@ -558,6 +625,10 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         [[0.8, 0.1], [0.2, 1.8], [2.7, 1.2]],
     )
     assert np.allclose(dataset["coef_ca1_full_all"].values, [[0.1, 0.2], [0.3, 0.4]])
+    assert np.array_equal(
+        dataset["coef_source_feature_name"].values,
+        ["ca1_unit_101", "ca1_unit_103"],
+    )
     assert np.allclose(dataset["coef_intercept_full_all"].values, [0.5, 0.6])
     assert np.allclose(dataset["ripple_pseudo_r2_mean"].values, [0.3, 0.5])
     assert np.allclose(dataset["ripple_mae_mean"].values, [0.4, 0.8])
@@ -570,7 +641,7 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["animal_name"] == "L14"
     assert dataset.attrs["epoch"] == "01_s1"
     assert dataset.attrs["model_direction"] == "ca1_to_v1"
-    assert dataset.attrs["schema_version"] == "7"
+    assert dataset.attrs["schema_version"] == "8"
     assert dataset.attrs["ripple_selection_mode"] == "single"
     assert dataset.attrs["n_ripples_before_selection"] == 10
     assert dataset.attrs["n_ripples_removed_by_selection"] == 2
@@ -584,6 +655,10 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
     assert dataset.attrs["n_ripples_before_window_bounds"] == 8
     assert dataset.attrs["n_ripples_removed_by_window_bounds"] == 0
     assert dataset.attrs["n_ripples_after_window_bounds"] == 8
+    assert dataset.attrs["source_predictor_mode"] == SOURCE_PREDICTOR_MODE_UNIT_VECTOR
+    assert dataset.attrs["source_predictor_description"] == "CA1 unit spike-count vector"
+    assert dataset.attrs["n_source_predictor_features"] == 3
+    assert dataset.attrs["n_coef_source_features"] == 2
     assert dataset.attrs["coef_ca1_full_all_space"] == "preprocessed_predictor"
     assert json.loads(dataset.attrs["sources_json"]) == {"ripple_events": "pynapple"}
     assert json.loads(dataset.attrs["fit_parameters_json"]) == {
@@ -602,6 +677,63 @@ def test_build_epoch_fit_dataset_contains_raw_and_summary_vars() -> None:
         "divide_by_sqrt_n_features": True,
         "scale": True,
     }
+
+
+def test_build_epoch_fit_dataset_records_mean_activity_source_predictor() -> None:
+    pytest.importorskip("xarray")
+
+    results = {
+        "v1_unit_ids": np.array([11, 12]),
+        "ca1_unit_ids": np.array([101, 102, 103]),
+        "coef_ca1_unit_ids": np.array([-1], dtype=int),
+        "source_predictor_feature_names": np.array(["mean_ca1_activity"]),
+        "source_predictor_mode": SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+        "source_predictor_description": "Mean raw CA1 spike count across kept CA1 units",
+        "n_source_predictor_features": 1,
+        "n_ripples": 4,
+        "ripple_start_time_s": np.array([1.0, 2.0], dtype=float),
+        "ripple_window_start_s": np.array([1.0, 2.0], dtype=float),
+        "ripple_window_end_s": np.array([1.2, 2.2], dtype=float),
+        "ripple_fold_index": np.array([0, 1], dtype=int),
+        "ripple_observed_count_oof": np.ones((2, 2), dtype=float),
+        "ripple_predicted_count_oof": np.ones((2, 2), dtype=float),
+        "pseudo_r2_ripple_folds": np.ones((2, 2), dtype=float),
+        "mae_ripple_folds": np.ones((2, 2), dtype=float),
+        "devexp_ripple_folds": np.ones((2, 2), dtype=float),
+        "bits_per_spike_ripple_folds": np.ones((2, 2), dtype=float),
+        "pseudo_r2_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "mae_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "devexp_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "bits_per_spike_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "coef_ca1_full_all": np.array([[0.1, 0.2]], dtype=float),
+        "coef_intercept_full_all": np.array([0.5, 0.6], dtype=float),
+    }
+
+    dataset = build_epoch_fit_dataset(
+        results,
+        animal_name="L14",
+        date="20240611",
+        epoch="01_s1",
+        sources={"ripple_events": "pynapple"},
+        fit_parameters={
+            "n_splits": 2,
+            "ridge_strength": 0.1,
+            "ripple_window_s": 0.2,
+            "ripple_window_offset_s": 0.0,
+            "ripple_selection_mode": "allripples",
+            "source_predictor_mode": SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+            "n_ripples_before_selection": 4,
+            "n_ripples_removed_by_selection": 0,
+            "n_ripples_after_selection": 4,
+        },
+    )
+
+    assert dataset.attrs["source_predictor_mode"] == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY
+    assert dataset.attrs["n_ca1_units"] == 3
+    assert dataset.attrs["n_source_predictor_features"] == 1
+    assert dataset.attrs["n_coef_source_features"] == 1
+    assert np.array_equal(dataset["coef_ca1_unit_id"].values, [-1])
+    assert np.array_equal(dataset["coef_source_feature_name"].values, ["mean_ca1_activity"])
 
 
 def test_fit_ripple_glm_returns_full_fit_coefficients(
@@ -712,6 +844,97 @@ def test_fit_ripple_glm_returns_full_fit_coefficients(
     assert results["coef_intercept_full_all"].shape == (2,)
     assert np.allclose(results["coef_ca1_full_all"], [[1.0, 2.0], [3.0, 4.0]])
     assert np.allclose(results["coef_intercept_full_all"], [0.25, 0.5])
+
+
+def test_fit_ripple_glm_mean_activity_uses_one_source_predictor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePopulationGLM:
+        def __init__(self, **kwargs) -> None:
+            self.coef_ = np.empty((0, 0), dtype=float)
+            self.intercept_ = np.empty((0,), dtype=float)
+
+        def fit(self, X, y) -> None:
+            X = np.asarray(X, dtype=float)
+            y = np.asarray(y, dtype=float)
+            self.coef_ = np.ones((X.shape[1], y.shape[1]), dtype=float)
+            self.intercept_ = np.zeros(y.shape[1], dtype=float)
+
+        def predict(self, X) -> np.ndarray:
+            X = np.asarray(X, dtype=float)
+            return np.ones((X.shape[0], self.intercept_.size), dtype=float)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nemos",
+        SimpleNamespace(
+            __version__="0.2.6",
+            glm=SimpleNamespace(PopulationGLM=FakePopulationGLM),
+        ),
+    )
+    monkeypatch.setattr(ripple_glm_module, "_clear_jax_caches", lambda: None)
+
+    prepared_epoch = {
+        "X_r": np.array(
+            [
+                [0.0, 2.0],
+                [2.0, 4.0],
+                [4.0, 6.0],
+                [6.0, 10.0],
+            ],
+            dtype=float,
+        ),
+        "y_r": np.array(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [2.0, 1.0],
+                [1.0, 2.0],
+            ],
+            dtype=float,
+        ),
+        "ca1_unit_ids": np.array([101, 102], dtype=int),
+        "v1_unit_ids": np.array([11, 12], dtype=int),
+        "ripple_start_times": np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "ripple_starts": np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "ripple_ends": np.array([1.2, 2.2, 3.2, 4.2], dtype=float),
+        "source_window_starts": np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "source_window_ends": np.array([1.2, 2.2, 3.2, 4.2], dtype=float),
+        "target_window_starts": np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "target_window_ends": np.array([1.2, 2.2, 3.2, 4.2], dtype=float),
+        "source_window_s": 0.2,
+        "source_window_offset_s": 0.0,
+        "target_window_s": 0.2,
+        "target_window_offset_s": 0.0,
+        "windows_differ": False,
+        "n_ripples": 4,
+        "n_cells": 2,
+        "n_ca1_cells": 2,
+        "cv_splits": [
+            (np.array([2, 3], dtype=int), np.array([0, 1], dtype=int)),
+            (np.array([0, 1], dtype=int), np.array([2, 3], dtype=int)),
+        ],
+    }
+
+    results = _fit_ripple_glm_on_prepared_epoch(
+        "01_s1",
+        prepared_epoch=prepared_epoch,
+        source_predictor_mode=SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+        n_shuffles_ripple=0,
+        shuffle_seed=45,
+        ripple_window_s=0.2,
+        ridge_strength=0.1,
+        maxiter=20,
+        tol=1e-4,
+    )
+
+    assert results["n_ca1_cells"] == 2
+    assert results["n_source_predictor_features"] == 1
+    assert results["source_predictor_mode"] == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY
+    assert np.array_equal(results["ca1_unit_ids"], [101, 102])
+    assert np.array_equal(results["coef_ca1_unit_ids"], [-1])
+    assert np.array_equal(results["source_predictor_feature_names"], ["mean_ca1_activity"])
+    assert results["coef_ca1_full_all"].shape == (1, 2)
 
 
 def test_fit_ripple_glm_preserves_overlapping_fixed_windows_in_fit_path(
@@ -1301,6 +1524,54 @@ def test_save_epoch_figures_returns_metric_and_prediction_paths(monkeypatch, tmp
         pseudo_r2_panel["ripple_p_value"],
         np.array([1.0, 1.0], dtype=float),
     )
+
+
+def test_save_epoch_figures_includes_mean_ca1_for_mean_activity_mode(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fake_plot_epoch_metric_summary(**kwargs):
+        return kwargs["out_path"]
+
+    def fake_plot_top_deviance_predicted_vs_observed(**kwargs):
+        return kwargs["out_path"]
+
+    monkeypatch.setattr(
+        "v1ca1.ripple.ripple_glm.plot_epoch_metric_summary",
+        fake_plot_epoch_metric_summary,
+    )
+    monkeypatch.setattr(
+        "v1ca1.ripple.ripple_glm.plot_top_deviance_predicted_vs_observed",
+        fake_plot_top_deviance_predicted_vs_observed,
+    )
+
+    results = {
+        "v1_unit_ids": np.array([11, 12], dtype=int),
+        "ripple_observed_count_oof": np.ones((2, 2), dtype=float),
+        "ripple_predicted_count_oof": np.ones((2, 2), dtype=float),
+        "pseudo_r2_ripple_folds": np.ones((2, 2), dtype=float),
+        "pseudo_r2_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "mae_ripple_folds": np.ones((2, 2), dtype=float),
+        "mae_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "devexp_ripple_folds": np.ones((2, 2), dtype=float),
+        "devexp_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+        "bits_per_spike_ripple_folds": np.ones((2, 2), dtype=float),
+        "bits_per_spike_ripple_shuff_folds": np.ones((2, 0, 2), dtype=float),
+    }
+
+    figure_paths = save_epoch_figures(
+        results=results,
+        fig_dir=tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="01_s1",
+        ripple_window_s=0.2,
+        ripple_selection_suffix="allripples",
+        ridge_strength=1e-1,
+        source_predictor_mode=SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+    )
+
+    assert all("_allripples_mean_ca1_ridge_" in path.name for path in figure_paths)
 
 
 def test_get_epoch_skip_reason_handles_common_weak_epoch_cases() -> None:

@@ -25,7 +25,8 @@ def test_paper_style_embeds_editable_text_for_vector_exports() -> None:
     assert DEFAULT_DPI == 300
     assert PAPER_RC_PARAMS["pdf.fonttype"] == 42
     assert PAPER_RC_PARAMS["svg.fonttype"] == "none"
-    assert REGION_COLORS == {"v1": "#4C72B0", "ca1": "#DD8452"}
+    assert PAPER_RC_PARAMS["font.sans-serif"][:2] == ["Arial", "Liberation Sans"]
+    assert REGION_COLORS == {"v1": "#2166AC", "ca1": "#B35806"}
 
 
 def test_get_processed_datasets_uses_paper_figure_registry() -> None:

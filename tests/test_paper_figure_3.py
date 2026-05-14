@@ -34,11 +34,13 @@ from v1ca1.paper_figures.figure_3 import (
     PANEL_F_CROSS_COMPARISONS,
     PANEL_F_NORM_ERROR_YLIM,
     PANEL_F_PLACE_ERROR_YLIM,
+    PANEL_F_SUMMARY_TEXT_FONTSIZE,
     PANEL_G_ARROW_COLOR,
     PANEL_G_BASIS_DARK_COLOR,
     PANEL_G_EXAMPLE_HEIGHT_FRACTION,
     PANEL_G_EXAMPLE_WIDTH_FRACTION,
     PANEL_G_EXAMPLES,
+    PANEL_G_MODEL_COLORS,
     PANEL_GH_WIDTH_RATIOS,
     PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
     PANEL_G_SCHEMATIC_WIDTH_FRACTION,
@@ -935,6 +937,9 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     )
     delta_table = pandas.DataFrame(
         {
+            "animal_name": ["L12", "L12", "L12", "L12"],
+            "date": ["20240421", "20240421", "20240421", "20240421"],
+            "unit": [1, 2, 1, 2],
             "epoch_type": ["light", "light", "dark", "dark"],
             "delta_bits_tp_vs_place": [0.1, 0.2, -0.2, 0.05],
         }
@@ -999,25 +1004,77 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert axes[0].collections[0].get_sizes().tolist() == pytest.approx(
         [PANEL_D_SCATTER_SIZE]
     )
-    assert axes[1].get_xlabel() == "Delta log likelihood (bits/spike)"
+    assert axes[1].get_xlabel() == "Δ log likelihood (bits/spike)"
+    assert axes[1].get_ylabel() == "Frac."
     assert "Trajectory-specific\nplace better" in [
         text.get_text() for text in axes[1].texts
     ]
     assert "DPP better" in [text.get_text() for text in axes[1].texts]
     dpp_text = next(text for text in axes[1].texts if text.get_text() == "DPP better")
-    summary_text = next(
-        text for text in axes[1].texts if text.get_text() == "100% >0\nmed. 0.15"
+    light_summary_text = next(
+        text for text in axes[1].texts if text.get_text() == "Light: 100% >0\nmed. 0.15"
+    )
+    dark_summary_text = next(
+        text for text in axes[1].texts if text.get_text() == "Dark: 50% >0\nmed. -0.08"
     )
     assert dpp_text.get_horizontalalignment() == "left"
-    assert summary_text.get_horizontalalignment() == "left"
-    assert summary_text.get_position()[0] == pytest.approx(dpp_text.get_position()[0])
-    assert summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
+    assert light_summary_text.get_horizontalalignment() == "left"
+    assert dark_summary_text.get_horizontalalignment() == "left"
+    assert light_summary_text.get_fontsize() == pytest.approx(
+        PANEL_F_SUMMARY_TEXT_FONTSIZE
+    )
+    assert dark_summary_text.get_fontsize() == pytest.approx(
+        PANEL_F_SUMMARY_TEXT_FONTSIZE
+    )
+    assert light_summary_text.get_position()[0] == pytest.approx(
+        dpp_text.get_position()[0]
+    )
+    assert dark_summary_text.get_position()[0] == pytest.approx(
+        dpp_text.get_position()[0]
+    )
+    assert light_summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
+    assert dark_summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["dark"]
+    light_count_text = next(
+        text
+        for text in axes[1].texts
+        if text.get_text() == "Light: n = 2 cells"
+    )
+    dark_count_text = next(
+        text
+        for text in axes[1].texts
+        if text.get_text() == "Dark: n = 2 cells"
+    )
+    animal_count_text = next(
+        text for text in axes[1].texts if text.get_text() == "1 animal"
+    )
+    assert light_count_text.get_position() == pytest.approx((0.03, 0.40))
+    assert dark_count_text.get_position() == pytest.approx((0.03, 0.24))
+    assert animal_count_text.get_position() == pytest.approx((0.03, 0.08))
+    assert light_count_text.get_horizontalalignment() == "left"
+    assert dark_count_text.get_horizontalalignment() == "left"
+    assert animal_count_text.get_horizontalalignment() == "left"
+    assert light_count_text.get_verticalalignment() == "bottom"
+    assert dark_count_text.get_verticalalignment() == "bottom"
+    assert animal_count_text.get_verticalalignment() == "bottom"
+    assert light_count_text.get_fontsize() == pytest.approx(
+        PANEL_F_SUMMARY_TEXT_FONTSIZE
+    )
+    assert dark_count_text.get_fontsize() == pytest.approx(
+        PANEL_F_SUMMARY_TEXT_FONTSIZE
+    )
+    assert animal_count_text.get_fontsize() == pytest.approx(
+        PANEL_F_SUMMARY_TEXT_FONTSIZE
+    )
+    assert light_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
+    assert dark_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["dark"]
+    assert animal_count_text.get_color() == "0.25"
     assert axes[1].get_legend() is None
     assert axes[1].get_xlim() == pytest.approx(PANEL_E_X_LIMITS)
     assert len(axes[1].lines) == 1
     assert axes[1].lines[0].get_color() == "black"
     assert axes[1].lines[0].get_linestyle() == "--"
     assert axes[1].patches[0].get_edgecolor()[3] == pytest.approx(0.0)
+    assert len(axes[1].patches) == 52
     assert len(axes[2].child_axes) == 2
     cross_ax, place_ax = axes[2].child_axes
     assert [child_ax.get_title() for child_ax in axes[2].child_axes] == [
@@ -1174,8 +1231,25 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         PANEL_G_EXAMPLE_HEIGHT_FRACTION
     )
     assert schematic_ax.get_position().y0 > example_ax.get_position().y0
-    assert [text.get_text() for text in example_ax.texts] == ["Example 1", "Example 2"]
-    assert all(text.get_fontsize() > 4.8 for text in example_ax.texts)
+    example_labels = [
+        text for text in example_ax.texts if text.get_text().startswith("Example")
+    ]
+    assert [text.get_text() for text in example_labels] == ["Example 1", "Example 2"]
+    assert all(text.get_fontsize() > 4.8 for text in example_labels)
+    assert all(text.get_position()[1] > 0.93 for text in example_labels)
+    shared_x_labels = [
+        text
+        for text in example_ax.texts
+        if text.get_text() == "Norm. path progression"
+    ]
+    assert len(shared_x_labels) == 2
+    assert all(
+        text.get_fontsize() == pytest.approx(3.7) for text in shared_x_labels
+    )
+    assert all(
+        text.get_position()[1] == pytest.approx(-0.145)
+        for text in shared_x_labels
+    )
     assert len(example_ax.child_axes) == 6
     example_icon_axes = [example_ax.child_axes[index] for index in (0, 3)]
     field_axes = [example_ax.child_axes[index] for index in (1, 2, 4, 5)]
@@ -1185,7 +1259,7 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         icon_ax.get_position().x1 < field_ax.get_position().x0
         for icon_ax, field_ax in zip(example_icon_axes, field_axes[::2], strict=True)
     )
-    assert all(field_ax.get_xlabel() == "Norm. path progression" for field_ax in field_axes)
+    assert all(field_ax.get_xlabel() == "" for field_ax in field_axes)
     assert field_axes[0].get_ylabel() == "FR (Hz)"
     assert field_axes[2].get_ylabel() == "FR (Hz)"
     assert field_axes[0].get_facecolor() == pytest.approx(
@@ -1225,6 +1299,11 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     panel_g_top_light_ax = schematic_ax.child_axes[2]
     panel_g_bottom_dark_ax = schematic_ax.child_axes[3]
     panel_g_bottom_light_ax = schematic_ax.child_axes[5]
+    assert all(
+        text.get_text() != "C"
+        for track_ax in schematic_ax.child_axes
+        for text in track_ax.texts
+    )
 
     def _axis_center_x(axis):
         position = axis.get_position()
@@ -1262,8 +1341,26 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     ]
     assert len(dark_basis_patches) > 0
     assert all(
-        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 1.0))
+        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
         for patch in dark_basis_patches
+    )
+    assert all(
+        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
+        for patch in dark_basis_patches
+    )
+    shared_light_basis_patches = [
+        patch
+        for patch in panel_g_bottom_light_ax.patches
+        if isinstance(patch, Circle)
+    ]
+    assert len(shared_light_basis_patches) > 0
+    assert all(
+        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
+        for patch in shared_light_basis_patches
+    )
+    assert all(
+        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
+        for patch in shared_light_basis_patches
     )
     track_patches = [
         patch
@@ -1305,6 +1402,30 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     assert schematic_h_ax.texts[1].get_fontsize() == pytest.approx(5.8)
     assert schematic_h_ax.texts[2].get_fontsize() == pytest.approx(4.1)
     assert schematic_h_ax.texts[3].get_fontsize() == pytest.approx(3.8)
+    assert schematic_h_ax.texts[2].get_position()[0] == pytest.approx(0.045)
+    assert schematic_h_ax.texts[3].get_position()[0] == pytest.approx(0.045)
+    train_predict_midpoint_x = 0.5 * (
+        schematic_h_ax.texts[0].get_position()[0]
+        + schematic_h_ax.texts[1].get_position()[0]
+    )
+    independent_prediction_text = next(
+        text
+        for text in schematic_h_ax.texts
+        if text.get_text().startswith('"Light activity is like the other arm')
+    )
+    shared_prediction_text = next(
+        text
+        for text in schematic_h_ax.texts
+        if text.get_text().startswith('"Light activity is like the same arm')
+    )
+    assert independent_prediction_text.get_position()[0] == pytest.approx(
+        train_predict_midpoint_x
+    )
+    assert independent_prediction_text.get_position()[1] == pytest.approx(0.61)
+    assert shared_prediction_text.get_position()[0] == pytest.approx(
+        train_predict_midpoint_x
+    )
+    assert shared_prediction_text.get_position()[1] == pytest.approx(0.02)
     panel_h_track_patches = [
         patch
         for track_ax in schematic_h_ax.child_axes
@@ -1328,6 +1449,26 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     panel_h_segment_modulation_ax = schematic_h_ax.child_axes[2]
     panel_h_dark_ax = schematic_h_ax.child_axes[3]
     panel_h_shared_light_ax = schematic_h_ax.child_axes[4]
+    assert all(
+        text.get_text() != "C"
+        for track_ax in schematic_h_ax.child_axes
+        for text in track_ax.texts
+    )
+    panel_h_shared_scaffold_basis_patches = [
+        patch
+        for track_ax in (panel_h_dark_ax, panel_h_shared_light_ax)
+        for patch in track_ax.patches
+        if isinstance(patch, Circle)
+    ]
+    assert len(panel_h_shared_scaffold_basis_patches) > 0
+    assert all(
+        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
+        for patch in panel_h_shared_scaffold_basis_patches
+    )
+    assert all(
+        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
+        for patch in panel_h_shared_scaffold_basis_patches
+    )
     assert _axis_center_y(panel_h_segment_modulation_ax) < (
         _axis_center_y(panel_h_independent_train_ax)
         - schematic_h_position.height * 0.36
@@ -1343,18 +1484,41 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     assert all(icon_ax.get_title() == "" for icon_ax in icon_axes)
     assert all(hist_ax.get_title() == "" for hist_ax in hist_axes)
     assert all(len(icon_ax.lines) > 0 for icon_ax in icon_axes)
-    assert any(
-        text.get_text() == "Δ log likelihood (bits/spike)"
+    panel_h_delta_xlabel = next(
+        text
         for text in delta_h_ax.texts
+        if text.get_text() == "Δ log likelihood (bits/spike)"
     )
-    assert any(text.get_text() == "Frac." for text in delta_h_ax.texts)
+    panel_h_delta_ylabel = next(
+        text for text in delta_h_ax.texts if text.get_text() == "Frac."
+    )
+    assert panel_h_delta_xlabel.get_position() == pytest.approx((0.53, -0.055))
+    assert panel_h_delta_ylabel.get_position() == pytest.approx((-0.055, 0.52))
     for child_delta_ax in hist_axes:
+        child_texts = child_delta_ax.texts
+        child_text_labels = [text.get_text() for text in child_texts]
         assert child_delta_ax.lines[0].get_linestyle() == "--"
         assert child_delta_ax.lines[0].get_color() == "black"
         assert len(child_delta_ax.lines) == 1
-        assert any("% >0\nmed." in text.get_text() for text in child_delta_ax.texts)
-        assert all("n=" not in text.get_text() for text in child_delta_ax.texts)
-        assert all(">0=" not in text.get_text() for text in child_delta_ax.texts)
+        assert "Independent\nbetter" in child_text_labels
+        assert "Shared scaffold\nbetter" in child_text_labels
+        independent_better_text = next(
+            text for text in child_texts if text.get_text() == "Independent\nbetter"
+        )
+        shared_better_text = next(
+            text for text in child_texts if text.get_text() == "Shared scaffold\nbetter"
+        )
+        assert independent_better_text.get_horizontalalignment() == "left"
+        assert shared_better_text.get_horizontalalignment() == "right"
+        assert independent_better_text.get_color() == PANEL_G_MODEL_COLORS["visual"]
+        assert shared_better_text.get_color() == PANEL_G_MODEL_COLORS[
+            "task_segment_bump"
+        ]
+        summary_text = next(text for text in child_texts if "% >0\nmed." in text.get_text())
+        assert summary_text.get_position() == pytest.approx((0.97, 0.56))
+        assert summary_text.get_horizontalalignment() == "right"
+        assert all("n=" not in text.get_text() for text in child_texts)
+        assert all(">0=" not in text.get_text() for text in child_texts)
         assert len(child_delta_ax.patches) > 0
         assert child_delta_ax.patches[0].get_edgecolor()[3] == pytest.approx(0.0)
         assert child_delta_ax.patches[0].get_linewidth() == pytest.approx(0.0)
@@ -1370,9 +1534,12 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     second_delta_text = next(
         text for text in second_example_h_ax.texts if text.get_text() == "ΔLL=-0.10"
     )
-    assert first_delta_text.get_position() == pytest.approx((0.04, 0.06))
-    assert second_delta_text.get_position() == pytest.approx((0.04, 0.06))
-    assert first_delta_text.get_verticalalignment() == "bottom"
+    assert first_delta_text.get_position() == pytest.approx((0.96, 0.94))
+    assert second_delta_text.get_position() == pytest.approx((0.96, 0.06))
+    assert first_delta_text.get_horizontalalignment() == "right"
+    assert second_delta_text.get_horizontalalignment() == "right"
+    assert first_delta_text.get_verticalalignment() == "top"
+    assert second_delta_text.get_verticalalignment() == "bottom"
     assert first_example_h_ax.get_legend() is not None
     assert [text.get_text() for text in first_example_h_ax.get_legend().get_texts()] == [
         "Empirical",

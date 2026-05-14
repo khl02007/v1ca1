@@ -106,6 +106,9 @@ PANEL_E_GLM_TARGET_WINDOW_S = DEFAULT_RIPPLE_WINDOW_S
 PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S = 0.0
 PANEL_E_GLM_EPOCH_ORDER = ("light",)
 HEATMAP_EPOCH_ORDER = ("light", "dark", "sleep")
+PANEL_A_EPOCH_ORDER = ("light", "sleep")
+PANEL_C_EPOCH_ORDER = ("light", "sleep")
+PANEL_D_EPOCH_ORDER = ("light", "sleep")
 HEATMAP_EPOCH_LABELS = {
     "light": "Light run",
     "dark": "Dark run",
@@ -1884,7 +1887,10 @@ def load_first_available_glm_prediction(
     )
 
 
-def draw_ripple_glm_schematic(ax: "Axes") -> None:
+def draw_ripple_glm_schematic(
+    ax: "Axes",
+    ripple_trace: Mapping[str, Any] | None = None,
+) -> None:
     """Draw a compact schematic of the CA1-to-V1 ripple count GLM."""
     from matplotlib.patches import FancyArrowPatch, Rectangle
 
@@ -1895,58 +1901,113 @@ def draw_ripple_glm_schematic(ax: "Axes") -> None:
 
     ca1_color = REGION_COLORS["ca1"]
     v1_color = REGION_COLORS["v1"]
-    window_x0 = 0.30
-    window_x1 = 0.67
-    timeline_x0 = 0.12
-    timeline_x1 = 0.90
+    time_min_s = -0.08
+    time_max_s = 0.22
+    trace_x0 = 0.13
+    trace_x1 = 0.94
+    count_window_x0 = trace_x0 + (0.0 - time_min_s) / (time_max_s - time_min_s) * (
+        trace_x1 - trace_x0
+    )
+    count_window_x1 = trace_x0 + (0.20 - time_min_s) / (time_max_s - time_min_s) * (
+        trace_x1 - trace_x0
+    )
 
-    ax.text(0.50, 0.96, "For each ripple", ha="center", va="top", fontsize=6.2, transform=transform)
     ax.add_patch(
         Rectangle(
-            (window_x0, 0.60),
-            window_x1 - window_x0,
-            0.26,
+            (count_window_x0, 0.43),
+            count_window_x1 - count_window_x0,
+            0.46,
             facecolor=SCHEMATIC_COLORS["ripple_window_fill"],
-            edgecolor="0.70",
-            linewidth=0.45,
+            edgecolor="none",
+            alpha=0.65,
             transform=transform,
             zorder=0,
         )
     )
-    ax.plot([timeline_x0, timeline_x1], [0.82, 0.82], color="0.35", linewidth=0.55, transform=transform)
-    ax.plot([window_x0, window_x0], [0.58, 0.88], color="0.10", linewidth=0.7, transform=transform)
-    ax.plot([window_x1, window_x1], [0.60, 0.86], color="0.55", linewidth=0.45, transform=transform)
-    ax.text(window_x0, 0.90, "onset", ha="center", va="bottom", fontsize=4.9, transform=transform)
+    ax.plot(
+        [count_window_x0, count_window_x0],
+        [0.42, 0.91],
+        color=SCHEMATIC_COLORS["ripple_onset"],
+        linewidth=0.75,
+        transform=transform,
+        zorder=3,
+    )
+    ax.plot(
+        [count_window_x1, count_window_x1],
+        [0.43, 0.88],
+        color="0.50",
+        linewidth=0.55,
+        linestyle=":",
+        transform=transform,
+        zorder=3,
+    )
     ax.text(
-        (window_x0 + window_x1) / 2.0,
-        0.875,
+        (count_window_x0 + count_window_x1) / 2.0,
+        0.905,
         "0-200 ms",
         ha="center",
-        va="bottom",
-        fontsize=5.5,
+        va="top",
+        fontsize=5.3,
         transform=transform,
     )
+    ax.text(count_window_x0, 0.930, "onset", ha="center", va="bottom", fontsize=4.8, transform=transform)
 
-    ripple_x = np.linspace(timeline_x0, timeline_x1, 80)
-    ripple_y = 0.80 + 0.018 * np.sin(np.linspace(0.0, 9.0 * np.pi, ripple_x.size))
-    ripple_y += 0.026 * np.exp(-((ripple_x - 0.42) / 0.13) ** 2) * np.sin(
-        np.linspace(0.0, 18.0 * np.pi, ripple_x.size)
+    if ripple_trace is not None:
+        trace_time_s = np.asarray(ripple_trace.get("time_s", []), dtype=float)
+        trace_lfp = np.asarray(ripple_trace.get("filtered_lfp", []), dtype=float)
+        trace_mask = (
+            np.isfinite(trace_time_s)
+            & np.isfinite(trace_lfp)
+            & (trace_time_s >= time_min_s)
+            & (trace_time_s <= time_max_s)
+        )
+    else:
+        trace_time_s = np.asarray([], dtype=float)
+        trace_lfp = np.asarray([], dtype=float)
+        trace_mask = np.asarray([], dtype=bool)
+    if np.any(trace_mask):
+        plot_time_s = trace_time_s[trace_mask]
+        plot_lfp = trace_lfp[trace_mask] - np.nanmedian(trace_lfp[trace_mask])
+        lfp_scale = np.nanpercentile(np.abs(plot_lfp), 98)
+        if not np.isfinite(lfp_scale) or lfp_scale <= 0:
+            lfp_scale = np.nanmax(np.abs(plot_lfp))
+        plot_lfp = plot_lfp / lfp_scale if np.isfinite(lfp_scale) and lfp_scale > 0 else plot_lfp
+    else:
+        plot_time_s = np.linspace(time_min_s, time_max_s, 120)
+        envelope = np.exp(-((plot_time_s - 0.055) / 0.065) ** 2)
+        plot_lfp = 0.35 * np.sin(2.0 * np.pi * 9.0 * plot_time_s)
+        plot_lfp += envelope * np.sin(2.0 * np.pi * 170.0 * plot_time_s)
+    ripple_x = trace_x0 + (plot_time_s - time_min_s) / (time_max_s - time_min_s) * (
+        trace_x1 - trace_x0
     )
+    ripple_y = 0.78 + 0.065 * np.clip(plot_lfp, -1.6, 1.6)
+    ax.plot([trace_x0, trace_x1], [0.78, 0.78], color="0.75", linewidth=0.35, transform=transform)
     ax.plot(
         ripple_x,
         ripple_y,
         color=SCHEMATIC_COLORS["ripple_trace"],
-        linewidth=0.55,
+        linewidth=0.75,
         transform=transform,
     )
+    ax.text(0.04, 0.80, "ripple\nLFP", ha="left", va="center", fontsize=5.0, transform=transform)
 
-    def _draw_raster_row(y_center: float, color: str, spike_times: Sequence[Sequence[float]]) -> None:
-        for row_index, row_spikes in enumerate(spike_times):
-            y0 = y_center - 0.035 + row_index * 0.035
-            for spike_x in row_spikes:
+    def _time_to_x(time_s: float) -> float:
+        return trace_x0 + (float(time_s) - time_min_s) / (time_max_s - time_min_s) * (
+            trace_x1 - trace_x0
+        )
+
+    def _draw_raster_row(
+        y_center: float,
+        color: str,
+        spike_times_s: Sequence[Sequence[float]],
+    ) -> None:
+        for row_index, row_spikes in enumerate(spike_times_s):
+            y0 = y_center - 0.030 + row_index * 0.030
+            for spike_time_s in row_spikes:
+                spike_x = _time_to_x(spike_time_s)
                 ax.plot(
                     [spike_x, spike_x],
-                    [y0 - 0.010, y0 + 0.010],
+                    [y0 - 0.011, y0 + 0.011],
                     color=color,
                     linewidth=0.8,
                     solid_capstyle="butt",
@@ -1954,39 +2015,24 @@ def draw_ripple_glm_schematic(ax: "Axes") -> None:
                 )
 
     ca1_spikes = (
-        (0.33, 0.38, 0.54, 0.61),
-        (0.36, 0.43, 0.58),
-        (0.31, 0.49, 0.63),
+        (0.012, 0.038, 0.112, 0.156),
+        (0.028, 0.074, 0.136),
+        (0.004, 0.094, 0.176),
     )
     v1_spikes = (
-        (0.34, 0.53),
-        (0.41, 0.46, 0.62),
-        (0.37, 0.60),
+        (0.030, 0.126),
+        (0.066, 0.088, 0.168),
+        (0.046, 0.150),
     )
-    ax.text(0.09, 0.70, "CA1", ha="right", va="center", fontsize=5.8, color=ca1_color, transform=transform)
-    ax.text(0.09, 0.62, "V1", ha="right", va="center", fontsize=5.8, color=v1_color, transform=transform)
-    _draw_raster_row(0.69, ca1_color, ca1_spikes)
-    _draw_raster_row(0.61, v1_color, v1_spikes)
+    ax.text(0.07, 0.62, "CA1", ha="right", va="center", fontsize=5.4, color=ca1_color, transform=transform)
+    ax.text(0.07, 0.50, "V1", ha="right", va="center", fontsize=5.4, color=v1_color, transform=transform)
+    _draw_raster_row(0.62, ca1_color, ca1_spikes)
+    _draw_raster_row(0.50, v1_color, v1_spikes)
 
     count_box_specs = (
-        (
-            0.08,
-            0.39,
-            0.34,
-            0.11,
-            SCHEMATIC_COLORS["ca1_count_fill"],
-            ca1_color,
-            "CA1 count\nvector X_r",
-        ),
-        (
-            0.58,
-            0.39,
-            0.34,
-            0.11,
-            SCHEMATIC_COLORS["v1_count_fill"],
-            v1_color,
-            "V1 count\ntarget y_r",
-        ),
+        (0.05, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["ca1_count_fill"], ca1_color, "CA1\ncounts X"),
+        (0.38, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["glm_fill"], "0.25", "Poisson\nGLM"),
+        (0.71, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["v1_count_fill"], v1_color, "V1\ncounts y"),
     )
     for x0, y0, width, height, facecolor, edgecolor, label in count_box_specs:
         ax.add_patch(
@@ -2006,27 +2052,15 @@ def draw_ripple_glm_schematic(ax: "Axes") -> None:
             label,
             ha="center",
             va="center",
-            fontsize=5.1,
+            fontsize=5.0,
             color="black",
             transform=transform,
         )
 
-    glm_rect = Rectangle(
-        (0.30, 0.18),
-        0.40,
-        0.12,
-        facecolor=SCHEMATIC_COLORS["glm_fill"],
-        edgecolor="0.25",
-        linewidth=0.65,
-        transform=transform,
-    )
-    ax.add_patch(glm_rect)
-    ax.text(0.50, 0.24, "Poisson GLM\npredict y_V1", ha="center", va="center", fontsize=5.3, transform=transform)
-
     arrow_specs = (
-        ((0.25, 0.39), (0.42, 0.30)),
-        ((0.50, 0.30), (0.50, 0.39)),
-        ((0.70, 0.24), (0.86, 0.39)),
+        ((0.29, 0.30), (0.38, 0.30)),
+        ((0.62, 0.30), (0.71, 0.30)),
+        ((0.50, 0.43), (0.50, 0.35)),
     )
     for start, end in arrow_specs:
         ax.add_patch(
@@ -2040,7 +2074,15 @@ def draw_ripple_glm_schematic(ax: "Axes") -> None:
                 transform=transform,
             )
         )
-    ax.text(0.50, 0.08, "Evaluate on held-out ripples", ha="center", va="center", fontsize=5.5, transform=transform)
+    ax.text(
+        0.50,
+        0.12,
+        "Held-out prediction",
+        ha="center",
+        va="center",
+        fontsize=5.4,
+        transform=transform,
+    )
 
 
 def plot_ripple_lfp_panel(ax: "Axes", trace: dict[str, Any]) -> None:
@@ -2255,10 +2297,14 @@ def plot_epoch_ripple_heatmap_panel(
     for col_index, prepared_epoch_payload in enumerate(prepared_epoch_payloads):
         epoch_payload = prepared_epoch_payload["epoch_payload"]
         x0 = left + col_index * (cell_width + column_gap)
+        panel_a_title = {
+            "light": "Run",
+            "sleep": "Sleep",
+        }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
         ax.text(
             x0 + cell_width / 2,
             0.96,
-            f"{epoch_payload['label']}\n{epoch_payload['epoch']}",
+            panel_a_title,
             ha="center",
             va="top",
             fontsize=6,
@@ -2611,9 +2657,27 @@ def plot_glm_summary_panel(ax: "Axes", glm_table: Any) -> None:
     ax.tick_params(labelsize=6, length=2, pad=1)
 
 
+def _draw_panel_c_neglog_p_label(ax: "Axes") -> None:
+    """Draw Panel C's scatter ylabel with regular figure text and subscripted 10."""
+    ax.set_ylabel("-log   p", fontsize=5, labelpad=1.0)
+    ax.yaxis.set_label_coords(-0.19, 0.58)
+    ax.text(
+        -0.178,
+        0.596,
+        "10",
+        ha="center",
+        va="center",
+        fontsize=3.5,
+        rotation=90,
+        transform=ax.transAxes,
+        clip_on=False,
+    )
+
+
 def plot_glm_analysis_panel(
     ax: "Axes",
     epoch_tables: Sequence[dict[str, Any]],
+    ripple_trace: Mapping[str, Any] | None = None,
 ) -> None:
     """Plot the ripple-GLM schematic and epoch-specific performance summaries."""
     ax.set_xlim(0.0, 1.0)
@@ -2624,7 +2688,7 @@ def plot_glm_analysis_panel(
         return
 
     schematic_ax = ax.inset_axes([0.01, 0.08, 0.30, 0.82])
-    draw_ripple_glm_schematic(schematic_ax)
+    draw_ripple_glm_schematic(schematic_ax, ripple_trace=ripple_trace)
 
     all_neglog_p: list[np.ndarray] = []
     for epoch_payload in epoch_tables:
@@ -2715,16 +2779,16 @@ def plot_glm_analysis_panel(
                 fontsize=5,
                 transform=plot_ax.transAxes,
             )
-        plot_ax.set_title(
-            f"{epoch_payload['label']}\n{epoch_payload['epoch']}",
-            fontsize=5.6,
-            pad=1.5,
-        )
+        panel_c_title = {
+            "light": "Run",
+            "sleep": "Sleep",
+        }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
+        plot_ax.set_title(panel_c_title, fontsize=5.6, pad=1.5)
         plot_ax.set_xlim(x_min, x_max)
         plot_ax.set_ylim(0.0, y_max)
         plot_ax.tick_params(labelbottom=False)
         if index == 0:
-            plot_ax.set_ylabel("-log10 p", fontsize=5, labelpad=1)
+            _draw_panel_c_neglog_p_label(plot_ax)
         else:
             plot_ax.set_yticklabels([])
         plot_ax.spines["top"].set_visible(False)
@@ -2790,7 +2854,31 @@ def plot_glm_analysis_panel(
         box_ax.set_ylim(0.45, 2.55)
         box_ax.set_yticks([1, 2])
         if index == 0:
-            box_ax.set_yticklabels(["n.s.", "p<0.005"], fontsize=4.8)
+            from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
+
+            box_ax.set_yticklabels(["n.s.", ""], fontsize=4.8)
+            text_props = {"fontsize": 4.8}
+            p_label_box = HPacker(
+                children=[
+                    TextArea("p", textprops={**text_props, "fontstyle": "italic"}),
+                    TextArea("<0.005", textprops=text_props),
+                ],
+                align="center",
+                pad=0,
+                sep=0,
+            )
+            box_ax.add_artist(
+                AnnotationBbox(
+                    p_label_box,
+                    (0.0, 2.0),
+                    xycoords=box_ax.get_yaxis_transform(),
+                    xybox=(-1.5, 0.0),
+                    boxcoords="offset points",
+                    box_alignment=(1.0, 0.5),
+                    frameon=False,
+                    pad=0,
+                )
+            )
         else:
             box_ax.set_yticklabels([])
         if index == 1:
@@ -3346,6 +3434,7 @@ def _plot_deviance_metric_quartiles(
     reference_y: float | None = None,
     epoch_type: str = "light",
     min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
+    show_x_ticklabels: bool = True,
 ) -> None:
     """Plot one metric across significant positive ripple-GLM deviance quartiles."""
     if reference_y is not None:
@@ -3436,7 +3525,10 @@ def _plot_deviance_metric_quartiles(
 
     ax.set_xlim(0.55, 4.45)
     ax.set_xticks([1.0, 2.0, 3.0, 4.0])
-    ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
+    if show_x_ticklabels:
+        ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
+    else:
+        ax.set_xticklabels([])
     if y_limits is not None:
         ax.set_ylim(*y_limits)
     if y_scale == "log":
@@ -3604,6 +3696,14 @@ def _plot_glm_significance_metric_distribution(
     y_label: str,
     title: str,
     epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
+    y_limits: tuple[float, float] | None = None,
+    y_ticks: Sequence[float] | None = None,
+    y_scale: str = "linear",
+    show_x_ticklabels: bool = True,
+    show_y_ticklabels: bool = True,
+    show_counts: bool = False,
 ) -> None:
     """Plot one metric for nonsignificant and significant ripple-GLM cells."""
     if table is None or len(table) == 0:
@@ -3627,13 +3727,18 @@ def _plot_glm_significance_metric_distribution(
             & np.isfinite(devexp_values)
             & np.isfinite(p_values)
         )
-        significant = finite & (devexp_values > 0.0) & (p_values < SIGNIFICANCE_P_VALUE)
+        if y_scale == "log":
+            finite &= metric_values > 0.0
+        significant = (
+            finite
+            & (devexp_values > float(min_devexp))
+            & (p_values < float(p_value_threshold))
+        )
         values_by_group = [
             metric_values[finite & ~significant],
             metric_values[significant],
         ]
         if any(values.size for values in values_by_group):
-            ax.axhline(0.0, color="0.45", linestyle="--", linewidth=0.55, zorder=0)
             plot_data = [values for values in values_by_group if values.size]
             plot_positions = [
                 position
@@ -3673,15 +3778,16 @@ def _plot_glm_significance_metric_distribution(
                 )
             ns_count = int(values_by_group[0].size)
             sig_count = int(values_by_group[1].size)
-            ax.text(
-                0.98,
-                0.96,
-                f"NS n={ns_count}\nSig n={sig_count}",
-                ha="right",
-                va="top",
-                fontsize=4.3,
-                transform=ax.transAxes,
-            )
+            if show_counts:
+                ax.text(
+                    0.98,
+                    0.96,
+                    f"NS n={ns_count}\nSig n={sig_count}",
+                    ha="right",
+                    va="top",
+                    fontsize=4.3,
+                    transform=ax.transAxes,
+                )
         else:
             ax.text(
                 0.5,
@@ -3698,13 +3804,28 @@ def _plot_glm_significance_metric_distribution(
         if values_by_group and any(values.size for values in values_by_group)
         else np.asarray([], dtype=float)
     )
-    if finite_values.size:
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    elif finite_values.size:
         low, high = np.nanpercentile(finite_values, [2.0, 98.0])
         pad = max(0.01, 0.12 * float(high - low))
         ax.set_ylim(float(low - pad), float(high + pad))
+    if y_scale == "log":
+        ax.set_yscale("log")
+        if y_ticks is None:
+            y_ticks = [1.0, 10.0, 100.0]
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels([f"{tick:g}" for tick in y_ticks], fontsize=4.4)
+    elif y_ticks is not None:
+        ax.set_yticks(y_ticks)
+    if not show_y_ticklabels:
+        ax.set_yticklabels([])
     ax.set_xlim(0.45, 2.55)
     ax.set_xticks([1.0, 2.0])
-    ax.set_xticklabels(["NS", "Sig"], fontsize=4.4)
+    if show_x_ticklabels:
+        ax.set_xticklabels(["NS", "Sig"], fontsize=4.4)
+    else:
+        ax.set_xticklabels([])
     ax.set_title(title, fontsize=5.4, pad=0.8)
     ax.set_ylabel(y_label, fontsize=5.0, labelpad=0.8)
     ax.spines["top"].set_visible(False)
@@ -3723,34 +3844,113 @@ def plot_glm_behavior_association_panel(
     ax.axis("off")
 
     table = payload.get("similarity_table")
-    firing_rate_ax = ax.inset_axes([0.08, 0.20, 0.38, 0.66])
-    similarity_ax = ax.inset_axes([0.58, 0.20, 0.34, 0.66])
-    _plot_deviance_metric_quartiles(
-        firing_rate_ax,
-        table,
-        y_column="firing_rate_hz",
-        y_label="Dark activity\n(Hz)",
-        title="Dark activity",
-        y_limits=(0.5, 120.0),
-        y_scale="log",
+    epoch_rows = tuple(PANEL_D_EPOCH_ORDER)
+    row_gap = 0.085
+    row_top = 0.86
+    row_bottom = 0.20
+    row_height = (
+        (row_top - row_bottom - row_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
+        if epoch_rows
+        else 0.0
     )
-    _plot_deviance_metric_quartiles(
-        similarity_ax,
-        table,
-        y_column="same_turn_tuning_similarity",
-        y_label="Dark DPP\ncorr.",
-        title="DPP",
-        y_limits=(-0.1, 1.0),
-    )
+    left = 0.09
+    quartile_width = 0.22
+    distribution_width = 0.13
+    activity_x = left
+    dpp_x = 0.35
+    activity_distribution_x = 0.65
+    dpp_distribution_x = 0.83
+    for row_index, epoch_type in enumerate(epoch_rows):
+        bottom = row_top - row_height - row_index * (row_height + row_gap)
+        show_x_ticklabels = row_index == len(epoch_rows) - 1
+        firing_rate_ax = ax.inset_axes([activity_x, bottom, quartile_width, row_height])
+        similarity_ax = ax.inset_axes([dpp_x, bottom, quartile_width, row_height])
+        firing_rate_distribution_ax = ax.inset_axes(
+            [activity_distribution_x, bottom, distribution_width, row_height]
+        )
+        similarity_distribution_ax = ax.inset_axes(
+            [dpp_distribution_x, bottom, distribution_width, row_height]
+        )
+        _plot_deviance_metric_quartiles(
+            firing_rate_ax,
+            table,
+            y_column="firing_rate_hz",
+            y_label="",
+            title="Dark activity\nquartiles" if row_index == 0 else "",
+            y_limits=(0.5, 120.0),
+            y_scale="log",
+            epoch_type=epoch_type,
+            show_x_ticklabels=show_x_ticklabels,
+        )
+        _plot_deviance_metric_quartiles(
+            similarity_ax,
+            table,
+            y_column="same_turn_tuning_similarity",
+            y_label="",
+            title="DPP corr.\nquartiles" if row_index == 0 else "",
+            y_limits=(-0.1, 1.0),
+            epoch_type=epoch_type,
+            show_x_ticklabels=show_x_ticklabels,
+        )
+        _plot_glm_significance_metric_distribution(
+            firing_rate_distribution_ax,
+            table,
+            metric_column="firing_rate_hz",
+            y_label="",
+            title="Dark activity\nsig vs n.s." if row_index == 0 else "",
+            epoch_type=epoch_type,
+            y_limits=(0.5, 120.0),
+            y_scale="log",
+            show_x_ticklabels=show_x_ticklabels,
+            show_y_ticklabels=False,
+        )
+        _plot_glm_significance_metric_distribution(
+            similarity_distribution_ax,
+            table,
+            metric_column="same_turn_tuning_similarity",
+            y_label="",
+            title="DPP corr.\nsig vs n.s." if row_index == 0 else "",
+            epoch_type=epoch_type,
+            y_limits=(-0.1, 1.0),
+            show_x_ticklabels=show_x_ticklabels,
+            show_y_ticklabels=False,
+        )
+        ax.text(
+            left - 0.045,
+            bottom + row_height / 2.0,
+            HEATMAP_EPOCH_LABELS[epoch_type].replace(" run", ""),
+            ha="right",
+            va="center",
+            fontsize=5.2,
+            color=GLM_EPOCH_COLORS.get(epoch_type, "black"),
+            transform=ax.transAxes,
+        )
     ax.text(
         0.50,
-        0.035,
-        "Light deviance quartile\n(p<0.005, devexp>0)",
+        0.030,
+        "Groups defined within epoch\n(p<0.005, devexp>0)",
         ha="center",
         va="bottom",
         fontsize=5.0,
         transform=ax.transAxes,
     )
+
+
+def filter_epoch_payloads(
+    payloads: Sequence[Mapping[str, Any]],
+    epoch_order: Sequence[str],
+) -> list[Mapping[str, Any]]:
+    """Return payloads ordered by a selected set of epoch types."""
+    payload_by_epoch_type = {
+        str(payload["epoch_type"]): payload
+        for payload in payloads
+        if "epoch_type" in payload
+    }
+    return [
+        payload_by_epoch_type[str(epoch_type)]
+        for epoch_type in epoch_order
+        if str(epoch_type) in payload_by_epoch_type
+    ]
 
 
 def plot_observed_predicted_panel(ax: "Axes", example: dict[str, Any]) -> None:
@@ -3855,6 +4055,23 @@ def make_figure_2(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
+    example_animal, example_date, example_epoch = normalize_dataset_id(example_dataset)
+    ripple_lfp_trace: dict[str, Any] | None = None
+    try:
+        ripple_lfp_trace = load_example_ripple_lfp_trace(
+            data_root,
+            animal_name=example_animal,
+            date=example_date,
+            epoch=example_epoch,
+            ripple_threshold_zscore=ripple_threshold_zscore,
+            time_before_s=DEFAULT_LFP_TIME_BEFORE_S,
+            time_after_s=0.220,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(
+            "Panel C using schematic ripple trace because saved ripple-band LFP "
+            f"was unavailable for {example_animal} {example_date} {example_epoch}: {exc}"
+        )
     panel_d_payload = load_glm_behavior_association_tables(
         data_root,
         datasets,
@@ -3866,6 +4083,8 @@ def make_figure_2(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
+    panel_a_epoch_tables = filter_epoch_payloads(heatmap_epoch_tables, PANEL_A_EPOCH_ORDER)
+    panel_c_epoch_tables = filter_epoch_payloads(glm_epoch_tables, PANEL_C_EPOCH_ORDER)
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
@@ -3883,14 +4102,18 @@ def make_figure_2(
         fig.add_subplot(outer_grid[1, 2:]),
     ]
 
-    plot_epoch_ripple_heatmap_panel(axes[0], heatmap_epoch_tables, regions=regions)
+    plot_epoch_ripple_heatmap_panel(axes[0], panel_a_epoch_tables, regions=regions)
     axes[0].set_title("Ripple-triggered mean firing rates", fontsize=8, pad=2)
     plot_top_ca1_xcorr_panel(axes[1], xcorr_payload)
     axes[1].set_title("CA1-V1 cross correlation during ripples", fontsize=8, pad=2)
-    plot_glm_analysis_panel(axes[2], glm_epoch_tables)
-    axes[2].set_title("CA1-to-V1 ripple GLM", fontsize=8, pad=2)
+    plot_glm_analysis_panel(axes[2], panel_c_epoch_tables, ripple_trace=ripple_lfp_trace)
+    axes[2].set_title("Predicting V1 activity during ripples with CA1 activity", fontsize=8, pad=2)
     plot_glm_behavior_association_panel(axes[3], panel_d_payload)
-    axes[3].set_title("Light ripple GLM associations", fontsize=8, pad=2)
+    axes[3].set_title(
+        "Predictable neurons are enriched for dark-active DPP coding",
+        fontsize=8,
+        pad=2,
+    )
 
     for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
         label_axis(ax, label, x=-0.10, y=1.04)
@@ -3950,8 +4173,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=parse_dataset_id,
         default=DEFAULT_EXAMPLE_DATASET,
         help=(
-            "Deprecated; retained for compatibility with earlier Figure 2 "
-            "versions. Format: animal:date:epoch."
+            "Data set used for the example ripple-band LFP trace in panel C. "
+            "Format: animal:date:epoch."
         ),
     )
     parser.add_argument(

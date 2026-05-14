@@ -1154,34 +1154,54 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(axes[2, 2].child_axes[2].patches) == 2
     assert [tick.get_text() for tick in axes[2, 2].child_axes[2].get_yticklabels()] == [
         "n.s.",
-        "p<0.005",
+        "",
     ]
+    assert axes[2, 2].child_axes[1].get_ylabel() == "-log   p"
+    assert any(
+        text.get_text() == "10" and text.get_fontstyle() == "normal"
+        for text in axes[2, 2].child_axes[1].texts
+    )
+    assert len(axes[2, 2].child_axes[2].artists) == 1
     plt.close(fig)
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
-    assert len(ax.child_axes) == 2
-    assert ax.child_axes[0].get_ylabel() == "Dark activity\n(Hz)"
-    assert ax.child_axes[1].get_ylabel() == "Dark DPP\ncorr."
+    assert len(ax.child_axes) == 8
+    assert ax.child_axes[0].get_ylabel() == ""
+    assert ax.child_axes[1].get_ylabel() == ""
+    assert ax.child_axes[0].get_title() == "Dark activity\nquartiles"
+    assert ax.child_axes[1].get_title() == "DPP corr.\nquartiles"
+    assert ax.child_axes[2].get_title() == "Dark activity\nsig vs n.s."
+    assert ax.child_axes[3].get_title() == "DPP corr.\nsig vs n.s."
     assert ax.child_axes[0].get_yscale() == "log"
     assert ax.child_axes[0].yaxis.get_label_position() == "left"
-    assert ax.texts[-1].get_text() == "Light deviance quartile\n(p<0.005, devexp>0)"
+    assert ax.texts[-1].get_text() == "Groups defined within epoch\n(p<0.005, devexp>0)"
     assert len(ax.child_axes[0].collections) == 1
     assert len(ax.child_axes[1].collections) == 1
     assert len(ax.child_axes[0].collections[0].get_offsets()) == 4
     assert len(ax.child_axes[0].lines) >= 3
     assert len(ax.child_axes[1].lines) >= 3
     assert [tick.get_text() for tick in ax.child_axes[0].get_xticklabels()] == [
+        "",
+        "",
+        "",
+        "",
+    ]
+    assert [tick.get_text() for tick in ax.child_axes[4].get_xticklabels()] == [
         "Q1",
         "Q2",
         "Q3",
         "Q4",
     ]
-    assert [tick.get_text() for tick in ax.child_axes[1].get_xticklabels()] == [
+    assert [tick.get_text() for tick in ax.child_axes[5].get_xticklabels()] == [
         "Q1",
         "Q2",
         "Q3",
         "Q4",
+    ]
+    assert [tick.get_text() for tick in ax.child_axes[6].get_xticklabels()] == [
+        "NS",
+        "Sig",
     ]
     plt.close(fig)
 

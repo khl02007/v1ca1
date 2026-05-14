@@ -276,6 +276,7 @@ def make_supplementary_figure_3(
         swap_delta_table,
         datasets=datasets,
     )
+
     panel_a_axis.set_title(
         "Predicting activity in held-out light epoch by animal",
         fontsize=8,

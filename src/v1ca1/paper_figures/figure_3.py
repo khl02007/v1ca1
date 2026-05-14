@@ -3372,17 +3372,101 @@ def plot_panel_d_similarity(ax: "Axes", similarity_table: Any) -> None:
     ax.tick_params(labelsize=5.6, length=1.8, pad=1)
 
 
-def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
-    """Plot light-epoch TP minus place encoding delta log-likelihoods."""
-    epoch_type = "light"
-    values = _finite_column_values(
-        delta_table[delta_table["epoch_type"].astype(str) == epoch_type],
-        "delta_bits_tp_vs_place",
+def _panel_e_epoch_cell_counts(delta_table: Any) -> tuple[dict[str, int], int]:
+    """Return separate light/dark cell counts and a shared animal count for Panel E."""
+    columns = set(getattr(delta_table, "columns", []))
+    if "delta_bits_tp_vs_place" in columns:
+        count_table = delta_table[
+            np.isfinite(np.asarray(delta_table["delta_bits_tp_vs_place"], dtype=float))
+        ]
+    else:
+        count_table = delta_table
+
+    if {"animal_name", "date", "unit"}.issubset(columns):
+        cell_columns = ["animal_name", "date", "unit"]
+        count_cells = lambda table: int(table.loc[:, cell_columns].drop_duplicates().shape[0])
+    elif "unit" in columns:
+        count_cells = lambda table: int(table["unit"].nunique())
+    else:
+        count_cells = lambda table: int(len(table))
+
+    cell_counts = {}
+    for epoch_type in PANEL_QUANT_EPOCH_ORDER:
+        epoch_table = count_table[
+            count_table["epoch_type"].astype(str) == epoch_type
+        ] if "epoch_type" in columns else count_table
+        cell_counts[epoch_type] = count_cells(epoch_table)
+
+    n_animals = (
+        int(count_table["animal_name"].nunique()) if "animal_name" in columns else 0
     )
+    return cell_counts, n_animals
+
+
+def _add_panel_e_count_text(ax: "Axes", delta_table: Any) -> None:
+    """Draw color-coded Panel E cell counts with a shared animal count."""
+    cell_counts, n_animals = _panel_e_epoch_cell_counts(delta_table)
+    y_by_epoch = {"light": 0.40, "dark": 0.24}
+    for epoch_type in PANEL_QUANT_EPOCH_ORDER:
+        n_cells = cell_counts.get(epoch_type, 0)
+        cell_word = "cell" if n_cells == 1 else "cells"
+        ax.text(
+            0.03,
+            y_by_epoch.get(epoch_type, 0.145),
+            f"{PANEL_QUANT_EPOCH_LABELS[epoch_type]}: n = {n_cells} {cell_word}",
+            ha="left",
+            va="bottom",
+            fontsize=PANEL_F_SUMMARY_TEXT_FONTSIZE,
+            color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            transform=ax.transAxes,
+        )
+
+    animal_word = "animal" if n_animals == 1 else "animals"
+    ax.text(
+        0.03,
+        0.08,
+        f"{n_animals} {animal_word}",
+        ha="left",
+        va="bottom",
+        fontsize=PANEL_F_SUMMARY_TEXT_FONTSIZE,
+        color="0.25",
+        transform=ax.transAxes,
+    )
+
+
+def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
+    """Plot light- and dark-epoch TP minus place encoding delta log-likelihoods."""
     bin_edges = np.linspace(PANEL_E_X_LIMITS[0], PANEL_E_X_LIMITS[1], 27)
 
     ax.axvline(0.0, color="black", linestyle="--", linewidth=0.6, zorder=1)
-    if values.size:
+    ax.text(
+        0.03,
+        0.97,
+        "Trajectory-specific\nplace better",
+        ha="left",
+        va="top",
+        fontsize=4.8,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.67,
+        0.97,
+        "DPP better",
+        ha="left",
+        va="top",
+        fontsize=4.8,
+        transform=ax.transAxes,
+    )
+    summary_y_by_epoch = {"light": 0.76, "dark": 0.50}
+    plotted_any = False
+    for epoch_index, epoch_type in enumerate(PANEL_QUANT_EPOCH_ORDER):
+        values = _finite_column_values(
+            delta_table[delta_table["epoch_type"].astype(str) == epoch_type],
+            "delta_bits_tp_vs_place",
+        )
+        if values.size == 0:
+            continue
+        plotted_any = True
         hist_kwargs = OUTLINED_HISTOGRAM_KWARGS.copy()
         hist_kwargs["alpha"] = EPOCH_HISTOGRAM_ALPHA.get(
             epoch_type,
@@ -3397,49 +3481,35 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
             color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
             label=PANEL_QUANT_EPOCH_LABELS[epoch_type],
             **hist_kwargs,
-            zorder=2,
+            zorder=2 + epoch_index,
         )
         median_value = float(np.nanmedian(values))
         fraction_positive = float(np.mean(values > 0.0))
-        summary_text = f"{fraction_positive:.0%} >0\nmed. {median_value:.2f}"
-        ax.text(
-            0.03,
-            0.97,
-            "Trajectory-specific\nplace better",
-            ha="left",
-            va="top",
-            fontsize=4.8,
-            transform=ax.transAxes,
+        summary_text = (
+            f"{PANEL_QUANT_EPOCH_LABELS[epoch_type]}: "
+            f"{fraction_positive:.0%} >0\nmed. {median_value:.2f}"
         )
         ax.text(
             0.67,
-            0.97,
-            "DPP better",
-            ha="left",
-            va="top",
-            fontsize=4.8,
-            transform=ax.transAxes,
-        )
-        ax.text(
-            0.67,
-            0.76,
+            summary_y_by_epoch.get(epoch_type, 0.76 - 0.26 * epoch_index),
             summary_text,
             ha="left",
             va="top",
-            fontsize=4.8,
+            fontsize=PANEL_F_SUMMARY_TEXT_FONTSIZE,
             color=PANEL_QUANT_EPOCH_COLORS[epoch_type],
             transform=ax.transAxes,
         )
-    else:
+    if not plotted_any:
         ax.text(0.5, 0.5, "No encoding\nvalues", ha="center", va="center")
+    _add_panel_e_count_text(ax, delta_table)
 
     ax.set_xlim(*PANEL_E_X_LIMITS)
     ax.set_xlabel(
-        "Delta log likelihood (bits/spike)",
+        "Δ log likelihood (bits/spike)",
         fontsize=5.8,
         labelpad=1.5,
     )
-    ax.set_ylabel("Frac. units", fontsize=6.2, labelpad=1.5)
+    ax.set_ylabel("Frac.", fontsize=6.2, labelpad=1.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=5.6, length=1.8, pad=1)
@@ -3721,6 +3791,13 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     ax.plot([0.58, 0.58], [0.18, 0.86], **line_kwargs)
 
 
+def _remove_w_track_center_label(ax: "Axes") -> None:
+    """Remove the center-arm C label from compact model schematics."""
+    for text in list(ax.texts):
+        if text.get_text() == "C":
+            text.remove()
+
+
 def _draw_panel_g_track(
     ax: "Axes",
     *,
@@ -3741,9 +3818,9 @@ def _draw_panel_g_track(
             fill_track_black=True,
             show_basis=True,
             basis_segment_styles=_panel_g_basis_styles(
-                edge_color=PANEL_G_BASIS_DARK_COLOR,
+                edge_color="black",
                 fill_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_alpha=1.0,
+                fill_alpha=0.7,
                 linewidth=0.25,
             ),
             arrow_color=trajectory_color,
@@ -3777,6 +3854,7 @@ def _draw_panel_g_track(
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "segment_modulation":
@@ -3794,6 +3872,7 @@ def _draw_panel_g_track(
             trajectory_linewidth=0.78,
             arrow_mutation_scale=6.0,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "shared_light":
@@ -3808,10 +3887,10 @@ def _draw_panel_g_track(
             label_fontsize=label_fontsize,
             show_basis=True,
             basis_segment_styles=_panel_g_basis_styles(
-                edge_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_color="none",
-                fill_alpha=1.0,
-                linewidth=PANEL_G_SHARED_SCAFFOLD_BASIS_LINEWIDTH,
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
+                fill_alpha=0.7,
+                linewidth=0.25,
             ),
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
@@ -3821,6 +3900,7 @@ def _draw_panel_g_track(
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
         )
+        _remove_w_track_center_label(ax)
         return
 
     raise ValueError(f"Unknown Panel G track_kind {track_kind!r}.")
@@ -3912,9 +3992,9 @@ def _draw_panel_h_track(
             fill_track_black=True,
             show_basis=True,
             basis_segment_styles=_panel_h_basis_styles(
-                edge_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_color="none",
-                fill_alpha=1.0,
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
+                fill_alpha=0.7,
                 linewidth=PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH,
             ),
             arrow_color=trajectory_color,
@@ -3948,6 +4028,7 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "segment_modulation":
@@ -3966,6 +4047,7 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "shared_light":
@@ -3978,9 +4060,9 @@ def _draw_panel_h_track(
             label_fontsize=label_fontsize,
             show_basis=True,
             basis_segment_styles=_panel_h_basis_styles(
-                edge_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_color="none",
-                fill_alpha=1.0,
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
+                fill_alpha=0.7,
                 linewidth=PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH,
             ),
             show_large_ovals=True,
@@ -3991,6 +4073,7 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        _remove_w_track_center_label(ax)
         return
 
     raise ValueError(f"Unknown Panel H track_kind {track_kind!r}.")
@@ -4238,6 +4321,10 @@ def _plot_panel_g_example_columns(
     for example_index, example in enumerate(examples[:2], start=1):
         column_left = (example_index - 1) * (column_width + column_gap)
         y_max = _panel_g_examples_y_max([example])
+        plot_left = column_left + 0.12
+        field_width = 0.14
+        field_gap = 0.035
+        plot_center = plot_left + field_width + field_gap / 2.0
         icon_ax = ax.inset_axes([column_left - 0.045, 0.23, 0.085, 0.26])
         draw_w_track_schematic(
             icon_ax,
@@ -4249,19 +4336,17 @@ def _plot_panel_g_example_columns(
             fill_track=False,
         )
         ax.text(
-            column_left + 0.29,
-            0.93,
+            plot_center,
+            0.985,
             f"Example {example_index}",
             ha="center",
             va="top",
             fontsize=5.6,
             transform=ax.transAxes,
         )
-        plot_left = column_left + 0.12
-        field_width = 0.14
         dark_ax = ax.inset_axes([plot_left, 0.05, field_width, 0.58])
         light_ax = ax.inset_axes(
-            [plot_left + field_width + 0.035, 0.05, field_width, 0.58]
+            [plot_left + field_width + field_gap, 0.05, field_width, 0.58]
         )
         dark_ax.set_facecolor(PANEL_C_DARK_EPOCH_BACKGROUND)
         _plot_panel_g_example_field_axis(
@@ -4282,8 +4367,16 @@ def _plot_panel_g_example_columns(
             legend_loc="center left",
             legend_bbox_to_anchor=(1.02, 0.5),
         )
-        dark_ax.set_xlabel("Norm. path progression", fontsize=3.7, labelpad=0.6)
-        light_ax.set_xlabel("Norm. path progression", fontsize=3.7, labelpad=0.6)
+        ax.text(
+            plot_center,
+            -0.145,
+            "Norm. path progression",
+            ha="center",
+            va="top",
+            fontsize=3.7,
+            transform=ax.transAxes,
+            clip_on=False,
+        )
 
 
 def plot_panel_g_model_architecture(
@@ -4521,13 +4614,14 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
 
     train_center_x = 0.36
     predict_center_x = 0.78
+    train_predict_midpoint_x = 0.5 * (train_center_x + predict_center_x)
     light_bounds = {"width": 0.38, "height": 0.23}
     dark_bounds = {"width": 0.34, "height": 0.21}
 
     ax.text(train_center_x, 0.98, "Train: AB", ha="center", va="top", fontsize=5.8)
     ax.text(predict_center_x, 0.98, "Predict: BA", ha="center", va="top", fontsize=5.8)
     ax.text(
-        0.08,
+        0.045,
         0.72,
         "Independent\nmodel",
         ha="center",
@@ -4536,7 +4630,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         fontweight="bold",
     )
     ax.text(
-        0.08,
+        0.045,
         0.235,
         "Shared-scaffold\nmodel",
         ha="center",
@@ -4577,7 +4671,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         label_fontsize=4.8,
     )
     ax.text(
-        predict_center_x,
+        train_predict_midpoint_x,
         0.61,
         "\"Light activity is like the other arm\nwith the same visual landmark\"",
         ha="center",
@@ -4605,7 +4699,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.120,
+                0.190,
                 dark_bounds["width"],
                 dark_bounds["height"],
             )
@@ -4630,7 +4724,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         label_fontsize=4.8,
     )
     ax.text(
-        predict_center_x,
+        train_predict_midpoint_x,
         0.02,
         "\"Light activity is like the same arm\ndark activity with visual modulation\"",
         ha="center",
@@ -4697,10 +4791,30 @@ def _plot_panel_h_delta_axis(
             zorder=2,
         )
         ax.text(
-            0.62,
-            0.92,
-            _format_panel_h_delta_summary(values),
+            0.03,
+            0.94,
+            "Independent\nbetter",
             ha="left",
+            va="top",
+            fontsize=2.7,
+            color=PANEL_G_MODEL_COLORS["visual"],
+            transform=ax.transAxes,
+        )
+        ax.text(
+            0.97,
+            0.94,
+            "Shared scaffold\nbetter",
+            ha="right",
+            va="top",
+            fontsize=2.7,
+            color=PANEL_G_MODEL_COLORS["task_segment_bump"],
+            transform=ax.transAxes,
+        )
+        ax.text(
+            0.97,
+            0.56,
+            _format_panel_h_delta_summary(values),
+            ha="right",
             va="top",
             fontsize=3.4,
             color=PANEL_G_MODEL_COLORS["task_segment_bump"],
@@ -4762,15 +4876,16 @@ def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
 
     ax.text(
         0.53,
-        0.02,
+        -0.055,
         "Δ log likelihood (bits/spike)",
         ha="center",
         va="bottom",
         fontsize=4.3,
         transform=ax.transAxes,
+        clip_on=False,
     )
     ax.text(
-        0.01,
+        -0.055,
         0.52,
         "Frac.",
         ha="left",
@@ -4778,6 +4893,7 @@ def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
         rotation=90,
         fontsize=4.3,
         transform=ax.transAxes,
+        clip_on=False,
     )
 
 
@@ -4845,12 +4961,17 @@ def _plot_panel_h_switched_segment_example(
     delta_label = ""
     if delta_ll is not None and np.isfinite(float(delta_ll)):
         delta_label = f"ΔLL={float(delta_ll):.2f}"
+        delta_text_position = (
+            (0.96, 0.94) if example_label == "Example 1" else (0.96, 0.06)
+        )
+        delta_text_vertical_alignment = (
+            "top" if example_label == "Example 1" else "bottom"
+        )
         ax.text(
-            0.04,
-            0.06,
+            *delta_text_position,
             delta_label,
-            ha="left",
-            va="bottom",
+            ha="right",
+            va=delta_text_vertical_alignment,
             fontsize=3.8,
             transform=ax.transAxes,
         )
@@ -5141,7 +5262,7 @@ def make_figure_3(
     label_axis(panel_d_container_axis, "D", x=0.00, y=0.98)
     label_axis(panel_e_container_axis, "E", x=0.00, y=0.98)
     label_axis(panel_f_axis, "F", x=0.00, y=0.98)
-    label_axis(panel_g_axis, "G", x=-0.035, y=1.02)
+    label_axis(panel_g_axis, "G", x=-0.035, y=1.12)
     label_axis(panel_h_axis, "H", x=-0.06, y=1.02)
     panel_c_axis.text(
         0.5,

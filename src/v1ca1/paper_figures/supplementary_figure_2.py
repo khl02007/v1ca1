@@ -13,19 +13,19 @@ from v1ca1.helper.session import DEFAULT_DATA_ROOT, get_analysis_path
 from v1ca1.paper_figures.datasets import (
     DatasetId,
     get_processed_datasets,
-    make_figure_2_epoch_ids,
-    normalize_dataset_id,
+    normalize_figure_epoch_dataset_id,
 )
 from v1ca1.paper_figures.figure_2 import (
     DEFAULT_RIDGE_STRENGTH,
+    DEFAULT_RIPPLE_SELECTION,
     DEFAULT_RIPPLE_WINDOW_S,
     FIGURE_FORMATS,
     MODEL_COLOR,
     NONSIGNIFICANT_COLOR,
     PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S,
     PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S,
-    SIGNIFICANCE_P_VALUE,
     get_ripple_glm_model_window_path,
+    load_glm_epoch_summary_tables,
     parse_dataset_id,
 )
 from v1ca1.paper_figures.style import (
@@ -43,18 +43,27 @@ if TYPE_CHECKING:
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
 DEFAULT_OUTPUT_NAME = "supplementary_figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
-DEFAULT_FIGURE_WIDTH_MM = 180.0
+DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_SECTION_HEADER_HEIGHT_MM = 8.0
-DEFAULT_DATASET_ROW_HEIGHT_MM = 19.0
+DEFAULT_DATASET_ROW_HEIGHT_MM = 13.0
+DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM = 20.0
 DEFAULT_SECTION_GAP_MM = 5.0
-DEFAULT_RIPPLE_SELECTION_MODES = ("allripples", "single")
+RIPPLE_SELECTION_MODE_CHOICES = ("allripples", "single")
+DEFAULT_RIPPLE_SELECTION_MODES = (DEFAULT_RIPPLE_SELECTION,)
+DEFAULT_EPOCH_TYPES = ("light", "dark", "sleep")
+DEFAULT_PER_ANIMAL_EPOCH_TYPES = ("light", "sleep")
+EPOCH_TYPE_LABELS = {
+    "light": "Light",
+    "dark": "Dark",
+    "sleep": "Sleep",
+}
+PER_ANIMAL_EPOCH_LABELS = {
+    "light": "Run",
+    "sleep": "Sleep",
+}
 SELECTION_LABELS = {
     "allripples": "All ripples",
     "single": "Single-ripple windows",
-}
-SELECTION_COLORS = {
-    "allripples": EPOCH_TYPE_COLORS["sleep"],
-    "single": EPOCH_TYPE_COLORS["light"],
 }
 PLOT_X_LIMITS = (-0.1, 0.5)
 PANEL_GRID_LEFT = 0.13
@@ -63,6 +72,7 @@ PANEL_GRID_BOTTOM = 0.11
 PANEL_GRID_TOP = 0.88
 DATASET_ROW_GAP = 0.045
 EPOCH_COLUMN_GAP = 0.018
+SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE = 0.005
 
 
 def build_output_path(
@@ -87,21 +97,51 @@ def get_dataset_analysis_path(data_root: Path, animal_name: str, date: str) -> P
     )
 
 
-def format_dataset_label(dataset: DatasetId) -> str:
-    """Return a compact row label for one data set."""
-    animal_name, date, _epoch = normalize_dataset_id(dataset)
-    return f"{animal_name}\n{date}"
+def format_dataset_epoch_label(dataset_row: dict[str, Any]) -> str:
+    """Return a compact row label for one data-set epoch."""
+    animal_name = str(dataset_row["animal_name"])
+    date = str(dataset_row["date"])
+    epoch = str(dataset_row.get("epoch", ""))
+    epoch_type = dataset_row.get("epoch_type")
+    if epoch_type is None:
+        return f"{animal_name}\n{date}"
+    epoch_label = EPOCH_TYPE_LABELS.get(str(epoch_type), str(epoch_type).title())
+    return f"{animal_name}\n{date}\n{epoch_label} {epoch}"
 
 
-def get_dataset_light_epoch(dataset: DatasetId) -> str:
-    """Return the registered light epoch for one data set."""
-    animal_name, date, dark_epoch = normalize_dataset_id(dataset)
-    epoch_ids = make_figure_2_epoch_ids(
-        animal_name,
-        date,
-        dark_epoch=dark_epoch,
+def get_epoch_type_color(epoch_type: str | None) -> str:
+    """Return the Figure 2 color for one epoch type."""
+    if epoch_type is None:
+        return MODEL_COLOR
+    return EPOCH_TYPE_COLORS.get(str(epoch_type), MODEL_COLOR)
+
+
+def iter_dataset_epoch_rows(
+    dataset: DatasetId,
+    epoch_types: Sequence[str] = DEFAULT_EPOCH_TYPES,
+) -> list[dict[str, str]]:
+    """Return registered epoch rows to include for one data set."""
+    animal_name, date, light_epoch, dark_epoch, sleep_epoch = (
+        normalize_figure_epoch_dataset_id(dataset)
     )
-    return normalize_dataset_id(epoch_ids["light"])[2]
+    epoch_by_type = {
+        "light": light_epoch,
+        "dark": dark_epoch,
+        "sleep": sleep_epoch,
+    }
+    rows = []
+    for epoch_type in epoch_types:
+        epoch = epoch_by_type[str(epoch_type)]
+        rows.append(
+            {
+                "animal_name": animal_name,
+                "date": date,
+                "dataset_dark_epoch": dark_epoch,
+                "epoch_type": str(epoch_type),
+                "epoch": epoch,
+            }
+        )
+    return rows
 
 
 def format_target_window_label(
@@ -207,49 +247,61 @@ def load_available_glm_scatter_payload(
     ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
 ) -> dict[str, Any]:
-    """Load available 02_r1 target-offset ripple-GLM artifacts by data set."""
+    """Load available target-offset ripple-GLM artifacts by data-set epoch."""
     payload_rows: dict[str, list[dict[str, Any]]] = {}
     for ripple_selection in ripple_selection_modes:
         selection_rows = []
         for dataset in datasets:
-            animal_name, date, dark_epoch = normalize_dataset_id(dataset)
-            epoch = get_dataset_light_epoch(dataset)
-            artifacts = []
-            for artifact in get_available_offset_glm_artifacts(
-                data_root,
-                animal_name=animal_name,
-                date=date,
-                epoch=epoch,
-                ripple_selection=ripple_selection,
-                ripple_window_s=ripple_window_s,
-                ridge_strength=ridge_strength,
-            ):
-                path = artifact["path"]
-                artifacts.append(
+            for epoch_row in iter_dataset_epoch_rows(dataset):
+                animal_name = epoch_row["animal_name"]
+                date = epoch_row["date"]
+                epoch = epoch_row["epoch"]
+                artifacts = []
+                for artifact in get_available_offset_glm_artifacts(
+                    data_root,
+                    animal_name=animal_name,
+                    date=date,
+                    epoch=epoch,
+                    ripple_selection=ripple_selection,
+                    ripple_window_s=ripple_window_s,
+                    ridge_strength=ridge_strength,
+                ):
+                    path = artifact["path"]
+                    artifacts.append(
+                        {
+                            "animal_name": animal_name,
+                            "date": date,
+                            "epoch_type": epoch_row["epoch_type"],
+                            "epoch": epoch,
+                            "ripple_selection": ripple_selection,
+                            "target_window_offset_s": artifact[
+                                "target_window_offset_s"
+                            ],
+                            "target_window_label": artifact["target_window_label"],
+                            "summary_table": load_glm_scatter_table(path),
+                            "source_path": str(path),
+                        }
+                    )
+                selection_rows.append(
                     {
+                        "dataset": (
+                            animal_name,
+                            date,
+                            epoch_row["dataset_dark_epoch"],
+                        ),
                         "animal_name": animal_name,
                         "date": date,
+                        "epoch_type": epoch_row["epoch_type"],
                         "epoch": epoch,
                         "ripple_selection": ripple_selection,
-                        "target_window_offset_s": artifact["target_window_offset_s"],
-                        "target_window_label": artifact["target_window_label"],
-                        "summary_table": load_glm_scatter_table(path),
-                        "source_path": str(path),
+                        "artifacts": artifacts,
                     }
                 )
-            selection_rows.append(
-                {
-                    "dataset": (animal_name, date, dark_epoch),
-                    "animal_name": animal_name,
-                    "date": date,
-                    "ripple_selection": ripple_selection,
-                    "artifacts": artifacts,
-                }
-            )
         payload_rows[ripple_selection] = selection_rows
     return {
         "rows_by_selection": payload_rows,
         "ripple_selection_modes": tuple(ripple_selection_modes),
+        "epoch_types": tuple(DEFAULT_EPOCH_TYPES),
         "ripple_window_s": float(ripple_window_s),
         "ridge_strength": float(ridge_strength),
     }
@@ -267,8 +319,11 @@ def get_payload_neglog_p_limit(payload: dict[str, Any]) -> float:
                 if p_values.size:
                     neglog_values.append(-np.log10(np.clip(p_values, 1e-12, 1.0)))
     if not neglog_values:
-        return 2.0
-    return max(2.0, float(np.nanmax(np.concatenate(neglog_values))) + 0.35)
+        return -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35
+    return max(
+        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35,
+        float(np.nanmax(np.concatenate(neglog_values))) + 0.35,
+    )
 
 
 def plot_glm_scatter_axis(
@@ -289,7 +344,7 @@ def plot_glm_scatter_axis(
 
     ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
     ax.axhline(
-        -np.log10(SIGNIFICANCE_P_VALUE),
+        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE),
         color="0.25",
         linestyle="--",
         linewidth=0.55,
@@ -299,7 +354,7 @@ def plot_glm_scatter_axis(
         finite_values = values[valid]
         finite_p_values = p_values[valid]
         neglog_p = -np.log10(np.clip(finite_p_values, 1e-12, 1.0))
-        significant = finite_p_values < SIGNIFICANCE_P_VALUE
+        significant = finite_p_values < SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE
         if np.any(~significant):
             ax.scatter(
                 finite_values[~significant],
@@ -357,7 +412,6 @@ def plot_selection_scatter_grid(
     selection_rows: Sequence[dict[str, Any]],
     *,
     selection_label: str,
-    color: str,
     x_limits: tuple[float, float],
     y_limit: float,
 ) -> list[Any]:
@@ -373,7 +427,11 @@ def plot_selection_scatter_grid(
     row_axes = []
     n_rows = len(selection_rows)
     grid_height = PANEL_GRID_TOP - PANEL_GRID_BOTTOM
-    row_height = (grid_height - DATASET_ROW_GAP * (n_rows - 1)) / n_rows
+    row_gap = min(
+        DATASET_ROW_GAP,
+        grid_height * 0.18 / max(n_rows - 1, 1),
+    )
+    row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
     grid_width = PANEL_GRID_RIGHT - PANEL_GRID_LEFT
     plotted_epochs = sorted(
         {
@@ -413,15 +471,15 @@ def plot_selection_scatter_grid(
             PANEL_GRID_BOTTOM
             + grid_height
             - (row_index + 1) * row_height
-            - row_index * DATASET_ROW_GAP
+            - row_index * row_gap
         )
         ax.text(
             0.01,
             row_bottom + 0.5 * row_height,
-            format_dataset_label(dataset_row["dataset"]),
+            format_dataset_epoch_label(dataset_row),
             ha="left",
             va="center",
-            fontsize=5.0,
+            fontsize=4.5,
             transform=ax.transAxes,
         )
         artifacts = dataset_row["artifacts"]
@@ -480,7 +538,9 @@ def plot_selection_scatter_grid(
                 scatter_ax,
                 artifact["summary_table"],
                 title=offset_labels[offset],
-                color=color,
+                color=get_epoch_type_color(
+                    artifact.get("epoch_type", dataset_row.get("epoch_type"))
+                ),
                 x_limits=x_limits,
                 y_limit=y_limit,
                 show_yticklabels=column_index == 0,
@@ -510,6 +570,222 @@ def plot_selection_scatter_grid(
     return row_axes
 
 
+def resolve_primary_ripple_selection(
+    ripple_selection_modes: Sequence[str],
+) -> str:
+    """Return the ripple-selection mode used by the per-animal scatter figure."""
+    if not ripple_selection_modes:
+        return DEFAULT_RIPPLE_SELECTION
+    return str(tuple(ripple_selection_modes)[0])
+
+
+def filter_glm_epoch_payloads(
+    payloads: Sequence[dict[str, Any]],
+    epoch_types: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Return GLM payloads ordered by requested epoch type."""
+    payload_by_epoch_type = {
+        str(payload["epoch_type"]): payload
+        for payload in payloads
+        if "epoch_type" in payload
+    }
+    return [
+        payload_by_epoch_type[str(epoch_type)]
+        for epoch_type in epoch_types
+        if str(epoch_type) in payload_by_epoch_type
+    ]
+
+
+def load_per_animal_glm_scatter_payload(
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    *,
+    epoch_types: Sequence[str] = DEFAULT_PER_ANIMAL_EPOCH_TYPES,
+    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+) -> dict[str, Any]:
+    """Load Figure-2C-style GLM summaries for per-animal run/sleep scatter panels."""
+    epoch_tables = load_glm_epoch_summary_tables(
+        data_root,
+        datasets,
+        ripple_window_s=ripple_window_s,
+        ripple_selection=ripple_selection,
+        ridge_strength=ridge_strength,
+    )
+    selected_epoch_tables = filter_glm_epoch_payloads(epoch_tables, epoch_types)
+    return {
+        "epoch_tables": selected_epoch_tables,
+        "epoch_types": tuple(epoch_types),
+        "ripple_selection": ripple_selection,
+        "ripple_window_s": float(ripple_window_s),
+        "ridge_strength": float(ridge_strength),
+    }
+
+
+def iter_per_animal_glm_keys(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return animal/date keys in first-seen order across GLM epoch tables."""
+    keys: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for epoch_payload in payload.get("epoch_tables", []):
+        table = epoch_payload.get("summary_table")
+        if table is None or len(table) == 0:
+            continue
+        if not {"animal_name", "date"}.issubset(table.columns):
+            continue
+        key_rows = table[["animal_name", "date"]].drop_duplicates()
+        for animal_name, date in key_rows.itertuples(index=False, name=None):
+            key = (str(animal_name), str(date))
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def subset_glm_table_for_animal_date(table: Any, animal_name: str, date: str) -> Any:
+    """Return one animal/date subset from a pooled GLM summary table."""
+    if {"animal_name", "date"}.issubset(table.columns):
+        return table[
+            (table["animal_name"].astype(str) == str(animal_name))
+            & (table["date"].astype(str) == str(date))
+        ]
+    return table
+
+
+def get_per_animal_neglog_p_limit(payload: dict[str, Any]) -> float:
+    """Return a shared y-axis maximum for per-animal GLM scatter panels."""
+    neglog_values = []
+    for epoch_payload in payload.get("epoch_tables", []):
+        table = epoch_payload.get("summary_table")
+        if table is None or len(table) == 0:
+            continue
+        p_values = np.asarray(table["ripple_devexp_p_value"], dtype=float)
+        p_values = p_values[np.isfinite(p_values)]
+        if p_values.size:
+            neglog_values.append(-np.log10(np.clip(p_values, 1e-12, 1.0)))
+    if not neglog_values:
+        return -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35
+    return max(
+        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35,
+        float(np.nanmax(np.concatenate(neglog_values))) + 0.35,
+    )
+
+
+def plot_per_animal_glm_scatter_grid(
+    ax: "Axes",
+    payload: dict[str, Any],
+    *,
+    x_limits: tuple[float, float] = (-0.05, 0.40),
+    y_limit: float | None = None,
+) -> list[Any]:
+    """Plot Figure 2C's run/sleep GLM scatter on separate rows for each animal."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    epoch_tables = list(payload.get("epoch_tables", []))
+    animal_date_keys = iter_per_animal_glm_keys(payload)
+    if not epoch_tables or not animal_date_keys:
+        ax.text(
+            0.5,
+            0.5,
+            "No GLM data",
+            ha="center",
+            va="center",
+            fontsize=6.0,
+            transform=ax.transAxes,
+        )
+        return []
+
+    y_limit = get_per_animal_neglog_p_limit(payload) if y_limit is None else y_limit
+    n_rows = len(animal_date_keys)
+    n_columns = len(epoch_tables)
+    grid_height = PANEL_GRID_TOP - PANEL_GRID_BOTTOM
+    row_gap = min(DATASET_ROW_GAP, grid_height * 0.18 / max(n_rows - 1, 1))
+    row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
+    grid_width = PANEL_GRID_RIGHT - PANEL_GRID_LEFT
+    column_width = (grid_width - EPOCH_COLUMN_GAP * (n_columns - 1)) / n_columns
+
+    ax.text(
+        PANEL_GRID_LEFT,
+        0.98,
+        f"Figure 2C scatter by animal ({payload['ripple_selection']})",
+        ha="left",
+        va="top",
+        fontsize=7.0,
+        fontweight="bold",
+        transform=ax.transAxes,
+    )
+
+    child_axes = []
+    for row_index, (animal_name, date) in enumerate(animal_date_keys):
+        row_bottom = (
+            PANEL_GRID_BOTTOM
+            + grid_height
+            - (row_index + 1) * row_height
+            - row_index * row_gap
+        )
+        ax.text(
+            0.01,
+            row_bottom + 0.5 * row_height,
+            f"{animal_name}\n{date}",
+            ha="left",
+            va="center",
+            fontsize=5.0,
+            transform=ax.transAxes,
+        )
+        for column_index, epoch_payload in enumerate(epoch_tables):
+            column_left = PANEL_GRID_LEFT + column_index * (
+                column_width + EPOCH_COLUMN_GAP
+            )
+            scatter_ax = ax.inset_axes(
+                [column_left, row_bottom, column_width, row_height]
+            )
+            epoch_type = str(epoch_payload["epoch_type"])
+            table = subset_glm_table_for_animal_date(
+                epoch_payload["summary_table"],
+                animal_name,
+                date,
+            )
+            title = (
+                PER_ANIMAL_EPOCH_LABELS.get(epoch_type, EPOCH_TYPE_LABELS.get(epoch_type, epoch_type))
+                if row_index == 0
+                else ""
+            )
+            plot_glm_scatter_axis(
+                scatter_ax,
+                table,
+                title=title,
+                color=get_epoch_type_color(epoch_type),
+                x_limits=x_limits,
+                y_limit=float(y_limit),
+                show_yticklabels=column_index == 0,
+                show_xticklabels=row_index == n_rows - 1,
+            )
+            child_axes.append(scatter_ax)
+
+    ax.text(
+        0.5 * (PANEL_GRID_LEFT + PANEL_GRID_RIGHT),
+        0.015,
+        "Ripple deviance explained",
+        ha="center",
+        va="bottom",
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        PANEL_GRID_LEFT - 0.065,
+        0.5 * (PANEL_GRID_BOTTOM + PANEL_GRID_TOP),
+        "-log10 shuffle p",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
+    return child_axes
+
+
 def make_supplementary_figure_2(
     *,
     data_root: Path,
@@ -523,59 +799,33 @@ def make_supplementary_figure_2(
     """Build and save Supplementary Figure 2."""
     import matplotlib.pyplot as plt
 
-    payload = load_available_glm_scatter_payload(
+    ripple_selection = resolve_primary_ripple_selection(ripple_selection_modes)
+    payload = load_per_animal_glm_scatter_payload(
         data_root,
         datasets,
-        ripple_selection_modes=ripple_selection_modes,
+        ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ridge_strength=ridge_strength,
     )
-    y_limit = get_payload_neglog_p_limit(payload)
+    y_limit = get_per_animal_neglog_p_limit(payload)
 
     apply_paper_style()
-    n_dataset_rows = max(len(datasets), 1)
-    section_height_mm = (
-        DEFAULT_SECTION_HEADER_HEIGHT_MM
-        + DEFAULT_DATASET_ROW_HEIGHT_MM * n_dataset_rows
-    )
+    n_animal_rows = max(len(iter_per_animal_glm_keys(payload)), len(datasets), 1)
     figure_height_mm = (
-        section_height_mm * len(ripple_selection_modes)
-        + DEFAULT_SECTION_GAP_MM * max(len(ripple_selection_modes) - 1, 0)
+        DEFAULT_SECTION_HEADER_HEIGHT_MM
+        + DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM * n_animal_rows
     )
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, figure_height_mm),
         constrained_layout=True,
     )
-    outer_grid = fig.add_gridspec(
-        nrows=len(ripple_selection_modes) * 2 - 1,
-        ncols=1,
-        height_ratios=[
-            section_height_mm if index % 2 == 0 else DEFAULT_SECTION_GAP_MM
-            for index in range(len(ripple_selection_modes) * 2 - 1)
-        ],
+    section_ax = fig.add_subplot(111)
+    plot_per_animal_glm_scatter_grid(
+        section_ax,
+        payload,
+        y_limit=y_limit,
     )
-    panel_labels = ("A", "B", "C", "D")
-    panel_index = 0
-    for selection_index, ripple_selection in enumerate(ripple_selection_modes):
-        axis_index = selection_index * 2
-        section_ax = fig.add_subplot(outer_grid[axis_index])
-        plot_selection_scatter_grid(
-            section_ax,
-            payload["rows_by_selection"].get(ripple_selection, []),
-            selection_label=SELECTION_LABELS.get(
-                ripple_selection,
-                str(ripple_selection),
-            ),
-            color=SELECTION_COLORS.get(ripple_selection, MODEL_COLOR),
-            x_limits=PLOT_X_LIMITS,
-            y_limit=y_limit,
-        )
-        if panel_index < len(panel_labels):
-            label_axis(section_ax, panel_labels[panel_index], x=-0.01, y=1.01)
-        panel_index += 1
-        if selection_index < len(ripple_selection_modes) - 1:
-            spacer_ax = fig.add_subplot(outer_grid[axis_index + 1])
-            spacer_ax.axis("off")
+    label_axis(section_ax, "A", x=-0.01, y=1.01)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
@@ -624,10 +874,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ripple-selection",
         nargs="+",
-        choices=DEFAULT_RIPPLE_SELECTION_MODES,
+        choices=RIPPLE_SELECTION_MODE_CHOICES,
         default=list(DEFAULT_RIPPLE_SELECTION_MODES),
         help=(
-            "Ripple-selection modes to plot, in order. "
+            "Ripple-selection mode to plot. If multiple values are passed, "
+            "only the first is used for the per-animal scatter grid. "
             f"Default: {list(DEFAULT_RIPPLE_SELECTION_MODES)!r}"
         ),
     )

@@ -93,7 +93,10 @@ def test_plot_panel_h_animal_histogram_rows_uses_one_row_per_animal() -> None:
     assert len(first_row_hist_axes) == len(figure_3_module.PANEL_H_DELTA_TRAJECTORIES)
     assert all(len(hist_ax.patches) > 0 for hist_ax in first_row_hist_axes)
     assert all(hist_ax.lines[0].get_linestyle() == "--" for hist_ax in first_row_hist_axes)
-    assert all("% >0\nmed." in hist_ax.texts[0].get_text() for hist_ax in first_row_hist_axes)
+    assert all(
+        any("% >0\nmed." in text.get_text() for text in hist_ax.texts)
+        for hist_ax in first_row_hist_axes
+    )
     assert all(
         "n = 3 cells\n1 animal" in [text.get_text() for text in hist_ax.texts]
         for hist_ax in first_row_hist_axes
@@ -119,6 +122,8 @@ def test_make_supplementary_figure_3_uses_figure_3_canvas_and_panel_a(
         return pandas.DataFrame(
             {
                 "animal_name": ["L14"],
+                "date": ["20240611"],
+                "unit": [1],
                 "trajectory": [figure_3_module.PANEL_H_DELTA_TRAJECTORIES[0]],
                 "light_train_epoch": [figure_3_module.PANEL_H_TRAIN_LIGHT_EPOCH],
                 "light_test_epoch": [figure_3_module.PANEL_H_HELDOUT_LIGHT_EPOCH],

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 DEFAULT_DPI = 300
 PAPER_RC_PARAMS: dict[str, Any] = {
     "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "DejaVu Sans"],
+    "font.sans-serif": ["Arial", "Liberation Sans", "DejaVu Sans"],
     "font.size": 7,
     "axes.labelsize": 7,
     "axes.titlesize": 7,

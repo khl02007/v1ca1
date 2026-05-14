@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+from math import log10
 from pathlib import Path
 
 import pytest
 
 import v1ca1.paper_figures.supplementary_figure_2 as supp_figure_2_module
 from v1ca1.paper_figures.supplementary_figure_2 import (
+    DEFAULT_EPOCH_TYPES,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_NAME,
     DEFAULT_RIPPLE_SELECTION_MODES,
+    SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE,
     build_output_path,
     get_available_offset_glm_artifacts,
+    get_epoch_type_color,
     load_available_glm_scatter_payload,
+    load_per_animal_glm_scatter_payload,
     make_supplementary_figure_2,
     parse_arguments,
+    plot_per_animal_glm_scatter_grid,
     plot_selection_scatter_grid,
 )
 
@@ -34,6 +40,8 @@ def test_default_cli_matches_supplementary_figure_2_defaults() -> None:
     assert args.output_name == DEFAULT_OUTPUT_NAME
     assert tuple(args.ripple_selection) == DEFAULT_RIPPLE_SELECTION_MODES
     assert args.dataset is None
+    assert DEFAULT_EPOCH_TYPES == ("light", "dark", "sleep")
+    assert SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE == pytest.approx(0.005)
 
 
 def test_get_available_offset_glm_artifacts_uses_target_offset_paths(
@@ -71,7 +79,7 @@ def test_get_available_offset_glm_artifacts_uses_target_offset_paths(
     ]
 
 
-def test_load_available_glm_scatter_payload_reads_light_offset_artifacts(
+def test_load_available_glm_scatter_payload_reads_epoch_offset_artifacts(
     tmp_path: Path,
 ) -> None:
     np = pytest.importorskip("numpy")
@@ -100,10 +108,14 @@ def test_load_available_glm_scatter_payload_reads_light_offset_artifacts(
     )
 
     rows = payload["rows_by_selection"]["allripples"]
-    assert len(rows) == 1
+    assert len(rows) == 3
     assert rows[0]["dataset"] == ("L14", "20240611", "08_r4")
+    assert [row["epoch_type"] for row in rows] == ["light", "dark", "sleep"]
+    assert [row["epoch"] for row in rows] == ["02_r1", "08_r4", "07_s4"]
     assert [artifact["epoch"] for artifact in rows[0]["artifacts"]] == ["02_r1"]
     assert [artifact["target_window_offset_s"] for artifact in rows[0]["artifacts"]] == [-0.2]
+    assert rows[1]["artifacts"] == []
+    assert rows[2]["artifacts"] == []
     table = rows[0]["artifacts"][0]["summary_table"]
     assert table["unit_id"].tolist() == [11, 12]
     assert table["n_ripples"].tolist() == [5, 5]
@@ -114,11 +126,18 @@ def test_plot_selection_scatter_grid_uses_one_axis_per_available_offset() -> Non
     pd = pytest.importorskip("pandas")
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
     import matplotlib.pyplot as plt
+
+    from v1ca1.paper_figures.style import EPOCH_TYPE_COLORS
 
     selection_rows = [
         {
             "dataset": ("L14", "20240611", "08_r4"),
+            "animal_name": "L14",
+            "date": "20240611",
+            "epoch_type": "light",
+            "epoch": "02_r1",
             "artifacts": [
                 {
                     "epoch": "02_r1",
@@ -127,7 +146,7 @@ def test_plot_selection_scatter_grid_uses_one_axis_per_available_offset() -> Non
                     "summary_table": pd.DataFrame(
                         {
                             "ripple_devexp_mean": [0.1, -0.02],
-                            "ripple_devexp_p_value": [0.01, 0.2],
+                            "ripple_devexp_p_value": [0.001, 0.2],
                         }
                     ),
                 },
@@ -151,7 +170,6 @@ def test_plot_selection_scatter_grid_uses_one_axis_per_available_offset() -> Non
         ax,
         selection_rows,
         selection_label="All ripples",
-        color="black",
         x_limits=(-0.1, 0.5),
         y_limit=2.2,
     )
@@ -163,14 +181,102 @@ def test_plot_selection_scatter_grid_uses_one_axis_per_available_offset() -> Non
     ]
     assert [text.get_text() for text in ax.texts[:2]] == [
         "All ripples (02_r1)",
-        "L14\n20240611",
+        "L14\n20240611\nLight 02_r1",
     ]
     assert child_axes[0].get_ylabel() == ""
     assert len(child_axes[0].collections) == 2
+    assert child_axes[0].lines[1].get_ydata()[0] == pytest.approx(
+        -log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE)
+    )
+    assert get_epoch_type_color("light") == EPOCH_TYPE_COLORS["light"]
+    assert tuple(child_axes[0].collections[1].get_facecolors()[0]) == pytest.approx(
+        to_rgba(EPOCH_TYPE_COLORS["light"], alpha=0.52)
+    )
     plt.close(fig)
 
 
-def test_make_supplementary_figure_2_saves_two_selection_sections(
+def test_load_per_animal_glm_scatter_payload_keeps_run_and_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd = pytest.importorskip("pandas")
+
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "summary_table": pd.DataFrame({"animal_name": ["L14"]}),
+        },
+        {
+            "epoch_type": "dark",
+            "label": "Dark run",
+            "summary_table": pd.DataFrame({"animal_name": ["L14"]}),
+        },
+        {
+            "epoch_type": "sleep",
+            "label": "Sleep",
+            "summary_table": pd.DataFrame({"animal_name": ["L14"]}),
+        },
+    ]
+
+    monkeypatch.setattr(
+        supp_figure_2_module,
+        "load_glm_epoch_summary_tables",
+        lambda *_args, **_kwargs: epoch_tables,
+    )
+
+    payload = load_per_animal_glm_scatter_payload(
+        Path("/analysis"),
+        [("L14", "20240611", "08_r4")],
+        ripple_selection="allripples",
+    )
+
+    assert [table["epoch_type"] for table in payload["epoch_tables"]] == ["light", "sleep"]
+    assert payload["ripple_selection"] == "allripples"
+
+
+def test_plot_per_animal_glm_scatter_grid_splits_run_and_sleep() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    base_rows = {
+        "animal_name": ["L14", "L14", "L15", "L15"],
+        "date": ["20240611", "20240611", "20241121", "20241121"],
+        "ripple_devexp_mean": [0.01, 0.12, -0.02, 0.18],
+        "ripple_devexp_p_value": [0.2, 0.001, 0.5, 0.0005],
+    }
+    payload = {
+        "epoch_tables": [
+            {
+                "epoch_type": "light",
+                "label": "Light run",
+                "summary_table": pd.DataFrame(base_rows),
+            },
+            {
+                "epoch_type": "sleep",
+                "label": "Sleep",
+                "summary_table": pd.DataFrame(base_rows),
+            },
+        ],
+        "ripple_selection": "allripples",
+    }
+
+    fig, ax = plt.subplots()
+    child_axes = plot_per_animal_glm_scatter_grid(ax, payload, y_limit=3.0)
+
+    assert len(child_axes) == 4
+    assert [child_axis.get_title() for child_axis in child_axes[:2]] == ["Run", "Sleep"]
+    assert all(child_axis.get_xlim()[0] == pytest.approx(-0.05) for child_axis in child_axes)
+    assert all(child_axis.get_xlim()[1] == pytest.approx(0.40) for child_axis in child_axes)
+    assert all(len(child_axis.collections) == 2 for child_axis in child_axes)
+    assert child_axes[0].lines[1].get_ydata()[0] == pytest.approx(
+        -log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE)
+    )
+    plt.close(fig)
+
+
+def test_make_supplementary_figure_2_saves_per_animal_scatter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -178,46 +284,28 @@ def test_make_supplementary_figure_2_saves_two_selection_sections(
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
 
+    summary_table = pd.DataFrame(
+        {
+            "animal_name": ["L14"],
+            "date": ["20240611"],
+            "ripple_devexp_mean": [0.1],
+            "ripple_devexp_p_value": [0.001],
+        }
+    )
     payload = {
-        "rows_by_selection": {
-            "allripples": [
-                {
-                    "dataset": ("L14", "20240611", "08_r4"),
-                    "artifacts": [
-                        {
-                            "epoch": "02_r1",
-                            "target_window_offset_s": 0.0,
-                            "target_window_label": "0 to 200 ms",
-                            "summary_table": pd.DataFrame(
-                                {
-                                    "ripple_devexp_mean": [0.1],
-                                    "ripple_devexp_p_value": [0.01],
-                                }
-                            ),
-                        }
-                    ],
-                }
-            ],
-            "single": [
-                {
-                    "dataset": ("L14", "20240611", "08_r4"),
-                    "artifacts": [
-                        {
-                            "epoch": "02_r1",
-                            "target_window_offset_s": 0.0,
-                            "target_window_label": "0 to 200 ms",
-                            "summary_table": pd.DataFrame(
-                                {
-                                    "ripple_devexp_mean": [0.2],
-                                    "ripple_devexp_p_value": [0.02],
-                                }
-                            ),
-                        }
-                    ],
-                }
-            ],
-        },
-        "ripple_selection_modes": ("allripples", "single"),
+        "epoch_tables": [
+            {
+                "epoch_type": "light",
+                "label": "Light run",
+                "summary_table": summary_table,
+            },
+            {
+                "epoch_type": "sleep",
+                "label": "Sleep",
+                "summary_table": summary_table,
+            },
+        ],
+        "ripple_selection": "allripples",
         "ripple_window_s": 0.2,
         "ridge_strength": 0.1,
     }
@@ -225,7 +313,7 @@ def test_make_supplementary_figure_2_saves_two_selection_sections(
 
     monkeypatch.setattr(
         supp_figure_2_module,
-        "load_available_glm_scatter_payload",
+        "load_per_animal_glm_scatter_payload",
         lambda *_args, **_kwargs: payload,
     )
 
@@ -247,7 +335,7 @@ def test_make_supplementary_figure_2_saves_two_selection_sections(
         data_root=Path("/analysis"),
         output_path=output_path,
         datasets=[("L14", "20240611", "08_r4")],
-        ripple_selection_modes=("allripples", "single"),
+        ripple_selection_modes=("allripples",),
         ripple_window_s=0.2,
         ridge_strength=0.1,
         dpi=300,
@@ -258,7 +346,5 @@ def test_make_supplementary_figure_2_saves_two_selection_sections(
     assert calls["dpi"] == 300
     assert set(calls["panel_labels"]) >= {
         "A",
-        "B",
-        "All ripples (02_r1)",
-        "Single-ripple windows (02_r1)",
+        "Figure 2C scatter by animal (allripples)",
     }

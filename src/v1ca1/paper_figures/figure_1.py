@@ -218,6 +218,8 @@ DECODING_SCHEMATIC_HEIGHT = 0.198
 DECODING_TRAIN_LABEL_Y = -0.32
 DECODING_YLABEL_FONTSIZE = 7.6
 DECODING_XTICK_LABEL_FONTSIZE = 5.6
+DECODING_MEDIAN_LABEL_FONTSIZE = 4.8
+DECODING_MEDIAN_LABEL_X_OFFSET = 0.09
 DELTA_LOG_LIKELIHOOD_AXIS_LABEL = "Δ log likelihood\n(bits/spike)"
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
@@ -2750,6 +2752,21 @@ def plot_decoding_error_panel(
             linewidths=0.3,
             zorder=4,
         )
+        for position, median in zip(
+            plot_positions,
+            medians,
+            strict=True,
+        ):
+            plot_ax.text(
+                position + DECODING_MEDIAN_LABEL_X_OFFSET,
+                median,
+                f"med. {median:.2f}",
+                ha="left",
+                va="center",
+                fontsize=DECODING_MEDIAN_LABEL_FONTSIZE,
+                color="0.20",
+                zorder=5,
+            )
 
     if not plotted_any:
         plot_ax.text(

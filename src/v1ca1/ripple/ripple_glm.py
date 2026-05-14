@@ -4,9 +4,11 @@ from __future__ import annotations
 
 This CLI fits the modern CA1-to-V1 ripple population GLM workflow for one
 session, one epoch at a time. Each ripple window is converted into one sample
-whose predictors are CA1 unit spike counts and whose targets are V1 unit spike
-counts. The model is a ridge-regularized Poisson population GLM trained and
-evaluated on ripple windows with contiguous cross-validation folds.
+whose predictors are CA1 spike counts and whose targets are V1 unit spike
+counts. By default, the predictors are the CA1 unit-count vector. An optional
+mean-activity control collapses that vector to one mean CA1 spike-count
+predictor per ripple. The model is a ridge-regularized Poisson population GLM
+trained and evaluated on ripple windows with contiguous cross-validation folds.
 By default, CA1 and V1 are counted in the same window. Optional source and
 target window flags can keep the CA1 predictor window fixed while shifting the
 V1 target window for temporal controls.
@@ -72,7 +74,7 @@ DEFAULT_RIPPLE_WINDOW_OFFSET_S = 0.0
 DEFAULT_MIN_SPIKES_PER_RIPPLE = 0.1
 DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE = 0.0
 DEFAULT_N_SPLITS = 5
-DEFAULT_N_SHUFFLES_RIPPLE = 100
+DEFAULT_N_SHUFFLES_RIPPLE = 1000
 DEFAULT_RIDGE_STRENGTH = 1e-1
 DEFAULT_RIDGE_STRENGTH_SWEEP = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 DEFAULT_SHUFFLE_SEED = 45
@@ -83,6 +85,23 @@ DEFAULT_XLA_MEM_FRACTION = "0.70"
 RIPPLE_SELECTION_MODE_ALL = "allripples"
 RIPPLE_SELECTION_MODE_DEDUPED = "deduped"
 RIPPLE_SELECTION_MODE_SINGLE = "single"
+SOURCE_PREDICTOR_MODE_UNIT_VECTOR = "unit_vector"
+SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY = "mean_activity"
+SOURCE_PREDICTOR_MODE_CHOICES = (
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+)
+DEFAULT_SOURCE_PREDICTOR_MODE = SOURCE_PREDICTOR_MODE_UNIT_VECTOR
+SOURCE_PREDICTOR_MODE_FILENAME_TOKENS = {
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR: "",
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY: "mean_ca1",
+}
+SOURCE_PREDICTOR_MODE_DESCRIPTIONS = {
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR: "CA1 unit spike-count vector",
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY: (
+        "Mean raw CA1 spike count across kept CA1 units in each source window"
+    ),
+}
 
 HIGHER_IS_BETTER_BY_METRIC = {
     "pseudo_r2": True,
@@ -130,6 +149,9 @@ def validate_arguments(args: argparse.Namespace) -> None:
         source_window_offset_s=getattr(args, "source_window_offset_s", None),
         target_window_s=getattr(args, "target_window_s", None),
         target_window_offset_s=getattr(args, "target_window_offset_s", None),
+    )
+    validate_source_predictor_mode(
+        getattr(args, "source_predictor_mode", DEFAULT_SOURCE_PREDICTOR_MODE)
     )
     if args.min_spikes_per_ripple < 0:
         raise ValueError("--min-spikes-per-ripple must be non-negative.")
@@ -763,6 +785,97 @@ def get_epoch_skip_reason(
     return None
 
 
+def validate_source_predictor_mode(source_predictor_mode: str) -> str:
+    """Return a validated source-predictor mode."""
+    if source_predictor_mode not in SOURCE_PREDICTOR_MODE_CHOICES:
+        raise ValueError(
+            "source_predictor_mode must be one of "
+            f"{SOURCE_PREDICTOR_MODE_CHOICES!r}, got {source_predictor_mode!r}."
+        )
+    return str(source_predictor_mode)
+
+
+def format_source_predictor_mode_suffix(source_predictor_mode: str) -> str:
+    """Return the optional filename token for one source-predictor mode."""
+    mode = validate_source_predictor_mode(source_predictor_mode)
+    return SOURCE_PREDICTOR_MODE_FILENAME_TOKENS[mode]
+
+
+def _format_source_predictor_filename_component(source_predictor_mode: str) -> str:
+    """Return the optional filename component for one source-predictor mode."""
+    suffix = format_source_predictor_mode_suffix(source_predictor_mode)
+    return f"{suffix}_" if suffix else ""
+
+
+def _source_predictor_feature_names(
+    *,
+    ca1_unit_ids: np.ndarray,
+    source_predictor_mode: str,
+) -> np.ndarray:
+    """Return coefficient-aligned source feature names before preprocessing drops."""
+    mode = validate_source_predictor_mode(source_predictor_mode)
+    if mode == SOURCE_PREDICTOR_MODE_UNIT_VECTOR:
+        return np.asarray([f"ca1_unit_{unit_id}" for unit_id in ca1_unit_ids], dtype=str)
+    if mode == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY:
+        return np.asarray(["mean_ca1_activity"], dtype=str)
+    raise AssertionError(f"Unhandled source predictor mode: {mode!r}")
+
+
+def _source_predictor_coef_ca1_unit_ids(
+    *,
+    ca1_unit_ids: np.ndarray,
+    source_predictor_mode: str,
+) -> np.ndarray:
+    """Return coefficient-aligned CA1 IDs, using -1 for synthetic predictors."""
+    mode = validate_source_predictor_mode(source_predictor_mode)
+    if mode == SOURCE_PREDICTOR_MODE_UNIT_VECTOR:
+        return np.asarray(ca1_unit_ids)
+    if mode == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY:
+        return np.asarray([-1], dtype=np.int64)
+    raise AssertionError(f"Unhandled source predictor mode: {mode!r}")
+
+
+def apply_source_predictor_mode(
+    X_r: np.ndarray,
+    ca1_unit_ids: np.ndarray,
+    *,
+    source_predictor_mode: str,
+) -> dict[str, np.ndarray | str | int]:
+    """Return the CA1 design matrix for the requested source-predictor mode."""
+    mode = validate_source_predictor_mode(source_predictor_mode)
+    X_r = np.asarray(X_r, dtype=float)
+    ca1_unit_ids = np.asarray(ca1_unit_ids)
+    if X_r.ndim != 2:
+        raise ValueError(f"Expected X_r to be 2D, got shape {X_r.shape!r}.")
+    if X_r.shape[1] != ca1_unit_ids.size:
+        raise ValueError(
+            "X_r column count must match ca1_unit_ids size, "
+            f"got {X_r.shape[1]} and {ca1_unit_ids.size}."
+        )
+
+    if mode == SOURCE_PREDICTOR_MODE_UNIT_VECTOR:
+        design_matrix = X_r
+    elif mode == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY:
+        design_matrix = X_r.mean(axis=1, keepdims=True)
+    else:
+        raise AssertionError(f"Unhandled source predictor mode: {mode!r}")
+
+    return {
+        "X_r": np.asarray(design_matrix, dtype=float),
+        "coef_ca1_unit_ids": _source_predictor_coef_ca1_unit_ids(
+            ca1_unit_ids=ca1_unit_ids,
+            source_predictor_mode=mode,
+        ),
+        "source_predictor_feature_names": _source_predictor_feature_names(
+            ca1_unit_ids=ca1_unit_ids,
+            source_predictor_mode=mode,
+        ),
+        "source_predictor_mode": mode,
+        "source_predictor_description": SOURCE_PREDICTOR_MODE_DESCRIPTIONS[mode],
+        "n_source_predictor_features": int(design_matrix.shape[1]),
+    }
+
+
 def resolve_ridge_strengths(args: argparse.Namespace) -> list[float]:
     """Return the ridge strengths to run for this invocation."""
     return [float(ridge_strength) for ridge_strength in args.ridge_strengths]
@@ -1086,6 +1199,7 @@ def _fit_ripple_glm_on_prepared_epoch(
     epoch: str,
     *,
     prepared_epoch: dict[str, Any],
+    source_predictor_mode: str = DEFAULT_SOURCE_PREDICTOR_MODE,
     n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     ripple_window_s: float | None = DEFAULT_RIPPLE_WINDOW_S,
@@ -1106,9 +1220,24 @@ def _fit_ripple_glm_on_prepared_epoch(
     print(_format_nemos_solver_selection_message(nemos_version, solver_name))
 
     rng = np.random.default_rng(shuffle_seed)
-    X_r = np.asarray(prepared_epoch["X_r"], dtype=np.float64)
+    X_r_units = np.asarray(prepared_epoch["X_r"], dtype=np.float64)
     y_r = np.asarray(prepared_epoch["y_r"], dtype=np.float64)
     kept_ca1_unit_ids = np.asarray(prepared_epoch["ca1_unit_ids"])
+    source_predictor = apply_source_predictor_mode(
+        X_r_units,
+        kept_ca1_unit_ids,
+        source_predictor_mode=source_predictor_mode,
+    )
+    X_r = np.asarray(source_predictor["X_r"], dtype=np.float64)
+    source_predictor_feature_names_all = np.asarray(
+        source_predictor["source_predictor_feature_names"],
+        dtype=str,
+    )
+    source_predictor_coef_ca1_unit_ids_all = np.asarray(
+        source_predictor["coef_ca1_unit_ids"]
+    )
+    source_predictor_mode = str(source_predictor["source_predictor_mode"])
+    source_predictor_description = str(source_predictor["source_predictor_description"])
     kept_v1_unit_ids = np.asarray(prepared_epoch["v1_unit_ids"])
     ripple_start_times = np.asarray(prepared_epoch["ripple_start_times"], dtype=np.float64)
     ripple_starts = np.asarray(prepared_epoch["ripple_starts"], dtype=np.float64)
@@ -1156,6 +1285,7 @@ def _fit_ripple_glm_on_prepared_epoch(
     n_ripples = int(prepared_epoch["n_ripples"])
     n_cells = int(prepared_epoch["n_cells"])
     n_ca1_cells = int(prepared_epoch["n_ca1_cells"])
+    n_source_predictor_features = int(source_predictor["n_source_predictor_features"])
     cv_splits = [
         (
             np.asarray(train_idx, dtype=np.int64),
@@ -1295,7 +1425,8 @@ def _fit_ripple_glm_on_prepared_epoch(
     _print_progress(epoch, "Fitting final full-data model for coefficient export.")
     coef_ca1_full_all = np.full((X_r_all_pp.shape[1], n_cells), np.nan, dtype=np.float32)
     coef_intercept_full_all = np.full(n_cells, np.nan, dtype=np.float32)
-    coef_ca1_unit_ids = kept_ca1_unit_ids[keep_x_all]
+    coef_ca1_unit_ids = source_predictor_coef_ca1_unit_ids_all[keep_x_all]
+    source_predictor_feature_names = source_predictor_feature_names_all[keep_x_all]
 
     glm_all = nmo.glm.PopulationGLM(
         solver_name=solver_name,
@@ -1326,6 +1457,9 @@ def _fit_ripple_glm_on_prepared_epoch(
         "target_window_s": float(window_parameters["target_window_s"]),
         "target_window_offset_s": float(window_parameters["target_window_offset_s"]),
         "windows_differ": bool(window_parameters["windows_differ"]),
+        "source_predictor_mode": source_predictor_mode,
+        "source_predictor_description": source_predictor_description,
+        "n_source_predictor_features": n_source_predictor_features,
         "n_ripples_before_window_bounds": int(
             prepared_epoch.get("n_ripples_before_window_bounds", n_ripples)
         ),
@@ -1338,6 +1472,7 @@ def _fit_ripple_glm_on_prepared_epoch(
         "v1_unit_ids": kept_v1_unit_ids,
         "ca1_unit_ids": kept_ca1_unit_ids,
         "coef_ca1_unit_ids": coef_ca1_unit_ids,
+        "source_predictor_feature_names": source_predictor_feature_names,
         "pseudo_r2_ripple_folds": pseudo_r2_ripple,
         "mae_ripple_folds": mae_ripple,
         "devexp_ripple_folds": devexp_ripple,
@@ -1368,6 +1503,7 @@ def fit_ripple_glm_train_on_ripple(
     spikes: dict[str, Any],
     epoch_interval: "nap.IntervalSet",
     ripple_table: pd.DataFrame,
+    source_predictor_mode: str = DEFAULT_SOURCE_PREDICTOR_MODE,
     min_spikes_per_ripple: float = DEFAULT_MIN_SPIKES_PER_RIPPLE,
     min_ca1_spikes_per_ripple: float = DEFAULT_MIN_CA1_SPIKES_PER_RIPPLE,
     n_shuffles_ripple: int = DEFAULT_N_SHUFFLES_RIPPLE,
@@ -1402,6 +1538,7 @@ def fit_ripple_glm_train_on_ripple(
     results = _fit_ripple_glm_on_prepared_epoch(
         epoch,
         prepared_epoch=prepared_epoch,
+        source_predictor_mode=source_predictor_mode,
         n_shuffles_ripple=n_shuffles_ripple,
         shuffle_seed=shuffle_seed,
         ripple_window_s=ripple_window_s,
@@ -1630,8 +1767,37 @@ def build_epoch_fit_dataset(
     n_shuffles = int(_as_3d_float(results["pseudo_r2_ripple_shuff_folds"]).shape[1])
     n_samples = int(_as_1d_float(results["ripple_window_start_s"]).shape[0])
     coef_ca1_unit_ids = np.asarray(results["coef_ca1_unit_ids"])
+    source_predictor_mode = validate_source_predictor_mode(
+        str(
+            results.get(
+                "source_predictor_mode",
+                fit_parameters.get("source_predictor_mode", DEFAULT_SOURCE_PREDICTOR_MODE),
+            )
+        )
+    )
+    source_predictor_description = str(
+        results.get(
+            "source_predictor_description",
+            SOURCE_PREDICTOR_MODE_DESCRIPTIONS[source_predictor_mode],
+        )
+    )
+    source_predictor_feature_names = np.asarray(
+        results.get(
+            "source_predictor_feature_names",
+            _source_predictor_feature_names(
+                ca1_unit_ids=coef_ca1_unit_ids,
+                source_predictor_mode=source_predictor_mode,
+            ),
+        ),
+        dtype=str,
+    )
     coef_ca1_full_all = _as_2d_float(results["coef_ca1_full_all"])
     coef_intercept_full_all = _as_1d_float(results["coef_intercept_full_all"])
+    if source_predictor_feature_names.size != coef_ca1_full_all.shape[0]:
+        raise ValueError(
+            "source_predictor_feature_names must align with coef_ca1_full_all rows, "
+            f"got {source_predictor_feature_names.size} and {coef_ca1_full_all.shape[0]}."
+        )
     ripple_start_time_s = _as_1d_float(
         results.get("ripple_start_time_s", results["ripple_window_start_s"])
     )
@@ -1654,7 +1820,7 @@ def build_epoch_fit_dataset(
     ripple_predicted_count_oof = _as_2d_float(results["ripple_predicted_count_oof"])
 
     attrs = {
-        "schema_version": "7",
+        "schema_version": "8",
         "animal_name": animal_name,
         "date": date,
         "epoch": epoch,
@@ -1709,6 +1875,17 @@ def build_epoch_fit_dataset(
                 ),
             )
         ),
+        "source_predictor_mode": source_predictor_mode,
+        "source_predictor_description": source_predictor_description,
+        "n_source_predictor_features": int(
+            results.get(
+                "n_source_predictor_features",
+                len(ca1_unit_ids)
+                if source_predictor_mode == SOURCE_PREDICTOR_MODE_UNIT_VECTOR
+                else coef_ca1_full_all.shape[0],
+            )
+        ),
+        "n_coef_source_features": int(coef_ca1_full_all.shape[0]),
         "n_units": int(len(unit_ids)),
         "n_ca1_units": int(len(ca1_unit_ids)),
         "sources_json": json.dumps(sources, sort_keys=True),
@@ -1728,6 +1905,10 @@ def build_epoch_fit_dataset(
     data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
         "ca1_unit_id": (("source_unit",), ca1_unit_ids),
         "coef_ca1_unit_id": (("coef_source_unit",), coef_ca1_unit_ids),
+        "coef_source_feature_name": (
+            ("coef_source_unit",),
+            source_predictor_feature_names,
+        ),
         "ripple_start_time_s": (("sample",), ripple_start_time_s),
         "ripple_window_start_s": (("sample",), ripple_window_start_s),
         "ripple_window_end_s": (("sample",), ripple_window_end_s),
@@ -1974,6 +2155,7 @@ def save_epoch_figures(
     source_window_offset_s: float | None = None,
     target_window_s: float | None = None,
     target_window_offset_s: float | None = None,
+    source_predictor_mode: str = DEFAULT_SOURCE_PREDICTOR_MODE,
 ) -> list[Path]:
     """Save the configured epoch summary figure."""
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -1992,6 +2174,9 @@ def save_epoch_figures(
         target_window_offset_s=float(window_parameters["target_window_offset_s"]),
     )
     ridge_strength_suffix = format_ridge_strength_suffix(ridge_strength)
+    source_predictor_filename_component = _format_source_predictor_filename_component(
+        source_predictor_mode
+    )
     metric_specs = [
         ("pseudo_r2", "Pseudo R^2"),
         ("mae", "MAE"),
@@ -2013,10 +2198,12 @@ def save_epoch_figures(
 
     out_path = fig_dir / (
         f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
+        f"{source_predictor_filename_component}"
         f"{ridge_strength_suffix}_samplewise_metrics_summary.png"
     )
     predicted_vs_observed_out_path = fig_dir / (
         f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
+        f"{source_predictor_filename_component}"
         f"{ridge_strength_suffix}_samplewise_top10_devexp_observed_vs_predicted.png"
     )
     return [
@@ -2108,6 +2295,17 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Optional V1 target window offset in seconds relative to ripple start. "
             "When omitted, defaults to --ripple-window-offset-s."
+        ),
+    )
+    parser.add_argument(
+        "--source-predictor-mode",
+        choices=SOURCE_PREDICTOR_MODE_CHOICES,
+        default=DEFAULT_SOURCE_PREDICTOR_MODE,
+        help=(
+            "CA1 source predictor representation. 'unit_vector' uses the CA1 "
+            "unit spike-count vector. 'mean_activity' uses one predictor equal "
+            "to the mean CA1 spike count across kept CA1 units in each source "
+            f"window. Default: {DEFAULT_SOURCE_PREDICTOR_MODE}"
         ),
     )
     parser.add_argument(
@@ -2264,6 +2462,7 @@ def main() -> None:
         f"Preparing outputs under {analysis_path} with ridge strengths {ridge_strengths!r}.",
     )
     print(f"Sweeping ridge strengths: {ridge_strengths!r}")
+    source_predictor_mode = validate_source_predictor_mode(args.source_predictor_mode)
     run_parameters = {
         "animal_name": args.animal_name,
         "date": args.date,
@@ -2276,6 +2475,7 @@ def main() -> None:
         "target_window_s": float(window_parameters["target_window_s"]),
         "target_window_offset_s": float(window_parameters["target_window_offset_s"]),
         "source_target_windows_differ": bool(window_parameters["windows_differ"]),
+        "source_predictor_mode": source_predictor_mode,
         "ripple_selection_mode": ripple_selection_mode,
         "remove_duplicate_ripples": bool(args.remove_duplicate_ripples),
         "keep_single_ripple_windows": bool(args.keep_single_ripple_windows),
@@ -2306,6 +2506,9 @@ def main() -> None:
         target_window_offset_s=float(window_parameters["target_window_offset_s"]),
     )
     ripple_selection_suffix = format_ripple_selection_suffix(ripple_selection_mode)
+    source_predictor_filename_component = _format_source_predictor_filename_component(
+        source_predictor_mode
+    )
 
     if ripple_selection_mode == RIPPLE_SELECTION_MODE_DEDUPED:
         print(
@@ -2329,6 +2532,11 @@ def main() -> None:
         print(
             "Outputs for default fits will include "
             f"'{ripple_selection_suffix}' in their filenames."
+        )
+    if source_predictor_mode == SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY:
+        print(
+            "Collapsing CA1 source predictors to mean activity. Outputs for this "
+            "control will include 'mean_ca1' in their filenames."
         )
 
     for epoch in selected_epochs:
@@ -2397,6 +2605,7 @@ def main() -> None:
                 results = _fit_ripple_glm_on_prepared_epoch(
                     epoch,
                     prepared_epoch=prepared_epoch,
+                    source_predictor_mode=source_predictor_mode,
                     n_shuffles_ripple=args.n_shuffles_ripple,
                     shuffle_seed=args.shuffle_seed,
                     ripple_window_s=args.ripple_window_s,
@@ -2466,6 +2675,7 @@ def main() -> None:
                 data_dir
                 / (
                     f"{epoch}_{ripple_window_suffix}_{ripple_selection_suffix}_"
+                    f"{source_predictor_filename_component}"
                     f"{ridge_strength_suffix}_samplewise_ripple_glm.nc"
                 )
             )
@@ -2486,6 +2696,7 @@ def main() -> None:
                     source_window_offset_s=float(window_parameters["source_window_offset_s"]),
                     target_window_s=float(window_parameters["target_window_s"]),
                     target_window_offset_s=float(window_parameters["target_window_offset_s"]),
+                    source_predictor_mode=source_predictor_mode,
                     ripple_selection_suffix=ripple_selection_suffix,
                     ridge_strength=ridge_strength,
                 )
@@ -2513,6 +2724,7 @@ def main() -> None:
             "target_window_s": float(window_parameters["target_window_s"]),
             "target_window_offset_s": float(window_parameters["target_window_offset_s"]),
             "source_target_windows_differ": bool(window_parameters["windows_differ"]),
+            "source_predictor_mode": source_predictor_mode,
             "ripple_selection_mode": ripple_selection_mode,
             "remove_duplicate_ripples": args.remove_duplicate_ripples,
             "keep_single_ripple_windows": args.keep_single_ripple_windows,
