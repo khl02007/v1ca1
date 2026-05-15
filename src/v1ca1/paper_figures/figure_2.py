@@ -3,13 +3,19 @@ from __future__ import annotations
 """Generate Figure 2 panels for CA1 ripple modulation of V1 activity."""
 
 import argparse
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS, get_analysis_path
+from v1ca1.helper.session import (
+    DEFAULT_DATA_ROOT,
+    DEFAULT_SPEED_THRESHOLD_CM_S,
+    REGIONS,
+    get_analysis_path,
+)
 from v1ca1.paper_figures.datasets import (
     DatasetId,
     get_processed_datasets,
@@ -43,6 +49,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
+DEFAULT_FIGURE_CACHE_DIR = DEFAULT_OUTPUT_DIR / "cache"
 DEFAULT_OUTPUT_NAME = "figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
@@ -70,6 +77,7 @@ DEFAULT_REGION_LABEL = "all_regions"
 DEFAULT_RIPPLE_WINDOW_S = 0.2
 DEFAULT_RIPPLE_WINDOW_OFFSET_S = 0.0
 DEFAULT_RIPPLE_SELECTION = "allripples"
+DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION = "single"
 DEFAULT_RIDGE_STRENGTH = 1e-1
 DEFAULT_LFP_TIME_BEFORE_S = 0.080
 DEFAULT_LFP_TIME_AFTER_S = 0.160
@@ -106,9 +114,9 @@ PANEL_E_GLM_TARGET_WINDOW_S = DEFAULT_RIPPLE_WINDOW_S
 PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S = 0.0
 PANEL_E_GLM_EPOCH_ORDER = ("light",)
 HEATMAP_EPOCH_ORDER = ("light", "dark", "sleep")
-PANEL_A_EPOCH_ORDER = ("light", "sleep")
-PANEL_C_EPOCH_ORDER = ("light", "sleep")
-PANEL_D_EPOCH_ORDER = ("light", "sleep")
+PANEL_A_EPOCH_ORDER = ("light",)
+PANEL_C_EPOCH_ORDER = ("light",)
+PANEL_D_EPOCH_ORDER = ("light",)
 HEATMAP_EPOCH_LABELS = {
     "light": "Light run",
     "dark": "Dark run",
@@ -121,10 +129,14 @@ MODEL_COLOR = MODEL_CLASS_COLORS["visual"]
 GLM_EPOCH_COLORS = EPOCH_TYPE_COLORS
 NONSIGNIFICANT_COLOR = NEUTRAL_COLORS["nonsignificant"]
 SIGNIFICANCE_P_VALUE = 0.05
-PANEL_C_SIGNIFICANCE_P_VALUE = 0.005
+PANEL_C_SIGNIFICANCE_P_VALUE = 0.05
 PANEL_D_SIGNIFICANCE_P_VALUE = PANEL_C_SIGNIFICANCE_P_VALUE
 PANEL_D_MIN_DEVIANCE_EXPLAINED = 0.0
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
+PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
+PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
+DARK_MOVEMENT_FR_CACHE_VERSION = 1
+DARK_MOVEMENT_FR_CACHE_COLUMNS = ("unit", "dark_firing_rate_hz")
 
 
 def parse_dataset_id(value: str) -> DatasetId:
@@ -1220,13 +1232,18 @@ def load_glm_epoch_summary_tables(
     light_epoch: str | None = None,
     dark_epoch: str | None = None,
     sleep_epoch: str | None = None,
+    epoch_types: Sequence[str] = HEATMAP_EPOCH_ORDER,
     ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
     ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
 ) -> list[dict[str, Any]]:
-    """Load pooled ripple-GLM summaries for light, dark, and sleep epochs."""
-    epoch_datasets: dict[str, list[DatasetId]] = {epoch_type: [] for epoch_type in HEATMAP_EPOCH_ORDER}
+    """Load pooled ripple-GLM summaries for selected figure epochs."""
+    selected_epoch_types = tuple(str(epoch_type) for epoch_type in epoch_types)
+    unknown_epoch_types = sorted(set(selected_epoch_types).difference(HEATMAP_EPOCH_ORDER))
+    if unknown_epoch_types:
+        raise ValueError(f"Unknown ripple-GLM epoch types: {unknown_epoch_types!r}")
+    epoch_datasets: dict[str, list[DatasetId]] = {epoch_type: [] for epoch_type in selected_epoch_types}
     for dataset in datasets:
         animal_name, date, dataset_dark_epoch = normalize_dataset_id(dataset)
         epoch_ids = make_figure_2_epoch_ids(
@@ -1236,11 +1253,11 @@ def load_glm_epoch_summary_tables(
             dark_epoch=dataset_dark_epoch if dark_epoch is None else dark_epoch,
             sleep_epoch=sleep_epoch,
         )
-        for epoch_type in HEATMAP_EPOCH_ORDER:
+        for epoch_type in selected_epoch_types:
             epoch_datasets[epoch_type].append(normalize_dataset_id(epoch_ids[epoch_type]))
 
     epoch_tables = []
-    for epoch_type in HEATMAP_EPOCH_ORDER:
+    for epoch_type in selected_epoch_types:
         selected_datasets = epoch_datasets[epoch_type]
         summary_table = load_ripple_glm_summary_table(
             data_root,
@@ -1429,6 +1446,374 @@ def load_glm_behavior_association_tables(
         "region": region,
         "tuning_comparison_label": tuning_comparison_label,
         "tuning_similarity_metric": tuning_similarity_metric,
+    }
+
+
+def _format_figure_cache_token(value: Any) -> str:
+    """Return a filesystem-safe token for one Figure 2 cache value."""
+    token = "".join(
+        character if character.isalnum() else "_"
+        for character in str(value).strip()
+    ).strip("_")
+    return token or "none"
+
+
+def _format_figure_cache_number(value: float) -> str:
+    """Return a compact cache token for one numeric setting."""
+    return f"{float(value):g}".replace("-", "m").replace(".", "p")
+
+
+def build_dark_movement_firing_rate_cache_metadata(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+    region: str,
+    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
+) -> dict[str, Any]:
+    """Return metadata that identifies one dark movement firing-rate cache."""
+    return {
+        "cache_version": DARK_MOVEMENT_FR_CACHE_VERSION,
+        "figure": DEFAULT_OUTPUT_NAME,
+        "panel": "D",
+        "artifact": "dark_movement_firing_rate",
+        "data_root": str(Path(data_root)),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "dark_epoch": str(dark_epoch),
+        "region": str(region),
+        "speed_threshold_cm_s": float(speed_threshold_cm_s),
+        "columns": list(DARK_MOVEMENT_FR_CACHE_COLUMNS),
+    }
+
+
+def build_dark_movement_firing_rate_cache_path(
+    cache_dir: Path,
+    metadata: Mapping[str, Any],
+) -> Path:
+    """Return the descriptive cache path for one dark movement firing-rate table."""
+    region = _format_figure_cache_token(metadata["region"])
+    animal_name = _format_figure_cache_token(metadata["animal_name"])
+    date = _format_figure_cache_token(metadata["date"])
+    dark_epoch = _format_figure_cache_token(metadata["dark_epoch"])
+    speed = _format_figure_cache_number(float(metadata["speed_threshold_cm_s"]))
+    cache_version = int(metadata["cache_version"])
+    filename = (
+        f"figure_2_dark_movement_firing_rate_{region}_{animal_name}_{date}_{dark_epoch}"
+        f"_speed{speed}_cachev{cache_version}.parquet"
+    )
+    return Path(cache_dir) / filename
+
+
+def _dark_movement_firing_rate_metadata_path(cache_path: Path) -> Path:
+    """Return the JSON sidecar path for one dark movement firing-rate cache."""
+    return cache_path.with_suffix(".json")
+
+
+def save_dark_movement_firing_rate_cache(
+    cache_path: Path,
+    table: Any,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Write one dark movement firing-rate cache table and metadata sidecar."""
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_table = table.loc[:, list(DARK_MOVEMENT_FR_CACHE_COLUMNS)].copy()
+    cache_table.to_parquet(cache_path, index=False)
+    _dark_movement_firing_rate_metadata_path(cache_path).write_text(
+        json.dumps(dict(metadata), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_dark_movement_firing_rate_cache(
+    cache_path: Path,
+    expected_metadata: Mapping[str, Any],
+) -> Any | None:
+    """Return cached dark movement firing rates when metadata still matches."""
+    import pandas as pd
+
+    cache_path = Path(cache_path)
+    metadata_path = _dark_movement_firing_rate_metadata_path(cache_path)
+    if not cache_path.exists() or not metadata_path.exists():
+        return None
+
+    try:
+        cached_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if cached_metadata != dict(expected_metadata):
+            print(f"Ignoring stale dark movement firing-rate cache at {cache_path}.")
+            return None
+
+        table = pd.read_parquet(cache_path)
+        missing_columns = [
+            column
+            for column in DARK_MOVEMENT_FR_CACHE_COLUMNS
+            if column not in table.columns
+        ]
+        if missing_columns:
+            print(
+                "Ignoring invalid dark movement firing-rate cache at "
+                f"{cache_path}: missing columns {missing_columns!r}."
+            )
+            return None
+        return table.loc[:, list(DARK_MOVEMENT_FR_CACHE_COLUMNS)].copy()
+    except Exception as exc:
+        print(f"Ignoring unreadable dark movement firing-rate cache at {cache_path}: {exc}")
+        return None
+
+
+def load_dark_movement_firing_rate_table(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+    region: str = DEFAULT_PANEL_D_REGION,
+    cache_dir: Path | None = DEFAULT_FIGURE_CACHE_DIR,
+    refresh_cache: bool = False,
+) -> Any:
+    """Return per-unit dark movement firing rates for one session and region."""
+    import pandas as pd
+
+    from v1ca1.helper.session import compute_movement_firing_rates
+    from v1ca1.task_progression._session import prepare_task_progression_session
+
+    metadata = build_dark_movement_firing_rate_cache_metadata(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        dark_epoch=dark_epoch,
+        region=region,
+    )
+    cache_path = (
+        build_dark_movement_firing_rate_cache_path(cache_dir, metadata)
+        if cache_dir is not None
+        else None
+    )
+    if cache_path is not None and not refresh_cache:
+        cached_table = load_dark_movement_firing_rate_cache(cache_path, metadata)
+        if cached_table is not None:
+            print(f"Loaded dark movement firing-rate cache from {cache_path}.")
+            return cached_table
+
+    session = prepare_task_progression_session(
+        animal_name=animal_name,
+        date=date,
+        data_root=data_root,
+        regions=(region,),
+        selected_run_epochs=[dark_epoch],
+        load_body_position=False,
+        include_generalized_place=False,
+    )
+    movement_firing_rates = compute_movement_firing_rates(
+        session["spikes_by_region"],
+        session["movement_by_run"],
+        session["run_epochs"],
+    )
+    spikes = session["spikes_by_region"][region]
+    unit_ids = np.asarray(list(spikes.keys()), dtype=int)
+    firing_rates_hz = np.asarray(movement_firing_rates[region][dark_epoch], dtype=float)
+    if unit_ids.shape[0] != firing_rates_hz.shape[0]:
+        raise ValueError(
+            "Dark movement firing-rate table is not aligned with spike unit IDs: "
+            f"{unit_ids.shape[0]} unit IDs and {firing_rates_hz.shape[0]} rates."
+        )
+    table = pd.DataFrame(
+        {
+            "unit": unit_ids,
+            "dark_firing_rate_hz": firing_rates_hz,
+        }
+    )
+    if cache_path is not None:
+        try:
+            save_dark_movement_firing_rate_cache(cache_path, table, metadata)
+            print(f"Saved dark movement firing-rate cache to {cache_path}.")
+        except Exception as exc:
+            print(f"Could not save dark movement firing-rate cache to {cache_path}: {exc}")
+    return table
+
+
+def build_glm_dark_activity_devexp_table(
+    glm_table: Any,
+    dark_activity_table: Any,
+    *,
+    animal_name: str,
+    date: str,
+    glm_epoch: str,
+    epoch_type: str,
+    dark_epoch: str,
+    dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+) -> Any:
+    """Join ripple-GLM unit summaries to direct dark movement firing rates."""
+    import pandas as pd
+
+    glm_rows = glm_table.rename(
+        columns={"unit_id": "unit", "source_path": "ripple_glm_source_path"}
+    ).copy()
+    glm_rows["unit"] = pd.to_numeric(glm_rows["unit"], errors="coerce")
+    glm_rows = glm_rows[np.isfinite(glm_rows["unit"].to_numpy(dtype=float))].copy()
+    glm_rows["unit"] = glm_rows["unit"].astype(int)
+    glm_rows = glm_rows.rename(columns={"epoch": "glm_epoch"})
+    glm_rows = glm_rows[
+        [
+            "unit",
+            "glm_epoch",
+            "ripple_devexp_mean",
+            "ripple_devexp_p_value",
+            "ripple_glm_source_path",
+        ]
+    ]
+
+    dark_rows = dark_activity_table.copy()
+    dark_rows["unit"] = pd.to_numeric(dark_rows["unit"], errors="coerce")
+    dark_rows = dark_rows[np.isfinite(dark_rows["unit"].to_numpy(dtype=float))].copy()
+    dark_rows["unit"] = dark_rows["unit"].astype(int)
+    dark_rows = dark_rows[["unit", "dark_firing_rate_hz"]]
+
+    joined = glm_rows.merge(dark_rows, on="unit", how="left")
+    dark_rate_values = np.asarray(joined["dark_firing_rate_hz"], dtype=float)
+    dark_active = np.isfinite(dark_rate_values) & (
+        dark_rate_values >= float(dark_activity_threshold_hz)
+    )
+    joined = joined.assign(
+        animal_name=animal_name,
+        date=date,
+        epoch_type=epoch_type,
+        label=HEATMAP_EPOCH_LABELS[epoch_type],
+        dark_epoch=dark_epoch,
+        dark_active=dark_active,
+        dark_activity_group=np.where(dark_active, "Dark active", "Dark inactive"),
+    )
+    return joined[
+        [
+            "animal_name",
+            "date",
+            "unit",
+            "epoch_type",
+            "label",
+            "glm_epoch",
+            "dark_epoch",
+            "dark_firing_rate_hz",
+            "dark_active",
+            "dark_activity_group",
+            "ripple_devexp_mean",
+            "ripple_devexp_p_value",
+            "ripple_glm_source_path",
+        ]
+    ]
+
+
+def load_glm_dark_activity_devexp_tables(
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    *,
+    light_epoch: str | None = None,
+    dark_epoch: str | None = None,
+    sleep_epoch: str | None = None,
+    region: str = DEFAULT_PANEL_D_REGION,
+    ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+    epoch_types: Sequence[str] = PANEL_D_EPOCH_ORDER,
+    dark_movement_fr_cache_dir: Path | None = DEFAULT_FIGURE_CACHE_DIR,
+    refresh_dark_movement_fr_cache: bool = False,
+) -> dict[str, Any]:
+    """Load ripple-GLM deviance explained split by dark activity threshold."""
+    import pandas as pd
+
+    rows: list[Any] = []
+    missing_artifacts: list[dict[str, str]] = []
+    selected_epoch_types = tuple(epoch_types)
+
+    for dataset_id in datasets:
+        animal_name, date, dataset_dark_epoch = normalize_dataset_id(dataset_id)
+        epoch_ids = make_figure_2_epoch_ids(
+            animal_name=animal_name,
+            date=date,
+            light_epoch=light_epoch,
+            dark_epoch=dataset_dark_epoch if dark_epoch is None else dark_epoch,
+            sleep_epoch=sleep_epoch,
+        )
+        _dark_animal, _dark_date, dark_run_epoch = normalize_dataset_id(epoch_ids["dark"])
+        try:
+            dark_activity_table = load_dark_movement_firing_rate_table(
+                data_root,
+                animal_name=animal_name,
+                date=date,
+                dark_epoch=dark_run_epoch,
+                region=region,
+                cache_dir=dark_movement_fr_cache_dir,
+                refresh_cache=refresh_dark_movement_fr_cache,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            missing_artifacts.append(
+                {
+                    "artifact": "dark_activity",
+                    "animal_name": animal_name,
+                    "date": date,
+                    "epoch": dark_run_epoch,
+                    "path": str(get_dataset_analysis_path(data_root, animal_name, date)),
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        for epoch_type in selected_epoch_types:
+            if epoch_type not in epoch_ids:
+                raise ValueError(f"Unknown Figure 2 epoch type: {epoch_type!r}")
+            _glm_animal, _glm_date, glm_epoch = normalize_dataset_id(epoch_ids[epoch_type])
+            glm_path = get_ripple_glm_path(
+                data_root,
+                animal_name=animal_name,
+                date=date,
+                epoch=glm_epoch,
+                ripple_window_s=ripple_window_s,
+                ripple_window_offset_s=ripple_window_offset_s,
+                ripple_selection=ripple_selection,
+                ridge_strength=ridge_strength,
+            )
+            if not glm_path.exists():
+                missing_artifacts.append(
+                    {
+                        "artifact": "ripple_glm",
+                        "animal_name": animal_name,
+                        "date": date,
+                        "epoch": glm_epoch,
+                        "path": str(glm_path),
+                    }
+                )
+                continue
+
+            glm_table = load_ripple_glm_summary_table(
+                data_root,
+                [(animal_name, date, glm_epoch)],
+                ripple_window_s=ripple_window_s,
+                ripple_window_offset_s=ripple_window_offset_s,
+                ripple_selection=ripple_selection,
+                ridge_strength=ridge_strength,
+            )
+            rows.append(
+                build_glm_dark_activity_devexp_table(
+                    glm_table,
+                    dark_activity_table,
+                    animal_name=animal_name,
+                    date=date,
+                    glm_epoch=glm_epoch,
+                    epoch_type=epoch_type,
+                    dark_epoch=dark_run_epoch,
+                    dark_activity_threshold_hz=dark_activity_threshold_hz,
+                )
+            )
+
+    devexp_table = pd.concat(rows, axis=0, ignore_index=True) if rows else pd.DataFrame()
+    return {
+        "devexp_table": devexp_table,
+        "missing_artifacts": missing_artifacts,
+        "region": region,
+        "dark_activity_threshold_hz": float(dark_activity_threshold_hz),
     }
 
 
@@ -2701,8 +3086,7 @@ def plot_glm_analysis_panel(
     finite_neglog_p = np.concatenate([values for values in all_neglog_p if values.size]) if any(
         values.size for values in all_neglog_p
     ) else np.asarray([], dtype=float)
-    x_min = -0.05
-    x_max = 0.40
+    x_min, x_max = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
     plot_left = 0.37
@@ -2861,7 +3245,7 @@ def plot_glm_analysis_panel(
             p_label_box = HPacker(
                 children=[
                     TextArea("p", textprops={**text_props, "fontstyle": "italic"}),
-                    TextArea("<0.005", textprops=text_props),
+                    TextArea(f"<{PANEL_C_SIGNIFICANCE_P_VALUE:g}", textprops=text_props),
                 ],
                 align="center",
                 pad=0,
@@ -2881,7 +3265,7 @@ def plot_glm_analysis_panel(
             )
         else:
             box_ax.set_yticklabels([])
-        if index == 1:
+        if index == len(epoch_tables) - 1:
             box_ax.set_xlabel("Deviance explained", fontsize=5, labelpad=1)
         box_ax.spines["top"].set_visible(False)
         box_ax.spines["right"].set_visible(False)
@@ -3834,101 +4218,365 @@ def _plot_glm_significance_metric_distribution(
     ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
 
 
+def _plot_dark_activity_devexp_boxplot(
+    ax: "Axes",
+    table: Any,
+    *,
+    epoch_type: str,
+    dark_activity_threshold_hz: float,
+    p_value_threshold: float,
+    title: str,
+    y_label: str = "",
+    x_limits: tuple[float, float] | None = None,
+    show_y_ticklabels: bool = True,
+) -> None:
+    """Plot significant ripple-GLM deviance explained by dark activity group."""
+    ax.axvline(0.0, color="0.55", linewidth=0.55, linestyle="--", zorder=0)
+    values_by_group: list[np.ndarray] = []
+    if table is None or len(table) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No GLM\nunits",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    else:
+        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
+        devexp_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
+        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+        dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
+        significant = (
+            np.isfinite(devexp_values)
+            & np.isfinite(p_values)
+            & np.isfinite(dark_rates_hz)
+            & (p_values < float(p_value_threshold))
+        )
+        inactive = significant & (dark_rates_hz < float(dark_activity_threshold_hz))
+        active = significant & (dark_rates_hz >= float(dark_activity_threshold_hz))
+        values_by_group = [
+            devexp_values[inactive],
+            devexp_values[active],
+        ]
+        if any(values.size for values in values_by_group):
+            colors = [NONSIGNIFICANT_COLOR, GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)]
+            finite_values = np.concatenate(
+                [values for values in values_by_group if values.size]
+            )
+            if x_limits is None:
+                low, high = np.nanpercentile(finite_values, [1.0, 99.0])
+                pad = max(0.02, 0.08 * float(high - low))
+                x_limits = (float(low - pad), float(high + pad))
+            plot_data = [values for values in values_by_group if values.size]
+            plot_positions = [
+                position
+                for position, values in enumerate(values_by_group, start=1)
+                if values.size
+            ]
+            box_artists = ax.boxplot(
+                plot_data,
+                orientation="horizontal",
+                positions=plot_positions,
+                widths=0.48,
+                patch_artist=True,
+                whis=(0, 100),
+                showfliers=False,
+                medianprops={"color": "black", "linewidth": 0.7, "zorder": 4},
+                whiskerprops={"color": "0.25", "linewidth": 0.55, "zorder": 4},
+                capprops={"color": "0.25", "linewidth": 0.55, "zorder": 4},
+            )
+            for patch, position in zip(box_artists["boxes"], plot_positions, strict=False):
+                patch.set_facecolor(colors[position - 1])
+                patch.set_edgecolor("0.25")
+                patch.set_alpha(0.50)
+                patch.set_linewidth(0.55)
+                patch.set_zorder(2)
+            for position, values in zip(plot_positions, plot_data, strict=False):
+                rng = np.random.default_rng(21_000 + position)
+                y_values = position + rng.uniform(-0.16, 0.16, size=values.size)
+                ax.scatter(
+                    values,
+                    y_values,
+                    s=3.8,
+                    color=colors[position - 1],
+                    alpha=0.38,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            ax.text(
+                0.98,
+                0.96,
+                f"Inactive sig n={values_by_group[0].size}\nActive sig n={values_by_group[1].size}",
+                ha="right",
+                va="top",
+                fontsize=4.5,
+                transform=ax.transAxes,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No significant\nvalues",
+                ha="center",
+                va="center",
+                fontsize=6,
+                transform=ax.transAxes,
+            )
+
+    if x_limits is not None:
+        ax.set_xlim(*x_limits)
+    ax.set_ylim(0.4, 2.6)
+    ax.set_yticks([1.0, 2.0])
+    if not show_y_ticklabels:
+        ax.set_yticklabels([])
+    else:
+        ax.set_yticklabels(
+            ["Inactive", "Active"],
+            fontsize=4.8,
+        )
+    ax.set_title(title, fontsize=5.8, pad=1.2)
+    ax.set_xlabel("CV deviance explained", fontsize=5.5, labelpad=1.0)
+    ax.set_ylabel(y_label, fontsize=5.5, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
+
+
+def _plot_dark_activity_significant_composition(
+    ax: "Axes",
+    table: Any,
+    *,
+    epoch_type: str,
+    dark_activity_threshold_hz: float,
+    p_value_threshold: float,
+    title: str,
+) -> None:
+    """Plot dark activity composition among ripple-GLM significant cells."""
+    import pandas as pd
+
+    colors = [NONSIGNIFICANT_COLOR, GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)]
+    group_labels = ["Inactive", "Active"]
+    fractions = [np.nan, np.nan]
+    counts = [0, 0]
+    total_significant_count = 0
+    if table is None or len(table) == 0:
+        ax.text(0.5, 0.5, "No GLM\nunits", ha="center", va="center", fontsize=6, transform=ax.transAxes)
+    else:
+        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)].copy()
+        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+        dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
+        significant = (
+            np.isfinite(p_values)
+            & np.isfinite(dark_rates_hz)
+            & (p_values < float(p_value_threshold))
+        )
+        group_masks = [
+            significant & (dark_rates_hz < float(dark_activity_threshold_hz)),
+            significant & (dark_rates_hz >= float(dark_activity_threshold_hz)),
+        ]
+        total_significant_count = int(np.sum(significant))
+        for group_index, mask in enumerate(group_masks):
+            counts[group_index] = int(np.sum(mask))
+            if total_significant_count:
+                fractions[group_index] = float(counts[group_index] / total_significant_count)
+
+        positions = np.arange(1, 3, dtype=float)
+        widths = np.nan_to_num(np.asarray(fractions, dtype=float), nan=0.0)
+        ax.barh(
+            positions,
+            widths,
+            height=0.58,
+            color=colors,
+            edgecolor=colors,
+            linewidth=0.65,
+            alpha=0.36,
+            zorder=2,
+        )
+        ax.scatter(
+            widths,
+            positions,
+            s=12,
+            color=colors,
+            edgecolors="0.2",
+            linewidths=0.35,
+            zorder=4,
+        )
+        if {"animal_name", "date"}.issubset(epoch_rows.columns):
+            dataset_fractions_by_key: dict[tuple[str, str], list[float]] = {}
+            for (_animal_name, _date), dataset_rows in epoch_rows.groupby(
+                ["animal_name", "date"], sort=True
+            ):
+                dataset_p_values = pd.to_numeric(
+                    dataset_rows["ripple_devexp_p_value"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                dataset_dark_rates_hz = pd.to_numeric(
+                    dataset_rows["dark_firing_rate_hz"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                dataset_significant = (
+                    np.isfinite(dataset_p_values)
+                    & np.isfinite(dataset_dark_rates_hz)
+                    & (dataset_p_values < float(p_value_threshold))
+                )
+                dataset_total = int(np.sum(dataset_significant))
+                if not dataset_total:
+                    continue
+                key = (str(_animal_name), str(_date))
+                dataset_inactive = int(
+                    np.sum(
+                        dataset_significant
+                        & (dataset_dark_rates_hz < float(dark_activity_threshold_hz))
+                    )
+                )
+                dataset_active = int(
+                    np.sum(
+                        dataset_significant
+                        & (dataset_dark_rates_hz >= float(dark_activity_threshold_hz))
+                    )
+                )
+                dataset_fractions_by_key[key] = [
+                    float(dataset_inactive / dataset_total),
+                    float(dataset_active / dataset_total),
+                ]
+            if dataset_fractions_by_key:
+                dataset_keys = sorted(dataset_fractions_by_key)
+                if len(dataset_keys) == 1:
+                    offsets = np.asarray([0.0], dtype=float)
+                else:
+                    offsets = np.linspace(-0.08, 0.08, len(dataset_keys), dtype=float)
+                offset_by_key = dict(zip(dataset_keys, offsets, strict=True))
+                for key in dataset_keys:
+                    dataset_fractions = np.asarray(dataset_fractions_by_key[key], dtype=float)
+                    finite_pair = np.isfinite(dataset_fractions)
+                    y_positions = positions + float(offset_by_key[key])
+                    if np.all(finite_pair):
+                        ax.plot(
+                            dataset_fractions,
+                            y_positions,
+                            color="0.45",
+                            linewidth=0.45,
+                            alpha=0.55,
+                            zorder=3,
+                        )
+                for group_index in range(2):
+                    group_keys = [
+                        key
+                        for key in dataset_keys
+                        if np.isfinite(dataset_fractions_by_key[key][group_index])
+                    ]
+                    if not group_keys:
+                        continue
+                    ax.scatter(
+                        [
+                            dataset_fractions_by_key[key][group_index]
+                            for key in group_keys
+                        ],
+                        [
+                            positions[group_index] + float(offset_by_key[key])
+                            for key in group_keys
+                        ],
+                        s=5.5,
+                        color=colors[group_index],
+                        alpha=0.7,
+                        edgecolors="none",
+                        zorder=5,
+                    )
+        for position, fraction, count in zip(positions, fractions, counts, strict=True):
+            label = f"n={count}"
+            label_x = 0.04
+            label_ha = "left"
+            if np.isfinite(fraction):
+                label = f"{fraction:.2f}\n{label}"
+                if fraction > 0.82:
+                    label_x = max(0.05, fraction - 0.055)
+                    label_ha = "right"
+                else:
+                    label_x = min(0.98, fraction + 0.05)
+            ax.text(
+                label_x,
+                position,
+                label,
+                ha=label_ha,
+                va="center",
+                fontsize=4.6,
+            )
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.4, 2.6)
+    ax.set_xticks([0.0, 0.5, 1.0])
+    ax.set_yticks([1.0, 2.0])
+    ax.set_yticklabels(group_labels, fontsize=4.8)
+    ax.set_title(title, fontsize=5.8, pad=1.2)
+    ax.set_xlabel(f"Frac. of p<{p_value_threshold:g} units", fontsize=5.5, labelpad=1.0)
+    ax.set_ylabel("", fontsize=5.5, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
+
+
 def plot_glm_behavior_association_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
 ) -> None:
-    """Plot dark tuning and firing-rate metrics against ripple-GLM deviance."""
+    """Plot ripple-GLM deviance explained by dark activity group."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    table = payload.get("similarity_table")
+    table = payload.get("devexp_table")
+    dark_activity_threshold_hz = float(
+        payload.get("dark_activity_threshold_hz", PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ)
+    )
     epoch_rows = tuple(PANEL_D_EPOCH_ORDER)
-    row_gap = 0.085
-    row_top = 0.86
-    row_bottom = 0.20
-    row_height = (
-        (row_top - row_bottom - row_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
+    x_limits = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
+
+    panel_left = 0.08
+    panel_right = 0.96
+    pair_gap = 0.07
+    inset_gap = 0.060 if len(epoch_rows) == 1 else 0.065
+    fraction_width = 0.23 if len(epoch_rows) == 1 else 0.14
+    pair_width = (
+        (panel_right - panel_left - pair_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
         if epoch_rows
         else 0.0
     )
-    left = 0.09
-    quartile_width = 0.22
-    distribution_width = 0.13
-    activity_x = left
-    dpp_x = 0.35
-    activity_distribution_x = 0.65
-    dpp_distribution_x = 0.83
-    for row_index, epoch_type in enumerate(epoch_rows):
-        bottom = row_top - row_height - row_index * (row_height + row_gap)
-        show_x_ticklabels = row_index == len(epoch_rows) - 1
-        firing_rate_ax = ax.inset_axes([activity_x, bottom, quartile_width, row_height])
-        similarity_ax = ax.inset_axes([dpp_x, bottom, quartile_width, row_height])
-        firing_rate_distribution_ax = ax.inset_axes(
-            [activity_distribution_x, bottom, distribution_width, row_height]
-        )
-        similarity_distribution_ax = ax.inset_axes(
-            [dpp_distribution_x, bottom, distribution_width, row_height]
-        )
-        _plot_deviance_metric_quartiles(
-            firing_rate_ax,
+    distribution_width = pair_width - inset_gap - fraction_width
+    bottom = 0.17
+    height = 0.72
+    for column_index, epoch_type in enumerate(epoch_rows):
+        pair_left = panel_left + column_index * (pair_width + pair_gap)
+        fraction_ax = ax.inset_axes([pair_left, bottom, fraction_width, height])
+        _plot_dark_activity_significant_composition(
+            fraction_ax,
             table,
-            y_column="firing_rate_hz",
-            y_label="",
-            title="Dark activity\nquartiles" if row_index == 0 else "",
-            y_limits=(0.5, 120.0),
-            y_scale="log",
             epoch_type=epoch_type,
-            show_x_ticklabels=show_x_ticklabels,
+            dark_activity_threshold_hz=dark_activity_threshold_hz,
+            p_value_threshold=PANEL_C_SIGNIFICANCE_P_VALUE,
+            title="p<0.05\ncomposition",
         )
-        _plot_deviance_metric_quartiles(
-            similarity_ax,
-            table,
-            y_column="same_turn_tuning_similarity",
-            y_label="",
-            title="DPP corr.\nquartiles" if row_index == 0 else "",
-            y_limits=(-0.1, 1.0),
-            epoch_type=epoch_type,
-            show_x_ticklabels=show_x_ticklabels,
+        distribution_ax = ax.inset_axes(
+            [pair_left + fraction_width + inset_gap, bottom, distribution_width, height]
         )
-        _plot_glm_significance_metric_distribution(
-            firing_rate_distribution_ax,
+        _plot_dark_activity_devexp_boxplot(
+            distribution_ax,
             table,
-            metric_column="firing_rate_hz",
-            y_label="",
-            title="Dark activity\nsig vs n.s." if row_index == 0 else "",
             epoch_type=epoch_type,
-            y_limits=(0.5, 120.0),
-            y_scale="log",
-            show_x_ticklabels=show_x_ticklabels,
+            dark_activity_threshold_hz=dark_activity_threshold_hz,
+            p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
+            title="Run" if epoch_type == "light" else HEATMAP_EPOCH_LABELS[epoch_type],
+            y_label="",
+            x_limits=x_limits,
             show_y_ticklabels=False,
-        )
-        _plot_glm_significance_metric_distribution(
-            similarity_distribution_ax,
-            table,
-            metric_column="same_turn_tuning_similarity",
-            y_label="",
-            title="DPP corr.\nsig vs n.s." if row_index == 0 else "",
-            epoch_type=epoch_type,
-            y_limits=(-0.1, 1.0),
-            show_x_ticklabels=show_x_ticklabels,
-            show_y_ticklabels=False,
-        )
-        ax.text(
-            left - 0.045,
-            bottom + row_height / 2.0,
-            HEATMAP_EPOCH_LABELS[epoch_type].replace(" run", ""),
-            ha="right",
-            va="center",
-            fontsize=5.2,
-            color=GLM_EPOCH_COLORS.get(epoch_type, "black"),
-            transform=ax.transAxes,
         )
     ax.text(
         0.50,
-        0.030,
-        "Groups defined within epoch\n(p<0.005, devexp>0)",
+        0.035,
+        "Boxplots show p<0.05 units; dark-active split uses 0.5 Hz",
         ha="center",
         va="bottom",
         fontsize=5.0,
@@ -4018,6 +4666,8 @@ def make_figure_2(
     ripple_window_offset_s: float,
     ripple_selection: str,
     ridge_strength: float,
+    dark_movement_fr_cache_dir: Path | None,
+    refresh_dark_movement_fr_cache: bool,
     dpi: int,
 ) -> Path:
     """Build and save Figure 2."""
@@ -4050,6 +4700,7 @@ def make_figure_2(
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
         sleep_epoch=sleep_epoch,
+        epoch_types=PANEL_C_EPOCH_ORDER,
         ripple_window_s=ripple_window_s,
         ripple_window_offset_s=ripple_window_offset_s,
         ripple_selection=ripple_selection,
@@ -4072,7 +4723,7 @@ def make_figure_2(
             "Panel C using schematic ripple trace because saved ripple-band LFP "
             f"was unavailable for {example_animal} {example_date} {example_epoch}: {exc}"
         )
-    panel_d_payload = load_glm_behavior_association_tables(
+    panel_d_payload = load_glm_dark_activity_devexp_tables(
         data_root,
         datasets,
         light_epoch=light_epoch,
@@ -4082,6 +4733,8 @@ def make_figure_2(
         ripple_window_offset_s=ripple_window_offset_s,
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
+        dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
     )
     panel_a_epoch_tables = filter_epoch_payloads(heatmap_epoch_tables, PANEL_A_EPOCH_ORDER)
     panel_c_epoch_tables = filter_epoch_payloads(glm_epoch_tables, PANEL_C_EPOCH_ORDER)
@@ -4110,7 +4763,7 @@ def make_figure_2(
     axes[2].set_title("Predicting V1 activity during ripples with CA1 activity", fontsize=8, pad=2)
     plot_glm_behavior_association_panel(axes[3], panel_d_payload)
     axes[3].set_title(
-        "Predictable neurons are enriched for dark-active DPP coding",
+        "CA1-to-V1 predictability by dark activity group",
         fontsize=8,
         pad=2,
     )
@@ -4253,6 +4906,20 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dark-movement-fr-cache-dir",
+        type=Path,
+        default=DEFAULT_FIGURE_CACHE_DIR,
+        help=(
+            "Directory for cached dark movement firing-rate tables used by Panel D. "
+            f"Default: {DEFAULT_FIGURE_CACHE_DIR}"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-dark-movement-fr-cache",
+        action="store_true",
+        help="Recompute and overwrite cached dark movement firing-rate tables.",
+    )
+    parser.add_argument(
         "--ripple-threshold-zscore",
         type=float,
         default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
@@ -4279,8 +4946,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ripple-selection",
         choices=("allripples", "deduped", "single"),
-        default=DEFAULT_RIPPLE_SELECTION,
-        help=f"Ripple-GLM selection suffix. Default: {DEFAULT_RIPPLE_SELECTION}",
+        default=DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
+        help=(
+            "Ripple-GLM selection suffix for Figure 2 Panels C and D. "
+            f"Default: {DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION}"
+        ),
     )
     parser.add_argument(
         "--ridge-strength",
@@ -4327,6 +4997,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         ripple_window_offset_s=args.ripple_window_offset_s,
         ripple_selection=args.ripple_selection,
         ridge_strength=args.ridge_strength,
+        dark_movement_fr_cache_dir=args.dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
         dpi=args.dpi,
     )
 

@@ -9,9 +9,10 @@ import pytest
 
 from v1ca1.paper_figures.figure_2 import (
     DEFAULT_EXAMPLE_DATASET,
+    DEFAULT_FIGURE_CACHE_DIR,
+    DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RIDGE_STRENGTH,
-    DEFAULT_RIPPLE_SELECTION,
     DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
@@ -23,6 +24,9 @@ from v1ca1.paper_figures.figure_2 import (
     DEFAULT_XCORR_TOP_CA1_UNITS,
     NEURON_SCALE_BAR_COUNT,
     build_output_path,
+    build_glm_dark_activity_devexp_table,
+    build_dark_movement_firing_rate_cache_metadata,
+    build_dark_movement_firing_rate_cache_path,
     build_peri_ripple_heatmap_payload,
     build_ripple_modulation_output_stem,
     compute_significance_distribution_comparison,
@@ -42,6 +46,7 @@ from v1ca1.paper_figures.figure_2 import (
     get_screen_xcorr_paths,
     get_tuning_similarity_path,
     load_glm_behavior_association_tables,
+    load_dark_movement_firing_rate_cache,
     load_glm_offset_panel_tables,
     load_example_glm_prediction,
     load_example_ripple_lfp_trace,
@@ -54,6 +59,7 @@ from v1ca1.paper_figures.figure_2 import (
     load_ripple_count_table,
     load_ripple_glm_summary_table,
     load_top_ca1_xcorr_panel_data,
+    save_dark_movement_firing_rate_cache,
     parse_arguments,
     parse_dataset_id,
     plot_glm_summary_panel,
@@ -85,6 +91,58 @@ def test_build_output_path_uses_requested_format() -> None:
 
     with pytest.raises(ValueError, match="Unknown output format"):
         build_output_path(Path("paper_figures"), "figure_2", "jpg")
+
+
+def test_dark_movement_firing_rate_cache_path_is_descriptive() -> None:
+    metadata = build_dark_movement_firing_rate_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+        region="v1",
+    )
+    cache_path = build_dark_movement_firing_rate_cache_path(
+        Path("paper_figures/output/cache"),
+        metadata,
+    )
+
+    assert metadata["cache_version"] == 1
+    assert metadata["data_root"] == "/analysis"
+    assert metadata["animal_name"] == "L14"
+    assert metadata["dark_epoch"] == "08_r4"
+    assert cache_path == Path(
+        "paper_figures/output/cache/"
+        "figure_2_dark_movement_firing_rate_v1_L14_20240611_08_r4_speed4_cachev1.parquet"
+    )
+
+
+def test_dark_movement_firing_rate_cache_roundtrip_validates_metadata(
+    tmp_path: Path,
+) -> None:
+    metadata = build_dark_movement_firing_rate_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+        region="v1",
+    )
+    table = pd.DataFrame(
+        {
+            "unit": [11, 12],
+            "dark_firing_rate_hz": [0.1, 0.6],
+        }
+    )
+    cache_path = build_dark_movement_firing_rate_cache_path(tmp_path, metadata)
+
+    pytest.importorskip("pyarrow")
+    save_dark_movement_firing_rate_cache(cache_path, table, metadata)
+    loaded = load_dark_movement_firing_rate_cache(cache_path, metadata)
+
+    assert loaded is not None
+    pd.testing.assert_frame_equal(loaded, table)
+    stale_metadata = dict(metadata)
+    stale_metadata["dark_epoch"] = "10_r5"
+    assert load_dark_movement_firing_rate_cache(cache_path, stale_metadata) is None
 
 
 def test_ripple_modulation_paths_match_cached_output_stem(tmp_path: Path) -> None:
@@ -778,6 +836,33 @@ def test_load_glm_behavior_association_tables_reports_missing_tuning(
     assert payload["missing_artifacts"][0]["artifact"] == "tuning_analysis"
 
 
+def test_build_glm_dark_activity_devexp_table_splits_dark_activity(
+    tmp_path: Path,
+) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+    glm_table = load_ripple_glm_summary_table(tmp_path, [("L14", "20240611", "08_r4")])
+    dark_activity_table = pd.DataFrame(
+        {
+            "unit": [11, 12],
+            "dark_firing_rate_hz": [0.2, 0.8],
+        }
+    )
+
+    table = build_glm_dark_activity_devexp_table(
+        glm_table,
+        dark_activity_table,
+        animal_name="L14",
+        date="20240611",
+        glm_epoch="08_r4",
+        epoch_type="light",
+        dark_epoch="08_r4",
+    )
+
+    assert table["dark_activity_group"].tolist() == ["Dark inactive", "Dark active"]
+    assert table["dark_active"].tolist() == [False, True]
+    assert np.allclose(table["dark_firing_rate_hz"], [0.2, 0.8])
+
+
 def _write_decoding_comparison_summary_table(
     tmp_path: Path,
     *,
@@ -1020,7 +1105,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
         "xcorr": np.ones((2, 3, 3), dtype=float),
     }
     association_payload = {
-        "similarity_table": pd.DataFrame(
+        "devexp_table": pd.DataFrame(
             {
                 "epoch_type": [
                     "light",
@@ -1032,13 +1117,42 @@ def test_plot_helpers_draw_expected_axes() -> None:
                     "sleep",
                     "sleep",
                 ],
-                "same_turn_tuning_similarity": [0.1, 0.5, 0.7, 0.9, 0.7, 0.8, 0.4, 0.9],
-                "firing_rate_hz": [1.0, 2.5, 4.5, 9.0, 5.0, 8.0, 3.5, 12.0],
+                "dark_firing_rate_hz": [0.2, 0.4, 0.8, 9.0, 5.0, 8.0, 0.3, 12.0],
                 "ripple_devexp_mean": [0.05, 0.2, 0.3, 0.4, 0.1, 0.3, 0.15, 0.25],
-                "ripple_devexp_p_value": [0.001, 0.002, 0.003, 0.004, 0.003, 0.4, 0.002, 0.6],
+                "ripple_devexp_p_value": [
+                    0.001,
+                    0.2,
+                    0.003,
+                    0.004,
+                    0.003,
+                    0.4,
+                    0.002,
+                    0.6,
+                ],
+                "animal_name": [
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                ],
+                "date": [
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                ],
             }
         ),
         "missing_artifacts": [],
+        "dark_activity_threshold_hz": 0.5,
     }
     decoding_payload = {
         "summary_table": pd.DataFrame(
@@ -1146,11 +1260,11 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(axes[1, 1].collections) == 1
     assert len(axes[1, 2].collections) == 1
     assert len(axes[2, 2].child_axes) == 7
-    assert axes[2, 2].child_axes[1].get_xlim()[0] == pytest.approx(-0.05)
-    assert axes[2, 2].child_axes[1].get_xlim()[1] == pytest.approx(0.40)
+    assert axes[2, 2].child_axes[1].get_xlim()[0] == pytest.approx(-0.1)
+    assert axes[2, 2].child_axes[1].get_xlim()[1] == pytest.approx(0.5)
     assert len(axes[2, 2].child_axes[1].collections) == 2
-    assert axes[2, 2].child_axes[2].get_xlim()[0] == pytest.approx(-0.05)
-    assert axes[2, 2].child_axes[2].get_xlim()[1] == pytest.approx(0.40)
+    assert axes[2, 2].child_axes[2].get_xlim()[0] == pytest.approx(-0.1)
+    assert axes[2, 2].child_axes[2].get_xlim()[1] == pytest.approx(0.5)
     assert len(axes[2, 2].child_axes[2].patches) == 2
     assert [tick.get_text() for tick in axes[2, 2].child_axes[2].get_yticklabels()] == [
         "n.s.",
@@ -1166,43 +1280,48 @@ def test_plot_helpers_draw_expected_axes() -> None:
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
-    assert len(ax.child_axes) == 8
-    assert ax.child_axes[0].get_ylabel() == ""
-    assert ax.child_axes[1].get_ylabel() == ""
-    assert ax.child_axes[0].get_title() == "Dark activity\nquartiles"
-    assert ax.child_axes[1].get_title() == "DPP corr.\nquartiles"
-    assert ax.child_axes[2].get_title() == "Dark activity\nsig vs n.s."
-    assert ax.child_axes[3].get_title() == "DPP corr.\nsig vs n.s."
-    assert ax.child_axes[0].get_yscale() == "log"
-    assert ax.child_axes[0].yaxis.get_label_position() == "left"
-    assert ax.texts[-1].get_text() == "Groups defined within epoch\n(p<0.005, devexp>0)"
-    assert len(ax.child_axes[0].collections) == 1
-    assert len(ax.child_axes[1].collections) == 1
-    assert len(ax.child_axes[0].collections[0].get_offsets()) == 4
-    assert len(ax.child_axes[0].lines) >= 3
-    assert len(ax.child_axes[1].lines) >= 3
-    assert [tick.get_text() for tick in ax.child_axes[0].get_xticklabels()] == [
-        "",
-        "",
-        "",
-        "",
+    assert len(ax.child_axes) == 2
+    fraction_ax, box_ax = ax.child_axes
+    assert fraction_ax.get_xlabel() == "Frac. of p<0.05 units"
+    assert fraction_ax.get_ylabel() == ""
+    assert fraction_ax.get_title() == "p<0.05\ncomposition"
+    assert box_ax.get_ylabel() == ""
+    assert box_ax.get_xlabel() == "CV deviance explained"
+    assert box_ax.get_title() == "Run"
+    assert ax.texts[-1].get_text() == (
+        "Boxplots show p<0.05 units; dark-active split uses 0.5 Hz"
+    )
+    assert len(fraction_ax.patches) == 2
+    assert len(box_ax.patches) == 2
+    assert len(box_ax.collections) == 2
+    assert len(box_ax.lines) >= 3
+    assert len(fraction_ax.collections) == 3
+    assert len(fraction_ax.lines) >= 2
+    assert fraction_ax.get_xlim()[0] == pytest.approx(0.0)
+    assert fraction_ax.get_xlim()[1] == pytest.approx(1.0)
+    assert [tick.get_text() for tick in fraction_ax.get_yticklabels()] == [
+        "Inactive",
+        "Active",
     ]
-    assert [tick.get_text() for tick in ax.child_axes[4].get_xticklabels()] == [
-        "Q1",
-        "Q2",
-        "Q3",
-        "Q4",
-    ]
-    assert [tick.get_text() for tick in ax.child_axes[5].get_xticklabels()] == [
-        "Q1",
-        "Q2",
-        "Q3",
-        "Q4",
-    ]
-    assert [tick.get_text() for tick in ax.child_axes[6].get_xticklabels()] == [
-        "NS",
-        "Sig",
-    ]
+    assert sum(
+        len(collection.get_offsets())
+        for collection in box_ax.collections
+    ) == 3
+    assert box_ax.get_xlim()[0] == pytest.approx(-0.1)
+    assert box_ax.get_xlim()[1] == pytest.approx(0.5)
+    devexp_box_line_max = max(
+        np.nanmax(np.asarray(line.get_xdata(), dtype=float))
+        for line in box_ax.lines
+        if len(line.get_xdata())
+    )
+    assert devexp_box_line_max == pytest.approx(0.4)
+    assert any(
+        text.get_text() == "Inactive sig n=1\nActive sig n=2"
+        for text in box_ax.texts
+    )
+    assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
+    assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
+    assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
     plt.close(fig)
 
     fig, ax = plt.subplots()
@@ -1239,8 +1358,10 @@ def test_parse_arguments_defaults_match_figure_2_cli() -> None:
     assert args.light_epoch is None
     assert args.dark_epoch is None
     assert args.sleep_epoch is None
+    assert args.dark_movement_fr_cache_dir == DEFAULT_FIGURE_CACHE_DIR
+    assert args.refresh_dark_movement_fr_cache is False
     assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
     assert args.ripple_window_s == DEFAULT_RIPPLE_WINDOW_S
     assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S
-    assert args.ripple_selection == DEFAULT_RIPPLE_SELECTION
+    assert args.ripple_selection == DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION
     assert args.ridge_strength == DEFAULT_RIDGE_STRENGTH

@@ -1,0 +1,16 @@
+{
+  "animal_name": "L15",
+  "artifact": "dark_movement_firing_rate",
+  "cache_version": 1,
+  "columns": [
+    "unit",
+    "dark_firing_rate_hz"
+  ],
+  "dark_epoch": "10_r5",
+  "data_root": "/stelmo/kyu/analysis",
+  "date": "20241121",
+  "figure": "figure_2",
+  "panel": "D",
+  "region": "v1",
+  "speed_threshold_cm_s": 4.0
+}

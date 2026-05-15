@@ -19,6 +19,7 @@ from v1ca1.paper_figures.supplementary_figure_2 import (
     load_per_animal_glm_scatter_payload,
     make_supplementary_figure_2,
     parse_arguments,
+    plot_dark_firing_rate_devexp_grid,
     plot_per_animal_glm_scatter_grid,
     plot_selection_scatter_grid,
 )
@@ -276,6 +277,38 @@ def test_plot_per_animal_glm_scatter_grid_splits_run_and_sleep() -> None:
     plt.close(fig)
 
 
+def test_plot_dark_firing_rate_devexp_grid_splits_datasets() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L15", "L15"],
+            "date": ["20240611", "20240611", "20241121", "20241121"],
+            "epoch_type": ["light", "sleep", "light", "sleep"],
+            "dark_firing_rate_hz": [0.5, 1.5, 2.0, 4.0],
+            "ripple_devexp_mean": [0.01, 0.12, -0.02, 0.18],
+            "ripple_devexp_p_value": [0.2, 0.001, 0.5, 0.0005],
+        }
+    )
+    payload = {"devexp_table": table, "missing_artifacts": []}
+
+    fig, ax = plt.subplots()
+    child_axes = plot_dark_firing_rate_devexp_grid(ax, payload)
+
+    assert len(child_axes) == 4
+    assert [child_axis.get_title() for child_axis in child_axes[:2]] == ["Run", "Sleep"]
+    assert all(child_axis.get_yscale() == "log" for child_axis in child_axes)
+    assert all(len(child_axis.collections) == 1 for child_axis in child_axes)
+    first_offset = child_axes[0].collections[0].get_offsets()[0]
+    assert first_offset[0] == pytest.approx(0.01)
+    assert first_offset[1] == pytest.approx(0.5)
+    assert child_axes[1].get_xlim()[1] >= 0.40
+    plt.close(fig)
+
+
 def test_make_supplementary_figure_2_saves_per_animal_scatter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -309,12 +342,30 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
         "ripple_window_s": 0.2,
         "ridge_strength": 0.1,
     }
+    dark_activity_payload = {
+        "devexp_table": pd.DataFrame(
+            {
+                "animal_name": ["L14", "L14"],
+                "date": ["20240611", "20240611"],
+                "epoch_type": ["light", "sleep"],
+                "dark_firing_rate_hz": [0.5, 1.5],
+                "ripple_devexp_mean": [0.1, 0.2],
+                "ripple_devexp_p_value": [0.001, 0.2],
+            }
+        ),
+        "missing_artifacts": [],
+    }
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(
         supp_figure_2_module,
         "load_per_animal_glm_scatter_payload",
         lambda *_args, **_kwargs: payload,
+    )
+    monkeypatch.setattr(
+        supp_figure_2_module,
+        "load_glm_dark_activity_devexp_tables",
+        lambda *_args, **_kwargs: dark_activity_payload,
     )
 
     def fake_save_figure(figure, output_path: Path, dpi: int):
@@ -346,5 +397,7 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
     assert calls["dpi"] == 300
     assert set(calls["panel_labels"]) >= {
         "A",
+        "B",
         "Figure 2C scatter by animal (allripples)",
+        "Dark movement firing rate versus deviance explained",
     }

@@ -25,6 +25,7 @@ from v1ca1.paper_figures.figure_2 import (
     PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S,
     PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S,
     get_ripple_glm_model_window_path,
+    load_glm_dark_activity_devexp_tables,
     load_glm_epoch_summary_tables,
     parse_dataset_id,
 )
@@ -671,6 +672,45 @@ def get_per_animal_neglog_p_limit(payload: dict[str, Any]) -> float:
     )
 
 
+def iter_dark_activity_dataset_keys(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return animal/date keys for dark-rate versus deviance plots."""
+    table = payload.get("devexp_table")
+    if table is None or len(table) == 0:
+        return []
+    if not {"animal_name", "date"}.issubset(table.columns):
+        return []
+    key_rows = table[["animal_name", "date"]].drop_duplicates()
+    return [
+        (str(animal_name), str(date))
+        for animal_name, date in key_rows.itertuples(index=False, name=None)
+    ]
+
+
+def get_dark_activity_scatter_limits(
+    payload: dict[str, Any],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return shared x/y limits for deviance versus dark movement rate plots."""
+    table = payload.get("devexp_table")
+    if table is None or len(table) == 0:
+        return (-0.05, 0.40), (0.1, 100.0)
+
+    x_values = np.asarray(table["ripple_devexp_mean"], dtype=float)
+    y_values = np.asarray(table["dark_firing_rate_hz"], dtype=float)
+    finite_x = x_values[np.isfinite(x_values)]
+    finite_y = y_values[np.isfinite(y_values) & (y_values > 0.0)]
+    if finite_x.size:
+        x_min = min(-0.05, float(np.nanmin(finite_x)) - 0.02)
+        x_max = max(0.40, float(np.nanmax(finite_x)) + 0.02)
+    else:
+        x_min, x_max = -0.05, 0.40
+    if finite_y.size:
+        y_min = max(0.03, float(np.nanmin(finite_y)) / 1.4)
+        y_max = max(y_min * 1.5, float(np.nanmax(finite_y)) * 1.4)
+    else:
+        y_min, y_max = 0.1, 100.0
+    return (x_min, x_max), (y_min, y_max)
+
+
 def plot_per_animal_glm_scatter_grid(
     ax: "Axes",
     payload: dict[str, Any],
@@ -786,6 +826,177 @@ def plot_per_animal_glm_scatter_grid(
     return child_axes
 
 
+def plot_dark_firing_rate_devexp_grid(
+    ax: "Axes",
+    payload: dict[str, Any],
+    *,
+    epoch_types: Sequence[str] = DEFAULT_PER_ANIMAL_EPOCH_TYPES,
+) -> list[Any]:
+    """Plot dark-epoch movement firing rate versus ripple deviance explained."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    table = payload.get("devexp_table")
+    animal_date_keys = iter_dark_activity_dataset_keys(payload)
+    if table is None or len(table) == 0 or not animal_date_keys:
+        ax.text(
+            0.5,
+            0.5,
+            "No dark movement firing-rate data",
+            ha="center",
+            va="center",
+            fontsize=6.0,
+            transform=ax.transAxes,
+        )
+        return []
+
+    x_limits, y_limits = get_dark_activity_scatter_limits(payload)
+    n_rows = len(animal_date_keys)
+    n_columns = len(epoch_types)
+    grid_height = PANEL_GRID_TOP - PANEL_GRID_BOTTOM
+    row_gap = min(DATASET_ROW_GAP, grid_height * 0.18 / max(n_rows - 1, 1))
+    row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
+    grid_width = PANEL_GRID_RIGHT - PANEL_GRID_LEFT
+    column_width = (grid_width - EPOCH_COLUMN_GAP * (n_columns - 1)) / n_columns
+
+    ax.text(
+        PANEL_GRID_LEFT,
+        0.98,
+        "Dark movement firing rate versus deviance explained",
+        ha="left",
+        va="top",
+        fontsize=7.0,
+        fontweight="bold",
+        transform=ax.transAxes,
+    )
+
+    child_axes = []
+    for row_index, (animal_name, date) in enumerate(animal_date_keys):
+        row_bottom = (
+            PANEL_GRID_BOTTOM
+            + grid_height
+            - (row_index + 1) * row_height
+            - row_index * row_gap
+        )
+        ax.text(
+            0.01,
+            row_bottom + 0.5 * row_height,
+            f"{animal_name}\n{date}",
+            ha="left",
+            va="center",
+            fontsize=5.0,
+            transform=ax.transAxes,
+        )
+        for column_index, epoch_type in enumerate(epoch_types):
+            column_left = PANEL_GRID_LEFT + column_index * (
+                column_width + EPOCH_COLUMN_GAP
+            )
+            scatter_ax = ax.inset_axes(
+                [column_left, row_bottom, column_width, row_height]
+            )
+            rows = table[
+                (table["animal_name"].astype(str) == animal_name)
+                & (table["date"].astype(str) == date)
+                & (table["epoch_type"].astype(str) == str(epoch_type))
+            ]
+            x_values = np.asarray(rows["ripple_devexp_mean"], dtype=float)
+            y_values = np.asarray(rows["dark_firing_rate_hz"], dtype=float)
+            p_values = np.asarray(rows["ripple_devexp_p_value"], dtype=float)
+            valid = (
+                np.isfinite(x_values)
+                & np.isfinite(y_values)
+                & (y_values > 0.0)
+                & np.isfinite(p_values)
+            )
+            scatter_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
+            if np.any(valid):
+                significant = p_values[valid] < SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE
+                finite_x = x_values[valid]
+                finite_y = y_values[valid]
+                if np.any(~significant):
+                    scatter_ax.scatter(
+                        finite_x[~significant],
+                        finite_y[~significant],
+                        s=3.2,
+                        color=NONSIGNIFICANT_COLOR,
+                        alpha=0.42,
+                        edgecolors="none",
+                        zorder=2,
+                    )
+                if np.any(significant):
+                    scatter_ax.scatter(
+                        finite_x[significant],
+                        finite_y[significant],
+                        s=3.8,
+                        color=get_epoch_type_color(str(epoch_type)),
+                        alpha=0.52,
+                        edgecolors="none",
+                        zorder=3,
+                    )
+                scatter_ax.text(
+                    0.96,
+                    0.05,
+                    f"n={int(np.sum(valid))}\nsig={np.mean(significant):.2f}",
+                    ha="right",
+                    va="bottom",
+                    fontsize=3.9,
+                    transform=scatter_ax.transAxes,
+                )
+            else:
+                scatter_ax.text(
+                    0.5,
+                    0.5,
+                    "No finite\nvalues",
+                    ha="center",
+                    va="center",
+                    fontsize=4.8,
+                    transform=scatter_ax.transAxes,
+                )
+
+            if row_index == 0:
+                scatter_ax.set_title(
+                    PER_ANIMAL_EPOCH_LABELS.get(
+                        str(epoch_type),
+                        EPOCH_TYPE_LABELS.get(str(epoch_type), str(epoch_type)),
+                    ),
+                    fontsize=4.8,
+                    pad=1.0,
+                )
+            scatter_ax.set_xlim(*x_limits)
+            scatter_ax.set_yscale("log")
+            scatter_ax.set_ylim(*y_limits)
+            if not (row_index == n_rows - 1):
+                scatter_ax.set_xticklabels([])
+            if column_index != 0:
+                scatter_ax.set_yticklabels([])
+            scatter_ax.spines["top"].set_visible(False)
+            scatter_ax.spines["right"].set_visible(False)
+            scatter_ax.tick_params(labelsize=4.2, length=1.3, pad=1)
+            child_axes.append(scatter_ax)
+
+    ax.text(
+        0.5 * (PANEL_GRID_LEFT + PANEL_GRID_RIGHT),
+        0.015,
+        "Ripple deviance explained",
+        ha="center",
+        va="bottom",
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        PANEL_GRID_LEFT - 0.065,
+        0.5 * (PANEL_GRID_BOTTOM + PANEL_GRID_TOP),
+        "Dark movement firing rate (Hz)",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
+    return child_axes
+
+
 def make_supplementary_figure_2(
     *,
     data_root: Path,
@@ -807,28 +1018,65 @@ def make_supplementary_figure_2(
         ripple_window_s=ripple_window_s,
         ridge_strength=ridge_strength,
     )
+    dark_activity_payload = load_glm_dark_activity_devexp_tables(
+        data_root,
+        datasets,
+        ripple_selection=ripple_selection,
+        ripple_window_s=ripple_window_s,
+        ridge_strength=ridge_strength,
+        epoch_types=DEFAULT_PER_ANIMAL_EPOCH_TYPES,
+    )
     y_limit = get_per_animal_neglog_p_limit(payload)
 
     apply_paper_style()
-    n_animal_rows = max(len(iter_per_animal_glm_keys(payload)), len(datasets), 1)
-    figure_height_mm = (
+    n_animal_rows = max(
+        len(iter_per_animal_glm_keys(payload)),
+        len(iter_dark_activity_dataset_keys(dark_activity_payload)),
+        len(datasets),
+        1,
+    )
+    section_height_mm = (
         DEFAULT_SECTION_HEADER_HEIGHT_MM
         + DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM * n_animal_rows
     )
+    figure_height_mm = 2.0 * section_height_mm + DEFAULT_SECTION_GAP_MM
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, figure_height_mm),
         constrained_layout=True,
     )
-    section_ax = fig.add_subplot(111)
+    outer_grid = fig.add_gridspec(
+        nrows=3,
+        ncols=1,
+        height_ratios=[
+            section_height_mm,
+            DEFAULT_SECTION_GAP_MM,
+            section_height_mm,
+        ],
+    )
+    section_ax = fig.add_subplot(outer_grid[0])
     plot_per_animal_glm_scatter_grid(
         section_ax,
         payload,
         y_limit=y_limit,
     )
     label_axis(section_ax, "A", x=-0.01, y=1.01)
+    spacer_ax = fig.add_subplot(outer_grid[1])
+    spacer_ax.axis("off")
+    dark_activity_ax = fig.add_subplot(outer_grid[2])
+    plot_dark_firing_rate_devexp_grid(
+        dark_activity_ax,
+        dark_activity_payload,
+    )
+    label_axis(dark_activity_ax, "B", x=-0.01, y=1.01)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
+    for missing in dark_activity_payload["missing_artifacts"]:
+        print(
+            "Supplementary Figure 2 missing "
+            f"{missing['artifact']} for {missing['animal_name']} "
+            f"{missing['date']} {missing['epoch']}: {missing.get('path', '')}"
+        )
     print(f"Saved Supplementary Figure 2 to {output_path}")
     return output_path
 
