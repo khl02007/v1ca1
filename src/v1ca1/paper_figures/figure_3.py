@@ -97,10 +97,8 @@ DEFAULT_PANEL_BC_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
 DEFAULT_PANEL_DEF_HEIGHT_MM = 30.0
 DEFAULT_PANEL_GH_HEIGHT_MM = 42.0
 DEFAULT_FIGURE_HEIGHT_MM = (
-    DEFAULT_PANEL_A_HEIGHT_MM
-    + DEFAULT_PANEL_BC_HEIGHT_MM
+    DEFAULT_PANEL_BC_HEIGHT_MM
     + DEFAULT_PANEL_DEF_HEIGHT_MM
-    + DEFAULT_PANEL_GH_HEIGHT_MM
 )
 DEFAULT_PANEL_B_WIDTH_FRACTION = DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION
 DEFAULT_PANEL_C_WIDTH_FRACTION = DEFAULT_PANEL_E_WIDTH_FRACTION
@@ -5078,34 +5076,24 @@ def make_figure_3(
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
     )
-    panel_glm_payload = load_panel_glm_data(
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-    )
 
     apply_paper_style()
-    fig_height_mm = DEFAULT_PANEL_A_HEIGHT_MM + (
+    fig_height_mm = (
         DEFAULT_PANEL_BC_HEIGHT_MM * max(len(regions), 1)
-    ) + DEFAULT_PANEL_DEF_HEIGHT_MM + DEFAULT_PANEL_GH_HEIGHT_MM
+    ) + DEFAULT_PANEL_DEF_HEIGHT_MM
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, fig_height_mm),
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=4,
+        nrows=2,
         ncols=1,
         height_ratios=[
-            DEFAULT_PANEL_A_HEIGHT_MM,
             DEFAULT_PANEL_BC_HEIGHT_MM * max(len(regions), 1),
             DEFAULT_PANEL_DEF_HEIGHT_MM,
-            DEFAULT_PANEL_GH_HEIGHT_MM,
         ],
     )
-    panel_a_axis = fig.add_subplot(outer_grid[0, 0])
-    middle_grid = outer_grid[1, 0].subgridspec(
+    middle_grid = outer_grid[0, 0].subgridspec(
         nrows=1,
         ncols=2,
         width_ratios=[
@@ -5119,7 +5107,7 @@ def make_figure_3(
         middle_grid[0, 1],
         regions=regions,
     )
-    bottom_grid = outer_grid[2, 0].subgridspec(
+    bottom_grid = outer_grid[1, 0].subgridspec(
         nrows=1,
         ncols=3,
         width_ratios=PANEL_DEF_WIDTH_RATIOS,
@@ -5132,30 +5120,6 @@ def make_figure_3(
     panel_e_container_axis.axis("off")
     panel_d_axis = panel_d_container_axis.inset_axes(PANEL_D_AXIS_BOUNDS)
     panel_e_axis = panel_e_container_axis.inset_axes(PANEL_E_AXIS_BOUNDS)
-    glm_grid = outer_grid[3, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_GH_WIDTH_RATIOS,
-    )
-    panel_g_axis = fig.add_subplot(glm_grid[0, 0])
-    panel_h_axis = fig.add_subplot(glm_grid[0, 1])
-
-    panel_a_animal, panel_a_date, panel_a_region, panel_a_unit = PANEL_A_EXAMPLE
-    panel_a_example = load_panel_a_example_data(
-        data_root=data_root,
-        animal_name=panel_a_animal,
-        date=panel_a_date,
-        region=panel_a_region,
-        unit_id=panel_a_unit,
-        dark_epoch=dark_epoch,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
-        panel_example_cache_dir=panel_example_cache_dir,
-        refresh_panel_example_cache=refresh_panel_example_cache,
-    )
-    plot_panel_a_example(panel_a_axis, panel_a_example)
 
     colorbar = None
     color_image = plot_light_heatmap_regions(
@@ -5222,15 +5186,6 @@ def make_figure_3(
         panel_f_axis,
         panel_quant_payload["decoding_error"],
     )
-    plot_panel_g_model_architecture(
-        panel_g_axis,
-        panel_glm_payload["dark_light_examples"],
-    )
-    plot_panel_h_swap_delta(
-        panel_h_axis,
-        panel_glm_payload["swap_delta"],
-        panel_glm_payload["swap_examples"],
-    )
 
     fig.canvas.draw()
     panel_c_axes = [
@@ -5256,14 +5211,11 @@ def make_figure_3(
         y_offset=-0.006,
         rotation=90,
     )
-    label_axis(panel_a_axis, "A", x=-0.02, y=1.00)
-    label_axis(panel_b["corner_axis"], "C", x=-0.12, y=0.52)
-    label_axis(panel_c_axis, "B", x=-0.07, y=1.267)
-    label_axis(panel_d_container_axis, "D", x=0.00, y=0.98)
-    label_axis(panel_e_container_axis, "E", x=0.00, y=0.98)
-    label_axis(panel_f_axis, "F", x=0.00, y=0.98)
-    label_axis(panel_g_axis, "G", x=-0.035, y=1.12)
-    label_axis(panel_h_axis, "H", x=-0.06, y=1.02)
+    label_axis(panel_c_axis, "A", x=-0.07, y=1.267)
+    label_axis(panel_b["corner_axis"], "B", x=-0.12, y=0.52)
+    label_axis(panel_d_container_axis, "C", x=0.00, y=0.98)
+    label_axis(panel_e_container_axis, "D", x=0.00, y=0.98)
+    label_axis(panel_f_axis, "E", x=0.00, y=0.98)
     panel_c_axis.text(
         0.5,
         PANEL_B_TITLE_Y,
@@ -5275,23 +5227,8 @@ def make_figure_3(
         transform=panel_c_axis.transAxes,
         clip_on=False,
     )
-    panel_a_axis.set_title(
-        "Example visual cell in different visual conditions",
-        fontsize=8,
-        pad=2,
-    )
     panel_d_axis.set_title("Same-turn tuning similarity", fontsize=8, pad=5)
     panel_e_axis.set_title("Encoding comparison", fontsize=8, pad=2)
-    panel_g_axis.set_title(
-        "Two possible models that relate dark and light activity",
-        fontsize=8,
-        pad=2,
-    )
-    panel_h_axis.set_title(
-        "Predicting activity in held-out light epoch",
-        fontsize=8,
-        pad=2,
-    )
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
@@ -5302,7 +5239,7 @@ def make_figure_3(
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Figure 3 generation."""
     parser = argparse.ArgumentParser(
-        description="Generate Figure 3 light-epoch heatmaps and dark-light tuning examples."
+        description="Generate Figure 3 light-epoch heatmaps and quantification panels."
     )
     parser.add_argument(
         "--data-root",
@@ -5340,16 +5277,14 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Directory for cached Panel A/C example-cell rasters and rate curves. "
+            "Directory for cached example-cell rasters and rate curves. "
             "Default: <output-dir>/cache."
         ),
     )
     parser.add_argument(
         "--refresh-panel-example-cache",
         action="store_true",
-        help=(
-            "Recompute Panel A/C example-cell data and overwrite matching caches."
-        ),
+        help="Recompute example-cell data and overwrite matching caches.",
     )
     parser.add_argument(
         "--format",
@@ -5388,7 +5323,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dark-epoch",
         default=None,
         help=(
-            "Dark run epoch for panel B. "
+            "Dark run epoch for example and quantification panels. "
             f"Default: registry value, currently {DEFAULT_DARK_EPOCH} unless overridden."
         ),
     )
