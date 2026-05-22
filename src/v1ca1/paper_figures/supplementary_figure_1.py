@@ -17,6 +17,7 @@ from v1ca1.paper_figures.datasets import (
 )
 from v1ca1.paper_figures.figure_1 import (
     DECODING_COMPARISON_REGION,
+    DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_1_WIDTH_MM,
     ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
     ENCODING_COMPARISON_REGION,
@@ -27,6 +28,7 @@ from v1ca1.paper_figures.figure_1 import (
     STABILITY_REGIONS,
     STABILITY_REGION_COLORS,
     STABILITY_TICK_LABEL_FONTSIZE,
+    draw_panel_a_anatomy_assets,
     load_decoding_absolute_error_table,
     load_dark_epoch_stability_table,
     load_encoding_delta_table,
@@ -35,6 +37,7 @@ from v1ca1.paper_figures.figure_1 import (
     plot_decoding_error_panel,
     plot_encoding_delta_panel,
     plot_motor_delta_panel,
+    plot_stability_panel,
 )
 from v1ca1.paper_figures.style import (
     HISTOGRAM_KWARGS,
@@ -50,6 +53,7 @@ DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
 DEFAULT_OUTPUT_NAME = "supplementary_figure_1"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = FIGURE_1_WIDTH_MM
+DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM = 40.0
 DEFAULT_STABILITY_ROW_HEIGHT_MM = 20.0
 DEFAULT_DATASET_PANEL_HEIGHT_MM = 26.0
 DEFAULT_SECTION_SPACER_MM = 5.0
@@ -439,9 +443,25 @@ def plot_decoding_error_dataset_stack_panel(
     )
 
 
+def plot_pooled_stability_panel(
+    ax: Any,
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+) -> None:
+    """Plot the pooled Figure 1C tuning-stability panel."""
+    stability_table = load_dark_epoch_stability_table(
+        data_root=data_root,
+        datasets=datasets,
+        regions=STABILITY_REGIONS,
+    )
+    plot_stability_panel(ax, stability_table)
+
+
 def make_supplementary_figure_1(
     *,
     data_root: Path,
+    asset_dir: Path,
     output_path: Path,
     datasets: Sequence[DatasetId],
     encoding_place_bin_size_cm: float,
@@ -454,7 +474,9 @@ def make_supplementary_figure_1(
     stability_row_height_mm = DEFAULT_STABILITY_ROW_HEIGHT_MM * max(len(datasets), 1)
     model_row_height_mm = DEFAULT_DATASET_PANEL_HEIGHT_MM * max(len(datasets), 1)
     fig_height_mm = (
-        stability_row_height_mm
+        DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM
+        + DEFAULT_SECTION_SPACER_MM
+        + stability_row_height_mm
         + DEFAULT_SECTION_SPACER_MM
         + model_row_height_mm
     )
@@ -463,27 +485,52 @@ def make_supplementary_figure_1(
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=3,
+        nrows=5,
         ncols=1,
         height_ratios=[
+            DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM,
+            DEFAULT_SECTION_SPACER_MM,
             stability_row_height_mm,
             DEFAULT_SECTION_SPACER_MM,
             model_row_height_mm,
         ],
     )
-    stability_axis = fig.add_subplot(outer_grid[0])
+    moved_grid = outer_grid[0].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=[0.42, 0.58],
+        wspace=0.15,
+    )
+    moved_anatomy_axis = fig.add_subplot(moved_grid[0, 0])
+    draw_panel_a_anatomy_assets(moved_anatomy_axis, asset_dir=asset_dir)
+    moved_anatomy_axis.set_title("Probe and histology", fontsize=8, pad=2)
+    label_axis(moved_anatomy_axis, "A", x=-0.02, y=1.01)
+
+    moved_stability_axis = fig.add_subplot(moved_grid[0, 1])
+    plot_pooled_stability_panel(
+        moved_stability_axis,
+        data_root=data_root,
+        datasets=datasets,
+    )
+    moved_stability_axis.set_title("Pooled tuning stability", fontsize=8, pad=2)
+    label_axis(moved_stability_axis, "B", x=-0.02, y=1.01)
+
+    moved_spacer_axis = fig.add_subplot(outer_grid[1])
+    moved_spacer_axis.axis("off")
+
+    stability_axis = fig.add_subplot(outer_grid[2])
     plot_stability_dataset_rows_panel(
         stability_axis,
         data_root=data_root,
         datasets=datasets,
     )
-    stability_axis.set_title("Tuning stability", fontsize=8, pad=2)
-    label_axis(stability_axis, "A", x=-0.02, y=1.01)
+    stability_axis.set_title("Per-data-set tuning stability", fontsize=8, pad=2)
+    label_axis(stability_axis, "C", x=-0.02, y=1.01)
 
-    spacer_axis = fig.add_subplot(outer_grid[1])
+    spacer_axis = fig.add_subplot(outer_grid[3])
     spacer_axis.axis("off")
 
-    model_grid = outer_grid[2].subgridspec(
+    model_grid = outer_grid[4].subgridspec(
         nrows=1,
         ncols=3,
         wspace=MODEL_COMPARISON_GRID_WSPACE,
@@ -514,7 +561,7 @@ def make_supplementary_figure_1(
     panel_c_axis.set_title("Cross trajectory decoding", fontsize=8, pad=2)
     for ax, label in zip(
         (panel_a_axis, panel_b_axis, panel_c_axis),
-        ("B", "C", "D"),
+        ("D", "E", "F"),
         strict=True,
     ):
         label_axis(ax, label, x=-0.02, y=1.01)
@@ -551,6 +598,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-name",
         default=DEFAULT_OUTPUT_NAME,
         help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
+    )
+    parser.add_argument(
+        "--asset-dir",
+        type=Path,
+        default=DEFAULT_ASSET_DIR,
+        help=f"Directory containing moved Figure 1 assets. Default: {DEFAULT_ASSET_DIR}",
     )
     parser.add_argument(
         "--format",
@@ -597,6 +650,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     make_supplementary_figure_1(
         data_root=args.data_root,
+        asset_dir=args.asset_dir,
         output_path=output_path,
         datasets=datasets,
         encoding_place_bin_size_cm=args.encoding_place_bin_size_cm,

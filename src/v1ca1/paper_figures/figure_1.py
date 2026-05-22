@@ -1910,6 +1910,49 @@ def draw_panel_a_assets(
     draw_image_asset(histology_ax, histology_image)
 
 
+def draw_panel_a_anatomy_assets(
+    ax: "Axes",
+    *,
+    asset_dir: Path,
+    probe_asset_name: str = DEFAULT_PROBE_ASSET_NAME,
+    histology_asset_name: str = DEFAULT_HISTOLOGY_ASSET_NAME,
+) -> None:
+    """Draw the Figure 1A probe and histology assets without behavior."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    probe_path = get_figure_1_asset_path(asset_dir, probe_asset_name)
+    histology_path = get_figure_1_asset_path(asset_dir, histology_asset_name)
+    probe_image = np.rot90(load_panel_asset_image(probe_path))
+    histology_image = load_panel_asset_image(histology_path)
+
+    probe_ax = ax.inset_axes([0.02, 0.21, 0.23, 0.60])
+    histology_ax = ax.inset_axes([0.30, -0.08, 0.72, 1.16])
+    draw_image_asset(probe_ax, probe_image)
+    draw_image_asset(histology_ax, histology_image)
+
+
+def draw_behavior_task_design_panel(
+    ax: "Axes",
+    *,
+    asset_dir: Path,
+    behavior_asset_name: str = DEFAULT_BEHAVIOR_ASSET_NAME,
+) -> None:
+    """Draw behavior and task-design schematics in one Figure 1B panel."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    behavior_path = get_figure_1_asset_path(asset_dir, behavior_asset_name)
+    behavior_image = load_panel_asset_image(behavior_path)
+
+    behavior_ax = ax.inset_axes([0.00, 0.11, 0.34, 0.76])
+    task_ax = ax.inset_axes([0.32, 0.00, 0.68, 1.00])
+    draw_image_asset(behavior_ax, behavior_image)
+    draw_w_track_cycle_panel(task_ax)
+
+
 def _scale_points_to_axes(
     points: Sequence[tuple[float, float]],
     *,
@@ -3090,39 +3133,32 @@ def make_figure_1(
         ],
     )
 
-    top_grid = outer_grid[0].subgridspec(nrows=1, ncols=3, wspace=0.15)
-    top_axes = [fig.add_subplot(top_grid[0, index]) for index in range(3)]
-    for ax in top_axes:
-        ax.axis("off")
-    draw_panel_a_assets(top_axes[0], asset_dir=asset_dir)
-    draw_w_track_cycle_panel(top_axes[1])
-    top_axes[1].set_title("Task design", fontsize=9, pad=2)
-    stability_table = load_dark_epoch_stability_table(
-        data_root=data_root,
-        datasets=datasets,
-        regions=STABILITY_REGIONS,
-    )
-    plot_stability_panel(top_axes[2], stability_table)
-    top_axes[2].set_title("Tuning stability", fontsize=9, pad=2)
-    for ax, label in zip(top_axes, ("A", "B", "C"), strict=True):
-        label_axis(ax, label, x=-0.04, y=1.02)
-
-    bottom_grid = outer_grid[1].subgridspec(
-        nrows=1,
+    main_grid = outer_grid[:2].subgridspec(
+        nrows=2,
         ncols=2,
         wspace=BOTTOM_ROW_PANEL_WSPACE,
+        hspace=0.08,
+        height_ratios=[
+            DEFAULT_TOP_ROW_HEIGHT_MM,
+            heatmap_height_mm,
+        ],
         width_ratios=[
             DEFAULT_PANEL_E_WIDTH_FRACTION,
             DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
         ],
     )
-    heatmap_grid = bottom_grid[0, 1].subgridspec(
+    panel_b_axis = fig.add_subplot(main_grid[0, 0])
+    draw_behavior_task_design_panel(panel_b_axis, asset_dir=asset_dir)
+    panel_b_axis.set_title("Task design", fontsize=9, pad=2)
+    label_axis(panel_b_axis, "A", x=-0.04, y=1.02)
+
+    heatmap_grid = main_grid[:, 1].subgridspec(
         nrows=n_region_rows + 1,
         ncols=len(TRAJECTORY_TYPES) + 1,
         height_ratios=[0.42, *([1.0] * n_region_rows)],
         width_ratios=[0.48, *([1.0] * len(TRAJECTORY_TYPES))],
     )
-    panel_e_axis = fig.add_subplot(bottom_grid[0, 0])
+    panel_d_axis = fig.add_subplot(main_grid[1, 0])
     panel_e_examples = [
         load_or_compute_panel_e_example_data(
             data_root=data_root,
@@ -3140,9 +3176,9 @@ def make_figure_1(
         )
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
-    plot_panel_e_examples(panel_e_axis, panel_e_examples)
-    panel_e_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
-    label_axis(panel_e_axis, "D", x=-0.04, y=1.02)
+    plot_panel_e_examples(panel_d_axis, panel_e_examples)
+    panel_d_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
+    label_axis(panel_d_axis, "B", x=-0.04, y=1.02)
 
     spacer_axis = fig.add_subplot(outer_grid[2])
     spacer_axis.axis("off")
@@ -3166,7 +3202,7 @@ def make_figure_1(
     )
     plot_motor_delta_panel(panel_f_axis, motor_delta_table)
     panel_f_axis.set_title("Comparison to motor", fontsize=8, pad=2)
-    label_axis(panel_f_axis, "F", x=-0.04, y=1.02)
+    label_axis(panel_f_axis, "D", x=-0.04, y=1.02)
     encoding_delta_table = load_encoding_delta_table(
         data_root=data_root,
         datasets=datasets,
@@ -3175,7 +3211,7 @@ def make_figure_1(
     )
     plot_encoding_delta_panel(panel_g_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
-    label_axis(panel_g_axis, "G", x=-0.08, y=1.02)
+    label_axis(panel_g_axis, "E", x=-0.08, y=1.02)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
         datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
@@ -3183,7 +3219,7 @@ def make_figure_1(
     )
     plot_decoding_error_panel(panel_h_axis, decoding_error_table)
     panel_h_axis.set_title("Cross trajectory decoding", fontsize=8, pad=2)
-    label_axis(panel_h_axis, "H", x=-0.04, y=1.02)
+    label_axis(panel_h_axis, "F", x=-0.04, y=1.02)
 
     axes = np.asarray(
         [
@@ -3261,7 +3297,7 @@ def make_figure_1(
         y_offset=HEATMAP_ORDER_LABEL_OFFSET,
         rotation=90,
     )
-    label_axis(corner_axis, "E", x=-0.12, y=1.04)
+    label_axis(corner_axis, "C", x=-0.12, y=1.04)
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 1 to {output_path}")

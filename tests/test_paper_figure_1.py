@@ -86,6 +86,8 @@ from v1ca1.paper_figures.figure_1 import (
     build_unit_keys,
     build_zero_including_histogram_bins,
     draw_panel_a_assets,
+    draw_behavior_task_design_panel,
+    draw_panel_a_anatomy_assets,
     draw_neuron_scale_bar,
     draw_visual_stimuli_schematic,
     draw_w_track_cycle_panel,
@@ -969,6 +971,63 @@ def test_draw_panel_a_assets_places_probe_and_behavior_left_of_histology(
     )
     probe_image = ax.child_axes[0].images[0].get_array()
     assert probe_image.shape[:2] == (6, 4)
+    plt.close(fig)
+
+
+def test_draw_panel_a_anatomy_assets_places_probe_left_of_histology(
+    tmp_path: Path,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    probe_path = tmp_path / "probe.png"
+    histology_path = tmp_path / "histology.png"
+    mpimg.imsave(probe_path, np.ones((4, 6, 3)))
+    mpimg.imsave(histology_path, np.ones((5, 6, 3)))
+
+    fig, ax = plt.subplots()
+    draw_panel_a_anatomy_assets(
+        ax,
+        asset_dir=tmp_path,
+        probe_asset_name="probe.png",
+        histology_asset_name="histology.png",
+    )
+
+    assert len(ax.child_axes) == 2
+    probe_ax, histology_ax = ax.child_axes
+    assert probe_ax.get_position().x0 < histology_ax.get_position().x0
+    assert histology_ax.get_position().height > probe_ax.get_position().height
+    assert histology_ax.get_position().width > probe_ax.get_position().width
+    probe_image = probe_ax.images[0].get_array()
+    assert probe_image.shape[:2] == (6, 4)
+    plt.close(fig)
+
+
+def test_draw_behavior_task_design_panel_places_behavior_left_of_cycle(
+    tmp_path: Path,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    behavior_path = tmp_path / "behavior.png"
+    mpimg.imsave(behavior_path, np.ones((5, 4, 3)))
+
+    fig, ax = plt.subplots()
+    draw_behavior_task_design_panel(
+        ax,
+        asset_dir=tmp_path,
+        behavior_asset_name="behavior.png",
+    )
+
+    assert len(ax.child_axes) == 2
+    behavior_ax, cycle_ax = ax.child_axes
+    assert behavior_ax.get_position().x0 < cycle_ax.get_position().x0
+    assert behavior_ax.images
+    assert len(cycle_ax.child_axes) == 4
     plt.close(fig)
 
 

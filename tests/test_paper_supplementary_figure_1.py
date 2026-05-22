@@ -7,7 +7,9 @@ import pytest
 import v1ca1.paper_figures.figure_1 as figure_1_module
 import v1ca1.paper_figures.supplementary_figure_1 as supp_figure_1_module
 from v1ca1.paper_figures.supplementary_figure_1 import (
+    DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM,
+    DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_NAME,
     MODEL_COMPARISON_GRID_WSPACE,
@@ -19,6 +21,7 @@ from v1ca1.paper_figures.supplementary_figure_1 import (
     parse_arguments,
     plot_decoding_error_dataset_stack_panel,
     plot_dataset_stack_panel,
+    plot_pooled_stability_panel,
     plot_stability_dataset_rows_panel,
     shift_model_comparison_columns,
 )
@@ -39,9 +42,11 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     assert DEFAULT_FIGURE_WIDTH_MM == figure_1_module.DEFAULT_FIGURE_WIDTH_MM
     assert args.output_dir == DEFAULT_OUTPUT_DIR
     assert args.output_name == DEFAULT_OUTPUT_NAME
+    assert args.asset_dir == DEFAULT_ASSET_DIR
     assert args.encoding_place_bin_size_cm == pytest.approx(
         figure_1_module.ENCODING_COMPARISON_PLACE_BIN_SIZE_CM
     )
+    assert DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM == pytest.approx(40.0)
     assert MODEL_COMPARISON_GRID_WSPACE == pytest.approx(-0.10)
     assert MODEL_COMPARISON_PANEL_C_SHIFT_PT == pytest.approx(-10.0)
     assert MODEL_COMPARISON_PANEL_D_SHIFT_PT == pytest.approx(-33.0)
@@ -183,6 +188,59 @@ def test_plot_stability_dataset_rows_panel_uses_one_horizontal_row_per_dataset(
     plt.close(fig)
 
 
+def test_plot_pooled_stability_panel_uses_all_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+    ]
+    calls: dict[str, object] = {}
+    table = pd.DataFrame(
+        {
+            "trajectory_type": ["center_to_left"],
+            "region": ["v1"],
+            "stability_correlation": [0.5],
+        }
+    )
+
+    def fake_load_dark_epoch_stability_table(**kwargs):
+        calls["load_kwargs"] = kwargs
+        return table
+
+    def fake_plot_stability_panel(ax, stability_table):
+        calls["plot_table"] = stability_table
+        ax.text(0.5, 0.5, "pooled")
+
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "load_dark_epoch_stability_table",
+        fake_load_dark_epoch_stability_table,
+    )
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "plot_stability_panel",
+        fake_plot_stability_panel,
+    )
+
+    fig, ax = plt.subplots()
+    plot_pooled_stability_panel(
+        ax,
+        data_root=Path("/analysis"),
+        datasets=datasets,
+    )
+
+    assert calls["load_kwargs"]["datasets"] == datasets
+    assert calls["load_kwargs"]["regions"] == figure_1_module.STABILITY_REGIONS
+    assert calls["plot_table"] is table
+    plt.close(fig)
+
+
 def test_plot_decoding_error_dataset_stack_panel_removes_w_track_icons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -251,6 +309,14 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
         ax.text(0.5, 0.5, "decoding")
         return []
 
+    def fake_draw_panel_a_anatomy_assets(ax, **kwargs: object):
+        calls["anatomy_kwargs"] = kwargs
+        ax.text(0.5, 0.5, "anatomy")
+
+    def fake_plot_pooled_stability_panel(ax, **kwargs: object):
+        calls["pooled_stability_kwargs"] = kwargs
+        ax.text(0.5, 0.5, "pooled stability")
+
     def fake_plot_stability_dataset_rows_panel(ax, **kwargs: object):
         calls["stability_kwargs"] = kwargs
         ax.text(0.5, 0.5, "stability")
@@ -286,15 +352,27 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     )
     monkeypatch.setattr(
         supp_figure_1_module,
+        "draw_panel_a_anatomy_assets",
+        fake_draw_panel_a_anatomy_assets,
+    )
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "plot_pooled_stability_panel",
+        fake_plot_pooled_stability_panel,
+    )
+    monkeypatch.setattr(
+        supp_figure_1_module,
         "plot_stability_dataset_rows_panel",
         fake_plot_stability_dataset_rows_panel,
     )
     monkeypatch.setattr(supp_figure_1_module, "save_figure", fake_save_figure)
 
     output_path = tmp_path / "supplementary_figure_1.svg"
+    asset_dir = tmp_path / "assets"
     datasets = [("L14", "20240611", "08_r4")]
     saved_path = make_supplementary_figure_1(
         data_root=Path("/analysis"),
+        asset_dir=asset_dir,
         output_path=output_path,
         datasets=datasets,
         encoding_place_bin_size_cm=4.0,
@@ -307,7 +385,9 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     assert figure_width_in == pytest.approx(DEFAULT_FIGURE_WIDTH_MM / 25.4)
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["panel_labels"] == ["A", "B", "C", "D"]
+    assert calls["panel_labels"] == ["A", "B", "C", "D", "E", "F"]
+    assert calls["anatomy_kwargs"]["asset_dir"] == asset_dir
+    assert calls["pooled_stability_kwargs"]["datasets"] == datasets
     assert calls["stability_kwargs"]["datasets"] == datasets
     assert calls["motor_kwargs"]["datasets"] == datasets
     assert calls["motor_kwargs"].get("show_dataset_labels", True) is True
