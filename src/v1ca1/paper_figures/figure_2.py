@@ -24,6 +24,7 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.style import (
+    ANIMAL_COLORS,
     COMPACT_HISTOGRAM_KWARGS,
     EPOCH_TYPE_COLORS,
     HISTOGRAM_KWARGS,
@@ -55,7 +56,7 @@ DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_FIGURE_HEIGHT_MM = 126.0
+DEFAULT_FIGURE_HEIGHT_MM = 165.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 DEFAULT_REGIONS = REGIONS
 RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
@@ -79,6 +80,16 @@ DEFAULT_RIPPLE_WINDOW_OFFSET_S = 0.0
 DEFAULT_RIPPLE_SELECTION = "allripples"
 DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION = "single"
 DEFAULT_RIDGE_STRENGTH = 1e-1
+SOURCE_PREDICTOR_MODE_UNIT_VECTOR = "unit_vector"
+SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY = "mean_activity"
+SOURCE_PREDICTOR_MODE_CHOICES = (
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+)
+SOURCE_PREDICTOR_MODE_FILENAME_TOKENS = {
+    SOURCE_PREDICTOR_MODE_UNIT_VECTOR: "",
+    SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY: "mean_ca1",
+}
 DEFAULT_LFP_TIME_BEFORE_S = 0.080
 DEFAULT_LFP_TIME_AFTER_S = 0.160
 DEFAULT_XCORR_STATE = "ripple"
@@ -135,6 +146,8 @@ PANEL_D_MIN_DEVIANCE_EXPLAINED = 0.0
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
 PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
 PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
+PANEL_E_VECTOR_COLOR = REGION_COLORS["ca1"]
+PANEL_E_MEAN_ACTIVITY_COLOR = NEUTRAL_COLORS["nonsignificant"]
 DARK_MOVEMENT_FR_CACHE_VERSION = 1
 DARK_MOVEMENT_FR_CACHE_COLUMNS = ("unit", "dark_firing_rate_hz")
 
@@ -317,6 +330,23 @@ def format_ridge_strength_suffix(ridge_strength: float) -> str:
     return f"ridge_{mantissa}e{exponent}"
 
 
+def validate_source_predictor_mode(source_predictor_mode: str) -> str:
+    """Return a validated ripple-GLM source predictor mode."""
+    if source_predictor_mode not in SOURCE_PREDICTOR_MODE_CHOICES:
+        raise ValueError(
+            "source_predictor_mode must be one of "
+            f"{SOURCE_PREDICTOR_MODE_CHOICES!r}, got {source_predictor_mode!r}."
+        )
+    return str(source_predictor_mode)
+
+
+def format_source_predictor_filename_component(source_predictor_mode: str) -> str:
+    """Return the optional ripple-GLM filename token for one source mode."""
+    mode = validate_source_predictor_mode(source_predictor_mode)
+    token = SOURCE_PREDICTOR_MODE_FILENAME_TOKENS[mode]
+    return f"{token}_" if token else ""
+
+
 def get_ripple_glm_path(
     data_root: Path,
     *,
@@ -327,6 +357,7 @@ def get_ripple_glm_path(
     ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    source_predictor_mode: str = SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
 ) -> Path:
     """Return the NetCDF ripple-GLM result path for one epoch."""
     window_suffix = format_ripple_window_suffix(
@@ -334,7 +365,11 @@ def get_ripple_glm_path(
         ripple_window_offset_s=ripple_window_offset_s,
     )
     ridge_suffix = format_ridge_strength_suffix(ridge_strength)
-    filename = f"{epoch}_{window_suffix}_{ripple_selection}_{ridge_suffix}_samplewise_ripple_glm.nc"
+    source_component = format_source_predictor_filename_component(source_predictor_mode)
+    filename = (
+        f"{epoch}_{window_suffix}_{ripple_selection}_{source_component}"
+        f"{ridge_suffix}_samplewise_ripple_glm.nc"
+    )
     return get_dataset_analysis_path(data_root, animal_name, date) / RIPPLE_GLM_RELATIVE_DIR / filename
 
 
@@ -350,6 +385,7 @@ def get_ripple_glm_model_window_path(
     target_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    source_predictor_mode: str = SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
 ) -> Path:
     """Return one NetCDF ripple-GLM path for asymmetric model windows."""
     window_suffix = format_glm_model_window_suffix(
@@ -359,7 +395,11 @@ def get_ripple_glm_model_window_path(
         target_window_offset_s=target_window_offset_s,
     )
     ridge_suffix = format_ridge_strength_suffix(ridge_strength)
-    filename = f"{epoch}_{window_suffix}_{ripple_selection}_{ridge_suffix}_samplewise_ripple_glm.nc"
+    source_component = format_source_predictor_filename_component(source_predictor_mode)
+    filename = (
+        f"{epoch}_{window_suffix}_{ripple_selection}_{source_component}"
+        f"{ridge_suffix}_samplewise_ripple_glm.nc"
+    )
     return get_dataset_analysis_path(data_root, animal_name, date) / RIPPLE_GLM_RELATIVE_DIR / filename
 
 
@@ -1168,6 +1208,7 @@ def load_ripple_glm_summary_table(
     ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    source_predictor_mode: str = SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
 ) -> Any:
     """Load pooled per-unit summary values from ripple-GLM NetCDF outputs."""
     import pandas as pd
@@ -1185,6 +1226,7 @@ def load_ripple_glm_summary_table(
             ripple_window_offset_s=ripple_window_offset_s,
             ripple_selection=ripple_selection,
             ridge_strength=ridge_strength,
+            source_predictor_mode=source_predictor_mode,
         )
         if not path.exists():
             raise FileNotFoundError(f"Ripple-GLM NetCDF not found: {path}")
@@ -1216,6 +1258,7 @@ def load_ripple_glm_summary_table(
                         "ripple_devexp_p_value": float(unit_p),
                         "ripple_bits_per_spike_mean": float(unit_bits_per_spike),
                         "n_ripples": n_ripples,
+                        "source_predictor_mode": source_predictor_mode,
                         "source_path": str(path),
                     }
                 )
@@ -1280,6 +1323,137 @@ def load_glm_epoch_summary_tables(
             }
         )
     return epoch_tables
+
+
+def load_glm_source_predictor_comparison_tables(
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    *,
+    light_epoch: str | None = None,
+    dark_epoch: str | None = None,
+    sleep_epoch: str | None = None,
+    epoch_types: Sequence[str] = PANEL_E_GLM_EPOCH_ORDER,
+    ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+) -> dict[str, Any]:
+    """Load paired vector and mean-activity ripple-GLM summaries."""
+    import pandas as pd
+
+    rows: list[Any] = []
+    missing_artifacts: list[dict[str, str]] = []
+    selected_epoch_types = tuple(str(epoch_type) for epoch_type in epoch_types)
+    unknown_epoch_types = sorted(set(selected_epoch_types).difference(HEATMAP_EPOCH_ORDER))
+    if unknown_epoch_types:
+        raise ValueError(f"Unknown ripple-GLM epoch types: {unknown_epoch_types!r}")
+
+    for dataset_id in datasets:
+        animal_name, date, dataset_dark_epoch = normalize_dataset_id(dataset_id)
+        epoch_ids = make_figure_2_epoch_ids(
+            animal_name=animal_name,
+            date=date,
+            light_epoch=light_epoch,
+            dark_epoch=dataset_dark_epoch if dark_epoch is None else dark_epoch,
+            sleep_epoch=sleep_epoch,
+        )
+        for epoch_type in selected_epoch_types:
+            _epoch_animal, _epoch_date, epoch = normalize_dataset_id(epoch_ids[epoch_type])
+            paths = {
+                mode: get_ripple_glm_path(
+                    data_root,
+                    animal_name=animal_name,
+                    date=date,
+                    epoch=epoch,
+                    ripple_window_s=ripple_window_s,
+                    ripple_window_offset_s=ripple_window_offset_s,
+                    ripple_selection=ripple_selection,
+                    ridge_strength=ridge_strength,
+                    source_predictor_mode=mode,
+                )
+                for mode in SOURCE_PREDICTOR_MODE_CHOICES
+            }
+            missing_modes = [
+                mode for mode, path in paths.items() if not Path(path).exists()
+            ]
+            if missing_modes:
+                for mode in missing_modes:
+                    missing_artifacts.append(
+                        {
+                            "artifact": "ripple_glm_source_predictor",
+                            "animal_name": animal_name,
+                            "date": date,
+                            "epoch": epoch,
+                            "source_predictor_mode": mode,
+                            "path": str(paths[mode]),
+                        }
+                    )
+                continue
+
+            vector_table = load_ripple_glm_summary_table(
+                data_root,
+                [(animal_name, date, epoch)],
+                ripple_window_s=ripple_window_s,
+                ripple_window_offset_s=ripple_window_offset_s,
+                ripple_selection=ripple_selection,
+                ridge_strength=ridge_strength,
+                source_predictor_mode=SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
+            ).rename(
+                columns={
+                    "ripple_devexp_mean": "vector_devexp_mean",
+                    "ripple_devexp_p_value": "vector_devexp_p_value",
+                    "ripple_bits_per_spike_mean": "vector_bits_per_spike_mean",
+                    "source_path": "vector_source_path",
+                }
+            )
+            mean_table = load_ripple_glm_summary_table(
+                data_root,
+                [(animal_name, date, epoch)],
+                ripple_window_s=ripple_window_s,
+                ripple_window_offset_s=ripple_window_offset_s,
+                ripple_selection=ripple_selection,
+                ridge_strength=ridge_strength,
+                source_predictor_mode=SOURCE_PREDICTOR_MODE_MEAN_ACTIVITY,
+            ).rename(
+                columns={
+                    "ripple_devexp_mean": "mean_activity_devexp_mean",
+                    "ripple_devexp_p_value": "mean_activity_devexp_p_value",
+                    "ripple_bits_per_spike_mean": "mean_activity_bits_per_spike_mean",
+                    "source_path": "mean_activity_source_path",
+                }
+            )
+            joined = vector_table.merge(
+                mean_table[
+                    [
+                        "animal_name",
+                        "date",
+                        "epoch",
+                        "unit_id",
+                        "mean_activity_devexp_mean",
+                        "mean_activity_devexp_p_value",
+                        "mean_activity_bits_per_spike_mean",
+                        "mean_activity_source_path",
+                    ]
+                ],
+                on=["animal_name", "date", "epoch", "unit_id"],
+                how="inner",
+            )
+            joined = joined.assign(
+                epoch_type=epoch_type,
+                label=HEATMAP_EPOCH_LABELS[epoch_type],
+                devexp_delta_vector_minus_mean=(
+                    joined["vector_devexp_mean"]
+                    - joined["mean_activity_devexp_mean"]
+                ),
+            )
+            rows.append(joined)
+
+    comparison_table = pd.concat(rows, axis=0, ignore_index=True) if rows else pd.DataFrame()
+    return {
+        "comparison_table": comparison_table,
+        "missing_artifacts": missing_artifacts,
+        "ripple_selection": ripple_selection,
+    }
 
 
 def load_glm_behavior_association_tables(
@@ -1637,6 +1811,7 @@ def load_dark_movement_firing_rate_table(
 def build_glm_dark_activity_devexp_table(
     glm_table: Any,
     dark_activity_table: Any,
+    tuning_similarity_table: Any | None = None,
     *,
     animal_name: str,
     date: str,
@@ -1645,7 +1820,7 @@ def build_glm_dark_activity_devexp_table(
     dark_epoch: str,
     dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
 ) -> Any:
-    """Join ripple-GLM unit summaries to direct dark movement firing rates."""
+    """Join ripple-GLM summaries to dark movement firing rates and tuning similarity."""
     import pandas as pd
 
     glm_rows = glm_table.rename(
@@ -1672,6 +1847,29 @@ def build_glm_dark_activity_devexp_table(
     dark_rows = dark_rows[["unit", "dark_firing_rate_hz"]]
 
     joined = glm_rows.merge(dark_rows, on="unit", how="left")
+    if tuning_similarity_table is not None and len(tuning_similarity_table):
+        tuning_rows = tuning_similarity_table.copy()
+        tuning_rows["unit"] = pd.to_numeric(tuning_rows["unit"], errors="coerce")
+        tuning_rows = tuning_rows[
+            np.isfinite(tuning_rows["unit"].to_numpy(dtype=float))
+        ].copy()
+        tuning_rows["unit"] = tuning_rows["unit"].astype(int)
+        joined = joined.merge(
+            tuning_rows[
+                [
+                    "unit",
+                    "same_turn_tuning_similarity",
+                    "tuning_source_path",
+                ]
+            ],
+            on="unit",
+            how="left",
+        )
+    else:
+        joined = joined.assign(
+            same_turn_tuning_similarity=np.nan,
+            tuning_source_path="",
+        )
     dark_rate_values = np.asarray(joined["dark_firing_rate_hz"], dtype=float)
     dark_active = np.isfinite(dark_rate_values) & (
         dark_rate_values >= float(dark_activity_threshold_hz)
@@ -1697,9 +1895,66 @@ def build_glm_dark_activity_devexp_table(
             "dark_firing_rate_hz",
             "dark_active",
             "dark_activity_group",
+            "same_turn_tuning_similarity",
+            "tuning_source_path",
             "ripple_devexp_mean",
             "ripple_devexp_p_value",
             "ripple_glm_source_path",
+        ]
+    ]
+
+
+def load_dark_same_turn_tuning_similarity_table(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+    region: str = DEFAULT_PANEL_D_REGION,
+    tuning_similarity_metric: str = DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
+    tuning_comparison_label: str = DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL,
+) -> Any:
+    """Load dark same-turn tuning similarity for one session and region."""
+    import pandas as pd
+
+    tuning_path = get_tuning_similarity_path(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        region=region,
+        epoch=dark_epoch,
+        similarity_metric=tuning_similarity_metric,
+    )
+    if not tuning_path.exists():
+        raise FileNotFoundError(str(tuning_path))
+
+    tuning_table = pd.read_parquet(tuning_path)
+    missing_columns = [
+        column
+        for column in ("unit", "region", "epoch", "comparison_label", "similarity")
+        if column not in tuning_table.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            f"Tuning similarity table {tuning_path} is missing columns "
+            f"{missing_columns!r}."
+        )
+    tuning_rows = tuning_table[
+        (tuning_table["region"].astype(str) == region)
+        & (tuning_table["epoch"].astype(str) == dark_epoch)
+        & (tuning_table["comparison_label"].astype(str) == tuning_comparison_label)
+    ].copy()
+    tuning_rows["unit"] = pd.to_numeric(tuning_rows["unit"], errors="coerce")
+    tuning_rows = tuning_rows[np.isfinite(tuning_rows["unit"].to_numpy(dtype=float))].copy()
+    tuning_rows["unit"] = tuning_rows["unit"].astype(int)
+    tuning_rows = tuning_rows.assign(tuning_source_path=str(tuning_path))
+    return tuning_rows.rename(
+        columns={"similarity": "same_turn_tuning_similarity"}
+    )[
+        [
+            "unit",
+            "same_turn_tuning_similarity",
+            "tuning_source_path",
         ]
     ]
 
@@ -1717,6 +1972,8 @@ def load_glm_dark_activity_devexp_tables(
     ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
     dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+    tuning_similarity_metric: str = DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
+    tuning_comparison_label: str = DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL,
     epoch_types: Sequence[str] = PANEL_D_EPOCH_ORDER,
     dark_movement_fr_cache_dir: Path | None = DEFAULT_FIGURE_CACHE_DIR,
     refresh_dark_movement_fr_cache: bool = False,
@@ -1761,6 +2018,38 @@ def load_glm_dark_activity_devexp_tables(
             )
             continue
 
+        try:
+            tuning_similarity_table = load_dark_same_turn_tuning_similarity_table(
+                data_root,
+                animal_name=animal_name,
+                date=date,
+                dark_epoch=dark_run_epoch,
+                region=region,
+                tuning_similarity_metric=tuning_similarity_metric,
+                tuning_comparison_label=tuning_comparison_label,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            missing_artifacts.append(
+                {
+                    "artifact": "tuning_analysis",
+                    "animal_name": animal_name,
+                    "date": date,
+                    "epoch": dark_run_epoch,
+                    "path": str(
+                        get_tuning_similarity_path(
+                            data_root,
+                            animal_name=animal_name,
+                            date=date,
+                            region=region,
+                            epoch=dark_run_epoch,
+                            similarity_metric=tuning_similarity_metric,
+                        )
+                    ),
+                    "reason": str(exc),
+                }
+            )
+            tuning_similarity_table = None
+
         for epoch_type in selected_epoch_types:
             if epoch_type not in epoch_ids:
                 raise ValueError(f"Unknown Figure 2 epoch type: {epoch_type!r}")
@@ -1799,6 +2088,7 @@ def load_glm_dark_activity_devexp_tables(
                 build_glm_dark_activity_devexp_table(
                     glm_table,
                     dark_activity_table,
+                    tuning_similarity_table,
                     animal_name=animal_name,
                     date=date,
                     glm_epoch=glm_epoch,
@@ -1814,6 +2104,8 @@ def load_glm_dark_activity_devexp_tables(
         "missing_artifacts": missing_artifacts,
         "region": region,
         "dark_activity_threshold_hz": float(dark_activity_threshold_hz),
+        "tuning_comparison_label": tuning_comparison_label,
+        "tuning_similarity_metric": tuning_similarity_metric,
     }
 
 
@@ -4345,6 +4637,91 @@ def _plot_dark_activity_devexp_boxplot(
     ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
 
 
+def _plot_dark_active_same_turn_similarity_histogram(
+    ax: "Axes",
+    table: Any,
+    *,
+    epoch_type: str,
+    dark_activity_threshold_hz: float,
+    p_value_threshold: float,
+    title: str,
+    x_limits: tuple[float, float] = (-0.1, 1.0),
+) -> None:
+    """Plot dark same-turn tuning similarity for dark-active GLM-significant units."""
+    ax.axvline(0.0, color="0.55", linewidth=0.55, linestyle="--", zorder=0)
+    if table is None or len(table) == 0 or "same_turn_tuning_similarity" not in table:
+        ax.text(
+            0.5,
+            0.5,
+            "No tuning\nvalues",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    else:
+        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
+        similarity_values = np.asarray(epoch_rows["same_turn_tuning_similarity"], dtype=float)
+        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+        dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
+        active_significant = (
+            np.isfinite(similarity_values)
+            & np.isfinite(p_values)
+            & np.isfinite(dark_rates_hz)
+            & (p_values < float(p_value_threshold))
+            & (dark_rates_hz >= float(dark_activity_threshold_hz))
+        )
+        values = similarity_values[active_significant]
+        if values.size:
+            color = GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)
+            bins = np.linspace(float(x_limits[0]), float(x_limits[1]), 18)
+            weights = np.full(values.size, 1.0 / values.size, dtype=float)
+            ax.hist(
+                values,
+                bins=bins,
+                weights=weights,
+                color=color,
+                alpha=0.50,
+                edgecolor="white",
+                linewidth=0.35,
+                zorder=2,
+            )
+            ax.axvline(
+                float(np.nanmedian(values)),
+                color=color,
+                linewidth=0.9,
+                zorder=4,
+            )
+            ax.text(
+                0.98,
+                0.96,
+                f"Active sig n={values.size}",
+                ha="right",
+                va="top",
+                fontsize=4.5,
+                transform=ax.transAxes,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No significant\nvalues",
+                ha="center",
+                va="center",
+                fontsize=6,
+                transform=ax.transAxes,
+            )
+
+    ax.set_xlim(*x_limits)
+    ax.set_title(title, fontsize=5.8, pad=1.2)
+    ax.set_xlabel("Dark same-turn corr.", fontsize=5.5, labelpad=1.0)
+    ax.set_ylabel("Frac. units", fontsize=5.5, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
+
+
 def _plot_dark_activity_significant_composition(
     ax: "Axes",
     table: Any,
@@ -4538,14 +4915,15 @@ def plot_glm_behavior_association_panel(
     panel_left = 0.08
     panel_right = 0.96
     pair_gap = 0.07
-    inset_gap = 0.060 if len(epoch_rows) == 1 else 0.065
-    fraction_width = 0.23 if len(epoch_rows) == 1 else 0.14
+    inset_gap = 0.045 if len(epoch_rows) == 1 else 0.025
+    fraction_width = 0.20 if len(epoch_rows) == 1 else 0.13
+    devexp_width = 0.31 if len(epoch_rows) == 1 else 0.14
     pair_width = (
         (panel_right - panel_left - pair_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
         if epoch_rows
         else 0.0
     )
-    distribution_width = pair_width - inset_gap - fraction_width
+    similarity_width = pair_width - fraction_width - devexp_width - 2.0 * inset_gap
     bottom = 0.17
     height = 0.72
     for column_index, epoch_type in enumerate(epoch_rows):
@@ -4559,27 +4937,325 @@ def plot_glm_behavior_association_panel(
             p_value_threshold=PANEL_C_SIGNIFICANCE_P_VALUE,
             title="p<0.05\ncomposition",
         )
-        distribution_ax = ax.inset_axes(
-            [pair_left + fraction_width + inset_gap, bottom, distribution_width, height]
+        devexp_ax = ax.inset_axes(
+            [pair_left + fraction_width + inset_gap, bottom, devexp_width, height]
         )
         _plot_dark_activity_devexp_boxplot(
-            distribution_ax,
+            devexp_ax,
             table,
             epoch_type=epoch_type,
             dark_activity_threshold_hz=dark_activity_threshold_hz,
             p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
-            title="Run" if epoch_type == "light" else HEATMAP_EPOCH_LABELS[epoch_type],
+            title="Run devexp" if epoch_type == "light" else HEATMAP_EPOCH_LABELS[epoch_type],
             y_label="",
             x_limits=x_limits,
             show_y_ticklabels=False,
         )
+        similarity_ax = ax.inset_axes(
+            [
+                pair_left + fraction_width + devexp_width + 2.0 * inset_gap,
+                bottom,
+                similarity_width,
+                height,
+            ]
+        )
+        _plot_dark_active_same_turn_similarity_histogram(
+            similarity_ax,
+            table,
+            epoch_type=epoch_type,
+            dark_activity_threshold_hz=dark_activity_threshold_hz,
+            p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
+            title="Dark DPP",
+        )
     ax.text(
         0.50,
         0.035,
-        "Boxplots show p<0.05 units; dark-active split uses 0.5 Hz",
+        "Plots show p<0.05 units; dark-active split uses 0.5 Hz",
         ha="center",
         va="bottom",
         fontsize=5.0,
+        transform=ax.transAxes,
+    )
+
+
+def _get_animal_color(animal_name: str) -> str:
+    """Return a stable point color for one animal."""
+    return ANIMAL_COLORS.get(str(animal_name), PANEL_E_VECTOR_COLOR)
+
+
+def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
+    """Return shared deviance-explained limits for source-mode comparisons."""
+    if table is None or len(table) == 0:
+        return PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
+    values = np.concatenate(
+        [
+            np.asarray(table["mean_activity_devexp_mean"], dtype=float),
+            np.asarray(table["vector_devexp_mean"], dtype=float),
+        ]
+    )
+    finite_values = values[np.isfinite(values)]
+    if not finite_values.size:
+        return PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
+    lower = float(PANEL_CD_DEVIANCE_EXPLAINED_LIMITS[0])
+    upper = max(float(PANEL_CD_DEVIANCE_EXPLAINED_LIMITS[1]), float(np.nanmax(finite_values)))
+    upper = np.ceil(upper * 10.0) / 10.0
+    if upper <= lower:
+        upper = lower + 0.1
+    return float(lower), float(upper)
+
+
+def _plot_source_predictor_comparison_axis(
+    ax: "Axes",
+    table: Any,
+    *,
+    title: str,
+    axis_limits: tuple[float, float],
+    pooled: bool = False,
+    p_value_threshold: float = SIGNIFICANCE_P_VALUE,
+) -> None:
+    """Plot vector-model deviance explained against mean-activity control."""
+    lower, upper = axis_limits
+    ax.plot(
+        [lower, upper],
+        [lower, upper],
+        color="0.55",
+        linestyle="--",
+        linewidth=0.55,
+        zorder=1,
+    )
+    if table is None or len(table) == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No paired\nGLM data",
+            ha="center",
+            va="center",
+            fontsize=5.5,
+            transform=ax.transAxes,
+        )
+    else:
+        x_values = np.asarray(table["mean_activity_devexp_mean"], dtype=float)
+        y_values = np.asarray(table["vector_devexp_mean"], dtype=float)
+        p_values = (
+            np.asarray(table["vector_devexp_p_value"], dtype=float)
+            if "vector_devexp_p_value" in table
+            else np.full(len(table), np.nan, dtype=float)
+        )
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        if np.any(valid):
+            if pooled and {"animal_name", "date"}.issubset(table.columns):
+                for (animal_name, _date), dataset_rows in table.loc[valid].groupby(
+                    ["animal_name", "date"],
+                    sort=True,
+                ):
+                    dataset_p_values = np.asarray(
+                        dataset_rows["vector_devexp_p_value"],
+                        dtype=float,
+                    )
+                    dataset_significant = (
+                        np.isfinite(dataset_p_values)
+                        & (dataset_p_values < float(p_value_threshold))
+                    )
+                    dataset_nonsignificant = ~dataset_significant
+                    if np.any(dataset_nonsignificant):
+                        ax.scatter(
+                            dataset_rows.loc[
+                                dataset_nonsignificant,
+                                "mean_activity_devexp_mean",
+                            ],
+                            dataset_rows.loc[
+                                dataset_nonsignificant,
+                                "vector_devexp_mean",
+                            ],
+                            s=3.8,
+                            color=NONSIGNIFICANT_COLOR,
+                            alpha=0.28,
+                            edgecolors="none",
+                            rasterized=True,
+                            zorder=2,
+                        )
+                    if not np.any(dataset_significant):
+                        continue
+                    ax.scatter(
+                        dataset_rows.loc[
+                            dataset_significant,
+                            "mean_activity_devexp_mean",
+                        ],
+                        dataset_rows.loc[
+                            dataset_significant,
+                            "vector_devexp_mean",
+                        ],
+                        s=4.2,
+                        color=_get_animal_color(str(animal_name)),
+                        alpha=0.42,
+                        edgecolors="none",
+                        rasterized=True,
+                        zorder=3,
+                    )
+            else:
+                animal_name = (
+                    str(table["animal_name"].iloc[0])
+                    if "animal_name" in table.columns and len(table)
+                    else ""
+                )
+                significant = (
+                    valid
+                    & np.isfinite(p_values)
+                    & (p_values < float(p_value_threshold))
+                )
+                nonsignificant = valid & ~significant
+                if np.any(nonsignificant):
+                    ax.scatter(
+                        x_values[nonsignificant],
+                        y_values[nonsignificant],
+                        s=3.8,
+                        color=NONSIGNIFICANT_COLOR,
+                        alpha=0.28,
+                        edgecolors="none",
+                        rasterized=True,
+                        zorder=2,
+                    )
+                if np.any(significant):
+                    ax.scatter(
+                        x_values[significant],
+                        y_values[significant],
+                        s=4.2,
+                        color=_get_animal_color(animal_name),
+                        alpha=0.42,
+                        edgecolors="none",
+                        rasterized=True,
+                        zorder=3,
+                    )
+            significant_count = int(
+                np.sum(
+                    valid
+                    & np.isfinite(p_values)
+                    & (p_values < float(p_value_threshold))
+                )
+            )
+            deltas = y_values[valid] - x_values[valid]
+            ax.text(
+                0.05,
+                0.95,
+                f"n={int(np.sum(valid))}\n"
+                f"sig={significant_count}\n"
+                f"med diff={np.nanmedian(deltas):.2f}",
+                ha="left",
+                va="top",
+                fontsize=4.6,
+                transform=ax.transAxes,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No finite\nvalues",
+                ha="center",
+                va="center",
+                fontsize=5.5,
+                transform=ax.transAxes,
+            )
+
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(title, fontsize=5.8, pad=1.4)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=4.7, length=1.5, pad=1)
+
+
+def plot_glm_source_predictor_comparison_panel(
+    ax: "Axes",
+    payload: Mapping[str, Any],
+) -> None:
+    """Plot full CA1 vector GLM performance against mean CA1 activity."""
+    import pandas as pd
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    table = payload.get("comparison_table")
+    if table is None:
+        table = pd.DataFrame()
+    axis_limits = _compute_source_comparison_axis_limits(table)
+    if len(table):
+        dataset_keys = sorted(
+            {
+                (str(row.animal_name), str(row.date))
+                for row in table[["animal_name", "date"]].drop_duplicates().itertuples()
+            }
+        )
+    else:
+        dataset_keys = []
+    groups: list[tuple[str, Any, bool]] = []
+    for animal_name, date in dataset_keys:
+        dataset_rows = table[
+            (table["animal_name"].astype(str) == animal_name)
+            & (table["date"].astype(str) == date)
+        ]
+        groups.append((animal_name, dataset_rows, False))
+    if len(table):
+        groups.append(("Pooled", table, True))
+
+    if not groups:
+        ax.text(
+            0.5,
+            0.5,
+            "No paired vector/mean GLM data",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+        return
+
+    left = 0.075
+    right = 0.985
+    bottom = 0.20
+    height = 0.70
+    gap = 0.030
+    width = (right - left - gap * (len(groups) - 1)) / len(groups)
+    for index, (title, rows, pooled) in enumerate(groups):
+        child_ax = ax.inset_axes([left + index * (width + gap), bottom, width, height])
+        _plot_source_predictor_comparison_axis(
+            child_ax,
+            rows,
+            title=title,
+            axis_limits=axis_limits,
+            pooled=pooled,
+            p_value_threshold=SIGNIFICANCE_P_VALUE,
+        )
+        if index > 0:
+            child_ax.set_yticklabels([])
+
+    ax.text(
+        0.52,
+        0.035,
+        "Mean CA1 activity deviance explained",
+        ha="center",
+        va="bottom",
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.98,
+        0.035,
+        f"Color: vector p<{SIGNIFICANCE_P_VALUE:g}; gray: n.s.",
+        ha="right",
+        va="bottom",
+        fontsize=5.2,
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.018,
+        0.56,
+        "CA1 spike vector deviance explained",
+        ha="center",
+        va="center",
+        rotation=90,
+        fontsize=6.0,
         transform=ax.transAxes,
     )
 
@@ -4736,6 +5412,17 @@ def make_figure_2(
         dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
         refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
     )
+    panel_e_payload = load_glm_source_predictor_comparison_tables(
+        data_root,
+        datasets,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+        sleep_epoch=sleep_epoch,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+        ripple_selection=ripple_selection,
+        ridge_strength=ridge_strength,
+    )
     panel_a_epoch_tables = filter_epoch_payloads(heatmap_epoch_tables, PANEL_A_EPOCH_ORDER)
     panel_c_epoch_tables = filter_epoch_payloads(glm_epoch_tables, PANEL_C_EPOCH_ORDER)
     fig = plt.figure(
@@ -4743,9 +5430,9 @@ def make_figure_2(
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=2,
+        nrows=3,
         ncols=4,
-        height_ratios=[1.12, 1.0],
+        height_ratios=[1.12, 1.0, 0.62],
         width_ratios=[1.1, 1.1, 0.9, 0.9],
     )
     axes = [
@@ -4753,6 +5440,7 @@ def make_figure_2(
         fig.add_subplot(outer_grid[0, 2:]),
         fig.add_subplot(outer_grid[1, :2]),
         fig.add_subplot(outer_grid[1, 2:]),
+        fig.add_subplot(outer_grid[2, :]),
     ]
 
     plot_epoch_ripple_heatmap_panel(axes[0], panel_a_epoch_tables, regions=regions)
@@ -4767,8 +5455,14 @@ def make_figure_2(
         fontsize=8,
         pad=2,
     )
+    plot_glm_source_predictor_comparison_panel(axes[4], panel_e_payload)
+    axes[4].set_title(
+        "Full CA1 spike vector vs mean CA1 activity",
+        fontsize=8,
+        pad=2,
+    )
 
-    for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
+    for ax, label in zip(axes, ("A", "B", "C", "D", "E"), strict=True):
         label_axis(ax, label, x=-0.10, y=1.04)
 
     save_figure(fig, output_path, dpi=dpi)
@@ -4778,6 +5472,13 @@ def make_figure_2(
             "Panel D missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
+        )
+    for missing in panel_e_payload["missing_artifacts"]:
+        print(
+            "Panel E missing "
+            f"{missing['artifact']} for {missing['animal_name']} "
+            f"{missing['date']} {missing['epoch']} "
+            f"({missing['source_predictor_mode']}): {missing['path']}"
         )
     print(f"Saved Figure 2 to {output_path}")
     return output_path

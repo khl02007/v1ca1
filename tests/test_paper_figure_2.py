@@ -46,6 +46,7 @@ from v1ca1.paper_figures.figure_2 import (
     get_screen_xcorr_paths,
     get_tuning_similarity_path,
     load_glm_behavior_association_tables,
+    load_glm_source_predictor_comparison_tables,
     load_dark_movement_firing_rate_cache,
     load_glm_offset_panel_tables,
     load_example_glm_prediction,
@@ -66,6 +67,7 @@ from v1ca1.paper_figures.figure_2 import (
     plot_epoch_ripple_heatmap_panel,
     plot_glm_behavior_association_panel,
     plot_glm_analysis_panel,
+    plot_glm_source_predictor_comparison_panel,
     plot_glm_offset_panel,
     plot_modulation_index_panel,
     plot_observed_predicted_panel,
@@ -204,6 +206,24 @@ def test_ripple_glm_path_matches_samplewise_output_name(tmp_path: Path) -> None:
         / "20240611"
         / "ripple_glm"
         / "08_r4_rw_0p2s_allripples_ridge_1e-1_samplewise_ripple_glm.nc"
+    )
+    mean_path = get_ripple_glm_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        ripple_window_s=0.2,
+        ripple_selection="single",
+        ridge_strength=1e-1,
+        source_predictor_mode="mean_activity",
+    )
+
+    assert mean_path == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple_glm"
+        / "08_r4_rw_0p2s_single_mean_ca1_ridge_1e-1_samplewise_ripple_glm.nc"
     )
 
 
@@ -600,6 +620,10 @@ def _write_ripple_glm_dataset(
     animal_name: str = "L14",
     date: str = "20240611",
     epoch: str = "08_r4",
+    ripple_selection: str = "allripples",
+    source_predictor_mode: str = "unit_vector",
+    devexp: np.ndarray | None = None,
+    p_values: np.ndarray | None = None,
 ) -> Path:
     xr = pytest.importorskip("xarray")
     path = get_ripple_glm_path(
@@ -607,12 +631,18 @@ def _write_ripple_glm_dataset(
         animal_name=animal_name,
         date=date,
         epoch=epoch,
+        ripple_selection=ripple_selection,
+        source_predictor_mode=source_predictor_mode,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    if devexp is None:
+        devexp = np.array([0.1, 0.4])
+    if p_values is None:
+        p_values = np.array([0.2, 0.01])
     dataset = xr.Dataset(
         data_vars={
-            "ripple_devexp_mean": (("unit",), np.array([0.1, 0.4])),
-            "ripple_devexp_p_value": (("unit",), np.array([0.2, 0.01])),
+            "ripple_devexp_mean": (("unit",), np.asarray(devexp, dtype=float)),
+            "ripple_devexp_p_value": (("unit",), np.asarray(p_values, dtype=float)),
             "ripple_bits_per_spike_mean": (("unit",), np.array([0.03, 0.08])),
             "ripple_observed_count_oof": (
                 ("sample", "unit"),
@@ -676,6 +706,38 @@ def test_load_ripple_glm_summary_table_reads_per_unit_metrics(tmp_path: Path) ->
     assert np.allclose(table["ripple_devexp_p_value"], [0.2, 0.01])
     assert table["n_ripples"].tolist() == [3, 3]
     assert table["source_path"].tolist() == [str(path), str(path)]
+
+
+def test_load_glm_source_predictor_comparison_tables_pairs_vector_and_mean(
+    tmp_path: Path,
+) -> None:
+    _write_ripple_glm_dataset(
+        tmp_path,
+        epoch="02_r1",
+        source_predictor_mode="unit_vector",
+        devexp=np.array([0.1, 0.4]),
+        p_values=np.array([0.2, 0.01]),
+    )
+    _write_ripple_glm_dataset(
+        tmp_path,
+        epoch="02_r1",
+        source_predictor_mode="mean_activity",
+        devexp=np.array([0.05, 0.2]),
+        p_values=np.array([0.3, 0.02]),
+    )
+
+    payload = load_glm_source_predictor_comparison_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    table = payload["comparison_table"]
+    assert payload["missing_artifacts"] == []
+    assert table["unit_id"].tolist() == [11, 12]
+    assert table["epoch_type"].tolist() == ["light", "light"]
+    assert np.allclose(table["vector_devexp_mean"], [0.1, 0.4])
+    assert np.allclose(table["mean_activity_devexp_mean"], [0.05, 0.2])
+    assert np.allclose(table["devexp_delta_vector_minus_mean"], [0.05, 0.2])
 
 
 def test_load_glm_offset_panel_tables_uses_complete_offset_sets(
@@ -1118,6 +1180,16 @@ def test_plot_helpers_draw_expected_axes() -> None:
                     "sleep",
                 ],
                 "dark_firing_rate_hz": [0.2, 0.4, 0.8, 9.0, 5.0, 8.0, 0.3, 12.0],
+                "same_turn_tuning_similarity": [
+                    0.2,
+                    0.4,
+                    0.7,
+                    0.9,
+                    0.6,
+                    0.8,
+                    0.3,
+                    0.85,
+                ],
                 "ripple_devexp_mean": [0.05, 0.2, 0.3, 0.4, 0.1, 0.3, 0.15, 0.25],
                 "ripple_devexp_p_value": [
                     0.001,
@@ -1153,6 +1225,23 @@ def test_plot_helpers_draw_expected_axes() -> None:
         ),
         "missing_artifacts": [],
         "dark_activity_threshold_hz": 0.5,
+    }
+    source_comparison_payload = {
+        "comparison_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA", "RatA", "RatB", "RatB"],
+                "date": ["20240101", "20240101", "20240102", "20240102"],
+                "epoch": ["02_r1", "02_r1", "02_r1", "02_r1"],
+                "epoch_type": ["light", "light", "light", "light"],
+                "unit_id": [1, 2, 3, 4],
+                "mean_activity_devexp_mean": [0.0, 0.1, 0.02, 0.05],
+                "vector_devexp_mean": [0.1, 0.2, 0.04, 0.15],
+                "vector_devexp_p_value": [0.2, 0.01, 0.03, 0.4],
+                "mean_activity_devexp_p_value": [0.3, 0.02, 0.2, 0.5],
+            }
+        ),
+        "missing_artifacts": [],
+        "ripple_selection": "single",
     }
     decoding_payload = {
         "summary_table": pd.DataFrame(
@@ -1280,16 +1369,19 @@ def test_plot_helpers_draw_expected_axes() -> None:
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
-    assert len(ax.child_axes) == 2
-    fraction_ax, box_ax = ax.child_axes
+    assert len(ax.child_axes) == 3
+    fraction_ax, box_ax, similarity_ax = ax.child_axes
     assert fraction_ax.get_xlabel() == "Frac. of p<0.05 units"
     assert fraction_ax.get_ylabel() == ""
     assert fraction_ax.get_title() == "p<0.05\ncomposition"
     assert box_ax.get_ylabel() == ""
     assert box_ax.get_xlabel() == "CV deviance explained"
-    assert box_ax.get_title() == "Run"
+    assert box_ax.get_title() == "Run devexp"
+    assert similarity_ax.get_xlabel() == "Dark same-turn corr."
+    assert similarity_ax.get_ylabel() == "Frac. units"
+    assert similarity_ax.get_title() == "Dark DPP"
     assert ax.texts[-1].get_text() == (
-        "Boxplots show p<0.05 units; dark-active split uses 0.5 Hz"
+        "Plots show p<0.05 units; dark-active split uses 0.5 Hz"
     )
     assert len(fraction_ax.patches) == 2
     assert len(box_ax.patches) == 2
@@ -1297,6 +1389,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(box_ax.lines) >= 3
     assert len(fraction_ax.collections) == 3
     assert len(fraction_ax.lines) >= 2
+    assert len(similarity_ax.patches) == 17
+    assert len(similarity_ax.collections) == 0
+    assert len(similarity_ax.lines) == 2
     assert fraction_ax.get_xlim()[0] == pytest.approx(0.0)
     assert fraction_ax.get_xlim()[1] == pytest.approx(1.0)
     assert [tick.get_text() for tick in fraction_ax.get_yticklabels()] == [
@@ -1309,6 +1404,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
     ) == 3
     assert box_ax.get_xlim()[0] == pytest.approx(-0.1)
     assert box_ax.get_xlim()[1] == pytest.approx(0.5)
+    assert similarity_ax.get_xlim()[0] == pytest.approx(-0.1)
+    assert similarity_ax.get_xlim()[1] == pytest.approx(1.0)
     devexp_box_line_max = max(
         np.nanmax(np.asarray(line.get_xdata(), dtype=float))
         for line in box_ax.lines
@@ -1319,9 +1416,38 @@ def test_plot_helpers_draw_expected_axes() -> None:
         text.get_text() == "Inactive sig n=1\nActive sig n=2"
         for text in box_ax.texts
     )
+    assert any(
+        text.get_text() == "Active sig n=2"
+        for text in similarity_ax.texts
+    )
     assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
     assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
     assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_source_predictor_comparison_panel(ax, source_comparison_payload)
+    assert len(ax.child_axes) == 3
+    assert [child.get_title() for child in ax.child_axes] == ["RatA", "RatB", "Pooled"]
+    assert ax.child_axes[0].get_xlim()[0] == pytest.approx(-0.1)
+    assert ax.child_axes[0].get_xlim()[1] == pytest.approx(0.5)
+    assert len(ax.child_axes[0].collections) == 2
+    assert len(ax.child_axes[2].collections) == 4
+    assert len(ax.child_axes[0].lines) == 1
+    assert any(
+        text.get_text() == "Mean CA1 activity deviance explained"
+        for text in ax.texts
+    )
+    assert any(
+        text.get_text() == "CA1 spike vector deviance explained"
+        for text in ax.texts
+    )
+    assert any(
+        text.get_text() == "Color: vector p<0.05; gray: n.s."
+        for text in ax.texts
+    )
+    assert any("sig=1" in text.get_text() for text in ax.child_axes[0].texts)
+    assert any("med diff=0.10" in text.get_text() for text in ax.child_axes[0].texts)
     plt.close(fig)
 
     fig, ax = plt.subplots()
