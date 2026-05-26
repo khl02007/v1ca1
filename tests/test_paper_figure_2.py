@@ -6,12 +6,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.colors import to_rgba
 
 from v1ca1.paper_figures.figure_2 import (
     DEFAULT_EXAMPLE_DATASET,
     DEFAULT_FIGURE_CACHE_DIR,
     DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+    DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+    DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
     DEFAULT_RIDGE_STRENGTH,
     DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_WINDOW_S,
@@ -23,11 +27,14 @@ from v1ca1.paper_figures.figure_2 import (
     DEFAULT_XCORR_STATE,
     DEFAULT_XCORR_TOP_CA1_UNITS,
     NEURON_SCALE_BAR_COUNT,
+    PANEL_D_DARK_ACTIVITY_COLORS,
     build_output_path,
     build_glm_dark_activity_devexp_table,
     build_dark_movement_firing_rate_cache_metadata,
     build_dark_movement_firing_rate_cache_path,
     build_peri_ripple_heatmap_payload,
+    build_panel_b_schematic_cache_metadata,
+    build_panel_b_schematic_cache_path,
     build_ripple_modulation_output_stem,
     compute_significance_distribution_comparison,
     draw_neuron_scale_bar,
@@ -48,6 +55,7 @@ from v1ca1.paper_figures.figure_2 import (
     load_glm_behavior_association_tables,
     load_glm_source_predictor_comparison_tables,
     load_dark_movement_firing_rate_cache,
+    load_panel_b_schematic_cache,
     load_glm_offset_panel_tables,
     load_example_glm_prediction,
     load_example_ripple_lfp_trace,
@@ -61,6 +69,7 @@ from v1ca1.paper_figures.figure_2 import (
     load_ripple_glm_summary_table,
     load_top_ca1_xcorr_panel_data,
     save_dark_movement_firing_rate_cache,
+    save_panel_b_schematic_cache,
     parse_arguments,
     parse_dataset_id,
     plot_glm_summary_panel,
@@ -145,6 +154,55 @@ def test_dark_movement_firing_rate_cache_roundtrip_validates_metadata(
     stale_metadata = dict(metadata)
     stale_metadata["dark_epoch"] = "10_r5"
     assert load_dark_movement_firing_rate_cache(cache_path, stale_metadata) is None
+
+
+def test_panel_b_schematic_cache_path_and_roundtrip(tmp_path: Path) -> None:
+    metadata = build_panel_b_schematic_cache_metadata(
+        data_root=Path("/analysis"),
+        animal_name="L15",
+        date="20241121",
+        epoch="02_r1",
+    )
+    cache_path = build_panel_b_schematic_cache_path(tmp_path, metadata)
+    payload = {
+        "animal_name": "L15",
+        "date": "20241121",
+        "epoch": "02_r1",
+        "time_s": np.asarray([-0.08, 0.0, 0.22]),
+        "filtered_lfp": np.asarray([0.1, -0.2, 0.3]),
+        "ripple_start_s": 10.0,
+        "ripple_end_s": 10.06,
+        "ripple_duration_s": 0.06,
+        "mean_zscore": 4.5,
+        "channel": 12,
+        "n_ripples": 7,
+        "time_before_s": DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+        "time_after_s": DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+        "n_units_per_region": DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+        "ca1_unit_ids": np.asarray([101, 102]),
+        "v1_unit_ids": np.asarray([201, 202]),
+        "ca1_spike_times_s": (np.asarray([-0.01, 0.03]), np.asarray([0.12])),
+        "v1_spike_times_s": (np.asarray([0.02]), np.asarray([0.09, 0.18])),
+        "selection_score": np.asarray([1.0, 2.0, 6.0, 4.5, 0.0]),
+    }
+
+    save_panel_b_schematic_cache(cache_path, payload, metadata)
+    loaded = load_panel_b_schematic_cache(cache_path, metadata)
+
+    assert cache_path.name == (
+        "figure_2_panel_b_schematic_L15_20241121_02_r1"
+        "_thr2_tb0p08_ta0p22_n5_dur0p15_cachev4.npz"
+    )
+    assert loaded is not None
+    assert loaded["animal_name"] == "L15"
+    assert loaded["channel"] == 12
+    np.testing.assert_array_equal(loaded["ca1_unit_ids"], np.asarray([101, 102]))
+    np.testing.assert_allclose(loaded["ca1_spike_times_s"][0], np.asarray([-0.01, 0.03]))
+    np.testing.assert_allclose(loaded["v1_spike_times_s"][1], np.asarray([0.09, 0.18]))
+
+    stale_metadata = dict(metadata)
+    stale_metadata["time_after_s"] = 0.2
+    assert load_panel_b_schematic_cache(cache_path, stale_metadata) is None
 
 
 def test_ripple_modulation_paths_match_cached_output_stem(tmp_path: Path) -> None:
@@ -1359,10 +1417,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
         "n.s.",
         "",
     ]
-    assert axes[2, 2].child_axes[1].get_ylabel() == "-log   p"
-    assert any(
-        text.get_text() == "10" and text.get_fontstyle() == "normal"
-        for text in axes[2, 2].child_axes[1].texts
+    assert (
+        axes[2, 2].child_axes[1].get_ylabel()
+        == r"-log10 $\mathit{p}$ from shuffle"
     )
     assert len(axes[2, 2].child_axes[2].artists) == 1
     plt.close(fig)
@@ -1371,15 +1428,15 @@ def test_plot_helpers_draw_expected_axes() -> None:
     plot_glm_behavior_association_panel(ax, association_payload)
     assert len(ax.child_axes) == 3
     fraction_ax, box_ax, similarity_ax = ax.child_axes
-    assert fraction_ax.get_xlabel() == "Frac. of p<0.05 units"
+    assert fraction_ax.get_xlabel() == "p<0.05 frac."
     assert fraction_ax.get_ylabel() == ""
-    assert fraction_ax.get_title() == "p<0.05\ncomposition"
+    assert fraction_ax.get_title() == ""
     assert box_ax.get_ylabel() == ""
-    assert box_ax.get_xlabel() == "CV deviance explained"
-    assert box_ax.get_title() == "Run devexp"
-    assert similarity_ax.get_xlabel() == "Dark same-turn corr."
+    assert box_ax.get_xlabel() == "Dev. explained"
+    assert box_ax.get_title() == ""
+    assert similarity_ax.get_xlabel() == "Dark DGP corr."
     assert similarity_ax.get_ylabel() == "Frac. units"
-    assert similarity_ax.get_title() == "Dark DPP"
+    assert similarity_ax.get_title() == ""
     assert ax.texts[-1].get_text() == (
         "Plots show p<0.05 units; dark-active split uses 0.5 Hz"
     )
@@ -1389,14 +1446,45 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(box_ax.lines) >= 3
     assert len(fraction_ax.collections) == 3
     assert len(fraction_ax.lines) >= 2
-    assert len(similarity_ax.patches) == 17
+    assert len(similarity_ax.patches) == 11
     assert len(similarity_ax.collections) == 0
     assert len(similarity_ax.lines) == 2
+    similarity_bin_edges = np.asarray(
+        [patch.get_x() for patch in similarity_ax.patches]
+        + [
+            similarity_ax.patches[-1].get_x()
+            + similarity_ax.patches[-1].get_width()
+        ],
+        dtype=float,
+    )
+    np.testing.assert_allclose(np.diff(similarity_bin_edges), 0.1, atol=1e-9)
+    assert np.any(np.isclose(similarity_bin_edges, 0.0))
+    assert similarity_ax.patches[0].get_edgecolor()[3] == pytest.approx(0.0)
+    np.testing.assert_allclose(
+        fraction_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["inactive"])[:3],
+    )
+    np.testing.assert_allclose(
+        fraction_ax.patches[1].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
+    np.testing.assert_allclose(
+        box_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["inactive"])[:3],
+    )
+    np.testing.assert_allclose(
+        box_ax.patches[1].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
+    np.testing.assert_allclose(
+        similarity_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
     assert fraction_ax.get_xlim()[0] == pytest.approx(0.0)
     assert fraction_ax.get_xlim()[1] == pytest.approx(1.0)
     assert [tick.get_text() for tick in fraction_ax.get_yticklabels()] == [
-        "Inactive",
-        "Active",
+        "Dark-inactive",
+        "Dark active",
     ]
     assert sum(
         len(collection.get_offsets())
@@ -1412,14 +1500,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
         if len(line.get_xdata())
     )
     assert devexp_box_line_max == pytest.approx(0.4)
-    assert any(
-        text.get_text() == "Inactive sig n=1\nActive sig n=2"
-        for text in box_ax.texts
-    )
-    assert any(
-        text.get_text() == "Active sig n=2"
-        for text in similarity_ax.texts
-    )
+    assert not box_ax.texts
+    assert [text.get_text() for text in similarity_ax.texts] == ["median=0.80"]
     assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
     assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
     assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
@@ -1446,8 +1528,25 @@ def test_plot_helpers_draw_expected_axes() -> None:
         text.get_text() == "Color: vector p<0.05; gray: n.s."
         for text in ax.texts
     )
-    assert any("sig=1" in text.get_text() for text in ax.child_axes[0].texts)
-    assert any("med diff=0.10" in text.get_text() for text in ax.child_axes[0].texts)
+    assert any(
+        text.get_text() == "n=2\nfrac vector>mean=1.00"
+        for text in ax.child_axes[0].texts
+    )
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_source_predictor_comparison_panel(
+        ax,
+        source_comparison_payload,
+        include_per_animal=False,
+        include_pooled=True,
+        compact_labels=True,
+        show_color_note=False,
+    )
+    compact_summary_text = ax.child_axes[0].texts[-1]
+    assert compact_summary_text.get_text() == "n=4\nfrac vector>mean=1.00"
+    assert compact_summary_text.get_ha() == "right"
+    assert compact_summary_text.get_va() == "top"
     plt.close(fig)
 
     fig, ax = plt.subplots()
@@ -1486,6 +1585,7 @@ def test_parse_arguments_defaults_match_figure_2_cli() -> None:
     assert args.sleep_epoch is None
     assert args.dark_movement_fr_cache_dir == DEFAULT_FIGURE_CACHE_DIR
     assert args.refresh_dark_movement_fr_cache is False
+    assert args.refresh_panel_b_schematic_cache is False
     assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
     assert args.ripple_window_s == DEFAULT_RIPPLE_WINDOW_S
     assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S

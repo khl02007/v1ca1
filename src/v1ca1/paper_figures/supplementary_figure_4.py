@@ -1,37 +1,29 @@
 from __future__ import annotations
 
-"""Generate Supplementary Figure 3 per-animal Figure 3D-F panels."""
+"""Generate Supplementary Figure 4 per-animal Figure 4C histograms."""
 
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from v1ca1.helper.session import (
-    DEFAULT_DATA_ROOT,
-    REGIONS,
-)
+from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
 from v1ca1.paper_figures.datasets import (
-    DEFAULT_LIGHT_EPOCH,
+    DEFAULT_DARK_EPOCH,
     DatasetId,
     get_processed_datasets,
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_3 import (
-    DEFAULT_FIGURE_HEIGHT_MM as FIGURE_3_HEIGHT_MM,
-    DEFAULT_FIGURE_WIDTH_MM as FIGURE_3_WIDTH_MM,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_REGIONS,
     FIGURE_FORMATS,
-    PANEL_DEF_WIDTH_RATIOS,
     build_output_path,
-    load_panel_d_similarity_table,
-    load_panel_e_encoding_delta_table,
-    load_panel_f_decoding_error_table,
+    load_panel_h_swap_delta_table,
     parse_dataset_id,
-    plot_panel_d_similarity,
-    plot_panel_e_encoding_delta_histogram,
-    plot_panel_f_decoding_error,
+)
+from v1ca1.paper_figures.figure_3 import (
+    _plot_panel_h_delta_grid as plot_figure_4c_histogram_grid,
 )
 from v1ca1.paper_figures.style import (
     apply_paper_style,
@@ -41,18 +33,21 @@ from v1ca1.paper_figures.style import (
 )
 
 
-DEFAULT_OUTPUT_NAME = "supplementary_figure_3"
-DEFAULT_FIGURE_WIDTH_MM = FIGURE_3_WIDTH_MM
-DEFAULT_FIGURE_HEIGHT_MM = FIGURE_3_HEIGHT_MM
+DEFAULT_OUTPUT_NAME = "supplementary_figure_4"
+LETTER_PAPER_WIDTH_IN = 8.5
+LETTER_HORIZONTAL_MARGIN_IN = 1.0
+DEFAULT_FIGURE_WIDTH_MM = (
+    LETTER_PAPER_WIDTH_IN - 2.0 * LETTER_HORIZONTAL_MARGIN_IN
+) * 25.4
+DEFAULT_ANIMAL_ROW_HEIGHT_MM = 35.0
 ANIMAL_ROW_LABEL_FONTSIZE = 5.2
-PER_ANIMAL_COLUMN_WIDTH_RATIOS = PANEL_DEF_WIDTH_RATIOS
-PER_ANIMAL_GRID_HSPACE = 0.22
-PER_ANIMAL_GRID_WSPACE = 0.20
+PER_ANIMAL_GRID_HSPACE = 0.42
 PANEL_TITLE_FONTSIZE = 8.0
-PANEL_A_SCATTER_ALPHA = 0.30
 
 
-def group_datasets_by_animal(datasets: Sequence[DatasetId]) -> dict[str, list[DatasetId]]:
+def group_datasets_by_animal(
+    datasets: Sequence[DatasetId],
+) -> dict[str, list[DatasetId]]:
     """Return normalized data sets grouped by animal in input order."""
     grouped: dict[str, list[DatasetId]] = {}
     for dataset in datasets:
@@ -74,137 +69,88 @@ def format_animal_row_label(animal_name: str, datasets: Sequence[DatasetId]) -> 
     return f"{animal_name}\n{', '.join(dates)}"
 
 
-def hide_x_axis_labels(ax: object) -> None:
-    """Hide x-axis label text and tick labels for repeated row panels."""
-    ax.set_xlabel("")
-    ax.tick_params(axis="x", labelbottom=False)
+def get_figure_height_mm(n_animal_rows: int) -> float:
+    """Return the Supplementary Figure 4 height for the requested row count."""
+    return DEFAULT_ANIMAL_ROW_HEIGHT_MM * max(int(n_animal_rows), 1)
 
 
-def set_panel_a_dot_alpha(ax: object) -> None:
-    """Make the per-animal Figure 3D scatter points more visible."""
-    for collection in ax.collections:
-        collection.set_alpha(PANEL_A_SCATTER_ALPHA)
-
-
-def make_supplementary_figure_3(
+def make_supplementary_figure_4(
     *,
     data_root: Path,
     output_path: Path,
     datasets: Sequence[DatasetId],
     region: str,
-    light_epoch: str | None,
     dark_epoch: str | None,
     dpi: int,
 ) -> Path:
-    """Build and save Supplementary Figure 3."""
+    """Build and save Supplementary Figure 4."""
     import matplotlib.pyplot as plt
 
     datasets = [normalize_dataset_id(dataset) for dataset in datasets]
     animal_groups = group_datasets_by_animal(datasets)
 
     apply_paper_style()
+    fig_height_mm = get_figure_height_mm(len(animal_groups))
     fig = plt.figure(
-        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
+        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, fig_height_mm),
         constrained_layout=False,
     )
     if not datasets:
         ax = fig.add_subplot(1, 1, 1)
         ax.text(0.5, 0.5, "No datasets", ha="center", va="center", fontsize=6.0)
         ax.axis("off")
-        save_figure(fig, output_path, dpi=dpi)
+        save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
         plt.close(fig)
-        print(f"Saved Supplementary Figure 3 to {output_path}")
+        print(f"Saved Supplementary Figure 4 to {output_path}")
         return output_path
 
     outer_grid = fig.add_gridspec(
         nrows=len(animal_groups),
-        ncols=3,
-        width_ratios=PER_ANIMAL_COLUMN_WIDTH_RATIOS,
+        ncols=1,
         hspace=PER_ANIMAL_GRID_HSPACE,
-        wspace=PER_ANIMAL_GRID_WSPACE,
-        left=0.045,
-        right=0.965,
-        top=0.945,
-        bottom=0.055,
+        left=0.125,
+        right=0.985,
+        top=0.94,
+        bottom=0.06,
     )
     for row_index, (animal_name, animal_datasets) in enumerate(animal_groups.items()):
-        panel_d_axis = fig.add_subplot(outer_grid[row_index, 0])
-        similarity_table = load_panel_d_similarity_table(
+        axis = fig.add_subplot(outer_grid[row_index, 0])
+        swap_delta_table = load_panel_h_swap_delta_table(
             data_root=data_root,
             datasets=animal_datasets,
             region=region,
-            light_epoch=light_epoch,
             dark_epoch=dark_epoch,
         )
-        plot_panel_d_similarity(panel_d_axis, similarity_table)
-        set_panel_a_dot_alpha(panel_d_axis)
-        panel_d_axis.text(
-            0.04,
-            0.13,
+        plot_figure_4c_histogram_grid(axis, swap_delta_table)
+        axis.text(
+            -0.075,
+            0.50,
             format_animal_row_label(animal_name, animal_datasets),
-            ha="left",
-            va="bottom",
+            ha="right",
+            va="center",
             fontsize=ANIMAL_ROW_LABEL_FONTSIZE,
-            transform=panel_d_axis.transAxes,
+            transform=axis.transAxes,
             color="0.25",
         )
 
-        panel_e_axis = fig.add_subplot(outer_grid[row_index, 1])
-        encoding_delta_table = load_panel_e_encoding_delta_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_e_encoding_delta_histogram(panel_e_axis, encoding_delta_table)
-
-        panel_f_axis = fig.add_subplot(outer_grid[row_index, 2])
-        decoding_error_table = load_panel_f_decoding_error_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_f_decoding_error(panel_f_axis, decoding_error_table)
-
-        if row_index < len(animal_groups) - 1:
-            hide_x_axis_labels(panel_d_axis)
-            hide_x_axis_labels(panel_e_axis)
-            for child_axis in panel_f_axis.child_axes:
-                hide_x_axis_labels(child_axis)
-
         if row_index == 0:
-            panel_d_axis.set_title(
-                "Fig. 3D similarity",
+            axis.set_title(
+                "Figure 4C delta LL histograms",
                 fontsize=PANEL_TITLE_FONTSIZE,
                 pad=2,
             )
-            panel_e_axis.set_title(
-                "Fig. 3E encoding",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            panel_f_axis.set_title(
-                "Fig. 3F decoding",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            label_axis(panel_d_axis, "A", x=-0.48, y=1.05)
-            label_axis(panel_e_axis, "B", x=-0.22, y=1.05)
-            label_axis(panel_f_axis, "C", x=-0.10, y=1.05)
+            label_axis(axis, "A", x=-0.115, y=1.02)
 
-    save_figure(fig, output_path, dpi=dpi)
+    save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
-    print(f"Saved Supplementary Figure 3 to {output_path}")
+    print(f"Saved Supplementary Figure 4 to {output_path}")
     return output_path
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for Supplementary Figure 3 generation."""
+    """Parse command-line arguments for Supplementary Figure 4 generation."""
     parser = argparse.ArgumentParser(
-        description="Generate Supplementary Figure 3 per-animal Figure 3D-F panels."
+        description="Generate Supplementary Figure 4 per-animal Figure 4C histograms."
     )
     parser.add_argument(
         "--data-root",
@@ -246,17 +192,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Region to include. Default: {DEFAULT_REGIONS[0]}.",
     )
     parser.add_argument(
-        "--light-epoch",
-        default=None,
-        help=(
-            "Light run epoch for Figure 3D-F panels. "
-            f"Default: registry value, currently {DEFAULT_LIGHT_EPOCH} unless overridden."
-        ),
-    )
-    parser.add_argument(
         "--dark-epoch",
         default=None,
-        help="Dark run epoch. Default: registry value for each animal.",
+        help=(
+            "Dark run epoch. "
+            f"Default: registry value, currently {DEFAULT_DARK_EPOCH} unless overridden."
+        ),
     )
     parser.add_argument(
         "--dpi",
@@ -268,7 +209,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Run Supplementary Figure 3 generation."""
+    """Run Supplementary Figure 4 generation."""
     args = parse_arguments(argv)
     datasets = args.dataset if args.dataset is not None else get_processed_datasets()
     output_path = build_output_path(
@@ -276,12 +217,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_name,
         args.output_format,
     )
-    make_supplementary_figure_3(
+    make_supplementary_figure_4(
         data_root=args.data_root,
         output_path=output_path,
         datasets=datasets,
         region=args.region,
-        light_epoch=args.light_epoch,
         dark_epoch=args.dark_epoch,
         dpi=args.dpi,
     )

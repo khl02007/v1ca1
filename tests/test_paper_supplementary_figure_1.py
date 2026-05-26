@@ -12,17 +12,19 @@ from v1ca1.paper_figures.supplementary_figure_1 import (
     DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_NAME,
+    MOTOR_DATASET_LABEL_X,
+    MOTOR_DATASET_STACK_AXIS_BOUNDS,
     MODEL_COMPARISON_GRID_WSPACE,
-    MODEL_COMPARISON_PANEL_C_SHIFT_PT,
-    MODEL_COMPARISON_PANEL_D_SHIFT_PT,
+    MODEL_COMPARISON_SECOND_COLUMN_SHIFT_PT,
+    MODEL_COMPARISON_THIRD_COLUMN_SHIFT_PT,
     build_output_path,
-    format_stability_summary,
+    keep_only_bottom_x_axis_labels,
     make_supplementary_figure_1,
     parse_arguments,
     plot_decoding_error_dataset_stack_panel,
     plot_dataset_stack_panel,
+    plot_motor_delta_dataset_stack_panel,
     plot_pooled_stability_panel,
-    plot_stability_dataset_rows_panel,
     shift_model_comparison_columns,
 )
 
@@ -48,8 +50,8 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     )
     assert DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM == pytest.approx(40.0)
     assert MODEL_COMPARISON_GRID_WSPACE == pytest.approx(-0.10)
-    assert MODEL_COMPARISON_PANEL_C_SHIFT_PT == pytest.approx(-10.0)
-    assert MODEL_COMPARISON_PANEL_D_SHIFT_PT == pytest.approx(-33.0)
+    assert MODEL_COMPARISON_SECOND_COLUMN_SHIFT_PT == pytest.approx(-10.0)
+    assert MODEL_COMPARISON_THIRD_COLUMN_SHIFT_PT == pytest.approx(-33.0)
     assert not hasattr(args, "region")
     assert not hasattr(args, "panel_heatmap_cache_dir")
     assert not hasattr(args, "refresh_panel_heatmap_cache")
@@ -127,14 +129,35 @@ def test_plot_dataset_stack_panel_can_hide_repeated_dataset_labels() -> None:
     plt.close(fig)
 
 
-def test_format_stability_summary_reports_median_and_fraction_above_half() -> None:
-    assert format_stability_summary("v1", [0.1, 0.8]) == "V1 med 0.45, >0.5 50%"
+def test_keep_only_bottom_x_axis_labels_hides_upper_rows() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(nrows=2, ncols=1)
+    for ax in axes:
+        ax.set_xlabel("Shared x")
+        ax.set_xticks([0.0, 1.0])
+        ax.set_xticklabels(["zero", "one"])
+    child_ax = axes[0].inset_axes([0.2, 0.2, 0.5, 0.5])
+    child_ax.set_xlabel("Child x")
+    child_ax.set_xticks([0.0, 1.0])
+    child_ax.set_xticklabels(["left", "right"])
+
+    keep_only_bottom_x_axis_labels(axes)
+
+    assert axes[0].get_xlabel() == ""
+    assert child_ax.get_xlabel() == ""
+    assert not any(label.get_visible() for label in axes[0].get_xticklabels())
+    assert not any(label.get_visible() for label in child_ax.get_xticklabels())
+    assert axes[1].get_xlabel() == "Shared x"
+    assert all(label.get_visible() for label in axes[1].get_xticklabels())
+    plt.close(fig)
 
 
-def test_plot_stability_dataset_rows_panel_uses_one_horizontal_row_per_dataset(
+def test_plot_motor_delta_dataset_stack_panel_uses_animal_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pd = pytest.importorskip("pandas")
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -144,47 +167,42 @@ def test_plot_stability_dataset_rows_panel_uses_one_horizontal_row_per_dataset(
         ("L15", "20241121", "10_r5"),
     ]
     loaded = []
-    rows = []
-    for trajectory_type in figure_1_module.TRAJECTORY_TYPES:
-        for region in figure_1_module.STABILITY_REGIONS:
-            rows.extend(
-                {
-                    "trajectory_type": trajectory_type,
-                    "region": region,
-                    "stability_correlation": value,
-                }
-                for value in (0.1, 0.8)
-            )
 
-    def fake_load_dark_epoch_stability_table(**kwargs):
+    def fake_load_motor_delta_table(**kwargs):
         loaded.append(kwargs["datasets"][0])
-        return pd.DataFrame(rows)
+        return kwargs["datasets"][0]
+
+    def fake_plot_motor_delta_panel(ax, _table):
+        ax.set_ylabel("Frac.")
+        ax.set_xlabel("Delta")
+        ax.plot([0.0, 1.0], [0.0, 1.0])
 
     monkeypatch.setattr(
         supp_figure_1_module,
-        "load_dark_epoch_stability_table",
-        fake_load_dark_epoch_stability_table,
+        "load_motor_delta_table",
+        fake_load_motor_delta_table,
+    )
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "plot_motor_delta_panel",
+        fake_plot_motor_delta_panel,
     )
 
     fig, ax = plt.subplots()
-    row_axes = plot_stability_dataset_rows_panel(
+    row_axes = plot_motor_delta_dataset_stack_panel(
         ax,
         data_root=Path("/analysis"),
         datasets=datasets,
     )
 
     assert loaded == datasets
-    assert len(row_axes) == 2
-    assert [text.get_text() for text in ax.texts] == [
-        "L14\n20240611\n08_r4",
-        "L15\n20241121\n10_r5",
-    ]
-    assert row_axes[0].get_position().y0 > row_axes[1].get_position().y0
-    assert len(row_axes[0].child_axes) == 2 * len(figure_1_module.TRAJECTORY_TYPES)
-    first_hist_axis = row_axes[0].child_axes[1]
-    first_hist_text = [text.get_text() for text in first_hist_axis.texts]
-    assert "V1 med 0.45, >0.5 50%" in first_hist_text
-    assert "CA1 med 0.45, >0.5 50%" in first_hist_text
+    assert [text.get_text() for text in ax.texts] == ["L14", "L15"]
+    assert all(text.get_position()[0] == pytest.approx(MOTOR_DATASET_LABEL_X) for text in ax.texts)
+    assert all(text.get_ha() == "right" for text in ax.texts)
+    parent_box = ax.get_position()
+    first_row_box = row_axes[0].get_position()
+    row_left = parent_box.x0 + MOTOR_DATASET_STACK_AXIS_BOUNDS[0] * parent_box.width
+    assert first_row_box.x0 == pytest.approx(row_left)
     plt.close(fig)
 
 
@@ -317,11 +335,6 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
         calls["pooled_stability_kwargs"] = kwargs
         ax.text(0.5, 0.5, "pooled stability")
 
-    def fake_plot_stability_dataset_rows_panel(ax, **kwargs: object):
-        calls["stability_kwargs"] = kwargs
-        ax.text(0.5, 0.5, "stability")
-        return []
-
     def fake_save_figure(figure, output_path: Path, dpi: int):
         calls["figsize"] = figure.get_size_inches()
         calls["output_path"] = output_path
@@ -360,11 +373,6 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
         "plot_pooled_stability_panel",
         fake_plot_pooled_stability_panel,
     )
-    monkeypatch.setattr(
-        supp_figure_1_module,
-        "plot_stability_dataset_rows_panel",
-        fake_plot_stability_dataset_rows_panel,
-    )
     monkeypatch.setattr(supp_figure_1_module, "save_figure", fake_save_figure)
 
     output_path = tmp_path / "supplementary_figure_1.svg"
@@ -385,10 +393,9 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     assert figure_width_in == pytest.approx(DEFAULT_FIGURE_WIDTH_MM / 25.4)
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["panel_labels"] == ["A", "B", "C", "D", "E", "F"]
+    assert calls["panel_labels"] == ["A", "B", "C", "D", "E"]
     assert calls["anatomy_kwargs"]["asset_dir"] == asset_dir
     assert calls["pooled_stability_kwargs"]["datasets"] == datasets
-    assert calls["stability_kwargs"]["datasets"] == datasets
     assert calls["motor_kwargs"]["datasets"] == datasets
     assert calls["motor_kwargs"].get("show_dataset_labels", True) is True
     assert calls["encoding_kwargs"]["datasets"] == datasets

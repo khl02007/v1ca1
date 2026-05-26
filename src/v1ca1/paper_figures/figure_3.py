@@ -106,7 +106,7 @@ PANEL_DEF_WIDTH_RATIOS = (0.86, 1.30, 1.58)
 PANEL_DEF_WSPACE = 0.22
 PANEL_DEF_AXIS_BOTTOM = 0.13
 PANEL_DEF_AXIS_HEIGHT = 0.70
-PANEL_D_AXIS_BOUNDS = (0.30, PANEL_DEF_AXIS_BOTTOM, 0.82, PANEL_DEF_AXIS_HEIGHT)
+PANEL_D_AXIS_BOUNDS = (0.73, PANEL_DEF_AXIS_BOTTOM, 0.82, PANEL_DEF_AXIS_HEIGHT)
 PANEL_E_AXIS_BOUNDS = (0.06, PANEL_DEF_AXIS_BOTTOM, 0.92, PANEL_DEF_AXIS_HEIGHT)
 PANEL_GH_WIDTH_RATIOS = (0.4, 0.6)
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
@@ -238,6 +238,24 @@ PANEL_G_SHARED_SCAFFOLD_OVAL_LINEWIDTH = 0.45
 PANEL_G_EMPIRICAL_COLOR = NEUTRAL_COLORS["empirical"]
 PANEL_G_EXAMPLE_MODEL_COLORS = MODEL_CLASS_COLORS
 PANEL_G_EXAMPLE_COUNT = 2
+PANEL_G_INDEPENDENT_TRACK_CENTER_Y = 0.715
+PANEL_G_SHARED_TRACK_CENTER_Y = 0.205
+PANEL_G_DARK_TRACK_CENTER_X = 0.25
+PANEL_G_LIGHT_TRACK_CENTER_X = 0.86
+PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X = 0.53
+PANEL_G_SHARED_OUTPUT_ARROW_X = (0.69, 0.74)
+PANEL_G_SCHEMATIC_INSET_ZORDER = -1.0
+PANEL_G_SCHEMATIC_TEXT_ZORDER = 5.0
+PANEL_G_FIELD_LABEL_Y = 0.98
+PANEL_G_INDEPENDENT_BASIS_LABEL_Y = 0.87
+PANEL_G_COMPONENT_LABEL_FONTSIZE = 4.3
+PANEL_G_SEGMENT_MODULATION_LABEL_GAP = 0.045
+PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH = 0.16
+PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT = 0.24
+PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X = 0.36
+PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X = 0.64
+PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM = 0.18
+PANEL_G_INDEPENDENT_BASIS_ICON_TOP = 0.58
 PANEL_H_SWAP_LIGHT_EPOCH_PAIRS = (("02_r1", "06_r3"), ("06_r3", "02_r1"))
 PANEL_H_HELDOUT_LIGHT_EPOCH = "06_r3"
 PANEL_H_TRAIN_LIGHT_EPOCH = "02_r1"
@@ -263,8 +281,16 @@ PANEL_H_SCHEMATIC_OVAL_LINEWIDTH = 0.45
 PANEL_H_SCHEMATIC_ARROW_SCALE = 6.5
 PANEL_H_SCHEMATIC_BASIS_RADIUS = 0.30
 PANEL_H_SCHEMATIC_BASIS_SPACING = 0.34
-PANEL_H_SCHEMATIC_AXIS_BOUNDS = (-0.025, 0.01, 0.34, 0.96)
-PANEL_H_DELTA_AXIS_BOUNDS = (0.32, 0.04, 0.45, 0.88)
+PANEL_H_SCHEMATIC_AXIS_BOUNDS = (-0.025, 0.38, 0.34, 0.58)
+PANEL_H_DELTA_AXIS_BOUNDS = (0.35, 0.42, 0.62, 0.52)
+PANEL_H_INDEPENDENT_TRACK_CENTER_Y = 0.765
+PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y = 0.380
+PANEL_H_SHARED_DARK_TRACK_CENTER_Y = 0.190
+PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y = 0.250
+PANEL_H_EXAMPLE_AXIS_BOUNDS = (
+    (0.18, 0.06, 0.24, 0.25),
+    (0.58, 0.06, 0.24, 0.25),
+)
 
 
 def get_dark_epoch(animal_name: str, date: str, dark_epoch: str | None = None) -> str:
@@ -1137,7 +1163,7 @@ def plot_panel_a_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel("Norm. path progression", fontsize=4.8, labelpad=1)
+    ax.set_xlabel("Norm. goal progression", fontsize=4.8, labelpad=1)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
     if show_legend:
@@ -1544,6 +1570,7 @@ def plot_epoch_path_rate_axis(
     show_ylabel: bool = False,
     show_legend: bool = False,
     show_title: bool = True,
+    show_correlation: bool = True,
 ) -> None:
     """Plot selected path-type tuning curves for one epoch."""
     trajectories = (
@@ -1568,24 +1595,25 @@ def plot_epoch_path_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel("Norm. path progression", fontsize=4.8, labelpad=1)
+    ax.set_xlabel("Norm. goal progression", fontsize=4.8, labelpad=1)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
     if show_title:
         ax.set_title(PANEL_C_EPOCH_LABELS[epoch_key], fontsize=5.3, pad=1)
     if show_legend:
         ax.legend(frameon=False, fontsize=4.2, handlelength=1.1, borderpad=0.1)
-    correlation = _compute_panel_c_rate_correlation(example, epoch_key, trajectories)
-    label = f"r={correlation:.2f}" if np.isfinite(correlation) else "r=n/a"
-    ax.text(
-        0.96,
-        0.92,
-        label,
-        ha="right",
-        va="top",
-        fontsize=4.6,
-        transform=ax.transAxes,
-    )
+    if show_correlation:
+        correlation = _compute_panel_c_rate_correlation(example, epoch_key, trajectories)
+        label = f"r={correlation:.2f}" if np.isfinite(correlation) else "r=n/a"
+        ax.text(
+            0.96,
+            0.92,
+            label,
+            ha="right",
+            va="top",
+            fontsize=4.6,
+            transform=ax.transAxes,
+        )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=4.5, length=1.5, pad=1)
@@ -1631,11 +1659,39 @@ def plot_panel_c_raster_axis(
     ax.set_yticks([])
     if show_ylabel:
         ax.set_ylabel("Trials", fontsize=4.8, labelpad=1)
+        ax.yaxis.set_label_coords(-0.32, 0.5)
     if show_title:
         ax.set_title(PANEL_C_EPOCH_LABELS[epoch_key], fontsize=5.3, pad=1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(length=1.0, width=0.35, pad=1)
+
+
+def _panel_c_raster_section_centers(
+    example: dict[str, Any],
+    trajectories: Sequence[str],
+    *,
+    epoch_key: str = "dark",
+) -> dict[str, float]:
+    """Return normalized raster-axis centers for each trajectory section."""
+    epoch_rates = example["epoch_rates"]
+    if epoch_key not in epoch_rates:
+        epoch_key = next(iter(epoch_rates))
+    raster_positions = epoch_rates[epoch_key]["raster_positions"]
+
+    section_centers: dict[str, float] = {}
+    row_index = 1
+    for trajectory_type in trajectories:
+        n_trials = len(raster_positions[trajectory_type])
+        section_centers[trajectory_type] = row_index + max(n_trials - 1, 0) / 2.0
+        row_index += n_trials
+        row_index += 1
+
+    y_limit = float(max(1, row_index))
+    return {
+        trajectory_type: section_center / y_limit
+        for trajectory_type, section_center in section_centers.items()
+    }
 
 
 def plot_panel_c_example(
@@ -1665,14 +1721,12 @@ def plot_panel_c_example(
     raster_y = PANEL_B_EXAMPLE_RASTER_Y + y_shift
     raster_height = PANEL_B_EXAMPLE_RASTER_HEIGHT
     schematic_height = 0.075
-    schematic_gap = 0.020 if len(trajectories) > 1 else 0.0
-    schematic_total_height = len(trajectories) * schematic_height + (
-        len(trajectories) - 1
-    ) * schematic_gap
-    schematic_top = raster_y + (raster_height + schematic_total_height) / 2
-    for trajectory_index, trajectory_type in enumerate(trajectories):
-        schematic_y = schematic_top - schematic_height - trajectory_index * (
-            schematic_height + schematic_gap
+    section_centers = _panel_c_raster_section_centers(example, trajectories)
+    for trajectory_type in reversed(trajectories):
+        schematic_y = (
+            raster_y
+            + raster_height * section_centers[trajectory_type]
+            - schematic_height / 2.0
         )
         schematic_ax = ax.inset_axes([0.012, schematic_y, 0.070, schematic_height])
         draw_w_track_schematic(
@@ -1718,6 +1772,7 @@ def plot_panel_c_example(
         y_max=y_max,
         show_ylabel=True,
         show_title=False,
+        show_correlation=False,
     )
     plot_epoch_path_rate_axis(
         light_ax,
@@ -1726,6 +1781,7 @@ def plot_panel_c_example(
         trajectories=trajectories,
         y_max=y_max,
         show_title=False,
+        show_correlation=False,
     )
 
 
@@ -3449,7 +3505,7 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DPP better",
+        "DGP better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -3782,11 +3838,30 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     """Draw a compact independent-basis icon."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="datalim")
     ax.axis("off")
     line_kwargs = {"color": "black", "linewidth": 1.05, "solid_capstyle": "butt"}
-    ax.plot([0.21, 0.79], [0.18, 0.18], **line_kwargs)
-    ax.plot([0.42, 0.42], [0.18, 0.86], **line_kwargs)
-    ax.plot([0.58, 0.58], [0.18, 0.86], **line_kwargs)
+    ax.plot(
+        [0.21, 0.79],
+        [PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM] * 2,
+        **line_kwargs,
+    )
+    ax.plot(
+        [PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X] * 2,
+        [
+            PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM,
+            PANEL_G_INDEPENDENT_BASIS_ICON_TOP,
+        ],
+        **line_kwargs,
+    )
+    ax.plot(
+        [PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X] * 2,
+        [
+            PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM,
+            PANEL_G_INDEPENDENT_BASIS_ICON_TOP,
+        ],
+        **line_kwargs,
+    )
 
 
 def _remove_w_track_center_label(ax: "Axes") -> None:
@@ -3814,6 +3889,10 @@ def _draw_panel_g_track(
             ax,
             trajectory_name=trajectory_name,
             fill_track_black=True,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_color="white",
+            label_fontsize=label_fontsize,
             show_basis=True,
             basis_segment_styles=_panel_g_basis_styles(
                 edge_color="black",
@@ -3826,6 +3905,7 @@ def _draw_panel_g_track(
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "independent_light":
@@ -3856,6 +3936,9 @@ def _draw_panel_g_track(
         return
 
     if track_kind == "segment_modulation":
+        selected_oval_regions = list(
+            oval_regions or ["left_arm", "center_arm", "left_center_connector"]
+        )
         draw_w_track_basis_schematic(
             ax,
             trajectory_name=trajectory_name,
@@ -3863,8 +3946,8 @@ def _draw_panel_g_track(
             stimulus_layout=stimulus_layout,
             label_fontsize=label_fontsize,
             show_large_ovals=True,
-            oval_regions=list(oval_regions or ["left_arm"]),
-            oval_styles=_panel_g_oval_styles(len(list(oval_regions or ["left_arm"]))),
+            oval_regions=selected_oval_regions,
+            oval_styles=_panel_g_oval_styles(len(selected_oval_regions)),
             arrow_color=trajectory_color,
             track_linewidth=0.55,
             trajectory_linewidth=0.78,
@@ -3988,6 +4071,10 @@ def _draw_panel_h_track(
             ax,
             trajectory_name=trajectory_name,
             fill_track_black=True,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_color="white",
+            label_fontsize=label_fontsize,
             show_basis=True,
             basis_segment_styles=_panel_h_basis_styles(
                 edge_color="black",
@@ -4000,6 +4087,7 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        _remove_w_track_center_label(ax)
         return
 
     if track_kind == "independent_light":
@@ -4077,11 +4165,27 @@ def _draw_panel_h_track(
     raise ValueError(f"Unknown Panel H track_kind {track_kind!r}.")
 
 
-def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
+def _plot_panel_g_architecture_schematic(
+    ax: "Axes",
+    *,
+    independent_track_center_y: float = PANEL_G_INDEPENDENT_TRACK_CENTER_Y,
+    shared_track_center_y: float = PANEL_G_SHARED_TRACK_CENTER_Y,
+    track_size: tuple[float, float] | None = None,
+    show_dark_track_labels: bool = False,
+    field_label_y: float = PANEL_G_FIELD_LABEL_Y,
+    model_label_x: float = 0.08,
+    model_label_fontsize: float | None = None,
+    component_label_fontsize: float = PANEL_G_COMPONENT_LABEL_FONTSIZE,
+    segment_modulation_label_y: float | None = None,
+    segment_modulation_label: str = "Segment-specific modulation",
+    segment_modulation_label_gap: float = PANEL_G_SEGMENT_MODULATION_LABEL_GAP,
+) -> None:
     """Draw the compact dark/light GLM architecture schematic."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
+    ax.patch.set_visible(False)
+
     def _bounds_from_center(
         center_x: float,
         center_y: float,
@@ -4090,83 +4194,130 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     ) -> list[float]:
         return [center_x - width / 2.0, center_y - height / 2.0, width, height]
 
-    dark_center_x = 0.25
-    light_center_x = 0.78
-    independent_basis_center_x = 0.5 * (dark_center_x + light_center_x)
-    top_center_y = 0.715
-    bottom_center_y = 0.205
-    dark_bounds = {
-        "width": 0.16,
-        "height": 0.31,
-    }
-    light_bounds = {
-        "width": 0.18,
-        "height": 0.34,
-    }
+    def _schematic_inset(bounds: list[float]) -> "Axes":
+        inset_ax = ax.inset_axes(bounds)
+        inset_ax.set_zorder(PANEL_G_SCHEMATIC_INSET_ZORDER)
+        inset_ax.patch.set_visible(False)
+        return inset_ax
 
-    ax.text(dark_center_x, 0.98, "Dark field", ha="center", va="top", fontsize=5.8)
-    ax.text(light_center_x, 0.98, "Light field", ha="center", va="top", fontsize=5.8)
+    dark_center_x = PANEL_G_DARK_TRACK_CENTER_X
+    light_center_x = PANEL_G_LIGHT_TRACK_CENTER_X
+    independent_basis_center_x = 0.5 * (dark_center_x + light_center_x)
+    default_dark_bounds = {"width": 0.16, "height": 0.31}
+    default_light_bounds = {"width": 0.18, "height": 0.34}
+    dark_bounds = (
+        {"width": track_size[0], "height": track_size[1]}
+        if track_size is not None
+        else default_dark_bounds
+    )
+    light_bounds = (
+        {"width": track_size[0], "height": track_size[1]}
+        if track_size is not None
+        else default_light_bounds
+    )
+    basis_icon_visual_center_y = 0.5 * (
+        PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM
+        + PANEL_G_INDEPENDENT_BASIS_ICON_TOP
+    )
+    basis_icon_y = (
+        independent_track_center_y
+        - PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT * basis_icon_visual_center_y
+    )
+    selected_segment_modulation_label_y = segment_modulation_label_y or min(
+        basis_icon_y - 0.035,
+        shared_track_center_y
+        + light_bounds["height"] / 2.0
+        + segment_modulation_label_gap,
+    )
+    independent_model_fontsize = 4.1 if model_label_fontsize is None else model_label_fontsize
+    shared_model_fontsize = 3.8 if model_label_fontsize is None else model_label_fontsize
+
+    text_kwargs = {"zorder": PANEL_G_SCHEMATIC_TEXT_ZORDER}
     ax.text(
-        0.08,
-        0.78,
+        dark_center_x,
+        field_label_y,
+        "Dark field",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+        **text_kwargs,
+    )
+    ax.text(
+        light_center_x,
+        field_label_y,
+        "Light field",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+        **text_kwargs,
+    )
+    ax.text(
+        model_label_x,
+        independent_track_center_y,
         "Independent\nmodel",
         ha="center",
         va="center",
-        fontsize=4.1,
+        fontsize=independent_model_fontsize,
         fontweight="bold",
+        **text_kwargs,
     )
     ax.text(
-        0.08,
-        0.26,
+        model_label_x,
+        shared_track_center_y,
         "Shared-scaffold\nmodel",
         ha="center",
         va="center",
-        fontsize=3.8,
+        fontsize=shared_model_fontsize,
         fontweight="bold",
+        **text_kwargs,
     )
     ax.text(
         independent_basis_center_x,
-        0.78,
+        PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
         "Independent\nbasis functions",
         ha="center",
         va="center",
-        fontsize=3.7,
+        fontsize=component_label_fontsize,
+        **text_kwargs,
     )
     ax.text(
-        0.55,
-        0.42,
-        "Segment-specific modulation",
+        PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X,
+        selected_segment_modulation_label_y,
+        segment_modulation_label,
         ha="center",
         va="center",
-        fontsize=3.7,
+        fontsize=component_label_fontsize,
+        **text_kwargs,
     )
 
     _draw_panel_g_track(
-        ax.inset_axes(
+        _schematic_inset(
             _bounds_from_center(
                 dark_center_x,
-                top_center_y,
+                independent_track_center_y,
                 dark_bounds["width"],
                 dark_bounds["height"],
             )
         ),
         track_kind="dark",
+        show_labels=show_dark_track_labels,
     )
-    basis_width = 0.08
     basis_ax = ax.inset_axes(
         [
-            independent_basis_center_x - basis_width / 2.0,
-            0.57,
-            basis_width,
-            0.15,
+            independent_basis_center_x - PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH / 2.0,
+            basis_icon_y,
+            PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH,
+            PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT,
         ]
     )
+    basis_ax.set_zorder(PANEL_G_SCHEMATIC_INSET_ZORDER)
+    basis_ax.patch.set_visible(False)
     _draw_panel_g_basis_icon(basis_ax)
     _draw_panel_g_track(
-        ax.inset_axes(
+        _schematic_inset(
             _bounds_from_center(
                 light_center_x,
-                top_center_y,
+                independent_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4176,26 +4327,42 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
     )
 
     _draw_panel_g_track(
-        ax.inset_axes(
+        _schematic_inset(
             _bounds_from_center(
                 dark_center_x,
-                bottom_center_y,
+                shared_track_center_y,
                 dark_bounds["width"],
                 dark_bounds["height"],
             )
         ),
         track_kind="dark",
+        show_labels=show_dark_track_labels,
     )
-    ax.text(0.39, 0.20, "+", ha="center", va="center", fontsize=8.0)
+    ax.text(
+        0.39,
+        shared_track_center_y,
+        "+",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+        **text_kwargs,
+    )
     _draw_panel_g_track(
-        ax.inset_axes([0.44, 0.03, 0.18, 0.34]),
+        _schematic_inset(
+            _bounds_from_center(
+                PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X,
+                shared_track_center_y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
         track_kind="segment_modulation",
         show_labels=True,
     )
     ax.annotate(
         "",
-        xy=(0.67, 0.21),
-        xytext=(0.62, 0.21),
+        xy=(PANEL_G_SHARED_OUTPUT_ARROW_X[1], shared_track_center_y + 0.005),
+        xytext=(PANEL_G_SHARED_OUTPUT_ARROW_X[0], shared_track_center_y + 0.005),
         xycoords=ax.transAxes,
         textcoords=ax.transAxes,
         arrowprops={
@@ -4206,12 +4373,13 @@ def _plot_panel_g_architecture_schematic(ax: "Axes") -> None:
             "shrinkA": 0,
             "shrinkB": 0,
         },
+        zorder=PANEL_G_SCHEMATIC_TEXT_ZORDER,
     )
     _draw_panel_g_track(
-        ax.inset_axes(
+        _schematic_inset(
             _bounds_from_center(
                 light_center_x,
-                bottom_center_y,
+                shared_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4305,6 +4473,19 @@ def _plot_panel_g_example_field_axis(
 def _plot_panel_g_example_columns(
     ax: "Axes",
     examples: Sequence[dict[str, Any]],
+    *,
+    field_y: float = 0.05,
+    field_height: float = 0.58,
+    icon_bounds: tuple[float, float, float, float] = (-0.045, 0.23, 0.085, 0.26),
+    xlabel_y: float = -0.145,
+    column_width: float = 0.46,
+    column_gap: float = 0.04,
+    plot_left_offset: float = 0.12,
+    field_width: float = 0.14,
+    field_gap: float = 0.035,
+    layout: str = "columns",
+    row_height: float = 0.46,
+    row_gap: float = 0.05,
 ) -> None:
     """Plot two example cells below the Panel G schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4314,16 +4495,28 @@ def _plot_panel_g_example_columns(
         ax.text(0.5, 0.5, "No GLM\nexamples", ha="center", va="center", fontsize=5.0)
         return
 
-    column_width = 0.46
-    column_gap = 0.04
-    for example_index, example in enumerate(examples[:2], start=1):
-        column_left = (example_index - 1) * (column_width + column_gap)
+    if layout not in {"columns", "rows"}:
+        raise ValueError("Panel G example layout must be 'columns' or 'rows'.")
+
+    def _plot_example_block(
+        block_ax: "Axes",
+        example: dict[str, Any],
+        example_index: int,
+        *,
+        column_left: float,
+        show_legend: bool,
+    ) -> None:
         y_max = _panel_g_examples_y_max([example])
-        plot_left = column_left + 0.12
-        field_width = 0.14
-        field_gap = 0.035
+        plot_left = column_left + plot_left_offset
         plot_center = plot_left + field_width + field_gap / 2.0
-        icon_ax = ax.inset_axes([column_left - 0.045, 0.23, 0.085, 0.26])
+        icon_ax = block_ax.inset_axes(
+            [
+                column_left + icon_bounds[0],
+                icon_bounds[1],
+                icon_bounds[2],
+                icon_bounds[3],
+            ]
+        )
         draw_w_track_schematic(
             icon_ax,
             trajectory_name=example["trajectory"],
@@ -4333,18 +4526,23 @@ def _plot_panel_g_example_columns(
             arrow_mutation_scale=5.4,
             fill_track=False,
         )
-        ax.text(
+        block_ax.text(
             plot_center,
             0.985,
             f"Example {example_index}",
             ha="center",
             va="top",
             fontsize=5.6,
-            transform=ax.transAxes,
+            transform=block_ax.transAxes,
         )
-        dark_ax = ax.inset_axes([plot_left, 0.05, field_width, 0.58])
-        light_ax = ax.inset_axes(
-            [plot_left + field_width + field_gap, 0.05, field_width, 0.58]
+        dark_ax = block_ax.inset_axes([plot_left, field_y, field_width, field_height])
+        light_ax = block_ax.inset_axes(
+            [
+                plot_left + field_width + field_gap,
+                field_y,
+                field_width,
+                field_height,
+            ]
         )
         dark_ax.set_facecolor(PANEL_C_DARK_EPOCH_BACKGROUND)
         _plot_panel_g_example_field_axis(
@@ -4361,25 +4559,87 @@ def _plot_panel_g_example_columns(
             epoch_key="light",
             y_max=y_max,
             show_title=True,
-            show_legend=example_index == 2,
+            show_legend=show_legend,
             legend_loc="center left",
             legend_bbox_to_anchor=(1.02, 0.5),
         )
-        ax.text(
+        block_ax.text(
             plot_center,
-            -0.145,
-            "Norm. path progression",
+            xlabel_y,
+            "Norm. goal progression",
             ha="center",
             va="top",
             fontsize=3.7,
-            transform=ax.transAxes,
+            transform=block_ax.transAxes,
             clip_on=False,
+        )
+
+    if layout == "columns":
+        for example_index, example in enumerate(examples[:2], start=1):
+            column_left = (example_index - 1) * (column_width + column_gap)
+            _plot_example_block(
+                ax,
+                example,
+                example_index,
+                column_left=column_left,
+                show_legend=example_index == 2,
+            )
+        return
+
+    for example_index, example in enumerate(examples[:2], start=1):
+        row_bottom = 1.0 - example_index * row_height - (example_index - 1) * row_gap
+        row_ax = ax.inset_axes([0.0, row_bottom, 1.0, row_height])
+        row_ax.set_xlim(0.0, 1.0)
+        row_ax.set_ylim(0.0, 1.0)
+        row_ax.axis("off")
+        _plot_example_block(
+            row_ax,
+            example,
+            example_index,
+            column_left=0.0,
+            show_legend=example_index == 2,
         )
 
 
 def plot_panel_g_model_architecture(
     ax: "Axes",
     examples: Sequence[dict[str, Any]] | None = None,
+    *,
+    independent_track_center_y: float = PANEL_G_INDEPENDENT_TRACK_CENTER_Y,
+    shared_track_center_y: float = PANEL_G_SHARED_TRACK_CENTER_Y,
+    schematic_height_fraction: float = PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
+    schematic_track_size: tuple[float, float] | None = None,
+    show_dark_track_labels: bool = False,
+    field_label_y: float = PANEL_G_FIELD_LABEL_Y,
+    model_label_x: float = 0.08,
+    model_label_fontsize: float | None = None,
+    component_label_fontsize: float = PANEL_G_COMPONENT_LABEL_FONTSIZE,
+    segment_modulation_label_y: float | None = None,
+    segment_modulation_label: str = "Segment-specific modulation",
+    segment_modulation_label_gap: float = PANEL_G_SEGMENT_MODULATION_LABEL_GAP,
+    example_axis_bounds: tuple[float, float, float, float] = (
+        0.0,
+        0.02,
+        1.0,
+        PANEL_G_EXAMPLE_HEIGHT_FRACTION,
+    ),
+    example_field_y: float = 0.05,
+    example_field_height: float = 0.58,
+    example_icon_bounds: tuple[float, float, float, float] = (
+        -0.045,
+        0.23,
+        0.085,
+        0.26,
+    ),
+    example_xlabel_y: float = -0.145,
+    example_column_width: float = 0.46,
+    example_column_gap: float = 0.04,
+    example_plot_left_offset: float = 0.12,
+    example_field_width: float = 0.14,
+    example_field_gap: float = 0.035,
+    example_layout: str = "columns",
+    example_row_height: float = 0.46,
+    example_row_gap: float = 0.05,
 ) -> None:
     """Plot Panel G example GLM fits and the model schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4388,21 +4648,42 @@ def plot_panel_g_model_architecture(
     schematic_ax = ax.inset_axes(
         [
             0.0,
-            1.0 - PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
+            1.0 - schematic_height_fraction,
             1.0,
-            PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
+            schematic_height_fraction,
         ]
     )
-    _plot_panel_g_architecture_schematic(schematic_ax)
-    example_ax = ax.inset_axes(
-        [
-            0.0,
-            0.02,
-            1.0,
-            PANEL_G_EXAMPLE_HEIGHT_FRACTION,
-        ]
+    _plot_panel_g_architecture_schematic(
+        schematic_ax,
+        independent_track_center_y=independent_track_center_y,
+        shared_track_center_y=shared_track_center_y,
+        track_size=schematic_track_size,
+        show_dark_track_labels=show_dark_track_labels,
+        field_label_y=field_label_y,
+        model_label_x=model_label_x,
+        model_label_fontsize=model_label_fontsize,
+        component_label_fontsize=component_label_fontsize,
+        segment_modulation_label_y=segment_modulation_label_y,
+        segment_modulation_label=segment_modulation_label,
+        segment_modulation_label_gap=segment_modulation_label_gap,
     )
-    _plot_panel_g_example_columns(example_ax, [] if examples is None else examples)
+    example_ax = ax.inset_axes(example_axis_bounds)
+    _plot_panel_g_example_columns(
+        example_ax,
+        [] if examples is None else examples,
+        field_y=example_field_y,
+        field_height=example_field_height,
+        icon_bounds=example_icon_bounds,
+        xlabel_y=example_xlabel_y,
+        column_width=example_column_width,
+        column_gap=example_column_gap,
+        plot_left_offset=example_plot_left_offset,
+        field_width=example_field_width,
+        field_gap=example_field_gap,
+        layout=example_layout,
+        row_height=example_row_height,
+        row_gap=example_row_gap,
+    )
 
 
 def _plot_panel_g_curve_schematic(ax: "Axes", *, bump: bool) -> None:
@@ -4596,7 +4877,20 @@ def plot_panel_g_dark_light_glm(
             bump_ax.set_xlabel("Norm. task progression", fontsize=4.6, labelpad=1)
 
 
-def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
+def _draw_panel_h_swap_schematic(
+    ax: "Axes",
+    *,
+    track_size: tuple[float, float] | None = None,
+    show_dark_track_labels: bool = False,
+    show_model_labels: bool = True,
+    prediction_label_fontsize: float = 3.0,
+    independent_track_center_y: float = PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
+    independent_prediction_label_y: float = 0.61,
+    segment_modulation_track_center_y: float = PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y,
+    shared_dark_track_center_y: float = PANEL_H_SHARED_DARK_TRACK_CENTER_Y,
+    shared_light_track_center_y: float = PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y,
+    shared_prediction_label_y: float = 0.02,
+) -> None:
     """Draw a scaled full-layout train/predict swap schematic for Panel H."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -4613,34 +4907,45 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     train_center_x = 0.36
     predict_center_x = 0.78
     train_predict_midpoint_x = 0.5 * (train_center_x + predict_center_x)
-    light_bounds = {"width": 0.38, "height": 0.23}
-    dark_bounds = {"width": 0.34, "height": 0.21}
+    default_light_bounds = {"width": 0.38, "height": 0.23}
+    default_dark_bounds = {"width": 0.34, "height": 0.21}
+    light_bounds = (
+        {"width": track_size[0], "height": track_size[1]}
+        if track_size is not None
+        else default_light_bounds
+    )
+    dark_bounds = (
+        {"width": track_size[0], "height": track_size[1]}
+        if track_size is not None
+        else default_dark_bounds
+    )
 
     ax.text(train_center_x, 0.98, "Train: AB", ha="center", va="top", fontsize=5.8)
     ax.text(predict_center_x, 0.98, "Predict: BA", ha="center", va="top", fontsize=5.8)
-    ax.text(
-        0.045,
-        0.72,
-        "Independent\nmodel",
-        ha="center",
-        va="center",
-        fontsize=4.1,
-        fontweight="bold",
-    )
-    ax.text(
-        0.045,
-        0.235,
-        "Shared-scaffold\nmodel",
-        ha="center",
-        va="center",
-        fontsize=3.8,
-        fontweight="bold",
-    )
+    if show_model_labels:
+        ax.text(
+            0.045,
+            0.72,
+            "Independent\nmodel",
+            ha="center",
+            va="center",
+            fontsize=4.1,
+            fontweight="bold",
+        )
+        ax.text(
+            0.045,
+            0.235,
+            "Shared-scaffold\nmodel",
+            ha="center",
+            va="center",
+            fontsize=3.8,
+            fontweight="bold",
+        )
     _draw_panel_h_track(
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.765,
+                independent_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4656,7 +4961,7 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 predict_center_x,
-                0.765,
+                independent_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4670,18 +4975,18 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     )
     ax.text(
         train_predict_midpoint_x,
-        0.61,
+        independent_prediction_label_y,
         "\"Light activity is like the other arm\nwith the same visual landmark\"",
         ha="center",
         va="top",
-        fontsize=3.0,
+        fontsize=prediction_label_fontsize,
         linespacing=0.9,
     )
     _draw_panel_h_track(
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.380,
+                segment_modulation_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4697,19 +5002,21 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
         ax.inset_axes(
             _bounds_from_center(
                 train_center_x,
-                0.190,
+                shared_dark_track_center_y,
                 dark_bounds["width"],
                 dark_bounds["height"],
             )
         ),
         track_kind="dark",
+        show_labels=show_dark_track_labels,
         trajectory_name="center_to_right",
+        stimulus_layout="stim2",
     )
     _draw_panel_h_track(
         ax.inset_axes(
             _bounds_from_center(
                 predict_center_x,
-                0.250,
+                shared_light_track_center_y,
                 light_bounds["width"],
                 light_bounds["height"],
             )
@@ -4723,11 +5030,11 @@ def _draw_panel_h_swap_schematic(ax: "Axes") -> None:
     )
     ax.text(
         train_predict_midpoint_x,
-        0.02,
+        shared_prediction_label_y,
         "\"Light activity is like the same arm\ndark activity with visual modulation\"",
         ha="center",
         va="bottom",
-        fontsize=3.0,
+        fontsize=prediction_label_fontsize,
         linespacing=0.9,
     )
 
@@ -4831,20 +5138,29 @@ def _plot_panel_h_delta_axis(
     ax.tick_params(labelsize=3.4, length=1.0, pad=0.6)
 
 
-def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
+def _plot_panel_h_delta_grid(
+    ax: "Axes",
+    swap_delta_table: Any,
+    *,
+    grid_bounds: Sequence[tuple[float, float, float, float]] | None = None,
+    xlabel_y: float = -0.055,
+) -> None:
     """Plot Panel H delta LL histograms split by trajectory."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    grid_bounds = (
-        (0.08, 0.55, 0.40, 0.31),
-        (0.56, 0.55, 0.40, 0.31),
-        (0.08, 0.12, 0.40, 0.31),
-        (0.56, 0.12, 0.40, 0.31),
+    selected_grid_bounds = (
+        grid_bounds
+        or (
+            (0.08, 0.55, 0.40, 0.31),
+            (0.56, 0.55, 0.40, 0.31),
+            (0.08, 0.12, 0.40, 0.31),
+            (0.56, 0.12, 0.40, 0.31),
+        )
     )
     for trajectory_index, (trajectory_type, bounds) in enumerate(
-        zip(PANEL_H_DELTA_TRAJECTORIES, grid_bounds, strict=True)
+        zip(PANEL_H_DELTA_TRAJECTORIES, selected_grid_bounds, strict=True)
     ):
         icon_ax = ax.inset_axes(
             [
@@ -4874,7 +5190,7 @@ def _plot_panel_h_delta_grid(ax: "Axes", swap_delta_table: Any) -> None:
 
     ax.text(
         0.53,
-        -0.055,
+        xlabel_y,
         "Δ log likelihood (bits/spike)",
         ha="center",
         va="bottom",
@@ -4904,6 +5220,11 @@ def _plot_panel_h_switched_segment_example(
     show_ylabel: bool = True,
     show_legend: bool = True,
     show_xticklabels: bool = True,
+    icon_bounds: tuple[float, float, float, float] | None = (1.05, 0.04, 0.28, 0.34),
+    legend_loc: str = "upper left",
+    legend_bbox_to_anchor: tuple[float, float] | None = (1.02, 1.02),
+    delta_label_position: tuple[float, float] | None = None,
+    delta_label_va: str | None = None,
 ) -> None:
     """Plot one empirical and model-predicted switched segment."""
     if swap_example is None:
@@ -4959,10 +5280,10 @@ def _plot_panel_h_switched_segment_example(
     delta_label = ""
     if delta_ll is not None and np.isfinite(float(delta_ll)):
         delta_label = f"ΔLL={float(delta_ll):.2f}"
-        delta_text_position = (
+        delta_text_position = delta_label_position or (
             (0.96, 0.94) if example_label == "Example 1" else (0.96, 0.06)
         )
-        delta_text_vertical_alignment = (
+        delta_text_vertical_alignment = delta_label_va or (
             "top" if example_label == "Example 1" else "bottom"
         )
         ax.text(
@@ -4978,29 +5299,32 @@ def _plot_panel_h_switched_segment_example(
         fontsize=5.0,
         pad=0.8,
     )
-    icon_ax = ax.inset_axes([1.05, 0.04, 0.28, 0.34])
-    draw_w_track_schematic(
-        icon_ax,
-        trajectory_name=swap_example["trajectory"],
-        arrow_color=PANEL_C_TRAJECTORY_COLORS[swap_example["trajectory"]],
-        track_linewidth=0.34,
-        trajectory_linewidth=0.55,
-        arrow_mutation_scale=4.8,
-        fill_track=False,
-    )
+    if icon_bounds is not None:
+        icon_ax = ax.inset_axes(icon_bounds)
+        draw_w_track_schematic(
+            icon_ax,
+            trajectory_name=swap_example["trajectory"],
+            arrow_color=PANEL_C_TRAJECTORY_COLORS[swap_example["trajectory"]],
+            track_linewidth=0.34,
+            trajectory_linewidth=0.55,
+            arrow_mutation_scale=4.8,
+            fill_track=False,
+        )
     if show_xlabel:
         ax.set_xlabel("Switched segment", fontsize=4.5, labelpad=0.8)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.5, labelpad=0.8)
     if show_legend:
-        ax.legend(
-            frameon=False,
-            fontsize=3.4,
-            handlelength=0.9,
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.02),
-            borderaxespad=0.0,
-        )
+        legend_kwargs: dict[str, Any] = {
+            "frameon": False,
+            "fontsize": 3.4,
+            "handlelength": 0.9,
+            "loc": legend_loc,
+            "borderaxespad": 0.0,
+        }
+        if legend_bbox_to_anchor is not None:
+            legend_kwargs["bbox_to_anchor"] = legend_bbox_to_anchor
+        ax.legend(**legend_kwargs)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=4.1, length=1.2, pad=0.7)
@@ -5010,30 +5334,93 @@ def plot_panel_h_swap_delta(
     ax: "Axes",
     swap_delta_table: Any,
     swap_examples: dict[str, Any] | Sequence[dict[str, Any]] | None = None,
+    *,
+    schematic_axis_bounds: tuple[float, float, float, float] = PANEL_H_SCHEMATIC_AXIS_BOUNDS,
+    delta_axis_bounds: tuple[float, float, float, float] = PANEL_H_DELTA_AXIS_BOUNDS,
+    example_axis_bounds: Sequence[tuple[float, float, float, float]] = (
+        PANEL_H_EXAMPLE_AXIS_BOUNDS
+    ),
+    schematic_track_size: tuple[float, float] | None = None,
+    show_dark_track_labels: bool = False,
+    show_model_labels: bool = True,
+    prediction_label_fontsize: float = 3.0,
+    independent_track_center_y: float = PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
+    independent_prediction_label_y: float = 0.61,
+    segment_modulation_track_center_y: float = PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y,
+    shared_dark_track_center_y: float = PANEL_H_SHARED_DARK_TRACK_CENTER_Y,
+    shared_light_track_center_y: float = PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y,
+    shared_prediction_label_y: float = 0.02,
+    delta_grid_bounds: Sequence[tuple[float, float, float, float]] | None = None,
+    delta_xlabel_y: float = -0.055,
+    example_delta_label_positions: Sequence[tuple[float, float] | None] | None = None,
+    example_delta_label_vertical_alignments: Sequence[str | None] | None = None,
+    example_icon_bounds: tuple[float, float, float, float] | None = (
+        -0.36,
+        0.04,
+        0.28,
+        0.34,
+    ),
 ) -> None:
     """Plot the Panel H swap schematic, delta LL, and switched-segment examples."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    schematic_ax = ax.inset_axes(PANEL_H_SCHEMATIC_AXIS_BOUNDS)
-    delta_ax = ax.inset_axes(PANEL_H_DELTA_AXIS_BOUNDS)
-    example_axes = [
-        ax.inset_axes([0.82, 0.56, 0.17, 0.34]),
-        ax.inset_axes([0.82, 0.11, 0.17, 0.34]),
-    ]
-    _draw_panel_h_swap_schematic(schematic_ax)
-    _plot_panel_h_delta_grid(delta_ax, swap_delta_table)
+    schematic_ax = ax.inset_axes(schematic_axis_bounds)
+    delta_ax = ax.inset_axes(delta_axis_bounds)
+    example_axes = [ax.inset_axes(bounds) for bounds in example_axis_bounds]
+    _draw_panel_h_swap_schematic(
+        schematic_ax,
+        track_size=schematic_track_size,
+        show_dark_track_labels=show_dark_track_labels,
+        show_model_labels=show_model_labels,
+        prediction_label_fontsize=prediction_label_fontsize,
+        independent_track_center_y=independent_track_center_y,
+        independent_prediction_label_y=independent_prediction_label_y,
+        segment_modulation_track_center_y=segment_modulation_track_center_y,
+        shared_dark_track_center_y=shared_dark_track_center_y,
+        shared_light_track_center_y=shared_light_track_center_y,
+        shared_prediction_label_y=shared_prediction_label_y,
+    )
+    _plot_panel_h_delta_grid(
+        delta_ax,
+        swap_delta_table,
+        grid_bounds=delta_grid_bounds,
+        xlabel_y=delta_xlabel_y,
+    )
+    delta_label_positions = example_delta_label_positions or (
+        (0.96, 0.94),
+        (0.96, 0.94),
+    )
+    delta_label_vertical_alignments = example_delta_label_vertical_alignments or (
+        "top",
+        "top",
+    )
     examples = _coerce_panel_h_swap_examples(swap_examples)[:2]
     for example_index, example_ax in enumerate(example_axes):
         example = examples[example_index] if example_index < len(examples) else None
+        delta_label_position = (
+            delta_label_positions[example_index]
+            if example_index < len(delta_label_positions)
+            else None
+        )
+        delta_label_vertical_alignment = (
+            delta_label_vertical_alignments[example_index]
+            if example_index < len(delta_label_vertical_alignments)
+            else None
+        )
         _plot_panel_h_switched_segment_example(
             example_ax,
             example,
             example_label=f"Example {example_index + 1}",
-            show_xlabel=example_index == 1,
+            show_xlabel=True,
             show_ylabel=True,
-            show_legend=example_index == 0,
-            show_xticklabels=example_index == 1,
+            show_legend=example_index == 1,
+            show_xticklabels=True,
+            icon_bounds=example_icon_bounds,
+            legend_loc="center left",
+            legend_bbox_to_anchor=(1.02, 0.5),
+            delta_label_position=delta_label_position,
+            delta_label_va=delta_label_vertical_alignment,
         )
 
 
@@ -5219,7 +5606,7 @@ def make_figure_3(
     panel_c_axis.text(
         0.5,
         PANEL_B_TITLE_Y,
-        "Example DPP cells in\ndifferent visual conditions",
+        "Example DGP cells in dark and light",
         ha="center",
         va="top",
         fontsize=7.2,

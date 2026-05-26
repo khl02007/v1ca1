@@ -159,12 +159,12 @@ STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
-        "DPP - absolute place",
+        "DGP - absolute place",
         "delta_bits_generalized_place_vs_tp",
     ),
     (
         "dpp_vs_absolute_task_progression",
-        "DPP - absolute task progression",
+        "DGP - distance-to-reward",
         "delta_bits_gtp_vs_tp",
     ),
 )
@@ -2570,7 +2570,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     ax.text(
         0.68,
         0.97,
-        "Motor+DPP better",
+        "Motor+DGP better",
         ha="left",
         va="top",
         fontsize=5.5,
@@ -2680,7 +2680,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.03,
         0.82,
-        "Abs task progression\nbetter",
+        "Distance-to-reward\nbetter",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -2690,7 +2690,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DPP better",
+        "DGP better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -2698,8 +2698,8 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     summary_label_by_comparison = {
-        "dpp_vs_absolute_place": "DPP > abs place",
-        "dpp_vs_absolute_task_progression": "DPP > abs task prog.",
+        "dpp_vs_absolute_place": "DGP > abs place",
+        "dpp_vs_absolute_task_progression": "DGP > dist.-to-reward",
     }
     for row_index, (comparison, summary, color) in enumerate(summary_rows):
         ax.text(
@@ -2970,7 +2970,7 @@ def plot_panel_e_rate_axis(
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
     ax.set_xlabel(
-        "Nom. path progression",
+        "Nom. goal progression",
         fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
         labelpad=1,
     )
@@ -3177,7 +3177,7 @@ def make_figure_1(
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
     plot_panel_e_examples(panel_d_axis, panel_e_examples)
-    panel_d_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
+    panel_d_axis.set_title("Example dark DGP coding cells", fontsize=8, pad=2)
     label_axis(panel_d_axis, "B", x=-0.04, y=1.02)
 
     spacer_axis = fig.add_subplot(outer_grid[2])

@@ -13,11 +13,18 @@ from v1ca1.helper.session import DEFAULT_DATA_ROOT, get_analysis_path
 from v1ca1.paper_figures.datasets import (
     DatasetId,
     get_processed_datasets,
+    normalize_dataset_id,
     normalize_figure_epoch_dataset_id,
 )
 from v1ca1.paper_figures.figure_2 import (
+    DEFAULT_XCORR_BIN_SIZE_S,
+    DEFAULT_XCORR_DATASET,
+    DEFAULT_XCORR_DISPLAY_VMAX,
+    DEFAULT_XCORR_MAX_LAG_S,
+    DEFAULT_XCORR_STATE,
+    DEFAULT_XCORR_TOP_CA1_UNITS,
     DEFAULT_RIDGE_STRENGTH,
-    DEFAULT_RIPPLE_SELECTION,
+    DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
     DEFAULT_RIPPLE_WINDOW_S,
     FIGURE_FORMATS,
     MODEL_COLOR,
@@ -25,9 +32,14 @@ from v1ca1.paper_figures.figure_2 import (
     PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S,
     PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S,
     get_ripple_glm_model_window_path,
+    load_top_ca1_xcorr_panel_data,
     load_glm_dark_activity_devexp_tables,
     load_glm_epoch_summary_tables,
+    load_glm_source_predictor_comparison_tables,
     parse_dataset_id,
+    plot_glm_behavior_association_panel,
+    plot_glm_source_predictor_comparison_panel,
+    plot_top_ca1_xcorr_panel,
 )
 from v1ca1.paper_figures.style import (
     EPOCH_TYPE_COLORS,
@@ -45,14 +57,23 @@ DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
 DEFAULT_OUTPUT_NAME = "supplementary_figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = 165.0
+DEFAULT_XCORR_PANEL_HEIGHT_MM = 54.0
+DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM = 48.0
 DEFAULT_SECTION_HEADER_HEIGHT_MM = 8.0
 DEFAULT_DATASET_ROW_HEIGHT_MM = 13.0
 DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM = 20.0
+DEFAULT_HORIZONTAL_PER_ANIMAL_PANEL_HEIGHT_MM = 52.0
+DEFAULT_BEHAVIOR_ASSOCIATION_ROW_HEIGHT_MM = 22.0
+DEFAULT_BEHAVIOR_ASSOCIATION_HEADER_HEIGHT_MM = 8.0
 DEFAULT_SECTION_GAP_MM = 5.0
 RIPPLE_SELECTION_MODE_CHOICES = ("allripples", "single")
-DEFAULT_RIPPLE_SELECTION_MODES = (DEFAULT_RIPPLE_SELECTION,)
+DEFAULT_PER_ANIMAL_RIPPLE_SELECTION = DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION
+DEFAULT_RIPPLE_SELECTION_MODES = (DEFAULT_PER_ANIMAL_RIPPLE_SELECTION,)
+DEFAULT_SOURCE_COMPARISON_RIPPLE_SELECTION = DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION
 DEFAULT_EPOCH_TYPES = ("light", "dark", "sleep")
-DEFAULT_PER_ANIMAL_EPOCH_TYPES = ("light", "sleep")
+DEFAULT_PER_ANIMAL_EPOCH_TYPES = ("light",)
+DEFAULT_DARK_ACTIVITY_EPOCH_TYPES = ("light", "sleep")
+DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE = 0.05
 EPOCH_TYPE_LABELS = {
     "light": "Light",
     "dark": "Dark",
@@ -337,6 +358,7 @@ def plot_glm_scatter_axis(
     y_limit: float,
     show_yticklabels: bool,
     show_xticklabels: bool,
+    significance_p_value: float = SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE,
 ) -> None:
     """Plot one Figure-2C-style deviance/significance scatter."""
     values = np.asarray(summary_table["ripple_devexp_mean"], dtype=float)
@@ -345,7 +367,7 @@ def plot_glm_scatter_axis(
 
     ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
     ax.axhline(
-        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE),
+        -np.log10(significance_p_value),
         color="0.25",
         linestyle="--",
         linewidth=0.55,
@@ -355,7 +377,7 @@ def plot_glm_scatter_axis(
         finite_values = values[valid]
         finite_p_values = p_values[valid]
         neglog_p = -np.log10(np.clip(finite_p_values, 1e-12, 1.0))
-        significant = finite_p_values < SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE
+        significant = finite_p_values < significance_p_value
         if np.any(~significant):
             ax.scatter(
                 finite_values[~significant],
@@ -406,6 +428,86 @@ def plot_glm_scatter_axis(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=4.2, length=1.3, pad=1)
+
+
+def plot_glm_devexp_box_axis(
+    ax: "Axes",
+    summary_table: Any,
+    *,
+    color: str,
+    x_limits: tuple[float, float],
+    show_yticklabels: bool,
+    show_xticklabels: bool,
+    significance_p_value: float,
+) -> None:
+    """Plot horizontal deviance boxplots split by shuffle significance."""
+    values = np.asarray(summary_table["ripple_devexp_mean"], dtype=float)
+    p_values = np.asarray(summary_table["ripple_devexp_p_value"], dtype=float)
+    valid = np.isfinite(values) & np.isfinite(p_values)
+
+    if np.any(valid):
+        finite_values = values[valid]
+        finite_p_values = p_values[valid]
+        nonsig_values = finite_values[finite_p_values >= significance_p_value]
+        sig_values = finite_values[finite_p_values < significance_p_value]
+        box_data = []
+        box_positions = []
+        box_colors = []
+        if nonsig_values.size:
+            box_data.append(nonsig_values)
+            box_positions.append(1)
+            box_colors.append(NONSIGNIFICANT_COLOR)
+        if sig_values.size:
+            box_data.append(sig_values)
+            box_positions.append(2)
+            box_colors.append(color)
+        if box_data:
+            box_artists = ax.boxplot(
+                box_data,
+                orientation="horizontal",
+                positions=box_positions,
+                widths=0.48,
+                patch_artist=True,
+                whis=(0, 100),
+                showfliers=False,
+                medianprops={"color": "black", "linewidth": 0.55},
+                whiskerprops={"color": "0.25", "linewidth": 0.45},
+                capprops={"color": "0.25", "linewidth": 0.45},
+            )
+            for patch, box_color in zip(
+                box_artists["boxes"],
+                box_colors,
+                strict=False,
+            ):
+                patch.set_facecolor(box_color)
+                patch.set_edgecolor("0.25")
+                patch.set_alpha(0.72)
+                patch.set_linewidth(0.45)
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No values",
+            ha="center",
+            va="center",
+            fontsize=4.8,
+            transform=ax.transAxes,
+        )
+
+    ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
+    ax.set_xlim(*x_limits)
+    ax.set_ylim(0.45, 2.55)
+    ax.set_yticks([1, 2])
+    if show_yticklabels:
+        ax.set_yticklabels(["n.s.", f"p<{significance_p_value:g}"], fontsize=4.8)
+    else:
+        ax.set_yticklabels([])
+    if not show_xticklabels:
+        ax.set_xticklabels([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=4.2, length=1.3, pad=1)
+    ax.tick_params(axis="y", length=0, pad=1)
 
 
 def plot_selection_scatter_grid(
@@ -576,7 +678,7 @@ def resolve_primary_ripple_selection(
 ) -> str:
     """Return the ripple-selection mode used by the per-animal scatter figure."""
     if not ripple_selection_modes:
-        return DEFAULT_RIPPLE_SELECTION
+        return DEFAULT_PER_ANIMAL_RIPPLE_SELECTION
     return str(tuple(ripple_selection_modes)[0])
 
 
@@ -602,14 +704,15 @@ def load_per_animal_glm_scatter_payload(
     datasets: Sequence[DatasetId],
     *,
     epoch_types: Sequence[str] = DEFAULT_PER_ANIMAL_EPOCH_TYPES,
-    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ripple_selection: str = DEFAULT_PER_ANIMAL_RIPPLE_SELECTION,
     ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
     ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
 ) -> dict[str, Any]:
-    """Load Figure-2C-style GLM summaries for per-animal run/sleep scatter panels."""
+    """Load Figure-2C-style GLM summaries for per-animal scatter panels."""
     epoch_tables = load_glm_epoch_summary_tables(
         data_root,
         datasets,
+        epoch_types=epoch_types,
         ripple_window_s=ripple_window_s,
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
@@ -653,7 +756,11 @@ def subset_glm_table_for_animal_date(table: Any, animal_name: str, date: str) ->
     return table
 
 
-def get_per_animal_neglog_p_limit(payload: dict[str, Any]) -> float:
+def get_per_animal_neglog_p_limit(
+    payload: dict[str, Any],
+    *,
+    significance_p_value: float = DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
+) -> float:
     """Return a shared y-axis maximum for per-animal GLM scatter panels."""
     neglog_values = []
     for epoch_payload in payload.get("epoch_tables", []):
@@ -665,9 +772,9 @@ def get_per_animal_neglog_p_limit(payload: dict[str, Any]) -> float:
         if p_values.size:
             neglog_values.append(-np.log10(np.clip(p_values, 1e-12, 1.0)))
     if not neglog_values:
-        return -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35
+        return -np.log10(significance_p_value) + 0.35
     return max(
-        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35,
+        -np.log10(significance_p_value) + 0.35,
         float(np.nanmax(np.concatenate(neglog_values))) + 0.35,
     )
 
@@ -717,8 +824,9 @@ def plot_per_animal_glm_scatter_grid(
     *,
     x_limits: tuple[float, float] = (-0.05, 0.40),
     y_limit: float | None = None,
+    significance_p_value: float = DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
 ) -> list[Any]:
-    """Plot Figure 2C's run/sleep GLM scatter on separate rows for each animal."""
+    """Plot Figure-2C-style GLM scatter on separate rows for each animal."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -737,76 +845,132 @@ def plot_per_animal_glm_scatter_grid(
         )
         return []
 
-    y_limit = get_per_animal_neglog_p_limit(payload) if y_limit is None else y_limit
-    n_rows = len(animal_date_keys)
-    n_columns = len(epoch_tables)
-    grid_height = PANEL_GRID_TOP - PANEL_GRID_BOTTOM
-    row_gap = min(DATASET_ROW_GAP, grid_height * 0.18 / max(n_rows - 1, 1))
-    row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
-    grid_width = PANEL_GRID_RIGHT - PANEL_GRID_LEFT
-    column_width = (grid_width - EPOCH_COLUMN_GAP * (n_columns - 1)) / n_columns
-
-    ax.text(
-        PANEL_GRID_LEFT,
-        0.98,
-        f"Figure 2C scatter by animal ({payload['ripple_selection']})",
-        ha="left",
-        va="top",
-        fontsize=7.0,
-        fontweight="bold",
-        transform=ax.transAxes,
+    y_limit = (
+        get_per_animal_neglog_p_limit(
+            payload,
+            significance_p_value=significance_p_value,
+        )
+        if y_limit is None
+        else y_limit
     )
+    grid_bottom = PANEL_GRID_BOTTOM
+    grid_top = PANEL_GRID_TOP
+    x_label_y = 0.015
+    grid_height = grid_top - grid_bottom
+    grid_width = PANEL_GRID_RIGHT - PANEL_GRID_LEFT
 
     child_axes = []
-    for row_index, (animal_name, date) in enumerate(animal_date_keys):
-        row_bottom = (
-            PANEL_GRID_BOTTOM
-            + grid_height
-            - (row_index + 1) * row_height
-            - row_index * row_gap
-        )
-        ax.text(
-            0.01,
-            row_bottom + 0.5 * row_height,
-            f"{animal_name}\n{date}",
-            ha="left",
-            va="center",
-            fontsize=5.0,
-            transform=ax.transAxes,
-        )
-        for column_index, epoch_payload in enumerate(epoch_tables):
+    if len(epoch_tables) == 1:
+        epoch_payload = epoch_tables[0]
+        epoch_type = str(epoch_payload["epoch_type"])
+        scatter_bottom = 0.42
+        scatter_top = 0.76
+        box_bottom = 0.15
+        box_top = 0.30
+        grid_bottom = scatter_bottom
+        grid_top = scatter_top
+        x_label_y = 0.055
+        grid_height = grid_top - grid_bottom
+        n_columns = len(animal_date_keys)
+        column_width = (grid_width - EPOCH_COLUMN_GAP * (n_columns - 1)) / n_columns
+        row_bottom = scatter_bottom
+        row_height = grid_height
+        for column_index, (animal_name, date) in enumerate(animal_date_keys):
             column_left = PANEL_GRID_LEFT + column_index * (
                 column_width + EPOCH_COLUMN_GAP
             )
             scatter_ax = ax.inset_axes(
                 [column_left, row_bottom, column_width, row_height]
             )
-            epoch_type = str(epoch_payload["epoch_type"])
             table = subset_glm_table_for_animal_date(
                 epoch_payload["summary_table"],
                 animal_name,
                 date,
             )
-            title = (
-                PER_ANIMAL_EPOCH_LABELS.get(epoch_type, EPOCH_TYPE_LABELS.get(epoch_type, epoch_type))
-                if row_index == 0
-                else ""
-            )
             plot_glm_scatter_axis(
                 scatter_ax,
                 table,
-                title=title,
+                title=animal_name,
                 color=get_epoch_type_color(epoch_type),
                 x_limits=x_limits,
                 y_limit=float(y_limit),
                 show_yticklabels=column_index == 0,
-                show_xticklabels=row_index == n_rows - 1,
+                show_xticklabels=True,
+                significance_p_value=significance_p_value,
+            )
+            box_ax = ax.inset_axes(
+                [column_left, box_bottom, column_width, box_top - box_bottom]
+            )
+            plot_glm_devexp_box_axis(
+                box_ax,
+                table,
+                color=get_epoch_type_color(epoch_type),
+                x_limits=x_limits,
+                show_yticklabels=column_index == 0,
+                show_xticklabels=True,
+                significance_p_value=significance_p_value,
             )
             child_axes.append(scatter_ax)
+    else:
+        n_rows = len(animal_date_keys)
+        n_columns = len(epoch_tables)
+        row_gap = min(DATASET_ROW_GAP, grid_height * 0.18 / max(n_rows - 1, 1))
+        row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
+        column_width = (grid_width - EPOCH_COLUMN_GAP * (n_columns - 1)) / n_columns
+
+        for row_index, (animal_name, date) in enumerate(animal_date_keys):
+            row_bottom = (
+                PANEL_GRID_BOTTOM
+                + grid_height
+                - (row_index + 1) * row_height
+                - row_index * row_gap
+            )
+            ax.text(
+                0.01,
+                row_bottom + 0.5 * row_height,
+                f"{animal_name}\n{date}",
+                ha="left",
+                va="center",
+                fontsize=5.0,
+                transform=ax.transAxes,
+            )
+            for column_index, epoch_payload in enumerate(epoch_tables):
+                column_left = PANEL_GRID_LEFT + column_index * (
+                    column_width + EPOCH_COLUMN_GAP
+                )
+                scatter_ax = ax.inset_axes(
+                    [column_left, row_bottom, column_width, row_height]
+                )
+                epoch_type = str(epoch_payload["epoch_type"])
+                table = subset_glm_table_for_animal_date(
+                    epoch_payload["summary_table"],
+                    animal_name,
+                    date,
+                )
+                title = (
+                    PER_ANIMAL_EPOCH_LABELS.get(
+                        epoch_type,
+                        EPOCH_TYPE_LABELS.get(epoch_type, epoch_type),
+                    )
+                    if row_index == 0
+                    else ""
+                )
+                plot_glm_scatter_axis(
+                    scatter_ax,
+                    table,
+                    title=title,
+                    color=get_epoch_type_color(epoch_type),
+                    x_limits=x_limits,
+                    y_limit=float(y_limit),
+                    show_yticklabels=column_index == 0,
+                    show_xticklabels=row_index == n_rows - 1,
+                    significance_p_value=significance_p_value,
+                )
+                child_axes.append(scatter_ax)
 
     ax.text(
         0.5 * (PANEL_GRID_LEFT + PANEL_GRID_RIGHT),
-        0.015,
+        x_label_y,
         "Ripple deviance explained",
         ha="center",
         va="bottom",
@@ -815,7 +979,7 @@ def plot_per_animal_glm_scatter_grid(
     )
     ax.text(
         PANEL_GRID_LEFT - 0.065,
-        0.5 * (PANEL_GRID_BOTTOM + PANEL_GRID_TOP),
+        0.5 * (grid_bottom + grid_top),
         "-log10 shuffle p",
         ha="center",
         va="center",
@@ -830,7 +994,7 @@ def plot_dark_firing_rate_devexp_grid(
     ax: "Axes",
     payload: dict[str, Any],
     *,
-    epoch_types: Sequence[str] = DEFAULT_PER_ANIMAL_EPOCH_TYPES,
+    epoch_types: Sequence[str] = DEFAULT_DARK_ACTIVITY_EPOCH_TYPES,
 ) -> list[Any]:
     """Plot dark-epoch movement firing rate versus ripple deviance explained."""
     ax.set_xlim(0.0, 1.0)
@@ -997,11 +1161,91 @@ def plot_dark_firing_rate_devexp_grid(
     return child_axes
 
 
+def plot_per_animal_behavior_association_grid(
+    ax: "Axes",
+    payload: dict[str, Any],
+) -> list[Any]:
+    """Plot Figure-2D-style behavior association panels on per-animal rows."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    table = payload.get("devexp_table")
+    animal_date_keys = iter_dark_activity_dataset_keys(payload)
+    if table is None or len(table) == 0 or not animal_date_keys:
+        ax.text(
+            0.5,
+            0.5,
+            "No behavior-association data",
+            ha="center",
+            va="center",
+            fontsize=6.0,
+            transform=ax.transAxes,
+        )
+        return []
+
+    n_rows = len(animal_date_keys)
+    grid_bottom = PANEL_GRID_BOTTOM
+    grid_top = 0.88
+    grid_height = grid_top - grid_bottom
+    row_gap = min(DATASET_ROW_GAP, grid_height * 0.18 / max(n_rows - 1, 1))
+    row_height = (grid_height - row_gap * (n_rows - 1)) / n_rows
+    row_axes = []
+    for row_index, (animal_name, date) in enumerate(animal_date_keys):
+        row_bottom = (
+            grid_bottom
+            + grid_height
+            - (row_index + 1) * row_height
+            - row_index * row_gap
+        )
+        ax.text(
+            0.01,
+            row_bottom + 0.5 * row_height,
+            animal_name,
+            ha="left",
+            va="center",
+            fontsize=5.4,
+            transform=ax.transAxes,
+        )
+        row_ax = ax.inset_axes(
+            [
+                PANEL_GRID_LEFT,
+                row_bottom,
+                PANEL_GRID_RIGHT - PANEL_GRID_LEFT,
+                row_height,
+            ]
+        )
+        row_table = table[
+            (table["animal_name"].astype(str) == animal_name)
+            & (table["date"].astype(str) == date)
+        ]
+        row_payload = {
+            **payload,
+            "devexp_table": row_table,
+        }
+        plot_glm_behavior_association_panel(
+            row_ax,
+            row_payload,
+            show_note=False,
+        )
+        if row_index != n_rows - 1:
+            for child_ax in row_ax.child_axes:
+                child_ax.set_xlabel("")
+        row_axes.append(row_ax)
+    return row_axes
+
+
 def make_supplementary_figure_2(
     *,
     data_root: Path,
     output_path: Path,
     datasets: Sequence[DatasetId],
+    xcorr_dataset: DatasetId,
+    xcorr_state: str,
+    xcorr_top_ca1_units: int,
+    xcorr_bin_size_s: float,
+    xcorr_max_lag_s: float,
+    xcorr_display_vmax: float,
     ripple_selection_modes: Sequence[str],
     ripple_window_s: float,
     ridge_strength: float,
@@ -1011,69 +1255,133 @@ def make_supplementary_figure_2(
     import matplotlib.pyplot as plt
 
     ripple_selection = resolve_primary_ripple_selection(ripple_selection_modes)
+    xcorr_animal, xcorr_date, xcorr_epoch = normalize_dataset_id(xcorr_dataset)
+    xcorr_payload = load_top_ca1_xcorr_panel_data(
+        data_root,
+        animal_name=xcorr_animal,
+        date=xcorr_date,
+        epoch=xcorr_epoch,
+        state=xcorr_state,
+        top_n_ca1_units=xcorr_top_ca1_units,
+        bin_size_s=xcorr_bin_size_s,
+        max_lag_s=xcorr_max_lag_s,
+        display_vmax=xcorr_display_vmax,
+    )
     payload = load_per_animal_glm_scatter_payload(
         data_root,
         datasets,
+        epoch_types=DEFAULT_PER_ANIMAL_EPOCH_TYPES,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ridge_strength=ridge_strength,
     )
-    dark_activity_payload = load_glm_dark_activity_devexp_tables(
+    source_comparison_payload = load_glm_source_predictor_comparison_tables(
+        data_root,
+        datasets,
+        ripple_selection=DEFAULT_SOURCE_COMPARISON_RIPPLE_SELECTION,
+        ripple_window_s=ripple_window_s,
+        ridge_strength=ridge_strength,
+    )
+    behavior_payload = load_glm_dark_activity_devexp_tables(
         data_root,
         datasets,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ridge_strength=ridge_strength,
-        epoch_types=DEFAULT_PER_ANIMAL_EPOCH_TYPES,
     )
-    y_limit = get_per_animal_neglog_p_limit(payload)
+    y_limit = get_per_animal_neglog_p_limit(
+        payload,
+        significance_p_value=DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
+    )
 
     apply_paper_style()
-    n_animal_rows = max(
-        len(iter_per_animal_glm_keys(payload)),
-        len(iter_dark_activity_dataset_keys(dark_activity_payload)),
-        len(datasets),
-        1,
+    if len(payload.get("epoch_tables", [])) == 1:
+        section_height_mm = DEFAULT_HORIZONTAL_PER_ANIMAL_PANEL_HEIGHT_MM
+    else:
+        n_dataset_rows = max(len(iter_per_animal_glm_keys(payload)), len(datasets), 1)
+        section_height_mm = (
+            DEFAULT_SECTION_HEADER_HEIGHT_MM
+            + DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM * n_dataset_rows
+        )
+    behavior_height_mm = (
+        DEFAULT_BEHAVIOR_ASSOCIATION_HEADER_HEIGHT_MM
+        + DEFAULT_BEHAVIOR_ASSOCIATION_ROW_HEIGHT_MM
+        * max(len(iter_dark_activity_dataset_keys(behavior_payload)), len(datasets), 1)
     )
-    section_height_mm = (
-        DEFAULT_SECTION_HEADER_HEIGHT_MM
-        + DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM * n_animal_rows
+    figure_height_mm = (
+        DEFAULT_XCORR_PANEL_HEIGHT_MM
+        + section_height_mm
+        + DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM
+        + behavior_height_mm
+        + 3.0 * DEFAULT_SECTION_GAP_MM
     )
-    figure_height_mm = 2.0 * section_height_mm + DEFAULT_SECTION_GAP_MM
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, figure_height_mm),
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=3,
+        nrows=7,
         ncols=1,
         height_ratios=[
-            section_height_mm,
+            DEFAULT_XCORR_PANEL_HEIGHT_MM,
             DEFAULT_SECTION_GAP_MM,
             section_height_mm,
+            DEFAULT_SECTION_GAP_MM,
+            DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM,
+            DEFAULT_SECTION_GAP_MM,
+            behavior_height_mm,
         ],
     )
-    section_ax = fig.add_subplot(outer_grid[0])
+    xcorr_ax = fig.add_subplot(outer_grid[0])
+    plot_top_ca1_xcorr_panel(xcorr_ax, xcorr_payload)
+    xcorr_ax.set_title("CA1-V1 cross correlation during ripples", fontsize=8, pad=2)
+    label_axis(xcorr_ax, "A", x=-0.01, y=1.01)
+    top_spacer_ax = fig.add_subplot(outer_grid[1])
+    top_spacer_ax.axis("off")
+    section_ax = fig.add_subplot(outer_grid[2])
     plot_per_animal_glm_scatter_grid(
         section_ax,
         payload,
         y_limit=y_limit,
+        significance_p_value=DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
     )
-    label_axis(section_ax, "A", x=-0.01, y=1.01)
-    spacer_ax = fig.add_subplot(outer_grid[1])
+    label_axis(section_ax, "B", x=-0.01, y=1.01)
+    spacer_ax = fig.add_subplot(outer_grid[3])
     spacer_ax.axis("off")
-    dark_activity_ax = fig.add_subplot(outer_grid[2])
-    plot_dark_firing_rate_devexp_grid(
-        dark_activity_ax,
-        dark_activity_payload,
+    source_comparison_ax = fig.add_subplot(outer_grid[4])
+    plot_glm_source_predictor_comparison_panel(
+        source_comparison_ax,
+        source_comparison_payload,
+        include_per_animal=True,
+        include_pooled=False,
     )
-    label_axis(dark_activity_ax, "B", x=-0.01, y=1.01)
+    source_comparison_ax.set_title(
+        "Per-animal full CA1 spike vector vs mean CA1 activity",
+        fontsize=8,
+        pad=2,
+    )
+    label_axis(source_comparison_ax, "C", x=-0.01, y=1.01)
+    lower_spacer_ax = fig.add_subplot(outer_grid[5])
+    lower_spacer_ax.axis("off")
+    behavior_ax = fig.add_subplot(outer_grid[6])
+    plot_per_animal_behavior_association_grid(
+        behavior_ax,
+        behavior_payload,
+    )
+    label_axis(behavior_ax, "D", x=-0.01, y=1.01)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
-    for missing in dark_activity_payload["missing_artifacts"]:
+    for missing in source_comparison_payload["missing_artifacts"]:
         print(
-            "Supplementary Figure 2 missing "
+            "Supplementary Figure 2 source-comparison missing "
+            f"{missing['artifact']} for {missing['animal_name']} "
+            f"{missing['date']} {missing['epoch']} "
+            f"({missing['source_predictor_mode']}): {missing['path']}"
+        )
+    for missing in behavior_payload["missing_artifacts"]:
+        print(
+            "Supplementary Figure 2 behavior-association missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing.get('path', '')}"
         )
@@ -1120,6 +1428,47 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--xcorr-dataset",
+        type=parse_dataset_id,
+        default=DEFAULT_XCORR_DATASET,
+        help=(
+            "Screen-xcorr data set for panel A. Format: animal:date:epoch. "
+            "Default: L15:20241121:02_r1."
+        ),
+    )
+    parser.add_argument(
+        "--xcorr-state",
+        default=DEFAULT_XCORR_STATE,
+        help=f"Screen-xcorr state for panel A. Default: {DEFAULT_XCORR_STATE}.",
+    )
+    parser.add_argument(
+        "--xcorr-top-ca1-units",
+        type=int,
+        default=DEFAULT_XCORR_TOP_CA1_UNITS,
+        help=(
+            "Number of top-ranked CA1 units to show in panel A. "
+            f"Default: {DEFAULT_XCORR_TOP_CA1_UNITS}."
+        ),
+    )
+    parser.add_argument(
+        "--xcorr-bin-size-s",
+        type=float,
+        default=DEFAULT_XCORR_BIN_SIZE_S,
+        help=f"Screen-xcorr bin size in seconds. Default: {DEFAULT_XCORR_BIN_SIZE_S:g}.",
+    )
+    parser.add_argument(
+        "--xcorr-max-lag-s",
+        type=float,
+        default=DEFAULT_XCORR_MAX_LAG_S,
+        help=f"Screen-xcorr maximum lag in seconds. Default: {DEFAULT_XCORR_MAX_LAG_S:g}.",
+    )
+    parser.add_argument(
+        "--xcorr-display-vmax",
+        type=float,
+        default=DEFAULT_XCORR_DISPLAY_VMAX,
+        help=f"Panel A normalized-xcorr color maximum. Default: {DEFAULT_XCORR_DISPLAY_VMAX:g}.",
+    )
+    parser.add_argument(
         "--ripple-selection",
         nargs="+",
         choices=RIPPLE_SELECTION_MODE_CHOICES,
@@ -1164,6 +1513,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         data_root=args.data_root,
         output_path=output_path,
         datasets=datasets,
+        xcorr_dataset=args.xcorr_dataset,
+        xcorr_state=args.xcorr_state,
+        xcorr_top_ca1_units=args.xcorr_top_ca1_units,
+        xcorr_bin_size_s=args.xcorr_bin_size_s,
+        xcorr_max_lag_s=args.xcorr_max_lag_s,
+        xcorr_display_vmax=args.xcorr_display_vmax,
         ripple_selection_modes=tuple(args.ripple_selection),
         ripple_window_s=args.ripple_window_s,
         ridge_strength=args.ridge_strength,

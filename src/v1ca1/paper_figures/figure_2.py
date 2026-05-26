@@ -15,6 +15,8 @@ from v1ca1.helper.session import (
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     get_analysis_path,
+    load_ephys_timestamps_all,
+    load_spikes_by_region,
 )
 from v1ca1.paper_figures.datasets import (
     DatasetId,
@@ -55,8 +57,9 @@ DEFAULT_OUTPUT_NAME = "figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
+DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_FIGURE_HEIGHT_MM = 165.0
+DEFAULT_FIGURE_HEIGHT_MM = 72.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 DEFAULT_REGIONS = REGIONS
 RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
@@ -92,6 +95,11 @@ SOURCE_PREDICTOR_MODE_FILENAME_TOKENS = {
 }
 DEFAULT_LFP_TIME_BEFORE_S = 0.080
 DEFAULT_LFP_TIME_AFTER_S = 0.160
+DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S = 0.080
+DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S = 0.220
+DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION = 5
+DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S = 0.150
+PANEL_B_SCHEMATIC_CACHE_VERSION = 4
 DEFAULT_XCORR_STATE = "ripple"
 DEFAULT_XCORR_BIN_SIZE_S = 0.005
 DEFAULT_XCORR_MAX_LAG_S = 0.5
@@ -141,13 +149,16 @@ GLM_EPOCH_COLORS = EPOCH_TYPE_COLORS
 NONSIGNIFICANT_COLOR = NEUTRAL_COLORS["nonsignificant"]
 SIGNIFICANCE_P_VALUE = 0.05
 PANEL_C_SIGNIFICANCE_P_VALUE = 0.05
+PANEL_C_SOURCE_COMPARISON_COLOR = GLM_EPOCH_COLORS["light"]
 PANEL_D_SIGNIFICANCE_P_VALUE = PANEL_C_SIGNIFICANCE_P_VALUE
 PANEL_D_MIN_DEVIANCE_EXPLAINED = 0.0
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
 PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
+PANEL_D_DARK_ACTIVITY_COLORS = {
+    "inactive": "#CC79A7",
+    "active": "#009E73",
+}
 PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
-PANEL_E_VECTOR_COLOR = REGION_COLORS["ca1"]
-PANEL_E_MEAN_ACTIVITY_COLOR = NEUTRAL_COLORS["nonsignificant"]
 DARK_MOVEMENT_FR_CACHE_VERSION = 1
 DARK_MOVEMENT_FR_CACHE_COLUMNS = ("unit", "dark_firing_rate_hz")
 
@@ -1141,8 +1152,6 @@ def load_example_ripple_lfp_trace(
     time_after_s: float = DEFAULT_LFP_TIME_AFTER_S,
 ) -> dict[str, Any]:
     """Load a ripple-band LFP snippet around the largest ripple in one epoch."""
-    import xarray as xr
-
     ripple_table = load_ripple_event_table(data_root, animal_name, date)
     epoch_table = filter_ripples_by_epoch_and_threshold(
         ripple_table,
@@ -1163,6 +1172,36 @@ def load_example_ripple_lfp_trace(
 
     ripple_start_s = float(row["start_time"])
     ripple_end_s = float(row["end_time"])
+    return load_ripple_lfp_snippet(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_start_s=ripple_start_s,
+        ripple_end_s=ripple_end_s,
+        mean_zscore=mean_zscore,
+        n_ripples=int(len(epoch_table)),
+        time_before_s=time_before_s,
+        time_after_s=time_after_s,
+    )
+
+
+def load_ripple_lfp_snippet(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ripple_start_s: float,
+    ripple_end_s: float,
+    mean_zscore: float = float("nan"),
+    n_ripples: int = 0,
+    time_before_s: float = DEFAULT_LFP_TIME_BEFORE_S,
+    time_after_s: float = DEFAULT_LFP_TIME_AFTER_S,
+) -> dict[str, Any]:
+    """Load one ripple-band LFP snippet around a specified ripple start."""
+    import xarray as xr
+
     lfp_path = get_ripple_lfp_path(data_root, animal_name, date, epoch)
     if not lfp_path.exists():
         raise FileNotFoundError(f"Ripple-band LFP NetCDF not found: {lfp_path}")
@@ -1196,8 +1235,514 @@ def load_example_ripple_lfp_trace(
         "ripple_duration_s": ripple_end_s - ripple_start_s,
         "mean_zscore": mean_zscore,
         "channel": channel_ids[0] if channel_ids.size else 0,
-        "n_ripples": int(len(epoch_table)),
+        "n_ripples": int(n_ripples),
     }
+
+
+def build_panel_b_schematic_cache_metadata(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+    time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+    n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+    target_ripple_duration_s: float = DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S,
+) -> dict[str, Any]:
+    """Return metadata identifying the cached panel B real-spike schematic example."""
+    return {
+        "cache_version": PANEL_B_SCHEMATIC_CACHE_VERSION,
+        "figure": DEFAULT_OUTPUT_NAME,
+        "panel": "B",
+        "artifact": "ripple_glm_schematic_spikes",
+        "data_root": str(Path(data_root)),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(epoch),
+        "ripple_threshold_zscore": None
+        if ripple_threshold_zscore is None
+        else float(ripple_threshold_zscore),
+        "time_before_s": float(time_before_s),
+        "time_after_s": float(time_after_s),
+        "n_units_per_region": int(n_units_per_region),
+        "target_ripple_duration_s": float(target_ripple_duration_s),
+    }
+
+
+def build_panel_b_schematic_cache_path(
+    cache_dir: Path,
+    metadata: Mapping[str, Any],
+) -> Path:
+    """Return the descriptive cache path for the panel B schematic spike rasters."""
+    animal_name = _format_figure_cache_token(metadata["animal_name"])
+    date = _format_figure_cache_token(metadata["date"])
+    epoch = _format_figure_cache_token(metadata["epoch"])
+    if metadata["ripple_threshold_zscore"] is None:
+        threshold = "none"
+    else:
+        threshold = _format_figure_cache_number(float(metadata["ripple_threshold_zscore"]))
+    time_before = _format_figure_cache_number(float(metadata["time_before_s"]))
+    time_after = _format_figure_cache_number(float(metadata["time_after_s"]))
+    n_units = int(metadata["n_units_per_region"])
+    target_duration = _format_figure_cache_number(float(metadata["target_ripple_duration_s"]))
+    cache_version = int(metadata["cache_version"])
+    filename = (
+        f"figure_2_panel_b_schematic_{animal_name}_{date}_{epoch}"
+        f"_thr{threshold}_tb{time_before}_ta{time_after}_n{n_units}"
+        f"_dur{target_duration}"
+        f"_cachev{cache_version}.npz"
+    )
+    return Path(cache_dir) / filename
+
+
+def _extract_spike_times_by_unit(spikes: Any) -> dict[Any, np.ndarray]:
+    """Return sorted spike-time arrays keyed by unit id for a TsGroup-like object."""
+    spike_times_by_unit: dict[Any, np.ndarray] = {}
+    for unit_id in spikes.keys():
+        times = np.asarray(spikes[unit_id].t, dtype=float)
+        spike_times_by_unit[unit_id] = np.sort(times[np.isfinite(times)])
+    return spike_times_by_unit
+
+
+def _count_unit_spikes_in_window(
+    spike_times_by_unit: Mapping[Any, np.ndarray],
+    *,
+    start_s: float,
+    end_s: float,
+) -> dict[Any, int]:
+    """Count spikes for each unit in one half-open time window."""
+    counts: dict[Any, int] = {}
+    for unit_id, spike_times_s in spike_times_by_unit.items():
+        left = int(np.searchsorted(spike_times_s, start_s, side="left"))
+        right = int(np.searchsorted(spike_times_s, end_s, side="left"))
+        counts[unit_id] = max(0, right - left)
+    return counts
+
+
+def _select_top_units_by_count(
+    spike_times_by_unit: Mapping[Any, np.ndarray],
+    *,
+    start_s: float,
+    end_s: float,
+    n_units: int,
+) -> tuple[list[Any], dict[Any, int]]:
+    """Select the most active units within one display window."""
+    counts = _count_unit_spikes_in_window(
+        spike_times_by_unit,
+        start_s=start_s,
+        end_s=end_s,
+    )
+    ranked_units = sorted(
+        counts,
+        key=lambda unit_id: (-counts[unit_id], str(unit_id)),
+    )
+    return ranked_units[: int(n_units)], counts
+
+
+def _select_strongly_modulated_ca1_units(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    n_units: int,
+    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+) -> list[Any]:
+    """Return CA1 units with the strongest finite ripple modulation."""
+    if ripple_threshold_zscore is None:
+        raise ValueError("CA1 ripple-modulation ranking requires a finite ripple threshold.")
+    table = load_epoch_modulation_summary_table(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_threshold_zscore=float(ripple_threshold_zscore),
+    )
+    ca1_table = table.loc[table["region"].astype(str) == "ca1"].copy()
+    if ca1_table.empty:
+        raise ValueError(f"No CA1 ripple-modulation rows found for {animal_name} {date} {epoch}.")
+
+    response_zscore = np.asarray(ca1_table["response_zscore"], dtype=float)
+    modulation_index = np.asarray(ca1_table["ripple_modulation_index"], dtype=float)
+    finite_zscore = np.isfinite(response_zscore)
+    finite_modulation_index = np.isfinite(modulation_index)
+    ca1_table["_modulation_rank_1"] = np.where(
+        finite_zscore,
+        np.abs(response_zscore),
+        -np.inf,
+    )
+    ca1_table["_modulation_rank_2"] = np.where(
+        finite_modulation_index,
+        np.abs(modulation_index),
+        -np.inf,
+    )
+    ranked = ca1_table.sort_values(
+        by=["_modulation_rank_1", "_modulation_rank_2", "unit_id"],
+        ascending=[False, False, True],
+    )
+    ranked = ranked.loc[
+        np.isfinite(np.asarray(ranked["_modulation_rank_1"], dtype=float))
+        | np.isfinite(np.asarray(ranked["_modulation_rank_2"], dtype=float))
+    ]
+    return list(ranked["unit_id"].iloc[: int(n_units)])
+
+
+def _relative_spike_times_for_units(
+    spike_times_by_unit: Mapping[Any, np.ndarray],
+    unit_ids: Sequence[Any],
+    *,
+    ripple_start_s: float,
+    time_before_s: float,
+    time_after_s: float,
+) -> tuple[np.ndarray, ...]:
+    """Return per-unit spike times relative to ripple onset."""
+    window_start_s = ripple_start_s - float(time_before_s)
+    window_end_s = ripple_start_s + float(time_after_s)
+    relative_times = []
+    for unit_id in unit_ids:
+        spike_times_s = spike_times_by_unit[unit_id]
+        left = int(np.searchsorted(spike_times_s, window_start_s, side="left"))
+        right = int(np.searchsorted(spike_times_s, window_end_s, side="left"))
+        relative_times.append(np.asarray(spike_times_s[left:right] - ripple_start_s, dtype=float))
+    return tuple(relative_times)
+
+
+def _flatten_spike_rasters(
+    spike_rasters: Sequence[Sequence[float] | np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten ragged spike rasters for compact npz storage."""
+    counts = np.asarray([len(row) for row in spike_rasters], dtype=np.int64)
+    if counts.size == 0 or int(np.sum(counts)) == 0:
+        return np.asarray([], dtype=float), counts
+    return np.concatenate([np.asarray(row, dtype=float) for row in spike_rasters]), counts
+
+
+def _unflatten_spike_rasters(
+    flat_spikes: np.ndarray,
+    counts: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Restore ragged spike rasters from compact npz storage."""
+    flat_spikes = np.asarray(flat_spikes, dtype=float)
+    counts = np.asarray(counts, dtype=np.int64)
+    rasters = []
+    offset = 0
+    for count in counts:
+        next_offset = offset + int(count)
+        rasters.append(np.asarray(flat_spikes[offset:next_offset], dtype=float))
+        offset = next_offset
+    return tuple(rasters)
+
+
+def save_panel_b_schematic_cache(
+    cache_path: Path,
+    payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> None:
+    """Save the real-spike panel B schematic example to a compact npz cache."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    ca1_flat_spikes, ca1_counts = _flatten_spike_rasters(payload["ca1_spike_times_s"])
+    v1_flat_spikes, v1_counts = _flatten_spike_rasters(payload["v1_spike_times_s"])
+    np.savez_compressed(
+        cache_path,
+        metadata_json=json.dumps(dict(metadata), sort_keys=True),
+        animal_name=str(payload["animal_name"]),
+        date=str(payload["date"]),
+        epoch=str(payload["epoch"]),
+        time_s=np.asarray(payload["time_s"], dtype=float),
+        filtered_lfp=np.asarray(payload["filtered_lfp"], dtype=float),
+        ripple_start_s=float(payload["ripple_start_s"]),
+        ripple_end_s=float(payload["ripple_end_s"]),
+        ripple_duration_s=float(payload["ripple_duration_s"]),
+        mean_zscore=float(payload["mean_zscore"]),
+        channel=payload["channel"],
+        n_ripples=int(payload["n_ripples"]),
+        time_before_s=float(payload["time_before_s"]),
+        time_after_s=float(payload["time_after_s"]),
+        n_units_per_region=int(payload["n_units_per_region"]),
+        ca1_unit_ids=np.asarray(payload["ca1_unit_ids"]),
+        v1_unit_ids=np.asarray(payload["v1_unit_ids"]),
+        ca1_spike_times_flat=ca1_flat_spikes,
+        ca1_spike_counts=ca1_counts,
+        v1_spike_times_flat=v1_flat_spikes,
+        v1_spike_counts=v1_counts,
+        selection_score=np.asarray(payload["selection_score"], dtype=float),
+    )
+
+
+def load_panel_b_schematic_cache(
+    cache_path: Path,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Load a cached panel B schematic example if metadata still match."""
+    if not cache_path.exists():
+        return None
+    try:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            cached_metadata = json.loads(str(cached["metadata_json"]))
+            if cached_metadata != dict(metadata):
+                return None
+            return {
+                "animal_name": str(cached["animal_name"]),
+                "date": str(cached["date"]),
+                "epoch": str(cached["epoch"]),
+                "time_s": np.asarray(cached["time_s"], dtype=float),
+                "filtered_lfp": np.asarray(cached["filtered_lfp"], dtype=float),
+                "ripple_start_s": float(cached["ripple_start_s"]),
+                "ripple_end_s": float(cached["ripple_end_s"]),
+                "ripple_duration_s": float(cached["ripple_duration_s"]),
+                "mean_zscore": float(cached["mean_zscore"]),
+                "channel": cached["channel"].item(),
+                "n_ripples": int(cached["n_ripples"]),
+                "time_before_s": float(cached["time_before_s"]),
+                "time_after_s": float(cached["time_after_s"]),
+                "n_units_per_region": int(cached["n_units_per_region"]),
+                "ca1_unit_ids": np.asarray(cached["ca1_unit_ids"]),
+                "v1_unit_ids": np.asarray(cached["v1_unit_ids"]),
+                "ca1_spike_times_s": _unflatten_spike_rasters(
+                    cached["ca1_spike_times_flat"],
+                    cached["ca1_spike_counts"],
+                ),
+                "v1_spike_times_s": _unflatten_spike_rasters(
+                    cached["v1_spike_times_flat"],
+                    cached["v1_spike_counts"],
+                ),
+                "selection_score": np.asarray(cached["selection_score"], dtype=float),
+            }
+    except (OSError, KeyError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def build_panel_b_schematic_example(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+    time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+    n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+    target_ripple_duration_s: float = DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S,
+) -> dict[str, Any]:
+    """Build a real LFP and spike-raster example for the panel B schematic."""
+    ripple_table = load_ripple_event_table(data_root, animal_name, date)
+    epoch_table = filter_ripples_by_epoch_and_threshold(
+        ripple_table,
+        epoch=epoch,
+        ripple_threshold_zscore=ripple_threshold_zscore,
+    )
+    if epoch_table.empty:
+        raise ValueError(
+            f"No ripples found for {animal_name} {date} {epoch} "
+            f"at threshold {ripple_threshold_zscore}."
+        )
+
+    analysis_path = get_analysis_path(
+        animal_name=animal_name,
+        date=date,
+        data_root=Path(data_root),
+    )
+    timestamps_ephys_all, _ = load_ephys_timestamps_all(analysis_path)
+    spikes_by_region = load_spikes_by_region(
+        analysis_path,
+        timestamps_ephys_all,
+        regions=("ca1", "v1"),
+    )
+    spike_times_by_region = {
+        region: _extract_spike_times_by_unit(spikes_by_region[region])
+        for region in ("ca1", "v1")
+    }
+    ranked_modulated_ca1_unit_ids = [
+        unit_id
+        for unit_id in _select_strongly_modulated_ca1_units(
+            data_root,
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            n_units=len(spike_times_by_region["ca1"]),
+            ripple_threshold_zscore=ripple_threshold_zscore,
+        )
+        if unit_id in spike_times_by_region["ca1"]
+    ]
+    if len(ranked_modulated_ca1_unit_ids) < int(n_units_per_region):
+        raise ValueError(
+            "Could not match enough strongly modulated CA1 units to spike trains "
+            f"for {animal_name} {date} {epoch}: found {len(ranked_modulated_ca1_unit_ids)}."
+        )
+
+    best_row_index: int | None = None
+    best_score: tuple[float, ...] | None = None
+    best_unit_ids: dict[str, list[Any]] = {}
+    for row_index, row in epoch_table.reset_index(drop=True).iterrows():
+        ripple_start_s = float(row["start_time"])
+        ripple_duration_s = float(row["end_time"]) - ripple_start_s
+        window_start_s = ripple_start_s - float(time_before_s)
+        window_end_s = ripple_start_s + float(time_after_s)
+        unit_ids_by_region: dict[str, list[Any]] = {}
+        counts_by_region: dict[str, dict[Any, int]] = {}
+        ca1_counts_all = _count_unit_spikes_in_window(
+            {
+                unit_id: spike_times_by_region["ca1"][unit_id]
+                for unit_id in ranked_modulated_ca1_unit_ids
+            },
+            start_s=window_start_s,
+            end_s=window_end_s,
+        )
+        active_modulated_ca1_unit_ids = [
+            unit_id for unit_id in ranked_modulated_ca1_unit_ids if ca1_counts_all[unit_id] > 0
+        ]
+        ca1_unit_ids = active_modulated_ca1_unit_ids[: int(n_units_per_region)]
+        if len(ca1_unit_ids) < int(n_units_per_region):
+            ca1_unit_ids.extend(
+                unit_id
+                for unit_id in ranked_modulated_ca1_unit_ids
+                if unit_id not in ca1_unit_ids
+            )
+            ca1_unit_ids = ca1_unit_ids[: int(n_units_per_region)]
+        unit_ids_by_region["ca1"] = ca1_unit_ids
+        counts_by_region["ca1"] = {
+            unit_id: ca1_counts_all[unit_id] for unit_id in unit_ids_by_region["ca1"]
+        }
+        v1_unit_ids, v1_counts = _select_top_units_by_count(
+            spike_times_by_region["v1"],
+            start_s=window_start_s,
+            end_s=window_end_s,
+            n_units=int(n_units_per_region),
+        )
+        unit_ids_by_region["v1"] = v1_unit_ids
+        counts_by_region["v1"] = v1_counts
+        active_counts = {
+            region: sum(counts_by_region[region][unit_id] > 0 for unit_id in unit_ids_by_region[region])
+            for region in ("ca1", "v1")
+        }
+        ca1_count_total = sum(
+            counts_by_region["ca1"][unit_id] for unit_id in unit_ids_by_region["ca1"]
+        )
+        v1_count_total = sum(
+            counts_by_region["v1"][unit_id] for unit_id in unit_ids_by_region["v1"]
+        )
+        if "mean_zscore" in epoch_table.columns:
+            mean_zscore = float(row["mean_zscore"])
+        else:
+            mean_zscore = float("nan")
+        minimum_active_units = int(n_units_per_region)
+        score = (
+            float(
+                active_counts["ca1"] >= minimum_active_units
+                and active_counts["v1"] >= minimum_active_units
+            ),
+            -float(abs(ripple_duration_s - float(target_ripple_duration_s))),
+            float(len(active_modulated_ca1_unit_ids)),
+            float(active_counts["ca1"]),
+            float(ca1_count_total),
+            float(active_counts["v1"]),
+            float(v1_count_total),
+            mean_zscore if np.isfinite(mean_zscore) else -np.inf,
+            -float(row_index),
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_row_index = int(row_index)
+            best_unit_ids = unit_ids_by_region
+
+    if best_row_index is None or best_score is None:
+        raise ValueError(f"Could not select a schematic ripple for {animal_name} {date} {epoch}.")
+
+    selected_row = epoch_table.reset_index(drop=True).iloc[best_row_index]
+    ripple_start_s = float(selected_row["start_time"])
+    ripple_end_s = float(selected_row["end_time"])
+    mean_zscore = (
+        float(selected_row["mean_zscore"])
+        if "mean_zscore" in epoch_table.columns
+        else float("nan")
+    )
+    payload = load_ripple_lfp_snippet(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_start_s=ripple_start_s,
+        ripple_end_s=ripple_end_s,
+        mean_zscore=mean_zscore,
+        n_ripples=int(len(epoch_table)),
+        time_before_s=time_before_s,
+        time_after_s=time_after_s,
+    )
+    ca1_unit_ids = best_unit_ids["ca1"]
+    v1_unit_ids = best_unit_ids["v1"]
+    payload.update(
+        {
+            "time_before_s": float(time_before_s),
+            "time_after_s": float(time_after_s),
+            "n_units_per_region": int(n_units_per_region),
+            "ca1_unit_ids": np.asarray(ca1_unit_ids),
+            "v1_unit_ids": np.asarray(v1_unit_ids),
+            "ca1_spike_times_s": _relative_spike_times_for_units(
+                spike_times_by_region["ca1"],
+                ca1_unit_ids,
+                ripple_start_s=ripple_start_s,
+                time_before_s=time_before_s,
+                time_after_s=time_after_s,
+            ),
+            "v1_spike_times_s": _relative_spike_times_for_units(
+                spike_times_by_region["v1"],
+                v1_unit_ids,
+                ripple_start_s=ripple_start_s,
+                time_before_s=time_before_s,
+                time_after_s=time_after_s,
+            ),
+            "selection_score": np.asarray(best_score, dtype=float),
+        }
+    )
+    return payload
+
+
+def load_or_build_panel_b_schematic_example(
+    data_root: Path,
+    *,
+    cache_dir: Path,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+    time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+    n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+    target_ripple_duration_s: float = DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S,
+    refresh_cache: bool = False,
+) -> dict[str, Any]:
+    """Load or build the cached real-spike panel B schematic example."""
+    metadata = build_panel_b_schematic_cache_metadata(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_threshold_zscore=ripple_threshold_zscore,
+        time_before_s=time_before_s,
+        time_after_s=time_after_s,
+        n_units_per_region=n_units_per_region,
+        target_ripple_duration_s=target_ripple_duration_s,
+    )
+    cache_path = build_panel_b_schematic_cache_path(cache_dir, metadata)
+    if not refresh_cache:
+        cached = load_panel_b_schematic_cache(cache_path, metadata)
+        if cached is not None:
+            return cached
+    payload = build_panel_b_schematic_example(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_threshold_zscore=ripple_threshold_zscore,
+        time_before_s=time_before_s,
+        time_after_s=time_after_s,
+        n_units_per_region=n_units_per_region,
+        target_ripple_duration_s=target_ripple_duration_s,
+    )
+    save_panel_b_schematic_cache(cache_path, payload, metadata)
+    return payload
 
 
 def load_ripple_glm_summary_table(
@@ -2580,6 +3125,7 @@ def draw_ripple_glm_schematic(
     v1_color = REGION_COLORS["v1"]
     time_min_s = -0.08
     time_max_s = 0.22
+    row_label_x = 0.095
     trace_x0 = 0.13
     trace_x1 = 0.94
     count_window_x0 = trace_x0 + (0.0 - time_min_s) / (time_max_s - time_min_s) * (
@@ -2666,94 +3212,196 @@ def draw_ripple_glm_schematic(
         linewidth=0.75,
         transform=transform,
     )
-    ax.text(0.04, 0.80, "ripple\nLFP", ha="left", va="center", fontsize=5.0, transform=transform)
+    ax.text(
+        row_label_x,
+        0.80,
+        "ripple\nLFP",
+        ha="right",
+        va="center",
+        fontsize=5.0,
+        transform=transform,
+    )
 
     def _time_to_x(time_s: float) -> float:
         return trace_x0 + (float(time_s) - time_min_s) / (time_max_s - time_min_s) * (
             trace_x1 - trace_x0
         )
 
-    def _draw_raster_row(
-        y_center: float,
+    def _draw_raster_rows(
+        y_top: float,
         color: str,
         spike_times_s: Sequence[Sequence[float]],
+        *,
+        row_step: float = 0.020,
     ) -> None:
         for row_index, row_spikes in enumerate(spike_times_s):
-            y0 = y_center - 0.030 + row_index * 0.030
+            y0 = y_top - row_index * row_step
+            ax.plot(
+                [trace_x0, trace_x1],
+                [y0, y0],
+                color="0.87",
+                linewidth=0.25,
+                transform=transform,
+                zorder=0,
+            )
             for spike_time_s in row_spikes:
+                if not np.isfinite(spike_time_s) or spike_time_s < time_min_s or spike_time_s > time_max_s:
+                    continue
                 spike_x = _time_to_x(spike_time_s)
                 ax.plot(
                     [spike_x, spike_x],
-                    [y0 - 0.011, y0 + 0.011],
+                    [y0 - 0.0075, y0 + 0.0075],
                     color=color,
-                    linewidth=0.8,
+                    linewidth=0.65,
                     solid_capstyle="butt",
                     transform=transform,
                 )
 
-    ca1_spikes = (
+    fallback_ca1_spikes = (
         (0.012, 0.038, 0.112, 0.156),
         (0.028, 0.074, 0.136),
         (0.004, 0.094, 0.176),
+        (0.018, 0.058, 0.148),
+        (0.042, 0.122),
     )
-    v1_spikes = (
+    fallback_v1_spikes = (
         (0.030, 0.126),
         (0.066, 0.088, 0.168),
         (0.046, 0.150),
+        (0.024, 0.104, 0.194),
+        (0.074, 0.138),
     )
-    ax.text(0.07, 0.62, "CA1", ha="right", va="center", fontsize=5.4, color=ca1_color, transform=transform)
-    ax.text(0.07, 0.50, "V1", ha="right", va="center", fontsize=5.4, color=v1_color, transform=transform)
-    _draw_raster_row(0.62, ca1_color, ca1_spikes)
-    _draw_raster_row(0.50, v1_color, v1_spikes)
 
-    count_box_specs = (
-        (0.05, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["ca1_count_fill"], ca1_color, "CA1\ncounts X"),
-        (0.38, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["glm_fill"], "0.25", "Poisson\nGLM"),
-        (0.71, 0.25, 0.24, 0.10, SCHEMATIC_COLORS["v1_count_fill"], v1_color, "V1\ncounts y"),
+    def _get_spike_raster(key: str, fallback: Sequence[Sequence[float]]) -> tuple[np.ndarray, ...]:
+        if ripple_trace is None or key not in ripple_trace:
+            return tuple(np.asarray(row, dtype=float) for row in fallback)
+        rows = tuple(np.asarray(row, dtype=float) for row in ripple_trace[key])
+        return rows if rows else tuple(np.asarray(row, dtype=float) for row in fallback)
+
+    ca1_spikes = _get_spike_raster("ca1_spike_times_s", fallback_ca1_spikes)
+    v1_spikes = _get_spike_raster("v1_spike_times_s", fallback_v1_spikes)
+    row_step = 0.020
+    ca1_top_y = 0.665
+    v1_top_y = 0.535
+    ca1_center_y = ca1_top_y - row_step * max(len(ca1_spikes) - 1, 0) / 2.0
+    v1_center_y = v1_top_y - row_step * max(len(v1_spikes) - 1, 0) / 2.0
+    ax.text(row_label_x, ca1_center_y, "CA1", ha="right", va="center", fontsize=5.4, color=ca1_color, transform=transform)
+    ax.text(row_label_x, v1_center_y, "V1", ha="right", va="center", fontsize=5.4, color=v1_color, transform=transform)
+    _draw_raster_rows(ca1_top_y, ca1_color, ca1_spikes, row_step=row_step)
+    _draw_raster_rows(v1_top_y, v1_color, v1_spikes, row_step=row_step)
+
+    circle_y = np.linspace(0.355, 0.120, 8)
+    ca1_column_x = 0.17
+    v1_column_x = 0.83
+    glm_x0 = 0.405
+    glm_y0 = float(np.mean(circle_y)) - 0.105 / 2.0
+    glm_width = 0.19
+    glm_height = 0.105
+    glm_center_y = glm_y0 + glm_height / 2.0
+
+    ax.text(
+        ca1_column_x,
+        0.385,
+        "CA1 counts",
+        ha="center",
+        va="bottom",
+        fontsize=4.9,
+        color=ca1_color,
+        transform=transform,
     )
-    for x0, y0, width, height, facecolor, edgecolor, label in count_box_specs:
-        ax.add_patch(
-            Rectangle(
-                (x0, y0),
-                width,
-                height,
-                facecolor=facecolor,
-                edgecolor=edgecolor,
-                linewidth=0.65,
-                transform=transform,
-            )
-        )
-        ax.text(
-            x0 + width / 2.0,
-            y0 + height / 2.0,
-            label,
-            ha="center",
-            va="center",
-            fontsize=5.0,
-            color="black",
+    ax.text(
+        v1_column_x,
+        0.385,
+        "V1 counts",
+        ha="center",
+        va="bottom",
+        fontsize=4.9,
+        color=v1_color,
+        transform=transform,
+    )
+    for y_value in circle_y:
+        ax.plot(
+            [ca1_column_x + 0.035, glm_x0],
+            [y_value, glm_center_y],
+            color="0.35",
+            linewidth=0.34,
+            alpha=0.72,
             transform=transform,
+            zorder=1,
         )
-
-    arrow_specs = (
-        ((0.29, 0.30), (0.38, 0.30)),
-        ((0.62, 0.30), (0.71, 0.30)),
-        ((0.50, 0.43), (0.50, 0.35)),
-    )
-    for start, end in arrow_specs:
+        ax.plot(
+            [glm_x0 + glm_width, v1_column_x - 0.035],
+            [glm_center_y, y_value],
+            color="0.35",
+            linewidth=0.34,
+            alpha=0.72,
+            transform=transform,
+            zorder=1,
+        )
+    for start, end in (
+        ((ca1_column_x + 0.062, glm_center_y), (glm_x0 - 0.008, glm_center_y)),
+        ((glm_x0 + glm_width + 0.008, glm_center_y), (v1_column_x - 0.062, glm_center_y)),
+    ):
         ax.add_patch(
             FancyArrowPatch(
                 start,
                 end,
                 arrowstyle="-|>",
-                mutation_scale=8,
-                linewidth=0.7,
-                color="0.15",
+                mutation_scale=6.5,
+                linewidth=0.55,
+                color="0.20",
                 transform=transform,
+                zorder=2,
             )
         )
+    ax.scatter(
+        np.full_like(circle_y, ca1_column_x, dtype=float),
+        circle_y,
+        s=17,
+        marker="o",
+        facecolor=SCHEMATIC_COLORS["ca1_count_fill"],
+        edgecolor=ca1_color,
+        linewidth=0.65,
+        transform=transform,
+        zorder=3,
+    )
+    ax.scatter(
+        np.full_like(circle_y, v1_column_x, dtype=float),
+        circle_y,
+        s=17,
+        marker="o",
+        facecolor=SCHEMATIC_COLORS["v1_count_fill"],
+        edgecolor=v1_color,
+        linewidth=0.65,
+        transform=transform,
+        zorder=3,
+    )
+    ax.add_patch(
+        Rectangle(
+            (glm_x0, glm_y0),
+            glm_width,
+            glm_height,
+            facecolor=SCHEMATIC_COLORS["glm_fill"],
+            edgecolor="0.25",
+            linewidth=0.65,
+            transform=transform,
+            zorder=2,
+        )
+    )
+    ax.text(
+        glm_x0 + glm_width / 2.0,
+        glm_center_y,
+        "GLM",
+        ha="center",
+        va="center",
+        fontsize=5.0,
+        color="black",
+        transform=transform,
+        zorder=4,
+    )
     ax.text(
         0.50,
-        0.12,
+        0.045,
         "Held-out prediction",
         ha="center",
         va="center",
@@ -2931,7 +3579,7 @@ def plot_epoch_ripple_heatmap_panel(
     left = 0.10
     right = 0.93
     heatmap_bottom = 0.36
-    heatmap_top = 0.84
+    heatmap_top = 0.96
     hist_bottom = 0.08
     hist_height = 0.18
     column_gap = 0.035
@@ -2975,18 +3623,19 @@ def plot_epoch_ripple_heatmap_panel(
         epoch_payload = prepared_epoch_payload["epoch_payload"]
         x0 = left + col_index * (cell_width + column_gap)
         panel_a_title = {
-            "light": "Run",
+            "light": "",
             "sleep": "Sleep",
         }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
-        ax.text(
-            x0 + cell_width / 2,
-            0.96,
-            panel_a_title,
-            ha="center",
-            va="top",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
+        if panel_a_title:
+            ax.text(
+                x0 + cell_width / 2,
+                0.96,
+                panel_a_title,
+                ha="center",
+                va="top",
+                fontsize=6,
+                transform=ax.transAxes,
+            )
         y_top = heatmap_top
         for row_index, region_payload in enumerate(prepared_epoch_payload["region_payloads"]):
             region = region_payload["region"]
@@ -3334,23 +3983,6 @@ def plot_glm_summary_panel(ax: "Axes", glm_table: Any) -> None:
     ax.tick_params(labelsize=6, length=2, pad=1)
 
 
-def _draw_panel_c_neglog_p_label(ax: "Axes") -> None:
-    """Draw Panel C's scatter ylabel with regular figure text and subscripted 10."""
-    ax.set_ylabel("-log   p", fontsize=5, labelpad=1.0)
-    ax.yaxis.set_label_coords(-0.19, 0.58)
-    ax.text(
-        -0.178,
-        0.596,
-        "10",
-        ha="center",
-        va="center",
-        fontsize=3.5,
-        rotation=90,
-        transform=ax.transAxes,
-        clip_on=False,
-    )
-
-
 def plot_glm_analysis_panel(
     ax: "Axes",
     epoch_tables: Sequence[dict[str, Any]],
@@ -3364,7 +3996,7 @@ def plot_glm_analysis_panel(
         ax.text(0.5, 0.5, "No GLM data", ha="center", va="center", transform=ax.transAxes)
         return
 
-    schematic_ax = ax.inset_axes([0.01, 0.08, 0.30, 0.82])
+    schematic_ax = ax.inset_axes([0.00, 0.04, 0.39, 0.91])
     draw_ripple_glm_schematic(schematic_ax, ripple_trace=ripple_trace)
 
     all_neglog_p: list[np.ndarray] = []
@@ -3381,13 +4013,13 @@ def plot_glm_analysis_panel(
     x_min, x_max = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
-    plot_left = 0.37
-    plot_right = 0.99
-    scatter_bottom = 0.39
-    scatter_top = 0.82
-    box_bottom = 0.13
-    box_top = 0.31
-    plot_gap = 0.035
+    plot_left = 0.52
+    plot_right = 0.98
+    scatter_bottom = 0.38
+    scatter_top = 0.94
+    box_bottom = 0.06
+    box_top = 0.29
+    plot_gap = 0.025
     plot_width = (plot_right - plot_left - plot_gap * (len(epoch_tables) - 1)) / len(epoch_tables)
     for index, epoch_payload in enumerate(epoch_tables):
         table = epoch_payload["summary_table"]
@@ -3456,15 +4088,20 @@ def plot_glm_analysis_panel(
                 transform=plot_ax.transAxes,
             )
         panel_c_title = {
-            "light": "Run",
+            "light": "",
             "sleep": "Sleep",
         }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
-        plot_ax.set_title(panel_c_title, fontsize=5.6, pad=1.5)
+        if panel_c_title:
+            plot_ax.set_title(panel_c_title, fontsize=5.6, pad=1.5)
         plot_ax.set_xlim(x_min, x_max)
         plot_ax.set_ylim(0.0, y_max)
         plot_ax.tick_params(labelbottom=False)
         if index == 0:
-            _draw_panel_c_neglog_p_label(plot_ax)
+            plot_ax.set_ylabel(
+                r"-log10 $\mathit{p}$ from shuffle",
+                fontsize=5,
+                labelpad=1.0,
+            )
         else:
             plot_ax.set_yticklabels([])
         plot_ax.spines["top"].set_visible(False)
@@ -4553,7 +5190,10 @@ def _plot_dark_activity_devexp_boxplot(
             devexp_values[active],
         ]
         if any(values.size for values in values_by_group):
-            colors = [NONSIGNIFICANT_COLOR, GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)]
+            colors = [
+                PANEL_D_DARK_ACTIVITY_COLORS["inactive"],
+                PANEL_D_DARK_ACTIVITY_COLORS["active"],
+            ]
             finite_values = np.concatenate(
                 [values for values in values_by_group if values.size]
             )
@@ -4597,15 +5237,6 @@ def _plot_dark_activity_devexp_boxplot(
                     edgecolors="none",
                     zorder=3,
                 )
-            ax.text(
-                0.98,
-                0.96,
-                f"Inactive sig n={values_by_group[0].size}\nActive sig n={values_by_group[1].size}",
-                ha="right",
-                va="top",
-                fontsize=4.5,
-                transform=ax.transAxes,
-            )
         else:
             ax.text(
                 0.5,
@@ -4625,11 +5256,11 @@ def _plot_dark_activity_devexp_boxplot(
         ax.set_yticklabels([])
     else:
         ax.set_yticklabels(
-            ["Inactive", "Active"],
+            ["Dark-inactive", "Dark active"],
             fontsize=4.8,
         )
     ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel("CV deviance explained", fontsize=5.5, labelpad=1.0)
+    ax.set_xlabel("Dev. explained", fontsize=5.5, labelpad=1.0)
     ax.set_ylabel(y_label, fontsize=5.5, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -4673,8 +5304,16 @@ def _plot_dark_active_same_turn_similarity_histogram(
         )
         values = similarity_values[active_significant]
         if values.size:
-            color = GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)
-            bins = np.linspace(float(x_limits[0]), float(x_limits[1]), 18)
+            color = PANEL_D_DARK_ACTIVITY_COLORS["active"]
+            bin_size = 0.1
+            left_edge = np.floor(float(x_limits[0]) / bin_size) * bin_size
+            right_edge = np.ceil(float(x_limits[1]) / bin_size) * bin_size
+            bins = np.round(
+                np.arange(left_edge, right_edge + 0.5 * bin_size, bin_size),
+                10,
+            )
+            if not np.any(np.isclose(bins, 0.0)):
+                bins = np.sort(np.unique(np.append(bins, 0.0)))
             weights = np.full(values.size, 1.0 / values.size, dtype=float)
             ax.hist(
                 values,
@@ -4682,23 +5321,24 @@ def _plot_dark_active_same_turn_similarity_histogram(
                 weights=weights,
                 color=color,
                 alpha=0.50,
-                edgecolor="white",
-                linewidth=0.35,
+                edgecolor="none",
+                linewidth=0.0,
                 zorder=2,
             )
+            median_value = float(np.nanmedian(values))
             ax.axvline(
-                float(np.nanmedian(values)),
+                median_value,
                 color=color,
                 linewidth=0.9,
                 zorder=4,
             )
             ax.text(
-                0.98,
                 0.96,
-                f"Active sig n={values.size}",
+                0.94,
+                f"median={median_value:.2f}",
                 ha="right",
                 va="top",
-                fontsize=4.5,
+                fontsize=4.6,
                 transform=ax.transAxes,
             )
         else:
@@ -4714,7 +5354,7 @@ def _plot_dark_active_same_turn_similarity_histogram(
 
     ax.set_xlim(*x_limits)
     ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel("Dark same-turn corr.", fontsize=5.5, labelpad=1.0)
+    ax.set_xlabel("Dark DGP corr.", fontsize=5.5, labelpad=1.0)
     ax.set_ylabel("Frac. units", fontsize=5.5, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -4734,8 +5374,11 @@ def _plot_dark_activity_significant_composition(
     """Plot dark activity composition among ripple-GLM significant cells."""
     import pandas as pd
 
-    colors = [NONSIGNIFICANT_COLOR, GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)]
-    group_labels = ["Inactive", "Active"]
+    colors = [
+        PANEL_D_DARK_ACTIVITY_COLORS["inactive"],
+        PANEL_D_DARK_ACTIVITY_COLORS["active"],
+    ]
+    group_labels = ["Dark-inactive", "Dark active"]
     fractions = [np.nan, np.nan]
     counts = [0, 0]
     total_significant_count = 0
@@ -4888,7 +5531,7 @@ def _plot_dark_activity_significant_composition(
     ax.set_yticks([1.0, 2.0])
     ax.set_yticklabels(group_labels, fontsize=4.8)
     ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel(f"Frac. of p<{p_value_threshold:g} units", fontsize=5.5, labelpad=1.0)
+    ax.set_xlabel(f"p<{p_value_threshold:g} frac.", fontsize=5.5, labelpad=1.0)
     ax.set_ylabel("", fontsize=5.5, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -4899,6 +5542,8 @@ def _plot_dark_activity_significant_composition(
 def plot_glm_behavior_association_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
+    *,
+    show_note: bool = True,
 ) -> None:
     """Plot ripple-GLM deviance explained by dark activity group."""
     ax.set_xlim(0.0, 1.0)
@@ -4912,33 +5557,70 @@ def plot_glm_behavior_association_panel(
     epoch_rows = tuple(PANEL_D_EPOCH_ORDER)
     x_limits = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
 
-    panel_left = 0.08
-    panel_right = 0.96
-    pair_gap = 0.07
-    inset_gap = 0.045 if len(epoch_rows) == 1 else 0.025
-    fraction_width = 0.20 if len(epoch_rows) == 1 else 0.13
-    devexp_width = 0.31 if len(epoch_rows) == 1 else 0.14
-    pair_width = (
-        (panel_right - panel_left - pair_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
-        if epoch_rows
-        else 0.0
-    )
-    similarity_width = pair_width - fraction_width - devexp_width - 2.0 * inset_gap
     bottom = 0.17
     height = 0.72
-    for column_index, epoch_type in enumerate(epoch_rows):
-        pair_left = panel_left + column_index * (pair_width + pair_gap)
-        fraction_ax = ax.inset_axes([pair_left, bottom, fraction_width, height])
+    if len(epoch_rows) == 1:
+        axis_layouts = [
+            (
+                epoch_rows[0],
+                0.02,
+                0.20,
+                0.27,
+                0.27,
+                0.68,
+                0.28,
+            )
+        ]
+    else:
+        panel_left = 0.08
+        panel_right = 0.96
+        pair_gap = 0.07
+        inset_gap = 0.025
+        fraction_width = 0.13
+        devexp_width = 0.14
+        pair_width = (
+            (panel_right - panel_left - pair_gap * (len(epoch_rows) - 1)) / len(epoch_rows)
+            if epoch_rows
+            else 0.0
+        )
+        similarity_width = pair_width - fraction_width - devexp_width - 2.0 * inset_gap
+        axis_layouts = [
+            (
+                epoch_type,
+                panel_left + column_index * (pair_width + pair_gap),
+                fraction_width,
+                panel_left + column_index * (pair_width + pair_gap) + fraction_width + inset_gap,
+                devexp_width,
+                panel_left
+                + column_index * (pair_width + pair_gap)
+                + fraction_width
+                + devexp_width
+                + 2.0 * inset_gap,
+                similarity_width,
+            )
+            for column_index, epoch_type in enumerate(epoch_rows)
+        ]
+
+    for (
+        epoch_type,
+        fraction_left,
+        fraction_width,
+        devexp_left,
+        devexp_width,
+        similarity_left,
+        similarity_width,
+    ) in axis_layouts:
+        fraction_ax = ax.inset_axes([fraction_left, bottom, fraction_width, height])
         _plot_dark_activity_significant_composition(
             fraction_ax,
             table,
             epoch_type=epoch_type,
             dark_activity_threshold_hz=dark_activity_threshold_hz,
             p_value_threshold=PANEL_C_SIGNIFICANCE_P_VALUE,
-            title="p<0.05\ncomposition",
+            title="",
         )
         devexp_ax = ax.inset_axes(
-            [pair_left + fraction_width + inset_gap, bottom, devexp_width, height]
+            [devexp_left, bottom, devexp_width, height]
         )
         _plot_dark_activity_devexp_boxplot(
             devexp_ax,
@@ -4946,18 +5628,13 @@ def plot_glm_behavior_association_panel(
             epoch_type=epoch_type,
             dark_activity_threshold_hz=dark_activity_threshold_hz,
             p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
-            title="Run devexp" if epoch_type == "light" else HEATMAP_EPOCH_LABELS[epoch_type],
+            title="",
             y_label="",
             x_limits=x_limits,
             show_y_ticklabels=False,
         )
         similarity_ax = ax.inset_axes(
-            [
-                pair_left + fraction_width + devexp_width + 2.0 * inset_gap,
-                bottom,
-                similarity_width,
-                height,
-            ]
+            [similarity_left, bottom, similarity_width, height]
         )
         _plot_dark_active_same_turn_similarity_histogram(
             similarity_ax,
@@ -4965,22 +5642,18 @@ def plot_glm_behavior_association_panel(
             epoch_type=epoch_type,
             dark_activity_threshold_hz=dark_activity_threshold_hz,
             p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
-            title="Dark DPP",
+            title="",
         )
-    ax.text(
-        0.50,
-        0.035,
-        "Plots show p<0.05 units; dark-active split uses 0.5 Hz",
-        ha="center",
-        va="bottom",
-        fontsize=5.0,
-        transform=ax.transAxes,
-    )
-
-
-def _get_animal_color(animal_name: str) -> str:
-    """Return a stable point color for one animal."""
-    return ANIMAL_COLORS.get(str(animal_name), PANEL_E_VECTOR_COLOR)
+    if show_note:
+        ax.text(
+            0.50,
+            0.035,
+            "Plots show p<0.05 units; dark-active split uses 0.5 Hz",
+            ha="center",
+            va="bottom",
+            fontsize=5.0,
+            transform=ax.transAxes,
+        )
 
 
 def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
@@ -5012,6 +5685,7 @@ def _plot_source_predictor_comparison_axis(
     axis_limits: tuple[float, float],
     pooled: bool = False,
     p_value_threshold: float = SIGNIFICANCE_P_VALUE,
+    summary_location: str = "upper_left",
 ) -> None:
     """Plot vector-model deviance explained against mean-activity control."""
     lower, upper = axis_limits
@@ -5044,7 +5718,7 @@ def _plot_source_predictor_comparison_axis(
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         if np.any(valid):
             if pooled and {"animal_name", "date"}.issubset(table.columns):
-                for (animal_name, _date), dataset_rows in table.loc[valid].groupby(
+                for (_animal_name, _date), dataset_rows in table.loc[valid].groupby(
                     ["animal_name", "date"],
                     sort=True,
                 ):
@@ -5086,18 +5760,13 @@ def _plot_source_predictor_comparison_axis(
                             "vector_devexp_mean",
                         ],
                         s=4.2,
-                        color=_get_animal_color(str(animal_name)),
+                        color=PANEL_C_SOURCE_COMPARISON_COLOR,
                         alpha=0.42,
                         edgecolors="none",
                         rasterized=True,
                         zorder=3,
                     )
             else:
-                animal_name = (
-                    str(table["animal_name"].iloc[0])
-                    if "animal_name" in table.columns and len(table)
-                    else ""
-                )
                 significant = (
                     valid
                     & np.isfinite(p_values)
@@ -5120,28 +5789,36 @@ def _plot_source_predictor_comparison_axis(
                         x_values[significant],
                         y_values[significant],
                         s=4.2,
-                        color=_get_animal_color(animal_name),
+                        color=PANEL_C_SOURCE_COMPARISON_COLOR,
                         alpha=0.42,
                         edgecolors="none",
                         rasterized=True,
                         zorder=3,
                     )
-            significant_count = int(
-                np.sum(
-                    valid
-                    & np.isfinite(p_values)
-                    & (p_values < float(p_value_threshold))
-                )
-            )
             deltas = y_values[valid] - x_values[valid]
+            vector_greater_fraction = float(np.mean(deltas > 0.0))
+            if summary_location == "lower_right":
+                text_x = 0.97
+                text_y = 0.05
+                text_ha = "right"
+                text_va = "bottom"
+            elif summary_location == "upper_right":
+                text_x = 0.97
+                text_y = 0.95
+                text_ha = "right"
+                text_va = "top"
+            else:
+                text_x = 0.05
+                text_y = 0.95
+                text_ha = "left"
+                text_va = "top"
             ax.text(
-                0.05,
-                0.95,
+                text_x,
+                text_y,
                 f"n={int(np.sum(valid))}\n"
-                f"sig={significant_count}\n"
-                f"med diff={np.nanmedian(deltas):.2f}",
-                ha="left",
-                va="top",
+                f"frac vector>mean={vector_greater_fraction:.2f}",
+                ha=text_ha,
+                va=text_va,
                 fontsize=4.6,
                 transform=ax.transAxes,
             )
@@ -5168,6 +5845,11 @@ def _plot_source_predictor_comparison_axis(
 def plot_glm_source_predictor_comparison_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
+    *,
+    include_per_animal: bool = True,
+    include_pooled: bool = True,
+    compact_labels: bool = False,
+    show_color_note: bool = True,
 ) -> None:
     """Plot full CA1 vector GLM performance against mean CA1 activity."""
     import pandas as pd
@@ -5190,13 +5872,14 @@ def plot_glm_source_predictor_comparison_panel(
     else:
         dataset_keys = []
     groups: list[tuple[str, Any, bool]] = []
-    for animal_name, date in dataset_keys:
-        dataset_rows = table[
-            (table["animal_name"].astype(str) == animal_name)
-            & (table["date"].astype(str) == date)
-        ]
-        groups.append((animal_name, dataset_rows, False))
-    if len(table):
+    if include_per_animal:
+        for animal_name, date in dataset_keys:
+            dataset_rows = table[
+                (table["animal_name"].astype(str) == animal_name)
+                & (table["date"].astype(str) == date)
+            ]
+            groups.append((animal_name, dataset_rows, False))
+    if include_pooled and len(table):
         groups.append(("Pooled", table, True))
 
     if not groups:
@@ -5211,52 +5894,90 @@ def plot_glm_source_predictor_comparison_panel(
         )
         return
 
-    left = 0.075
+    left = 0.10 if compact_labels else 0.075
     right = 0.985
-    bottom = 0.20
-    height = 0.70
+    bottom = 0.10 if compact_labels else 0.20
+    height = 0.82 if compact_labels else 0.70
     gap = 0.030
     width = (right - left - gap * (len(groups) - 1)) / len(groups)
     for index, (title, rows, pooled) in enumerate(groups):
         child_ax = ax.inset_axes([left + index * (width + gap), bottom, width, height])
+        child_title = "" if compact_labels else title
         _plot_source_predictor_comparison_axis(
             child_ax,
             rows,
-            title=title,
+            title=child_title,
             axis_limits=axis_limits,
             pooled=pooled,
             p_value_threshold=SIGNIFICANCE_P_VALUE,
+            summary_location="upper_right" if compact_labels else "upper_left",
         )
+        if compact_labels:
+            child_ax.set_xlabel("Mean CA1 devexp", fontsize=5.3, labelpad=1.0)
+            if index == 0:
+                child_ax.set_ylabel("CA1 vector devexp", fontsize=5.3, labelpad=1.0)
         if index > 0:
             child_ax.set_yticklabels([])
 
-    ax.text(
-        0.52,
-        0.035,
-        "Mean CA1 activity deviance explained",
-        ha="center",
-        va="bottom",
-        fontsize=6.0,
-        transform=ax.transAxes,
+    if not compact_labels:
+        ax.text(
+            0.52,
+            0.035,
+            "Mean CA1 activity deviance explained",
+            ha="center",
+            va="bottom",
+            fontsize=6.0,
+            transform=ax.transAxes,
+        )
+    if show_color_note:
+        ax.text(
+            0.98,
+            0.035,
+            f"Color: vector p<{SIGNIFICANCE_P_VALUE:g}; gray: n.s.",
+            ha="right",
+            va="bottom",
+            fontsize=5.2,
+            transform=ax.transAxes,
+        )
+    if not compact_labels:
+        ax.text(
+            0.018,
+            0.56,
+            "CA1 spike vector deviance explained",
+            ha="center",
+            va="center",
+            rotation=90,
+            fontsize=6.0,
+            transform=ax.transAxes,
+        )
+
+
+def plot_glm_prediction_context_panel(
+    ax: "Axes",
+    behavior_payload: Mapping[str, Any],
+    source_comparison_payload: Mapping[str, Any],
+) -> None:
+    """Stack the pooled source-control plot above the dark-activity summary."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    source_ax = ax.inset_axes([0.0, 0.55, 1.0, 0.42])
+    plot_glm_source_predictor_comparison_panel(
+        source_ax,
+        source_comparison_payload,
+        include_per_animal=False,
+        include_pooled=True,
+        compact_labels=True,
+        show_color_note=False,
     )
-    ax.text(
-        0.98,
-        0.035,
-        f"Color: vector p<{SIGNIFICANCE_P_VALUE:g}; gray: n.s.",
-        ha="right",
-        va="bottom",
-        fontsize=5.2,
-        transform=ax.transAxes,
-    )
-    ax.text(
-        0.018,
-        0.56,
-        "CA1 spike vector deviance explained",
-        ha="center",
-        va="center",
-        rotation=90,
-        fontsize=6.0,
-        transform=ax.transAxes,
+    source_ax.set_title("Pooled vector vs mean CA1 activity", fontsize=5.8, pad=1.2)
+
+    behavior_ax = ax.inset_axes([0.0, 0.01, 1.0, 0.49])
+    plot_glm_behavior_association_panel(
+        behavior_ax,
+        behavior_payload,
+        show_note=False,
     )
 
 
@@ -5344,13 +6065,13 @@ def make_figure_2(
     ridge_strength: float,
     dark_movement_fr_cache_dir: Path | None,
     refresh_dark_movement_fr_cache: bool,
+    refresh_panel_b_schematic_cache: bool,
     dpi: int,
 ) -> Path:
     """Build and save Figure 2."""
     import matplotlib.pyplot as plt
 
     apply_paper_style()
-    xcorr_animal, xcorr_date, xcorr_epoch = normalize_dataset_id(xcorr_dataset)
     heatmap_epoch_tables = load_pooled_ripple_heatmap_epoch_tables(
         data_root,
         datasets,
@@ -5358,17 +6079,6 @@ def make_figure_2(
         dark_epoch=dark_epoch,
         sleep_epoch=sleep_epoch,
         ripple_threshold_zscore=ripple_threshold_zscore,
-    )
-    xcorr_payload = load_top_ca1_xcorr_panel_data(
-        data_root,
-        animal_name=xcorr_animal,
-        date=xcorr_date,
-        epoch=xcorr_epoch,
-        state=xcorr_state,
-        top_n_ca1_units=xcorr_top_ca1_units,
-        bin_size_s=xcorr_bin_size_s,
-        max_lag_s=xcorr_max_lag_s,
-        display_vmax=xcorr_display_vmax,
     )
     glm_epoch_tables = load_glm_epoch_summary_tables(
         data_root,
@@ -5382,23 +6092,47 @@ def make_figure_2(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
-    example_animal, example_date, example_epoch = normalize_dataset_id(example_dataset)
-    ripple_lfp_trace: dict[str, Any] | None = None
+    schematic_animal, schematic_date, schematic_epoch = normalize_dataset_id(
+        DEFAULT_PANEL_B_SCHEMATIC_DATASET
+    )
+    ripple_schematic_trace: dict[str, Any] | None = None
     try:
-        ripple_lfp_trace = load_example_ripple_lfp_trace(
+        ripple_schematic_trace = load_or_build_panel_b_schematic_example(
             data_root,
-            animal_name=example_animal,
-            date=example_date,
-            epoch=example_epoch,
+            cache_dir=DEFAULT_FIGURE_CACHE_DIR,
+            animal_name=schematic_animal,
+            date=schematic_date,
+            epoch=schematic_epoch,
             ripple_threshold_zscore=ripple_threshold_zscore,
-            time_before_s=DEFAULT_LFP_TIME_BEFORE_S,
-            time_after_s=0.220,
+            time_before_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+            time_after_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+            n_units_per_region=DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+            target_ripple_duration_s=DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S,
+            refresh_cache=refresh_panel_b_schematic_cache,
         )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(
-            "Panel C using schematic ripple trace because saved ripple-band LFP "
-            f"was unavailable for {example_animal} {example_date} {example_epoch}: {exc}"
+            "Panel B using fallback schematic spikes because the real-spike cache "
+            f"could not be built for {schematic_animal} {schematic_date} "
+            f"{schematic_epoch}: {exc}"
         )
+        example_animal, example_date, example_epoch = normalize_dataset_id(example_dataset)
+        try:
+            ripple_schematic_trace = load_example_ripple_lfp_trace(
+                data_root,
+                animal_name=example_animal,
+                date=example_date,
+                epoch=example_epoch,
+                ripple_threshold_zscore=ripple_threshold_zscore,
+                time_before_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+                time_after_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as fallback_exc:
+            print(
+                "Panel B using fully synthetic schematic because saved ripple-band LFP "
+                f"was unavailable for {example_animal} {example_date} "
+                f"{example_epoch}: {fallback_exc}"
+            )
     panel_d_payload = load_glm_dark_activity_devexp_tables(
         data_root,
         datasets,
@@ -5430,52 +6164,63 @@ def make_figure_2(
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=3,
-        ncols=4,
-        height_ratios=[1.12, 1.0, 0.62],
-        width_ratios=[1.1, 1.1, 0.9, 0.9],
+        nrows=2,
+        ncols=8,
+        height_ratios=[0.46, 0.54],
     )
     axes = [
-        fig.add_subplot(outer_grid[0, :2]),
-        fig.add_subplot(outer_grid[0, 2:]),
-        fig.add_subplot(outer_grid[1, :2]),
-        fig.add_subplot(outer_grid[1, 2:]),
-        fig.add_subplot(outer_grid[2, :]),
+        fig.add_subplot(outer_grid[:, :2]),
+        fig.add_subplot(outer_grid[:, 2:5]),
+        fig.add_subplot(outer_grid[0, 5:]),
+        fig.add_subplot(outer_grid[1, 5:]),
     ]
 
     plot_epoch_ripple_heatmap_panel(axes[0], panel_a_epoch_tables, regions=regions)
-    axes[0].set_title("Ripple-triggered mean firing rates", fontsize=8, pad=2)
-    plot_top_ca1_xcorr_panel(axes[1], xcorr_payload)
-    axes[1].set_title("CA1-V1 cross correlation during ripples", fontsize=8, pad=2)
-    plot_glm_analysis_panel(axes[2], panel_c_epoch_tables, ripple_trace=ripple_lfp_trace)
-    axes[2].set_title("Predicting V1 activity during ripples with CA1 activity", fontsize=8, pad=2)
-    plot_glm_behavior_association_panel(axes[3], panel_d_payload)
-    axes[3].set_title(
-        "CA1-to-V1 predictability by dark activity group",
-        fontsize=8,
+    axes[0].set_title("Ripple-triggered\nmean firing rates", fontsize=7.2, pad=2)
+    plot_glm_analysis_panel(axes[1], panel_c_epoch_tables, ripple_trace=ripple_schematic_trace)
+    axes[1].set_title(
+        "Predicting V1 activity during ripples\nwith CA1 activity",
+        fontsize=7.2,
         pad=2,
     )
-    plot_glm_source_predictor_comparison_panel(axes[4], panel_e_payload)
-    axes[4].set_title(
-        "Full CA1 spike vector vs mean CA1 activity",
-        fontsize=8,
+    plot_glm_source_predictor_comparison_panel(
+        axes[2],
+        panel_e_payload,
+        include_per_animal=False,
+        include_pooled=True,
+        compact_labels=True,
+        show_color_note=False,
+    )
+    axes[2].set_title(
+        "CA1 spike vector vs. mean CA1 activity",
+        fontsize=7.2,
+        pad=2,
+    )
+    plot_glm_behavior_association_panel(
+        axes[3],
+        panel_d_payload,
+        show_note=False,
+    )
+    axes[3].set_title(
+        "Relationship to dark-active DGP cells",
+        fontsize=7.2,
         pad=2,
     )
 
-    for ax, label in zip(axes, ("A", "B", "C", "D", "E"), strict=True):
+    for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
         label_axis(ax, label, x=-0.10, y=1.04)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     for missing in panel_d_payload["missing_artifacts"]:
         print(
-            "Panel D missing "
+            "Panel C dark-activity missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
         )
     for missing in panel_e_payload["missing_artifacts"]:
         print(
-            "Panel E missing "
+            "Panel C source-comparison missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']} "
             f"({missing['source_predictor_mode']}): {missing['path']}"
@@ -5536,7 +6281,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=parse_dataset_id,
         default=DEFAULT_XCORR_DATASET,
         help=(
-            "Screen-xcorr data set used for panel B. "
+            "Deprecated screen-xcorr data set argument. "
             "Format: animal:date:epoch. Default: L15:20241121:02_r1."
         ),
     )
@@ -5544,14 +6289,14 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--xcorr-state",
         choices=XCORR_STATE_CHOICES,
         default=DEFAULT_XCORR_STATE,
-        help=f"Screen-xcorr state for panel B. Default: {DEFAULT_XCORR_STATE}.",
+        help=f"Deprecated screen-xcorr state argument. Default: {DEFAULT_XCORR_STATE}.",
     )
     parser.add_argument(
         "--xcorr-top-ca1-units",
         type=int,
         default=DEFAULT_XCORR_TOP_CA1_UNITS,
         help=(
-            "Number of top-ranked CA1 units to show in panel B. "
+            "Deprecated number of top-ranked CA1 units for screen-xcorr. "
             f"Default: {DEFAULT_XCORR_TOP_CA1_UNITS}."
         ),
     )
@@ -5571,7 +6316,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--xcorr-display-vmax",
         type=float,
         default=DEFAULT_XCORR_DISPLAY_VMAX,
-        help=f"Panel B normalized-xcorr color maximum. Default: {DEFAULT_XCORR_DISPLAY_VMAX:g}.",
+        help=f"Deprecated normalized-xcorr color maximum. Default: {DEFAULT_XCORR_DISPLAY_VMAX:g}.",
     )
     parser.add_argument(
         "--region",
@@ -5611,7 +6356,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_FIGURE_CACHE_DIR,
         help=(
-            "Directory for cached dark movement firing-rate tables used by Panel D. "
+            "Directory for cached dark movement firing-rate tables used by Panel C. "
             f"Default: {DEFAULT_FIGURE_CACHE_DIR}"
         ),
     )
@@ -5619,6 +6364,11 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--refresh-dark-movement-fr-cache",
         action="store_true",
         help="Recompute and overwrite cached dark movement firing-rate tables.",
+    )
+    parser.add_argument(
+        "--refresh-panel-b-schematic-cache",
+        action="store_true",
+        help="Recompute and overwrite the cached real-spike panel B schematic example.",
     )
     parser.add_argument(
         "--ripple-threshold-zscore",
@@ -5700,6 +6450,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ridge_strength=args.ridge_strength,
         dark_movement_fr_cache_dir=args.dark_movement_fr_cache_dir,
         refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
+        refresh_panel_b_schematic_cache=args.refresh_panel_b_schematic_cache,
         dpi=args.dpi,
     )
 

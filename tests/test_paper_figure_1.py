@@ -1296,7 +1296,7 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
         ]
         rate_axes = example_ax.child_axes[8:]
         assert all(
-            rate_axis.get_xlabel() == "Nom. path progression"
+            rate_axis.get_xlabel() == "Nom. goal progression"
             for rate_axis in rate_axes
         )
         assert all(
@@ -1411,7 +1411,7 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
-    assert "Motor+DPP better" in text_labels
+    assert "Motor+DGP better" in text_labels
     assert "50% >0, med. 0.10" in text_labels
     assert "n = 4 cells\n2 animals" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
@@ -1452,11 +1452,11 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
                 "dpp_vs_absolute_place",
             ],
             "comparison_label": [
-                "DPP - absolute place",
-                "DPP - absolute place",
-                "DPP - absolute task progression",
-                "DPP - absolute task progression",
-                "DPP - absolute place",
+                "DGP - absolute place",
+                "DGP - absolute place",
+                "DGP - distance-to-reward",
+                "DGP - distance-to-reward",
+                "DGP - absolute place",
             ],
             "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
@@ -1471,10 +1471,10 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Abs place better" in text_labels
-    assert "Abs task progression\nbetter" in text_labels
-    assert text_labels.count("DPP better") == 1
-    assert "DPP > abs place\n50% >0, med. 0.05" in text_labels
-    assert "DPP > abs task prog.\n50% >0, med. -0.10" in text_labels
+    assert "Distance-to-reward\nbetter" in text_labels
+    assert text_labels.count("DGP better") == 1
+    assert "DGP > abs place\n50% >0, med. 0.05" in text_labels
+    assert "DGP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
     assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"

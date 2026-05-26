@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
@@ -31,6 +32,10 @@ from v1ca1.paper_figures.figure_3 import (
     FIGURE_FORMATS,
     PANEL_A_EXAMPLE,
     PANEL_GH_WIDTH_RATIOS,
+    PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
+    PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y,
+    PANEL_H_SHARED_DARK_TRACK_CENTER_Y,
+    PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y,
     build_output_path,
     load_panel_a_example_data,
     load_panel_glm_data,
@@ -49,8 +54,108 @@ from v1ca1.paper_figures.style import (
 
 DEFAULT_OUTPUT_NAME = "figure_4"
 DEFAULT_FIGURE_WIDTH_MM = FIGURE_2_WIDTH_MM
-DEFAULT_FIGURE_HEIGHT_MM = FIGURE_2_HEIGHT_MM
-PANEL_A_TO_GH_HEIGHT_RATIOS = (1.0, 1.0)
+DEFAULT_FIGURE_HEIGHT_MM = FIGURE_2_HEIGHT_MM * 1.3
+FIGURE_4_CONSTRAINED_LAYOUT_PADS = {
+    "h_pad": 0.01,
+    "w_pad": 0.01,
+    "hspace": 0.01,
+    "wspace": 0.02,
+}
+PANEL_A_TO_GH_HEIGHT_RATIOS = (0.637, 1.3)
+PANEL_BC_LABEL_Y = 1.03
+PANEL_BC_TITLE_PAD = 0.5
+PANEL_B_SCHEMATIC_HEIGHT_FRACTION = 0.72
+PANEL_B_SCHEMATIC_TRACK_SIZE = (0.22, 0.40)
+PANEL_B_EXAMPLE_AXIS_BOUNDS = (0.0, 0.01, 1.0, 0.44)
+PANEL_B_EXAMPLE_FIELD_Y = 0.13
+PANEL_B_EXAMPLE_FIELD_HEIGHT = 0.62
+PANEL_B_EXAMPLE_ICON_BOUNDS = (0.04, 0.27, 0.09, 0.34)
+PANEL_B_EXAMPLE_XLABEL_Y = 0.02
+PANEL_B_EXAMPLE_COLUMN_WIDTH = 0.50
+PANEL_B_EXAMPLE_COLUMN_GAP = 0.0
+PANEL_B_EXAMPLE_PLOT_LEFT_OFFSET = 0.20
+PANEL_B_EXAMPLE_FIELD_WIDTH = 0.28
+PANEL_B_EXAMPLE_FIELD_GAP = 0.075
+PANEL_B_EXAMPLE_LAYOUT = "rows"
+PANEL_B_EXAMPLE_ROW_HEIGHT = 0.46
+PANEL_B_EXAMPLE_ROW_GAP = 0.05
+PANEL_B_MODEL_LABEL_X = 0.03
+PANEL_B_MODEL_LABEL_FONTSIZE = 5.8
+PANEL_B_COMPONENT_LABEL_FONTSIZE = 5.8
+PANEL_B_SEGMENT_MODULATION_LABEL = "Segment-specific\nmodulation"
+PANEL_B_SEGMENT_MODULATION_LABEL_Y = 0.595
+PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
+PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)
+PANEL_C_DELTA_AXIS_BOUNDS = (0.39, 0.35, 0.60, 0.59)
+PANEL_C_DELTA_GRID_BOUNDS = (
+    (0.035, 0.42, 0.445, 0.50),
+    (0.535, 0.42, 0.445, 0.50),
+    (0.035, -0.22, 0.445, 0.50),
+    (0.535, -0.22, 0.445, 0.50),
+)
+PANEL_C_DELTA_XLABEL_Y = -0.30
+PANEL_C_EXAMPLE_AXIS_BOUNDS = (
+    (0.201, -0.18, 0.248, 0.19),
+    (0.591, -0.18, 0.248, 0.19),
+)
+PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS = ((0.96, 0.94), (0.96, 0.06))
+PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS = ("top", "bottom")
+PANEL_C_EXAMPLE_ICON_BOUNDS = (-0.46, 0.28, 0.26, 0.38)
+PANEL_C_PREDICTION_LABEL_FONTSIZE = 5.8
+PANEL_C_INDEPENDENT_TRACK_CENTER_Y = 0.742
+PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y = 0.60
+PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y = 0.34
+PANEL_C_SHARED_DARK_TRACK_CENTER_Y = 0.0
+PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y = 0.17
+PANEL_C_SHARED_PREDICTION_LABEL_Y = -0.24
+PANEL_C_SCHEMATIC_TRACK_SIZE = (0.628, 0.316)
+PANEL_C_HORIZONTAL_SHIFT = -0.025
+
+
+def _panel_b_schematic_center_y_for_panel_c_center_y(panel_c_center_y: float) -> float:
+    """Return a Panel B schematic y-center aligned to one Panel C schematic row."""
+    panel_b_schematic_bottom = 1.0 - PANEL_B_SCHEMATIC_HEIGHT_FRACTION
+    panel_c_parent_center_y = (
+        PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS[1]
+        + PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS[3] * float(panel_c_center_y)
+    )
+    return (
+        panel_c_parent_center_y - panel_b_schematic_bottom
+    ) / PANEL_B_SCHEMATIC_HEIGHT_FRACTION
+
+
+PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y = (
+    _panel_b_schematic_center_y_for_panel_c_center_y(
+        PANEL_H_INDEPENDENT_TRACK_CENTER_Y
+    )
+)
+PANEL_B_FIELD_LABEL_Y = 0.9619
+PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y = (
+    _panel_b_schematic_center_y_for_panel_c_center_y(
+        (
+            PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y
+            + PANEL_H_SHARED_DARK_TRACK_CENTER_Y
+            + PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y
+        )
+        / 3.0
+    )
+)
+
+
+def _shift_axis_horizontally(ax: Any, dx_figure_fraction: float) -> None:
+    """Shift one axis after constrained layout has selected its size."""
+    if dx_figure_fraction == 0.0:
+        return
+    box = ax.get_position()
+    ax.set_axes_locator(None)
+    ax.set_position(
+        [
+            box.x0 + dx_figure_fraction,
+            box.y0,
+            box.width,
+            box.height,
+        ]
+    )
 
 
 def make_figure_4(
@@ -91,6 +196,7 @@ def make_figure_4(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
     )
+    fig.get_layout_engine().set(**FIGURE_4_CONSTRAINED_LAYOUT_PADS)
     outer_grid = fig.add_gridspec(
         nrows=2,
         ncols=1,
@@ -124,31 +230,78 @@ def make_figure_4(
     plot_panel_g_model_architecture(
         panel_b_axis,
         panel_glm_payload["dark_light_examples"],
+        independent_track_center_y=PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y,
+        shared_track_center_y=PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
+        schematic_height_fraction=PANEL_B_SCHEMATIC_HEIGHT_FRACTION,
+        schematic_track_size=PANEL_B_SCHEMATIC_TRACK_SIZE,
+        show_dark_track_labels=True,
+        field_label_y=PANEL_B_FIELD_LABEL_Y,
+        model_label_x=PANEL_B_MODEL_LABEL_X,
+        model_label_fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
+        component_label_fontsize=PANEL_B_COMPONENT_LABEL_FONTSIZE,
+        segment_modulation_label_y=PANEL_B_SEGMENT_MODULATION_LABEL_Y,
+        segment_modulation_label=PANEL_B_SEGMENT_MODULATION_LABEL,
+        example_axis_bounds=PANEL_B_EXAMPLE_AXIS_BOUNDS,
+        example_field_y=PANEL_B_EXAMPLE_FIELD_Y,
+        example_field_height=PANEL_B_EXAMPLE_FIELD_HEIGHT,
+        example_icon_bounds=PANEL_B_EXAMPLE_ICON_BOUNDS,
+        example_xlabel_y=PANEL_B_EXAMPLE_XLABEL_Y,
+        example_column_width=PANEL_B_EXAMPLE_COLUMN_WIDTH,
+        example_column_gap=PANEL_B_EXAMPLE_COLUMN_GAP,
+        example_plot_left_offset=PANEL_B_EXAMPLE_PLOT_LEFT_OFFSET,
+        example_field_width=PANEL_B_EXAMPLE_FIELD_WIDTH,
+        example_field_gap=PANEL_B_EXAMPLE_FIELD_GAP,
+        example_layout=PANEL_B_EXAMPLE_LAYOUT,
+        example_row_height=PANEL_B_EXAMPLE_ROW_HEIGHT,
+        example_row_gap=PANEL_B_EXAMPLE_ROW_GAP,
     )
     plot_panel_h_swap_delta(
         panel_c_axis,
         panel_glm_payload["swap_delta"],
         panel_glm_payload["swap_examples"],
+        schematic_axis_bounds=PANEL_C_SCHEMATIC_AXIS_BOUNDS,
+        delta_axis_bounds=PANEL_C_DELTA_AXIS_BOUNDS,
+        example_axis_bounds=PANEL_C_EXAMPLE_AXIS_BOUNDS,
+        schematic_track_size=PANEL_C_SCHEMATIC_TRACK_SIZE,
+        show_dark_track_labels=True,
+        show_model_labels=False,
+        prediction_label_fontsize=PANEL_C_PREDICTION_LABEL_FONTSIZE,
+        independent_track_center_y=PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
+        independent_prediction_label_y=PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
+        segment_modulation_track_center_y=PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
+        shared_dark_track_center_y=PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
+        shared_light_track_center_y=PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
+        shared_prediction_label_y=PANEL_C_SHARED_PREDICTION_LABEL_Y,
+        delta_grid_bounds=PANEL_C_DELTA_GRID_BOUNDS,
+        delta_xlabel_y=PANEL_C_DELTA_XLABEL_Y,
+        example_delta_label_positions=PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS,
+        example_delta_label_vertical_alignments=(
+            PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
+        ),
+        example_icon_bounds=PANEL_C_EXAMPLE_ICON_BOUNDS,
     )
 
     label_axis(panel_a_axis, "A", x=-0.02, y=1.00)
-    label_axis(panel_b_axis, "B", x=-0.035, y=1.12)
-    label_axis(panel_c_axis, "C", x=-0.06, y=1.02)
+    label_axis(panel_b_axis, "B", x=-0.035, y=PANEL_BC_LABEL_Y)
+    label_axis(panel_c_axis, "C", x=-0.035, y=PANEL_BC_LABEL_Y)
     panel_a_axis.set_title(
         "Example visual cell in different visual conditions",
         fontsize=8,
         pad=2,
     )
     panel_b_axis.set_title(
-        "Two possible models that relate dark and light activity",
+        "Two models that relate dark and light activity",
         fontsize=8,
-        pad=2,
+        pad=PANEL_BC_TITLE_PAD,
     )
     panel_c_axis.set_title(
         "Predicting activity in held-out light epoch",
         fontsize=8,
-        pad=2,
+        pad=PANEL_BC_TITLE_PAD,
     )
+
+    fig.canvas.draw()
+    _shift_axis_horizontally(panel_c_axis, PANEL_C_HORIZONTAL_SHIFT)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)

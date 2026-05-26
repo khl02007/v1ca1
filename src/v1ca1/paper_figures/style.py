@@ -29,6 +29,13 @@ PAPER_RC_PARAMS: dict[str, Any] = {
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
     "svg.fonttype": "none",
+    "mathtext.fontset": "custom",
+    "mathtext.rm": "Liberation Sans",
+    "mathtext.it": "Liberation Sans:italic",
+    "mathtext.bf": "Liberation Sans:bold",
+    "mathtext.cal": "Liberation Sans",
+    "mathtext.sf": "Liberation Sans",
+    "mathtext.tt": "Liberation Mono",
 }
 PANEL_LABEL_KWARGS: dict[str, Any] = {
     "fontsize": 8,
