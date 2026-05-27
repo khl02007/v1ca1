@@ -106,7 +106,7 @@ def test_default_cli_matches_figure_2_canvas() -> None:
     assert PANEL_BC_LABEL_Y == pytest.approx(1.03)
     assert PANEL_BC_TITLE_PAD == pytest.approx(0.5)
     assert PANEL_B_SCHEMATIC_HEIGHT_FRACTION == pytest.approx(0.72)
-    assert PANEL_B_SCHEMATIC_TRACK_SIZE == pytest.approx((0.22, 0.40))
+    assert PANEL_B_SCHEMATIC_TRACK_SIZE == pytest.approx((0.3022, 0.2535))
     assert PANEL_B_EXAMPLE_AXIS_BOUNDS == pytest.approx((0.0, 0.01, 1.0, 0.44))
     assert PANEL_B_EXAMPLE_FIELD_Y == pytest.approx(0.13)
     assert PANEL_B_EXAMPLE_FIELD_HEIGHT == pytest.approx(0.62)
