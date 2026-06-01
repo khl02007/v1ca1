@@ -29,6 +29,8 @@ from v1ca1.helper.session import (
 )
 from v1ca1.helper.wtrack import (
     get_wtrack_branch_graph,
+    get_wtrack_branch_side,
+    get_wtrack_direction,
     get_wtrack_geometry,
     get_wtrack_total_length,
 )
@@ -248,13 +250,20 @@ def _extract_tuning_curve_arrays(tuning_curve: Any) -> tuple[np.ndarray, np.ndar
 def get_legacy_heatmap_track_graph(
     animal_name: str,
     trajectory_type: str,
+    *,
+    use_trajectory_direction: bool = False,
 ) -> tuple[Any, list[tuple[int, int]]]:
-    """Return the legacy branch-only linearization used by the old heatmap script."""
-    branch_side = "left" if "left" in trajectory_type else "right"
+    """Return the branch-only linearization used by heatmap workflows."""
+    branch_side = get_wtrack_branch_side(trajectory_type)
+    direction = (
+        get_wtrack_direction(trajectory_type)
+        if use_trajectory_direction
+        else "from_center"
+    )
     return get_wtrack_branch_graph(
         animal_name=animal_name,
         branch_side=branch_side,
-        direction="from_center",
+        direction=direction,
     )
 
 
@@ -265,8 +274,9 @@ def build_linear_position_by_trajectory(
     trajectory_intervals: dict[str, Any],
     *,
     position_offset: int = DEFAULT_POSITION_OFFSET,
+    use_trajectory_direction: bool = False,
 ) -> dict[str, Any]:
-    """Build legacy-coordinate linear position Tsds for the four trajectories."""
+    """Build branch-coordinate linear position Tsds for the four trajectories."""
     import pynapple as nap
     import track_linearization as tl
 
@@ -286,6 +296,7 @@ def build_linear_position_by_trajectory(
         track_graph, edge_order = get_legacy_heatmap_track_graph(
             animal_name,
             trajectory_type,
+            use_trajectory_direction=use_trajectory_direction,
         )
         position_df = tl.get_linearized_position(
             position=epoch_position,

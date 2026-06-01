@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,15 +36,24 @@ from v1ca1.paper_figures.figure_1 import (
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_PANEL_E_WIDTH_FRACTION,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
+    HEATMAP_COLORBAR_PAD,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
     HEATMAP_COLORBAR_LABELPAD,
+    HEATMAP_PATH_LABEL_OFFSET,
+    PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+    PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    PANEL_D_MIN_TUNING_STABILITY_CORRELATION,
+    PANEL_E_AXIS_LABEL_FONTSIZE,
+    TASK_PROGRESSION_XLABEL,
     add_centered_axis_text,
+    add_centered_below_axis_text,
     build_normalized_position_bins,
     build_pooled_panel_values,
     compute_dark_epoch_tuning_curves,
     draw_neuron_scale_bar,
     draw_order_schematic,
     extract_unit_rate_curve,
+    get_stability_table_path,
     get_unit_spike_times,
     normalize_linear_position_by_trajectory,
     orient_panel_e_task_progression,
@@ -85,6 +94,7 @@ from v1ca1.raster.plot_1d_place_field_trajectory import (
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.image import AxesImage
+    from matplotlib.text import Text
 
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
@@ -92,12 +102,13 @@ DEFAULT_OUTPUT_NAME = "figure_3"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_PANEL_A_HEIGHT_MM = 42.56
-DEFAULT_PANEL_BC_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
+DEFAULT_PANEL_AB_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
+DEFAULT_PANEL_A_HEIGHT_MM = DEFAULT_PANEL_AB_HEIGHT_MM
+DEFAULT_PANEL_BC_HEIGHT_MM = DEFAULT_PANEL_AB_HEIGHT_MM
 DEFAULT_PANEL_DEF_HEIGHT_MM = 30.0
 DEFAULT_PANEL_GH_HEIGHT_MM = 42.0
 DEFAULT_FIGURE_HEIGHT_MM = (
-    DEFAULT_PANEL_BC_HEIGHT_MM
+    DEFAULT_PANEL_AB_HEIGHT_MM
     + DEFAULT_PANEL_DEF_HEIGHT_MM
 )
 DEFAULT_PANEL_B_WIDTH_FRACTION = DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION
@@ -110,10 +121,20 @@ PANEL_D_AXIS_BOUNDS = (0.73, PANEL_DEF_AXIS_BOTTOM, 0.82, PANEL_DEF_AXIS_HEIGHT)
 PANEL_E_AXIS_BOUNDS = (0.06, PANEL_DEF_AXIS_BOTTOM, 0.92, PANEL_DEF_AXIS_HEIGHT)
 PANEL_GH_WIDTH_RATIOS = (0.4, 0.6)
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
-PANEL_C_COLORBAR_PAD = 0.002
+PANEL_C_COLORBAR_PAD = HEATMAP_COLORBAR_PAD
 PANEL_C_NEURON_SCALE_BAR_X = 1.02
 PANEL_C_HORIZONTAL_SHIFT = 0.012
-PANEL_B_CACHE_VERSION = 1
+PANEL_B_TRAJECTORY_TYPES = (
+    "right_to_center",
+    "center_to_left",
+    "left_to_center",
+    "center_to_right",
+)
+PANEL_B_LINEAR_POSITION_ORIENTATION = "task_progression"
+PANEL_B_HEATMAP_CMAP = "viridis"
+PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ
+PANEL_B_MIN_TUNING_STABILITY_CORRELATION = PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+PANEL_B_CACHE_VERSION = 3
 PANEL_B_CACHE_PREFIX = "figure_3_panel_b"
 PANEL_B_CACHE_METADATA_KEY = "__metadata__"
 PANEL_B_CACHE_DATASET_TOKEN_LIMIT = 120
@@ -191,6 +212,7 @@ PANEL_D_SCATTER_ALPHA = 0.126
 PANEL_E_ENCODING_N_FOLDS = 5
 PANEL_E_PLACE_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
 PANEL_E_DELTA_COLUMN = "delta_bits_place_vs_tp"
+PANEL_E_MIN_TUNING_STABILITY_CORRELATION = 0.5
 PANEL_E_X_LIMITS = (-0.75, 0.75)
 PANEL_F_DECODING_MODELS = ("task_progression", "place")
 PANEL_F_DECODING_METRIC = "median_abs_error"
@@ -252,8 +274,8 @@ PANEL_G_COMPONENT_LABEL_FONTSIZE = 4.3
 PANEL_G_SEGMENT_MODULATION_LABEL_GAP = 0.045
 PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH = 0.16
 PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT = 0.24
-PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X = 0.36
-PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X = 0.64
+PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X = 0.43
+PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X = 0.57
 PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM = 0.18
 PANEL_G_INDEPENDENT_BASIS_ICON_TOP = 0.58
 PANEL_H_SWAP_LIGHT_EPOCH_PAIRS = (("02_r1", "06_r3"), ("06_r3", "02_r1"))
@@ -596,8 +618,19 @@ def build_panel_b_cache_metadata(
     position_offset: int,
     speed_threshold_cm_s: float,
     sigma_bins: float,
+    min_movement_firing_rate_hz: float | None = PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> dict[str, Any]:
     """Return metadata that identifies one Panel B heatmap cache."""
+    if min_movement_firing_rate_hz is not None and min_movement_firing_rate_hz < 0:
+        raise ValueError("min_movement_firing_rate_hz must be non-negative.")
+    if (
+        min_tuning_stability_correlation is not None
+        and min_tuning_stability_correlation < -1.0
+    ):
+        raise ValueError("min_tuning_stability_correlation must be at least -1.")
     dataset_metadata = []
     for dataset in datasets:
         animal_name, date, dark_epoch = normalize_dataset_id(dataset)
@@ -610,7 +643,7 @@ def build_panel_b_cache_metadata(
             }
         )
 
-    return {
+    metadata = {
         "cache_version": PANEL_B_CACHE_VERSION,
         "figure": DEFAULT_OUTPUT_NAME,
         "panel": "B",
@@ -618,13 +651,21 @@ def build_panel_b_cache_metadata(
         "region": str(region),
         "light_epoch_argument": light_epoch,
         "datasets": dataset_metadata,
-        "trajectory_types": list(TRAJECTORY_TYPES),
+        "trajectory_types": list(PANEL_B_TRAJECTORY_TYPES),
+        "linear_position_orientation": PANEL_B_LINEAR_POSITION_ORIENTATION,
         "position_bin_count": int(position_bin_count),
         "position_offset": int(position_offset),
         "speed_threshold_cm_s": float(speed_threshold_cm_s),
         "sigma_bins": float(sigma_bins),
         "pooled_builder": "build_pooled_panel_values",
     }
+    if min_movement_firing_rate_hz is not None:
+        metadata["min_movement_firing_rate_hz"] = float(min_movement_firing_rate_hz)
+    if min_tuning_stability_correlation is not None:
+        metadata["min_tuning_stability_correlation"] = float(
+            min_tuning_stability_correlation
+        )
+    return metadata
 
 
 def build_panel_b_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
@@ -645,6 +686,19 @@ def build_panel_b_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
     filename = (
         f"{PANEL_B_CACHE_PREFIX}_{region_token}_light{light_epoch_token}"
         f"_datasets-{dataset_token}"
+        f"_orient{_format_panel_b_cache_token(metadata['linear_position_orientation'])}"
+    )
+    if "min_movement_firing_rate_hz" in metadata:
+        filename += (
+            "_minmovefr"
+            f"{_format_panel_b_cache_number(metadata['min_movement_firing_rate_hz'])}"
+        )
+    if "min_tuning_stability_correlation" in metadata:
+        filename += (
+            "_minstab"
+            f"{_format_panel_b_cache_number(metadata['min_tuning_stability_correlation'])}"
+        )
+    filename += (
         f"_posbins{int(metadata['position_bin_count'])}"
         f"_offset{int(metadata['position_offset'])}"
         f"_speed{_format_panel_b_cache_number(metadata['speed_threshold_cm_s'])}"
@@ -670,8 +724,8 @@ def save_panel_b_cache(
     payload: dict[str, Any] = {
         PANEL_B_CACHE_METADATA_KEY: np.asarray(json.dumps(metadata, sort_keys=True)),
     }
-    for order_trajectory in TRAJECTORY_TYPES:
-        for plot_trajectory in TRAJECTORY_TYPES:
+    for order_trajectory in PANEL_B_TRAJECTORY_TYPES:
+        for plot_trajectory in PANEL_B_TRAJECTORY_TYPES:
             payload[_panel_b_cache_array_name(order_trajectory, plot_trajectory)] = np.asarray(
                 panels[(order_trajectory, plot_trajectory)],
                 dtype=float,
@@ -696,8 +750,8 @@ def load_panel_b_cache(
                 return None
 
             panels: dict[tuple[str, str], np.ndarray] = {}
-            for order_trajectory in TRAJECTORY_TYPES:
-                for plot_trajectory in TRAJECTORY_TYPES:
+            for order_trajectory in PANEL_B_TRAJECTORY_TYPES:
+                for plot_trajectory in PANEL_B_TRAJECTORY_TYPES:
                     array_name = _panel_b_cache_array_name(
                         order_trajectory,
                         plot_trajectory,
@@ -724,6 +778,10 @@ def load_or_compute_panel_b_heatmap_panels(
     sigma_bins: float,
     panel_b_cache_dir: Path | None,
     refresh_panel_b_cache: bool,
+    min_movement_firing_rate_hz: float | None = PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> dict[tuple[str, str], np.ndarray]:
     """Load cached Panel B panels or compute and cache them."""
     metadata = build_panel_b_cache_metadata(
@@ -735,6 +793,8 @@ def load_or_compute_panel_b_heatmap_panels(
         position_offset=position_offset,
         speed_threshold_cm_s=speed_threshold_cm_s,
         sigma_bins=sigma_bins,
+        min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+        min_tuning_stability_correlation=min_tuning_stability_correlation,
     )
     cache_path = (
         build_panel_b_cache_path(panel_b_cache_dir, metadata)
@@ -764,12 +824,17 @@ def load_or_compute_panel_b_heatmap_panels(
                 position_offset=position_offset,
                 speed_threshold_cm_s=speed_threshold_cm_s,
                 sigma_bins=sigma_bins,
+                use_trajectory_direction=True,
+                min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+                min_tuning_stability_correlation=min_tuning_stability_correlation,
             )
         )
 
     panels = build_pooled_panel_values(
         curve_sets,
         position_bin_count=position_bin_count,
+        trajectory_types=PANEL_B_TRAJECTORY_TYPES,
+        firing_rate_normalization=PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
     )
     if cache_path is not None:
         save_panel_b_cache(cache_path, panels, metadata)
@@ -788,6 +853,9 @@ def compute_light_epoch_tuning_curves(
     position_offset: int,
     speed_threshold_cm_s: float,
     sigma_bins: float,
+    use_trajectory_direction: bool = False,
+    min_movement_firing_rate_hz: float | None = None,
+    min_tuning_stability_correlation: float | None = None,
 ) -> dict[str, Any]:
     """Compute odd/even normalized-position tuning curves for one light epoch."""
     return compute_dark_epoch_tuning_curves(
@@ -800,6 +868,9 @@ def compute_light_epoch_tuning_curves(
         position_offset=position_offset,
         speed_threshold_cm_s=speed_threshold_cm_s,
         sigma_bins=sigma_bins,
+        use_trajectory_direction=use_trajectory_direction,
+        min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+        min_tuning_stability_correlation=min_tuning_stability_correlation,
     )
 
 
@@ -1143,16 +1214,22 @@ def plot_panel_a_rate_axis(
     y_max: float,
     show_ylabel: bool = False,
     show_legend: bool = False,
+    trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     """Plot panel-A firing-rate curves for one trajectory across epochs."""
     for epoch_key in example["epoch_order"]:
         position, rate = example["epoch_examples"][epoch_key]["firing_rates"][
             trajectory_type
         ]
+        trajectory_epoch_colors = (
+            trajectory_epoch_color_overrides.get(trajectory_type, {})
+            if trajectory_epoch_color_overrides is not None
+            else {}
+        )
         ax.plot(
             position,
             rate,
-            color=PANEL_A_EPOCH_COLORS[epoch_key],
+            color=trajectory_epoch_colors.get(epoch_key, PANEL_A_EPOCH_COLORS[epoch_key]),
             linewidth=0.85,
             label=example["epoch_labels"][epoch_key],
         )
@@ -1163,7 +1240,7 @@ def plot_panel_a_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel("Norm. goal progression", fontsize=4.8, labelpad=1)
+    ax.set_xlabel(TASK_PROGRESSION_XLABEL, fontsize=4.8, labelpad=1)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
     if show_legend:
@@ -1209,10 +1286,17 @@ def plot_panel_a_combined_raster_axis(
     ax: "Axes",
     example: dict[str, Any],
     trajectory_type: str,
+    *,
+    trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     """Plot all panel-A epoch rasters in one stacked axis."""
     epoch_order = tuple(example["epoch_order"])
     n_epochs = len(epoch_order)
+    trajectory_epoch_colors = (
+        trajectory_epoch_color_overrides.get(trajectory_type, {})
+        if trajectory_epoch_color_overrides is not None
+        else {}
+    )
     for epoch_index, epoch_key in enumerate(epoch_order):
         epoch_base = float(n_epochs - epoch_index - 1)
         if epoch_key == "dark":
@@ -1227,7 +1311,7 @@ def plot_panel_a_combined_raster_axis(
             trajectory_type
         ]
         n_trials = len(trial_positions)
-        color = PANEL_A_EPOCH_COLORS[epoch_key]
+        color = trajectory_epoch_colors.get(epoch_key, PANEL_A_EPOCH_COLORS[epoch_key])
         for trial_index, positions in enumerate(trial_positions, start=1):
             positions = np.asarray(positions, dtype=float)
             if positions.size == 0:
@@ -1262,6 +1346,7 @@ def draw_panel_a_epoch_icon(
     left_label: str | None = None,
     right_label: str | None = None,
     fill_track: bool = False,
+    label_colors: Mapping[str, str] | None = None,
 ) -> None:
     """Draw one panel-A epoch-condition W-track icon."""
     from matplotlib.patches import Polygon
@@ -1285,6 +1370,11 @@ def draw_panel_a_epoch_icon(
             ha="center",
             va="center",
             fontsize=5.2,
+            color=(
+                label_colors.get(left_label, "black")
+                if label_colors is not None
+                else "black"
+            ),
         )
     if right_label is not None:
         ax.text(
@@ -1294,6 +1384,11 @@ def draw_panel_a_epoch_icon(
             ha="center",
             va="center",
             fontsize=5.2,
+            color=(
+                label_colors.get(right_label, "black")
+                if label_colors is not None
+                else "black"
+            ),
         )
     ax.set_aspect("equal")
     ax.set_xlim(-0.95, dims["x5"] + 0.95)
@@ -1301,7 +1396,13 @@ def draw_panel_a_epoch_icon(
     ax.axis("off")
 
 
-def plot_panel_a_example(ax: "Axes", example: dict[str, Any]) -> None:
+def plot_panel_a_example(
+    ax: "Axes",
+    example: dict[str, Any],
+    *,
+    visual_label_colors: Mapping[str, str] | None = None,
+    trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> None:
     """Plot the panel-A example rasters and firing-rate curves."""
     trajectories = validate_trajectories(example["trajectories"], panel_name="A")
     ax.set_xlim(0.0, 1.0)
@@ -1331,7 +1432,11 @@ def plot_panel_a_example(ax: "Axes", example: dict[str, Any]) -> None:
             len(icon_specs) - row_index - 0.5
         ) / len(icon_specs)
         icon_ax = ax.inset_axes([0.026, epoch_center - 0.061, 0.070, 0.122])
-        draw_panel_a_epoch_icon(icon_ax, **icon_spec)
+        draw_panel_a_epoch_icon(
+            icon_ax,
+            **icon_spec,
+            label_colors=visual_label_colors,
+        )
 
     for trajectory_index, trajectory_type in enumerate(trajectories):
         left = left_margin + trajectory_index * (column_width + column_gap)
@@ -1349,7 +1454,12 @@ def plot_panel_a_example(ax: "Axes", example: dict[str, Any]) -> None:
         )
 
         raster_ax = ax.inset_axes([left, raster_bottom, column_width, raster_height])
-        plot_panel_a_combined_raster_axis(raster_ax, example, trajectory_type)
+        plot_panel_a_combined_raster_axis(
+            raster_ax,
+            example,
+            trajectory_type,
+            trajectory_epoch_color_overrides=trajectory_epoch_color_overrides,
+        )
         if trajectory_index == 0:
             raster_ax.set_ylabel("")
 
@@ -1361,6 +1471,7 @@ def plot_panel_a_example(ax: "Axes", example: dict[str, Any]) -> None:
             y_max=y_max,
             show_ylabel=trajectory_index == 0,
             show_legend=False,
+            trajectory_epoch_color_overrides=trajectory_epoch_color_overrides,
         )
 
 
@@ -1595,7 +1706,7 @@ def plot_epoch_path_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel("Norm. goal progression", fontsize=4.8, labelpad=1)
+    ax.set_xlabel(TASK_PROGRESSION_XLABEL, fontsize=4.8, labelpad=1)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
     if show_title:
@@ -1822,17 +1933,20 @@ def setup_light_heatmap_panel(
     *,
     regions: Sequence[str],
 ) -> dict[str, Any]:
-    """Create the panel-A light-epoch heatmap axes."""
-    n_region_rows = len(regions) * len(TRAJECTORY_TYPES)
+    """Create the Panel B light-epoch heatmap axes."""
+    n_region_rows = len(regions) * len(PANEL_B_TRAJECTORY_TYPES)
     heatmap_grid = grid_spec.subgridspec(
         nrows=n_region_rows + 1,
-        ncols=len(TRAJECTORY_TYPES) + 1,
+        ncols=len(PANEL_B_TRAJECTORY_TYPES) + 1,
         height_ratios=[0.42, *([1.0] * n_region_rows)],
-        width_ratios=[0.48, *([1.0] * len(TRAJECTORY_TYPES))],
+        width_ratios=[0.48, *([1.0] * len(PANEL_B_TRAJECTORY_TYPES))],
     )
     axes = np.asarray(
         [
-            [fig.add_subplot(heatmap_grid[row, col]) for col in range(len(TRAJECTORY_TYPES) + 1)]
+            [
+                fig.add_subplot(heatmap_grid[row, col])
+                for col in range(len(PANEL_B_TRAJECTORY_TYPES) + 1)
+            ]
             for row in range(n_region_rows + 1)
         ],
         dtype=object,
@@ -1842,7 +1956,11 @@ def setup_light_heatmap_panel(
     tuning_schematic_axes = axes[0, 1:]
     order_schematic_axes = axes[1:, 0]
     heatmap_axes = axes[1:, 1:]
-    for ax, trajectory_type in zip(tuning_schematic_axes, TRAJECTORY_TYPES, strict=True):
+    for ax, trajectory_type in zip(
+        tuning_schematic_axes,
+        PANEL_B_TRAJECTORY_TYPES,
+        strict=True,
+    ):
         draw_w_track_schematic(
             ax,
             trajectory_name=trajectory_type,
@@ -1850,12 +1968,13 @@ def setup_light_heatmap_panel(
             fill_track=False,
         )
     for row_index, ax in enumerate(order_schematic_axes):
+        trajectory_type = PANEL_B_TRAJECTORY_TYPES[
+            row_index % len(PANEL_B_TRAJECTORY_TYPES)
+        ]
         draw_order_schematic(
             ax,
-            TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)],
-            arrow_color=PANEL_C_TRAJECTORY_COLORS[
-                TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)]
-            ],
+            trajectory_type,
+            arrow_color=PANEL_C_TRAJECTORY_COLORS[trajectory_type],
             fill_track=False,
         )
     return {
@@ -1873,6 +1992,17 @@ def shift_axes_horizontally(axes: Sequence["Axes"], dx: float) -> None:
     for ax in axes:
         box = ax.get_position()
         ax.set_position([box.x0 + dx, box.y0, box.width, box.height])
+
+
+def add_panel_b_path_progression_label(fig: Any, heatmap_axes: np.ndarray) -> "Text":
+    """Add the shared Panel B normalized path-progression x-axis label."""
+    return add_centered_below_axis_text(
+        fig,
+        heatmap_axes[-1, :],
+        TASK_PROGRESSION_XLABEL,
+        y_offset=HEATMAP_PATH_LABEL_OFFSET,
+        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
+    )
 
 
 def plot_light_heatmap_regions(
@@ -1904,11 +2034,14 @@ def plot_light_heatmap_regions(
             panel_b_cache_dir=panel_b_cache_dir,
             refresh_panel_b_cache=refresh_panel_b_cache,
         )
-        start_row = region_index * len(TRAJECTORY_TYPES)
-        stop_row = start_row + len(TRAJECTORY_TYPES)
+        start_row = region_index * len(PANEL_B_TRAJECTORY_TYPES)
+        stop_row = start_row + len(PANEL_B_TRAJECTORY_TYPES)
         image = plot_pooled_heatmap_grid(
             heatmap_axes[start_row:stop_row, :],
             panels,
+            trajectory_types=PANEL_B_TRAJECTORY_TYPES,
+            axis_orientation=PANEL_B_LINEAR_POSITION_ORIENTATION,
+            cmap=PANEL_B_HEATMAP_CMAP,
         )
         for heatmap_ax in heatmap_axes[start_row:stop_row, :].ravel():
             add_segment_boundary_lines(heatmap_ax)
@@ -2037,6 +2170,51 @@ def _require_columns(table: Any, path: Path, columns: Sequence[str]) -> None:
         raise ValueError(f"Artifact table {path} is missing columns {missing!r}.")
 
 
+def load_panel_e_stable_units(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_E_MIN_TUNING_STABILITY_CORRELATION
+    ),
+) -> np.ndarray | None:
+    """Return units with odd/even tuning stability above threshold in any trajectory."""
+    if min_tuning_stability_correlation is None:
+        return None
+    if min_tuning_stability_correlation < -1.0:
+        raise ValueError("min_tuning_stability_correlation must be at least -1.")
+
+    import pandas as pd
+
+    table_path = get_stability_table_path(data_root, animal_name, date)
+    if not table_path.exists():
+        raise FileNotFoundError(
+            "Missing task-progression stability table. Expected "
+            f"{table_path}. Run `python -m v1ca1.task_progression.stability` "
+            "for this session first."
+        )
+    table = read_parquet_table(table_path)
+    _require_columns(
+        table,
+        table_path,
+        ("unit", "region", "epoch", "trajectory_type", "stability_correlation"),
+    )
+    correlations = np.asarray(table["stability_correlation"], dtype=float)
+    stable_rows = table[
+        (table["region"].astype(str) == str(region))
+        & (table["epoch"].astype(str) == str(epoch))
+        & (table["trajectory_type"].astype(str).isin(TRAJECTORY_TYPES))
+        & np.isfinite(correlations)
+        & (correlations > float(min_tuning_stability_correlation))
+    ]
+    stable_units = pd.to_numeric(stable_rows["unit"], errors="coerce")
+    stable_units = stable_units[np.isfinite(stable_units.to_numpy(dtype=float))]
+    return stable_units.astype(int).drop_duplicates().to_numpy(dtype=int)
+
+
 def load_panel_d_similarity_table(
     *,
     data_root: Path,
@@ -2130,6 +2308,9 @@ def load_panel_e_encoding_delta_table(
     dark_epoch: str | None,
     n_folds: int = PANEL_E_ENCODING_N_FOLDS,
     place_bin_size_cm: float = PANEL_E_PLACE_BIN_SIZE_CM,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_E_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> Any:
     """Load directional path progression minus place delta log likelihoods."""
     import pandas as pd
@@ -2158,6 +2339,28 @@ def load_panel_e_encoding_delta_table(
                 continue
             table = read_parquet_table(path)
             _require_columns(table, path, (PANEL_E_DELTA_COLUMN, "n_spikes"))
+            stable_units = load_panel_e_stable_units(
+                data_root=data_root,
+                animal_name=animal_name,
+                date=date,
+                region=region,
+                epoch=epoch,
+                min_tuning_stability_correlation=min_tuning_stability_correlation,
+            )
+            if stable_units is not None:
+                stable_unit_set = {int(unit) for unit in np.asarray(stable_units)}
+                candidate_units = pd.to_numeric(
+                    table.index.to_numpy(),
+                    errors="coerce",
+                )
+                keep_mask = np.asarray(
+                    [
+                        np.isfinite(unit_id) and int(unit_id) in stable_unit_set
+                        for unit_id in candidate_units
+                    ],
+                    dtype=bool,
+                )
+                table = table.iloc[keep_mask]
             unit_ids = pd.to_numeric(table.index.to_numpy(), errors="coerce")
             values = -pd.to_numeric(table[PANEL_E_DELTA_COLUMN], errors="coerce").to_numpy(
                 dtype=float
@@ -2828,6 +3031,7 @@ def load_panel_h_swap_delta_table(
     region: str,
     dark_epoch: str | None,
     light_epoch_pairs: Sequence[tuple[str, str]] = PANEL_H_SWAP_LIGHT_EPOCH_PAIRS,
+    min_tuning_stability_correlation: float | None = None,
 ) -> Any:
     """Load segment-bump minus independent swapped-segment LL values."""
     import pandas as pd
@@ -2838,6 +3042,19 @@ def load_panel_h_swap_delta_table(
     for dataset in datasets:
         animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
         dataset_dark_epoch = get_dark_epoch(animal_name, date, dark_epoch)
+        stable_units = load_dark_epoch_units_exceeding_tuning_stability(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            region=region,
+            epoch=dataset_dark_epoch,
+            min_tuning_stability_correlation=min_tuning_stability_correlation,
+        )
+        stable_unit_set = (
+            {int(unit) for unit in np.asarray(stable_units).reshape(-1)}
+            if stable_units is not None
+            else None
+        )
         for light_train_epoch, light_test_epoch in light_epoch_pairs:
             path = get_swap_glm_selected_comparison_path(
                 data_root,
@@ -2864,6 +3081,13 @@ def load_panel_h_swap_delta_table(
                 )
                 trajectories = [str(value) for value in dataset_obj.coords["trajectory"].values]
                 units = np.asarray(dataset_obj.coords["unit"].values)
+                if stable_unit_set is not None:
+                    unit_mask = np.asarray(
+                        [int(unit) in stable_unit_set for unit in units],
+                        dtype=bool,
+                    )
+                    delta = delta[:, unit_mask]
+                    units = units[unit_mask]
 
             trajectory_grid, unit_grid = np.meshgrid(
                 np.asarray(trajectories, dtype=object),
@@ -2913,6 +3137,44 @@ def load_panel_h_swap_delta_table(
             "source_path",
         ]
     )
+
+
+def load_dark_epoch_units_exceeding_tuning_stability(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    min_tuning_stability_correlation: float | None,
+) -> np.ndarray | None:
+    """Return dark-epoch units with odd/even stability above the threshold."""
+    if min_tuning_stability_correlation is None:
+        return None
+    if min_tuning_stability_correlation < -1.0:
+        raise ValueError("min_tuning_stability_correlation must be at least -1.")
+
+    import pandas as pd
+
+    table_path = get_stability_table_path(data_root, animal_name, date)
+    if not table_path.exists():
+        raise FileNotFoundError(
+            "Missing task-progression stability table. Expected "
+            f"{table_path}. Run `python -m v1ca1.task_progression.stability` "
+            "for this session first."
+        )
+    table = pd.read_parquet(table_path)
+    table = table[
+        (table["epoch"].astype(str) == str(epoch))
+        & (table["region"].astype(str) == str(region))
+        & (table["trajectory_type"].astype(str).isin(TRAJECTORY_TYPES))
+    ].copy()
+    correlations = np.asarray(table["stability_correlation"], dtype=float)
+    stable_rows = table[
+        np.isfinite(correlations)
+        & (correlations > float(min_tuning_stability_correlation))
+    ]
+    return np.asarray(stable_rows["unit"].drop_duplicates())
 
 
 def _panel_h_swap_examples_from_dataset(
@@ -3252,6 +3514,7 @@ def load_panel_glm_data(
     region: str,
     light_epoch: str | None,
     dark_epoch: str | None,
+    swap_delta_min_tuning_stability_correlation: float | None = None,
 ) -> dict[str, Any]:
     """Load saved GLM artifacts for panels G and H."""
     swap_examples = load_panel_h_swap_examples(
@@ -3273,6 +3536,9 @@ def load_panel_glm_data(
             datasets=datasets,
             region=region,
             dark_epoch=dark_epoch,
+            min_tuning_stability_correlation=(
+                swap_delta_min_tuning_stability_correlation
+            ),
         ),
         "swap_examples": swap_examples,
         "swap_example": swap_examples[0] if swap_examples else None,
@@ -3496,7 +3762,7 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
     ax.text(
         0.03,
         0.97,
-        "Trajectory-specific\nplace better",
+        "Route-specific\nplace better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -3505,7 +3771,7 @@ def plot_panel_e_encoding_delta_histogram(ax: "Axes", delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DGP better",
+        "DPP better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -3682,7 +3948,7 @@ def _plot_panel_f_place_axis(
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
     ax.set_ylim(*PANEL_F_PLACE_ERROR_YLIM)
-    ax.set_title("Trajectory-specific\nplace decoding", fontsize=5.8, pad=1.5)
+    ax.set_title("Route-specific\nplace decoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No place\ndecoding", ha="center", va="center")
         _style_panel_f_error_axis(ax, ylabel=ylabel)
@@ -3724,9 +3990,9 @@ def _plot_panel_f_cross_axis(
         [PANEL_QUANT_EPOCH_LABELS[epoch_type] for epoch_type in PANEL_QUANT_EPOCH_ORDER]
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
-    ax.set_title("Cross trajectory\ndecoding", fontsize=5.8, pad=1.5)
+    ax.set_title("Cross route\ndecoding", fontsize=5.8, pad=1.5)
     if table.empty:
-        ax.text(0.5, 0.5, "No cross-trajectory\ndecoding", ha="center", va="center")
+        ax.text(0.5, 0.5, "No cross-route\ndecoding", ha="center", va="center")
         _set_panel_f_error_ylim(ax, table)
         _style_panel_f_error_axis(ax, ylabel=ylabel)
         return
@@ -4040,6 +4306,28 @@ def _panel_h_basis_styles_with_highlighted_segments(
     return styles
 
 
+def _panel_h_shared_basis_styles_with_filled_segments(
+    filled_segments: Sequence[int],
+) -> list[dict[str, Any]]:
+    """Return shared-scaffold basis styles with selected 1-based segments filled."""
+    filled = {int(segment_index) for segment_index in filled_segments}
+    styles = []
+    for segment_index in range(1, 4):
+        styles.append(
+            {
+                "edge_color": "black",
+                "fill_color": (
+                    PANEL_G_BASIS_DARK_COLOR if segment_index in filled else "none"
+                ),
+                "fill_alpha": 0.7 if segment_index in filled else 1.0,
+                "linewidth": PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH,
+                "radius": PANEL_H_SCHEMATIC_BASIS_RADIUS,
+                "spacing": PANEL_H_SCHEMATIC_BASIS_SPACING,
+            }
+        )
+    return styles
+
+
 def _panel_h_oval_styles(count: int) -> list[dict[str, Any]]:
     """Return thin orange modulation ovals for the scaled Panel H schematic."""
     return [
@@ -4145,11 +4433,8 @@ def _draw_panel_h_track(
             stimulus_layout=stimulus_layout,
             label_fontsize=label_fontsize,
             show_basis=True,
-            basis_segment_styles=_panel_h_basis_styles(
-                edge_color="black",
-                fill_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_alpha=0.7,
-                linewidth=PANEL_H_SCHEMATIC_DARK_BASIS_LINEWIDTH,
+            basis_segment_styles=_panel_h_shared_basis_styles_with_filled_segments(
+                (3,)
             ),
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
@@ -4566,7 +4851,7 @@ def _plot_panel_g_example_columns(
         block_ax.text(
             plot_center,
             xlabel_y,
-            "Norm. goal progression",
+            TASK_PROGRESSION_XLABEL,
             ha="center",
             va="top",
             fontsize=3.7,
@@ -5101,7 +5386,7 @@ def _plot_panel_h_delta_axis(
             "Independent\nbetter",
             ha="left",
             va="top",
-            fontsize=2.7,
+            fontsize=4.0,
             color=PANEL_G_MODEL_COLORS["visual"],
             transform=ax.transAxes,
         )
@@ -5111,7 +5396,7 @@ def _plot_panel_h_delta_axis(
             "Shared scaffold\nbetter",
             ha="right",
             va="top",
-            fontsize=2.7,
+            fontsize=4.0,
             color=PANEL_G_MODEL_COLORS["task_segment_bump"],
             transform=ax.transAxes,
         )
@@ -5121,7 +5406,7 @@ def _plot_panel_h_delta_axis(
             _format_panel_h_delta_summary(values),
             ha="right",
             va="top",
-            fontsize=3.4,
+            fontsize=4.8,
             color=PANEL_G_MODEL_COLORS["task_segment_bump"],
             transform=ax.transAxes,
         )
@@ -5159,6 +5444,8 @@ def _plot_panel_h_delta_grid(
             (0.56, 0.12, 0.40, 0.31),
         )
     )
+    row_centers = [bounds[1] + bounds[3] / 2 for bounds in selected_grid_bounds]
+    ylabel_y = (min(row_centers) + max(row_centers)) / 2
     for trajectory_index, (trajectory_type, bounds) in enumerate(
         zip(PANEL_H_DELTA_TRAJECTORIES, selected_grid_bounds, strict=True)
     ):
@@ -5200,7 +5487,7 @@ def _plot_panel_h_delta_grid(
     )
     ax.text(
         -0.055,
-        0.52,
+        ylabel_y,
         "Frac.",
         ha="left",
         va="center",
@@ -5466,7 +5753,7 @@ def make_figure_3(
 
     apply_paper_style()
     fig_height_mm = (
-        DEFAULT_PANEL_BC_HEIGHT_MM * max(len(regions), 1)
+        DEFAULT_PANEL_AB_HEIGHT_MM * max(len(regions), 1)
     ) + DEFAULT_PANEL_DEF_HEIGHT_MM
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, fig_height_mm),
@@ -5476,7 +5763,7 @@ def make_figure_3(
         nrows=2,
         ncols=1,
         height_ratios=[
-            DEFAULT_PANEL_BC_HEIGHT_MM * max(len(regions), 1),
+            DEFAULT_PANEL_AB_HEIGHT_MM * max(len(regions), 1),
             DEFAULT_PANEL_DEF_HEIGHT_MM,
         ],
     )
@@ -5598,6 +5885,7 @@ def make_figure_3(
         y_offset=-0.006,
         rotation=90,
     )
+    add_panel_b_path_progression_label(fig, panel_b["heatmap_axes"])
     label_axis(panel_c_axis, "A", x=-0.07, y=1.267)
     label_axis(panel_b["corner_axis"], "B", x=-0.12, y=0.52)
     label_axis(panel_d_container_axis, "C", x=0.00, y=0.98)
@@ -5606,7 +5894,7 @@ def make_figure_3(
     panel_c_axis.text(
         0.5,
         PANEL_B_TITLE_Y,
-        "Example DGP cells in dark and light",
+        "Example DPP cells in dark and light",
         ha="center",
         va="top",
         fontsize=7.2,

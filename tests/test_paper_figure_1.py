@@ -43,18 +43,23 @@ from v1ca1.paper_figures.figure_1 import (
     DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
+    ENCODING_MIN_TUNING_STABILITY_CORRELATION,
     ENCODING_DPP_COMPARISON_COLORS,
     ENCODING_DPP_COMPARISONS,
     HEATMAP_COLORBAR_LABELPAD,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
     HEATMAP_COLORBAR_PAD,
     HEATMAP_ORDER_LABEL_OFFSET,
+    HEATMAP_PATH_LABEL_OFFSET,
     HEATMAP_TUNING_LABEL_OFFSET,
     MOVEMENT_AXIS_ARROW_MARGIN,
     MOVEMENT_AXIS_Y,
     MOTOR_DELTA_METRIC,
+    MOTOR_MIN_TUNING_STABILITY_CORRELATION,
     MOTOR_NESTED_CV_RELATIVE_DIR,
     NEURON_SCALE_BAR_COUNT,
+    PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
+    PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
     PANEL_E_EXAMPLES,
     PANEL_E_AXIS_LABEL_FONTSIZE,
     PANEL_E_CACHE_VERSION,
@@ -65,7 +70,14 @@ from v1ca1.paper_figures.figure_1 import (
     PANEL_E_TICK_LABEL_FONTSIZE,
     PANEL_E_TRAJECTORY_COLORS,
     PANEL_H_DECODING_ANIMALS,
+    PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
     PANEL_D_CACHE_VERSION,
+    PANEL_D_FIRING_RATE_NORMALIZATION,
+    PANEL_D_HEATMAP_CMAP,
+    PANEL_D_LINEAR_POSITION_ORIENTATION,
+    PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    PANEL_D_MIN_TUNING_STABILITY_CORRELATION,
+    PANEL_D_TRAJECTORY_TYPES,
     SCHEMATIC_COLORS,
     STABILITY_AXIS_LABEL_FONTSIZE,
     STABILITY_LEGEND_FONTSIZE,
@@ -75,9 +87,13 @@ from v1ca1.paper_figures.figure_1 import (
     TASK_PROGRESSION_SEGMENT_BOUNDARIES,
     TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR,
     TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH,
+    TASK_PROGRESSION_XLABEL,
     TRAJECTORY_TYPES,
     add_centered_axis_text,
+    add_centered_below_axis_text,
     build_normalized_position_bins,
+    build_pooled_panel_values,
+    build_pooled_panel_values_and_unit_order,
     build_panel_d_cache_metadata,
     build_panel_d_cache_path,
     build_panel_e_cache_metadata,
@@ -94,6 +110,7 @@ from v1ca1.paper_figures.figure_1 import (
     find_encoding_summary_path,
     find_motor_nested_cv_path,
     filter_datasets_by_animals,
+    filter_tuning_curve_units,
     format_place_bin_size_token,
     get_cross_trajectory_decoding_tsd_paths,
     get_decoding_comparison_dir,
@@ -112,6 +129,7 @@ from v1ca1.paper_figures.figure_1 import (
     orient_panel_e_task_progression,
     plot_decoding_error_panel,
     plot_dark_heatmap_regions,
+    plot_dark_light_example_panel,
     plot_encoding_delta_panel,
     plot_panel_e_examples,
     plot_pooled_heatmap_grid,
@@ -119,11 +137,15 @@ from v1ca1.paper_figures.figure_1 import (
     plot_stability_panel,
     save_panel_d_cache,
     load_panel_d_cache,
+    load_panel_d_cache_payload,
+    load_panel_d_ordered_unit_keys,
     save_panel_e_cache,
     load_panel_e_cache,
     get_trajectory_endpoint_labels,
     parse_arguments,
     parse_dataset_id,
+    select_units_by_movement_firing_rate,
+    select_units_by_tuning_stability,
 )
 
 
@@ -217,10 +239,21 @@ def test_panel_d_cache_path_is_descriptive() -> None:
             "dark_epoch": "08_r4",
         }
     ]
+    assert tuple(metadata["trajectory_types"]) == PANEL_D_TRAJECTORY_TYPES
+    assert metadata["linear_position_orientation"] == "task_progression"
+    assert PANEL_D_FIRING_RATE_NORMALIZATION == "unit_max_per_trajectory"
+    assert metadata["min_movement_firing_rate_hz"] == pytest.approx(
+        PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ
+    )
+    assert metadata["min_tuning_stability_correlation"] == pytest.approx(
+        PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+    )
+    assert "firing_rate_normalization" not in metadata
     assert cache_path == Path(
         "paper_figures/output/cache/"
         "figure_1_panel_d_v1_dark08_r4_datasets-L14-20240611-08_r4"
-        "_posbins100_offset5_speed4_sigma1p5_cachev1.npz"
+        "_orienttask_progression_minmovefr0p5_minstab0p5"
+        "_posbins100_offset5_speed4_sigma1p5_cachev6.npz"
     )
 
 
@@ -235,25 +268,195 @@ def test_panel_d_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
         sigma_bins=1.5,
     )
     panels = {}
-    for index, order_trajectory in enumerate(TRAJECTORY_TYPES):
-        for plot_trajectory in TRAJECTORY_TYPES:
+    for index, order_trajectory in enumerate(PANEL_D_TRAJECTORY_TYPES):
+        for plot_trajectory in PANEL_D_TRAJECTORY_TYPES:
             panels[(order_trajectory, plot_trajectory)] = np.full(
                 (index + 1, 3),
                 index,
                 dtype=float,
             )
+    ordered_unit_keys_by_trajectory = {
+        order_trajectory: np.asarray([f"unit-{index}"], dtype=str)
+        for index, order_trajectory in enumerate(PANEL_D_TRAJECTORY_TYPES)
+    }
     cache_path = build_panel_d_cache_path(tmp_path, metadata)
 
-    save_panel_d_cache(cache_path, panels, metadata)
+    save_panel_d_cache(
+        cache_path,
+        panels,
+        metadata,
+        ordered_unit_keys_by_trajectory=ordered_unit_keys_by_trajectory,
+    )
     loaded = load_panel_d_cache(cache_path, metadata)
+    loaded_payload = load_panel_d_cache_payload(cache_path, metadata)
+    loaded_unit_keys = load_panel_d_ordered_unit_keys(cache_path, metadata)
 
     assert loaded is not None
+    assert loaded_payload is not None
+    assert loaded_unit_keys is not None
     for key, expected in panels.items():
         assert np.array_equal(loaded[key], expected)
+    for key, expected in ordered_unit_keys_by_trajectory.items():
+        assert np.array_equal(loaded_unit_keys[key], expected)
 
     stale_metadata = dict(metadata)
     stale_metadata["position_bin_count"] = 4
     assert load_panel_d_cache(cache_path, stale_metadata) is None
+
+
+def test_panel_d_selects_units_by_minimum_movement_firing_rate() -> None:
+    movement_firing_rates = {
+        1: 0.49,
+        2: 0.5,
+        3: 2.0,
+    }
+
+    assert np.array_equal(
+        select_units_by_movement_firing_rate(movement_firing_rates, 0.5),
+        [2, 3],
+    )
+    assert np.array_equal(
+        select_units_by_movement_firing_rate(movement_firing_rates, None),
+        [1, 2, 3],
+    )
+
+
+def test_panel_d_selects_units_stable_on_at_least_one_trajectory() -> None:
+    pd = pytest.importorskip("pandas")
+    stability_table = pd.DataFrame(
+        {
+            "unit": [1, 1, 2, 2, 3],
+            "stability_correlation": [0.1, 0.5, 0.49, 0.2, np.nan],
+        }
+    )
+
+    assert np.array_equal(
+        select_units_by_tuning_stability(stability_table, 0.5),
+        [1],
+    )
+    assert np.array_equal(
+        select_units_by_tuning_stability(stability_table, None),
+        [1, 2, 3],
+    )
+
+
+def test_panel_d_filters_tuning_curve_units_by_inclusion_list() -> None:
+    xr = pytest.importorskip("xarray")
+    tuning_curve = xr.DataArray(
+        np.asarray(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [5.0, 6.0],
+            ]
+        ),
+        dims=("unit", "linpos"),
+        coords={
+            "unit": np.asarray([10, 20, 30]),
+            "linpos": np.asarray([0.25, 0.75]),
+        },
+    )
+
+    filtered = filter_tuning_curve_units(tuning_curve, np.asarray([30, 10]))
+
+    assert np.array_equal(filtered.coords["unit"].values, [10, 30])
+    assert np.array_equal(filtered.values, [[1.0, 2.0], [5.0, 6.0]])
+
+
+def test_panel_d_supports_per_and_across_trajectory_normalization() -> None:
+    xr = pytest.importorskip("xarray")
+
+    def make_curve(values: list[list[float]]):
+        value_array = np.asarray(values, dtype=float)
+        return xr.DataArray(
+            value_array,
+            dims=("unit", "linpos"),
+            coords={
+                "unit": np.asarray([1], dtype=int),
+                "linpos": np.arange(value_array.shape[1], dtype=float),
+            },
+        )
+
+    even_values = {
+        PANEL_D_TRAJECTORY_TYPES[0]: [[1.0, 2.0]],
+        PANEL_D_TRAJECTORY_TYPES[1]: [[4.0, 0.0]],
+        PANEL_D_TRAJECTORY_TYPES[2]: [[0.0, 8.0]],
+        PANEL_D_TRAJECTORY_TYPES[3]: [[2.0, 6.0]],
+    }
+    curve_set = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "region": "v1",
+        "odd_curves": {
+            trajectory_type: make_curve([[1.0, 0.0]])
+            for trajectory_type in PANEL_D_TRAJECTORY_TYPES
+        },
+        "even_curves": {
+            trajectory_type: make_curve(values)
+            for trajectory_type, values in even_values.items()
+        },
+    }
+
+    panels = build_pooled_panel_values(
+        [curve_set],
+        position_bin_count=2,
+        trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+    )
+    panels_with_order, ordered_unit_keys = build_pooled_panel_values_and_unit_order(
+        [curve_set],
+        position_bin_count=2,
+        trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+    )
+    order_trajectory = PANEL_D_TRAJECTORY_TYPES[0]
+
+    assert np.array_equal(
+        panels_with_order[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[0])],
+        panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[0])],
+    )
+    assert np.array_equal(
+        ordered_unit_keys[order_trajectory],
+        np.asarray(["L14:20240611:v1:1"], dtype=object),
+    )
+    assert np.allclose(
+        panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[0])],
+        [[1.0 / 2.0, 1.0]],
+    )
+    assert np.allclose(
+        panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[1])],
+        [[1.0, 0.0]],
+    )
+    assert np.allclose(
+        panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[2])],
+        [[0.0, 1.0]],
+    )
+    assert np.allclose(
+        panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[3])],
+        [[2.0 / 6.0, 1.0]],
+    )
+
+    across_panels = build_pooled_panel_values(
+        [curve_set],
+        position_bin_count=2,
+        trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+        firing_rate_normalization=PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+    )
+
+    assert np.allclose(
+        across_panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[0])],
+        [[1.0 / 8.0, 2.0 / 8.0]],
+    )
+    assert np.allclose(
+        across_panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[1])],
+        [[4.0 / 8.0, 0.0]],
+    )
+    assert np.allclose(
+        across_panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[2])],
+        [[0.0, 1.0]],
+    )
+    assert np.allclose(
+        across_panels[(order_trajectory, PANEL_D_TRAJECTORY_TYPES[3])],
+        [[2.0 / 8.0, 6.0 / 8.0]],
+    )
 
 
 def test_panel_e_cache_path_is_descriptive() -> None:
@@ -500,7 +703,10 @@ def test_find_motor_nested_cv_path_prefers_zscore_output(tmp_path: Path) -> None
     assert path == zscore_path
 
 
-def test_load_motor_delta_table_reads_registered_dark_epoch(tmp_path: Path) -> None:
+def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
     xr = pytest.importorskip("xarray")
 
     data_dir = get_motor_nested_cv_dir(tmp_path, "L14", "20240611")
@@ -518,6 +724,24 @@ def test_load_motor_delta_table_reads_registered_dark_epoch(tmp_path: Path) -> N
             "unit": np.asarray([11, 12], dtype=int),
         },
     ).to_netcdf(path)
+    stability_path = get_stability_table_path(tmp_path, "L14", "20240611")
+    stability_path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L14", "L14"],
+            "date": ["20240611", "20240611", "20240611", "20240611"],
+            "unit": [11, 11, 12, 13],
+            "region": ["v1", "v1", "v1", "v1"],
+            "epoch": ["08_r4", "08_r4", "08_r4", "10_r5"],
+            "trajectory_type": [
+                "right_to_center",
+                "center_to_left",
+                "center_to_right",
+                "center_to_left",
+            ],
+            "stability_correlation": [0.2, 0.5, 0.49, 0.9],
+        }
+    ).to_parquet(stability_path)
 
     table = load_motor_delta_table(
         data_root=tmp_path,
@@ -525,11 +749,12 @@ def test_load_motor_delta_table_reads_registered_dark_epoch(tmp_path: Path) -> N
         region="v1",
     )
 
-    assert table["animal_name"].tolist() == ["L14", "L14"]
-    assert table["epoch"].tolist() == ["08_r4", "08_r4"]
-    assert table["unit"].tolist() == [11, 12]
+    assert MOTOR_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
+    assert table["animal_name"].tolist() == ["L14"]
+    assert table["epoch"].tolist() == ["08_r4"]
+    assert table["unit"].tolist() == [11]
     assert table["delta_log_likelihood_bits_per_spike"].tolist() == pytest.approx(
-        [0.1, -0.2]
+        [0.1]
     )
 
 
@@ -558,7 +783,7 @@ def test_find_encoding_summary_path_prefers_placebin_output(tmp_path: Path) -> N
     assert path == placebin_path
 
 
-def test_load_encoding_delta_table_negates_saved_absolute_minus_dpp_columns(
+def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_columns(
     tmp_path: Path,
 ) -> None:
     pd = pytest.importorskip("pandas")
@@ -574,6 +799,24 @@ def test_load_encoding_delta_table_negates_saved_absolute_minus_dpp_columns(
         },
         index=pd.Index([11, 12], name="unit"),
     ).to_parquet(path)
+    stability_path = get_stability_table_path(tmp_path, "L14", "20240611")
+    stability_path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L14", "L14"],
+            "date": ["20240611", "20240611", "20240611", "20240611"],
+            "unit": [11, 11, 12, 13],
+            "region": ["v1", "v1", "v1", "v1"],
+            "epoch": ["08_r4", "08_r4", "08_r4", "10_r5"],
+            "trajectory_type": [
+                "right_to_center",
+                "center_to_left",
+                "center_to_right",
+                "center_to_left",
+            ],
+            "stability_correlation": [0.2, 0.5, 0.49, 0.9],
+        }
+    ).to_parquet(stability_path)
 
     table = load_encoding_delta_table(
         data_root=tmp_path,
@@ -586,12 +829,13 @@ def test_load_encoding_delta_table_negates_saved_absolute_minus_dpp_columns(
         comparison: rows["delta_log_likelihood_bits_per_spike"].tolist()
         for comparison, rows in table.groupby("comparison", sort=False)
     }
-    assert by_comparison["dpp_vs_absolute_place"] == pytest.approx([-0.25, 0.5])
+    assert by_comparison["dpp_vs_absolute_place"] == pytest.approx([-0.25])
     assert by_comparison["dpp_vs_absolute_task_progression"] == pytest.approx(
-        [0.1, -0.2]
+        [0.1]
     )
     assert ENCODING_COMPARISON_MIN_SPIKES == 0
-    assert table["unit"].tolist() == [11, 12, 11, 12]
+    assert ENCODING_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
+    assert table["unit"].tolist() == [11, 11]
     assert [comparison for comparison, _label, _column in ENCODING_DPP_COMPARISONS] == [
         "dpp_vs_absolute_place",
         "dpp_vs_absolute_task_progression",
@@ -702,6 +946,78 @@ def test_panel_d_colorbar_label_size_uses_requested_scale() -> None:
     assert HEATMAP_COLORBAR_LABELPAD == pytest.approx(0)
     assert HEATMAP_TUNING_LABEL_OFFSET == pytest.approx(-0.004)
     assert HEATMAP_ORDER_LABEL_OFFSET == pytest.approx(0.007)
+    assert HEATMAP_PATH_LABEL_OFFSET == pytest.approx(0.020)
+
+
+def test_dark_light_visual_color_configuration_swaps_right_arm_trajectories() -> None:
+    assert PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS == {
+        "A": figure_1_module.VISUAL_CONDITION_COLORS["02_r1"],
+        "B": figure_1_module.VISUAL_CONDITION_COLORS["06_r3"],
+    }
+    assert PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS == {
+        "center_to_right": {
+            "02_r1": figure_1_module.VISUAL_CONDITION_COLORS["06_r3"],
+            "06_r3": figure_1_module.VISUAL_CONDITION_COLORS["02_r1"],
+        },
+        "right_to_center": {
+            "02_r1": figure_1_module.VISUAL_CONDITION_COLORS["06_r3"],
+            "06_r3": figure_1_module.VISUAL_CONDITION_COLORS["02_r1"],
+        },
+    }
+
+
+def test_plot_dark_light_example_panel_uses_visual_color_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import v1ca1.paper_figures.figure_3 as figure_3_source
+
+    observed: dict[str, object] = {}
+
+    def fake_load_panel_a_example_data(**kwargs: object) -> dict[str, object]:
+        observed["load_kwargs"] = kwargs
+        return {"example": True}
+
+    def fake_plot_panel_a_example(
+        _ax: object,
+        example: dict[str, object],
+        **kwargs: object,
+    ) -> None:
+        observed["example"] = example
+        observed["plot_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        figure_3_source,
+        "load_panel_a_example_data",
+        fake_load_panel_a_example_data,
+    )
+    monkeypatch.setattr(
+        figure_3_source,
+        "plot_panel_a_example",
+        fake_plot_panel_a_example,
+    )
+
+    fig, ax = plt.subplots()
+    plot_dark_light_example_panel(
+        ax,
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        position_bin_count=50,
+        position_offset=10,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+        panel_example_cache_dir=None,
+        refresh_panel_example_cache=False,
+    )
+
+    assert observed["example"] == {"example": True}
+    assert observed["plot_kwargs"] == {
+        "visual_label_colors": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
+        "trajectory_epoch_color_overrides": PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
+    }
+    plt.close(fig)
 
 
 def test_panel_e_example_configuration_uses_requested_cells_and_layout() -> None:
@@ -755,24 +1071,38 @@ def test_default_figure_height_is_shorter_than_previous_layout() -> None:
     assert figure_height_mm < previous_height_mm
 
 
-def test_cycle_panel_uses_four_task_trajectory_schematics() -> None:
-    assert [name for name, _bounds in CYCLE_TRAJECTORY_LAYOUT] == [
-        "left_to_center",
-        "center_to_right",
-        "right_to_center",
-        "center_to_left",
-    ]
+def test_cycle_panel_uses_square_task_trajectory_layout() -> None:
+    assert CYCLE_TRAJECTORY_LAYOUT == (
+        ("left_to_center", (0.58, 0.70, 0.26, 0.27)),
+        ("center_to_right", (0.58, 0.28, 0.26, 0.27)),
+        ("right_to_center", (0.16, 0.28, 0.26, 0.27)),
+        ("center_to_left", (0.16, 0.70, 0.26, 0.27)),
+    )
 
 
-def test_cycle_panel_arrow_curvatures_are_flipped_consistently() -> None:
-    assert [rad for _start, _end, rad in CYCLE_ARROW_SPECS] == [
-        -0.25,
-        -0.25,
-        -0.25,
-        -0.25,
-    ]
+def test_cycle_panel_arrows_close_square_sides() -> None:
+    assert CYCLE_ARROW_SPECS == (
+        ((0.71, 0.70), (0.71, 0.55), 0.0),
+        ((0.58, 0.415), (0.42, 0.415), 0.0),
+        ((0.29, 0.55), (0.29, 0.70), 0.0),
+        ((0.42, 0.835), (0.58, 0.835), 0.0),
+    )
     assert CYCLE_ARROW_LINEWIDTH == pytest.approx(1.08)
     assert CYCLE_ARROW_MUTATION_SCALE == pytest.approx(12.6)
+
+
+def test_panel_d_trajectory_order_uses_requested_sequence() -> None:
+    assert PANEL_D_TRAJECTORY_TYPES == (
+        "right_to_center",
+        "center_to_left",
+        "left_to_center",
+        "center_to_right",
+    )
+    assert PANEL_D_LINEAR_POSITION_ORIENTATION == "task_progression"
+    assert PANEL_D_HEATMAP_CMAP == "viridis"
+    assert PANEL_D_FIRING_RATE_NORMALIZATION == "unit_max_per_trajectory"
+    assert PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ == pytest.approx(0.5)
+    assert PANEL_D_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
 
 
 def test_trajectory_axis_labels_mark_center_and_side() -> None:
@@ -780,6 +1110,25 @@ def test_trajectory_axis_labels_mark_center_and_side() -> None:
     assert get_trajectory_endpoint_labels("left_to_center") == ("C", "L")
     assert get_trajectory_endpoint_labels("center_to_right") == ("C", "R")
     assert get_trajectory_endpoint_labels("right_to_center") == ("C", "R")
+
+
+def test_task_progression_axis_labels_mark_start_and_end() -> None:
+    assert get_trajectory_endpoint_labels(
+        "right_to_center",
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+    ) == ("R", "C")
+    assert get_trajectory_endpoint_labels(
+        "center_to_left",
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+    ) == ("C", "L")
+    assert get_trajectory_endpoint_labels(
+        "left_to_center",
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+    ) == ("L", "C")
+    assert get_trajectory_endpoint_labels(
+        "center_to_right",
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+    ) == ("C", "R")
 
 
 def test_movement_axis_arrow_points_follow_behavior_direction() -> None:
@@ -792,6 +1141,17 @@ def test_movement_axis_arrow_points_follow_behavior_direction() -> None:
     assert inbound_end == pytest.approx((MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y))
     assert outbound_start[0] < outbound_end[0]
     assert inbound_start[0] > inbound_end[0]
+
+
+def test_task_progression_movement_axis_is_left_to_right() -> None:
+    start, end = get_movement_arrow_points(
+        "right_to_center",
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+    )
+
+    assert start == pytest.approx((MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y))
+    assert end == pytest.approx((1.0 - MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y))
+    assert start[0] < end[0]
 
 
 def test_draw_neuron_scale_bar_uses_data_height() -> None:
@@ -825,6 +1185,24 @@ def test_add_centered_axis_text_places_figure_text() -> None:
     plt.close(fig)
 
 
+def test_add_centered_below_axis_text_places_figure_text() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(ncols=2)
+    fig.canvas.draw()
+    text = add_centered_below_axis_text(fig, axes, TASK_PROGRESSION_XLABEL)
+
+    boxes = [ax.get_position() for ax in axes]
+    expected_x = (min(box.x0 for box in boxes) + max(box.x1 for box in boxes)) / 2
+
+    assert text.get_text() == TASK_PROGRESSION_XLABEL
+    assert text.get_position()[0] == pytest.approx(expected_x)
+    assert text.figure is fig
+    plt.close(fig)
+
+
 def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -843,6 +1221,7 @@ def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
     image = plot_pooled_heatmap_grid(axes, panels)
 
     assert image is not None
+    assert image.get_cmap().name == "viridis"
     for ax in axes.ravel():
         boundary_lines = ax.lines[-len(TASK_PROGRESSION_SEGMENT_BOUNDARIES) :]
         assert [line.get_xdata()[0] for line in boundary_lines] == pytest.approx(
@@ -855,6 +1234,13 @@ def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
             [TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH]
             * len(TASK_PROGRESSION_SEGMENT_BOUNDARIES)
         )
+    for ax in axes[-1, :]:
+        assert ax.get_xticks() == pytest.approx([0.0, 1.0])
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == ["0", "1"]
+        assert ax.get_xlabel() == ""
+    for ax in axes[:-1, :].ravel():
+        assert ax.get_xticks().size == 0
+        assert ax.get_xlabel() == ""
     plt.close(fig)
 
 
@@ -877,8 +1263,8 @@ def test_plot_dark_heatmap_regions_uses_matching_cache(
     )
     panels = {
         (order_trajectory, plot_trajectory): np.ones((2, 3), dtype=float)
-        for order_trajectory in TRAJECTORY_TYPES
-        for plot_trajectory in TRAJECTORY_TYPES
+        for order_trajectory in PANEL_D_TRAJECTORY_TYPES
+        for plot_trajectory in PANEL_D_TRAJECTORY_TYPES
     }
     save_panel_d_cache(build_panel_d_cache_path(tmp_path, metadata), panels, metadata)
 
@@ -889,8 +1275,9 @@ def test_plot_dark_heatmap_regions_uses_matching_cache(
     )
     observed = {}
 
-    def _fake_plot_pooled_heatmap_grid(_axes, cached_panels):
+    def _fake_plot_pooled_heatmap_grid(_axes, cached_panels, **kwargs):
         observed["panels"] = cached_panels
+        observed["kwargs"] = kwargs
         return None
 
     monkeypatch.setattr(
@@ -913,6 +1300,9 @@ def test_plot_dark_heatmap_regions_uses_matching_cache(
     )
 
     assert observed["panels"] is not None
+    assert observed["kwargs"]["trajectory_types"] == PANEL_D_TRAJECTORY_TYPES
+    assert observed["kwargs"]["axis_orientation"] == PANEL_D_LINEAR_POSITION_ORIENTATION
+    assert observed["kwargs"]["cmap"] == PANEL_D_HEATMAP_CMAP
     for key in panels:
         assert np.array_equal(observed["panels"][key], panels[key])
     plt.close(fig)
@@ -1296,7 +1686,7 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
         ]
         rate_axes = example_ax.child_axes[8:]
         assert all(
-            rate_axis.get_xlabel() == "Nom. goal progression"
+            rate_axis.get_xlabel() == "Norm. path progression"
             for rate_axis in rate_axes
         )
         assert all(
@@ -1411,7 +1801,7 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
-    assert "Motor+DGP better" in text_labels
+    assert "Motor+DPP better" in text_labels
     assert "50% >0, med. 0.10" in text_labels
     assert "n = 4 cells\n2 animals" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
@@ -1452,11 +1842,11 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
                 "dpp_vs_absolute_place",
             ],
             "comparison_label": [
-                "DGP - absolute place",
-                "DGP - absolute place",
-                "DGP - distance-to-reward",
-                "DGP - distance-to-reward",
-                "DGP - absolute place",
+                "DPP - absolute place",
+                "DPP - absolute place",
+                "DPP - distance-to-reward",
+                "DPP - distance-to-reward",
+                "DPP - absolute place",
             ],
             "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
@@ -1472,9 +1862,9 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     text_labels = [text.get_text() for text in ax.texts]
     assert "Abs place better" in text_labels
     assert "Distance-to-reward\nbetter" in text_labels
-    assert text_labels.count("DGP better") == 1
-    assert "DGP > abs place\n50% >0, med. 0.05" in text_labels
-    assert "DGP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
+    assert text_labels.count("DPP better") == 1
+    assert "DPP > abs place\n50% >0, med. 0.05" in text_labels
+    assert "DPP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
     assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"

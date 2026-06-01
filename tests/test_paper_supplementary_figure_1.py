@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import v1ca1.paper_figures.figure_1 as figure_1_module
 import v1ca1.paper_figures.supplementary_figure_1 as supp_figure_1_module
 from v1ca1.paper_figures.supplementary_figure_1 import (
+    DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ,
     DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM,
@@ -17,13 +20,21 @@ from v1ca1.paper_figures.supplementary_figure_1 import (
     MODEL_COMPARISON_GRID_WSPACE,
     MODEL_COMPARISON_SECOND_COLUMN_SHIFT_PT,
     MODEL_COMPARISON_THIRD_COLUMN_SHIFT_PT,
+    PANEL_D_NORMALIZATION_HEATMAP_HSPACE,
+    PANEL_D_NORMALIZATION_HEATMAP_WSPACE,
+    PANEL_D_NORMALIZATION_REGION,
+    PANEL_D_PER_TRAJECTORY_CACHE_VERSION,
+    build_panel_d_per_trajectory_cache_metadata,
     build_output_path,
     keep_only_bottom_x_axis_labels,
+    load_panel_d_per_trajectory_panels,
+    load_pooled_dark_movement_firing_rate_table,
     make_supplementary_figure_1,
     parse_arguments,
     plot_decoding_error_dataset_stack_panel,
     plot_dataset_stack_panel,
     plot_motor_delta_dataset_stack_panel,
+    plot_pooled_dark_movement_firing_rate_histogram,
     plot_pooled_stability_panel,
     shift_model_comparison_columns,
 )
@@ -45,14 +56,20 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     assert args.output_dir == DEFAULT_OUTPUT_DIR
     assert args.output_name == DEFAULT_OUTPUT_NAME
     assert args.asset_dir == DEFAULT_ASSET_DIR
+    assert args.dark_movement_fr_cache_dir is None
+    assert args.refresh_dark_movement_fr_cache is False
     assert args.encoding_place_bin_size_cm == pytest.approx(
         figure_1_module.ENCODING_COMPARISON_PLACE_BIN_SIZE_CM
     )
     assert DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM == pytest.approx(40.0)
+    assert PANEL_D_NORMALIZATION_HEATMAP_WSPACE == pytest.approx(0.0)
+    assert PANEL_D_NORMALIZATION_HEATMAP_HSPACE == pytest.approx(0.0)
+    assert DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ == pytest.approx(0.5)
     assert MODEL_COMPARISON_GRID_WSPACE == pytest.approx(-0.10)
     assert MODEL_COMPARISON_SECOND_COLUMN_SHIFT_PT == pytest.approx(-10.0)
     assert MODEL_COMPARISON_THIRD_COLUMN_SHIFT_PT == pytest.approx(-33.0)
     assert not hasattr(args, "region")
+    assert not hasattr(args, "panel_d_cache_dir")
     assert not hasattr(args, "panel_heatmap_cache_dir")
     assert not hasattr(args, "refresh_panel_heatmap_cache")
 
@@ -259,6 +276,83 @@ def test_plot_pooled_stability_panel_uses_all_datasets(
     plt.close(fig)
 
 
+def test_load_pooled_dark_movement_firing_rate_table_uses_dataset_dark_epochs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pd = pytest.importorskip("pandas")
+
+    calls = []
+
+    def fake_load_dark_movement_firing_rate_table(**kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame(
+            {
+                "unit": [len(calls)],
+                "dark_firing_rate_hz": [0.25 * len(calls)],
+            }
+        )
+
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "load_dark_movement_firing_rate_table",
+        fake_load_dark_movement_firing_rate_table,
+    )
+
+    table = load_pooled_dark_movement_firing_rate_table(
+        Path("/analysis"),
+        [
+            ("L14", "20240611", "08_r4"),
+            ("L15", "20241121", "10_r5"),
+        ],
+        cache_dir=Path("/cache"),
+        refresh_cache=True,
+    )
+
+    assert [call["animal_name"] for call in calls] == ["L14", "L15"]
+    assert [call["dark_epoch"] for call in calls] == ["08_r4", "10_r5"]
+    assert all(call["region"] == "v1" for call in calls)
+    assert all(call["cache_dir"] == Path("/cache") for call in calls)
+    assert all(call["refresh_cache"] is True for call in calls)
+    assert table["animal_name"].tolist() == ["L14", "L15"]
+    assert table["date"].tolist() == ["20240611", "20241121"]
+    assert table["dark_epoch"].tolist() == ["08_r4", "10_r5"]
+    assert table["dark_firing_rate_hz"].tolist() == [0.25, 0.5]
+
+
+def test_plot_pooled_dark_movement_firing_rate_histogram_uses_log_threshold() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    plot_pooled_dark_movement_firing_rate_histogram(
+        ax,
+        {
+            "dark_firing_rate_hz": [
+                0.0,
+                0.1,
+                0.5,
+                0.6,
+                1.2,
+                np.nan,
+            ]
+        },
+    )
+
+    assert ax.get_xscale() == "log"
+    threshold_lines = [
+        line
+        for line in ax.lines
+        if line.get_linestyle() == "--"
+        and np.allclose(line.get_xdata(), [DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ] * 2)
+    ]
+    assert len(threshold_lines) == 1
+    assert any("40% > 0.5 Hz" in text.get_text() for text in ax.texts)
+    assert ax.get_xlabel() == "Movement firing rate (Hz)"
+    assert ax.get_ylabel() == "Frac. V1 cells"
+    plt.close(fig)
+
+
 def test_plot_decoding_error_dataset_stack_panel_removes_w_track_icons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,6 +394,76 @@ def test_plot_decoding_error_dataset_stack_panel_removes_w_track_icons(
     plt.close(fig)
 
 
+def test_panel_d_per_trajectory_cache_metadata_matches_legacy_cache() -> None:
+    metadata = build_panel_d_per_trajectory_cache_metadata(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region=PANEL_D_NORMALIZATION_REGION,
+        position_bin_count=50,
+        position_offset=10,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+
+    assert metadata["cache_version"] == PANEL_D_PER_TRAJECTORY_CACHE_VERSION
+    assert tuple(metadata["trajectory_types"]) == figure_1_module.PANEL_D_TRAJECTORY_TYPES
+    assert metadata["linear_position_orientation"] == "task_progression"
+    assert "firing_rate_normalization" not in metadata
+
+
+def test_load_panel_d_per_trajectory_panels_uses_matching_legacy_cache(
+    tmp_path: Path,
+) -> None:
+    metadata = build_panel_d_per_trajectory_cache_metadata(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region=PANEL_D_NORMALIZATION_REGION,
+        position_bin_count=2,
+        position_offset=10,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+    )
+    payload = {
+        figure_1_module.PANEL_D_CACHE_METADATA_KEY: np.asarray(
+            json.dumps(metadata, sort_keys=True)
+        ),
+    }
+    expected_panels = {}
+    for row_index, order_trajectory in enumerate(figure_1_module.PANEL_D_TRAJECTORY_TYPES):
+        for col_index, plot_trajectory in enumerate(figure_1_module.PANEL_D_TRAJECTORY_TYPES):
+            values = np.full((1, 2), row_index + col_index, dtype=float)
+            expected_panels[(order_trajectory, plot_trajectory)] = values
+            payload[f"{order_trajectory}__{plot_trajectory}"] = values
+    np.savez_compressed(
+        tmp_path / f"{figure_1_module.PANEL_D_CACHE_PREFIX}_test_cachev2.npz",
+        **payload,
+    )
+    stale_payload = dict(payload)
+    stale_metadata = dict(metadata)
+    stale_metadata["position_bin_count"] = 3
+    stale_payload[figure_1_module.PANEL_D_CACHE_METADATA_KEY] = np.asarray(
+        json.dumps(stale_metadata, sort_keys=True)
+    )
+    np.savez_compressed(
+        tmp_path / f"{figure_1_module.PANEL_D_CACHE_PREFIX}_stale_cachev2.npz",
+        **stale_payload,
+    )
+
+    loaded = load_panel_d_per_trajectory_panels(
+        data_root=Path("/analysis"),
+        datasets=[("L14", "20240611", "08_r4")],
+        region=PANEL_D_NORMALIZATION_REGION,
+        position_bin_count=2,
+        position_offset=10,
+        speed_threshold_cm_s=4.0,
+        sigma_bins=1.5,
+        panel_d_cache_dir=tmp_path,
+    )
+
+    for key, expected in expected_panels.items():
+        assert np.array_equal(loaded[key], expected)
+
+
 def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -333,7 +497,13 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
 
     def fake_plot_pooled_stability_panel(ax, **kwargs: object):
         calls["pooled_stability_kwargs"] = kwargs
+        calls["pooled_stability_col"] = ax.get_subplotspec().colspan.start
         ax.text(0.5, 0.5, "pooled stability")
+
+    def fake_plot_pooled_dark_movement_firing_rate_panel(ax, **kwargs: object):
+        calls["dark_movement_fr_kwargs"] = kwargs
+        calls["dark_movement_fr_col"] = ax.get_subplotspec().colspan.start
+        ax.text(0.5, 0.5, "dark fr")
 
     def fake_save_figure(figure, output_path: Path, dpi: int):
         calls["figsize"] = figure.get_size_inches()
@@ -373,6 +543,11 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
         "plot_pooled_stability_panel",
         fake_plot_pooled_stability_panel,
     )
+    monkeypatch.setattr(
+        supp_figure_1_module,
+        "plot_pooled_dark_movement_firing_rate_panel",
+        fake_plot_pooled_dark_movement_firing_rate_panel,
+    )
     monkeypatch.setattr(supp_figure_1_module, "save_figure", fake_save_figure)
 
     output_path = tmp_path / "supplementary_figure_1.svg"
@@ -391,11 +566,24 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     assert saved_path == output_path
     assert calls["styled"] is True
     assert figure_width_in == pytest.approx(DEFAULT_FIGURE_WIDTH_MM / 25.4)
+    assert calls["figsize"][1] == pytest.approx(
+        (
+            DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM
+            + supp_figure_1_module.DEFAULT_SECTION_SPACER_MM
+            + supp_figure_1_module.DEFAULT_DATASET_PANEL_HEIGHT_MM * len(datasets)
+        )
+        / 25.4
+    )
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["panel_labels"] == ["A", "B", "C", "D", "E"]
+    assert calls["panel_labels"] == ["A", "B", "C", "D", "E", "F"]
     assert calls["anatomy_kwargs"]["asset_dir"] == asset_dir
     assert calls["pooled_stability_kwargs"]["datasets"] == datasets
+    assert calls["pooled_stability_col"] == 2
+    assert calls["dark_movement_fr_kwargs"]["datasets"] == datasets
+    assert calls["dark_movement_fr_col"] == 1
+    assert calls["dark_movement_fr_kwargs"]["cache_dir"] == output_path.parent / "cache"
+    assert calls["dark_movement_fr_kwargs"]["refresh_cache"] is False
     assert calls["motor_kwargs"]["datasets"] == datasets
     assert calls["motor_kwargs"].get("show_dataset_labels", True) is True
     assert calls["encoding_kwargs"]["datasets"] == datasets

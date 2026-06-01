@@ -48,6 +48,7 @@ from v1ca1.paper_figures.style import (
     REGION_COLORS,
     SCHEMATIC_COLORS,
     TRAJECTORY_COLORS,
+    VISUAL_CONDITION_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
@@ -100,13 +101,41 @@ HEATMAP_COLORBAR_LABEL_FONTSIZE = 4.9
 HEATMAP_COLORBAR_LABELPAD = 0
 HEATMAP_TUNING_LABEL_OFFSET = -0.004
 HEATMAP_ORDER_LABEL_OFFSET = 0.007
+HEATMAP_PATH_LABEL_OFFSET = 0.020
+PANEL_D_TRAJECTORY_TYPES = (
+    "right_to_center",
+    "center_to_left",
+    "left_to_center",
+    "center_to_right",
+)
+PANEL_D_LINEAR_POSITION_ORIENTATION = "task_progression"
+PANEL_D_HEATMAP_CMAP = "viridis"
+PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION = "unit_max_per_trajectory"
+PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION = "unit_max_across_trajectories"
+PANEL_D_FIRING_RATE_NORMALIZATION = PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION
+PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
+PANEL_D_MIN_TUNING_STABILITY_CORRELATION = 0.5
 PANEL_D_CACHE_PREFIX = "figure_1_panel_d"
-PANEL_D_CACHE_VERSION = 1
+PANEL_D_CACHE_VERSION = 6
+PANEL_D_ACROSS_TRAJECTORY_CACHE_VERSION = 4
 PANEL_D_CACHE_METADATA_KEY = "__metadata__"
 PANEL_D_CACHE_DATASET_TOKEN_LIMIT = 96
 PANEL_E_CACHE_PREFIX = "figure_1_panel_e"
 PANEL_E_CACHE_VERSION = 1
 PANEL_E_CACHE_METADATA_KEY = "__metadata__"
+PANEL_DARK_LIGHT_EXAMPLE_TITLE = "Example visual cell in different visual conditions"
+PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS = {
+    "A": VISUAL_CONDITION_COLORS["02_r1"],
+    "B": VISUAL_CONDITION_COLORS["06_r3"],
+}
+PANEL_DARK_LIGHT_RIGHT_ARM_TRAJECTORIES = ("center_to_right", "right_to_center")
+PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS = {
+    trajectory_type: {
+        "02_r1": VISUAL_CONDITION_COLORS["06_r3"],
+        "06_r3": VISUAL_CONDITION_COLORS["02_r1"],
+    }
+    for trajectory_type in PANEL_DARK_LIGHT_RIGHT_ARM_TRAJECTORIES
+}
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 RASTER_ASSET_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 NEURON_SCALE_BAR_COUNT = 100
@@ -133,6 +162,7 @@ PANEL_E_RASTER_TICK_MARKERSIZE = RASTER_TICK_KWARGS["markersize"]
 PANEL_E_RASTER_TICK_MARKEREDGEWIDTH = RASTER_TICK_KWARGS["markeredgewidth"]
 PANEL_E_AXIS_LABEL_FONTSIZE = 5.4
 PANEL_E_TICK_LABEL_FONTSIZE = 5.0
+TASK_PROGRESSION_XLABEL = "Norm. path progression"
 TASK_PROGRESSION_SEGMENT_BOUNDARIES = (0.4, 0.6)
 TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = NEUTRAL_COLORS["segment_boundary"]
 TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH = 0.45
@@ -147,11 +177,13 @@ MOTOR_NESTED_CV_RELATIVE_DIR = Path("task_progression") / "motor" / "nested_lap_
 MOTOR_DELTA_METRIC = "dll_motor_tp_vs_motor_bits_per_spike"
 MOTOR_DELTA_REGION = "v1"
 MOTOR_PREFERRED_FILENAME_TOKEN = "_zscore_"
+MOTOR_MIN_TUNING_STABILITY_CORRELATION = 0.5
 ENCODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "encoding_comparison"
 ENCODING_COMPARISON_REGION = "v1"
 ENCODING_COMPARISON_N_FOLDS = 5
 ENCODING_COMPARISON_PLACE_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
 ENCODING_COMPARISON_MIN_SPIKES = 0
+ENCODING_MIN_TUNING_STABILITY_CORRELATION = 0.5
 DECODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "decoding_comparison"
 DECODING_COMPARISON_REGION = "v1"
 STABILITY_REGIONS = ("v1", "ca1")
@@ -159,12 +191,12 @@ STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
-        "DGP - absolute place",
+        "DPP - absolute place",
         "delta_bits_generalized_place_vs_tp",
     ),
     (
         "dpp_vs_absolute_task_progression",
-        "DGP - distance-to-reward",
+        "DPP - distance-to-reward",
         "delta_bits_gtp_vs_tp",
     ),
 )
@@ -271,16 +303,16 @@ DECODING_ABSOLUTE_ERROR_TABLE_COLUMNS = (
     "decoded_path",
 )
 CYCLE_TRAJECTORY_LAYOUT = (
-    ("left_to_center", (0.03, 0.45, 0.26, 0.27)),
-    ("center_to_right", (0.37, 0.70, 0.26, 0.27)),
-    ("right_to_center", (0.71, 0.45, 0.26, 0.27)),
-    ("center_to_left", (0.37, 0.27, 0.26, 0.27)),
+    ("left_to_center", (0.58, 0.70, 0.26, 0.27)),
+    ("center_to_right", (0.58, 0.28, 0.26, 0.27)),
+    ("right_to_center", (0.16, 0.28, 0.26, 0.27)),
+    ("center_to_left", (0.16, 0.70, 0.26, 0.27)),
 )
 CYCLE_ARROW_SPECS = (
-    ((0.24, 0.68), (0.37, 0.80), -0.25),
-    ((0.64, 0.80), (0.77, 0.68), -0.25),
-    ((0.77, 0.46), (0.64, 0.34), -0.25),
-    ((0.36, 0.34), (0.23, 0.46), -0.25),
+    ((0.71, 0.70), (0.71, 0.55), 0.0),
+    ((0.58, 0.415), (0.42, 0.415), 0.0),
+    ((0.29, 0.55), (0.29, 0.70), 0.0),
+    ((0.42, 0.835), (0.58, 0.835), 0.0),
 )
 CYCLE_ARROW_LINEWIDTH = 1.08
 CYCLE_ARROW_MUTATION_SCALE = 12.6
@@ -288,8 +320,24 @@ MOVEMENT_AXIS_Y = -0.13
 MOVEMENT_AXIS_ARROW_MARGIN = 0.12
 
 
-def get_trajectory_endpoint_labels(trajectory_type: str) -> tuple[str, str]:
+def get_trajectory_endpoint_labels(
+    trajectory_type: str,
+    *,
+    axis_orientation: str = "branch_position",
+) -> tuple[str, str]:
     """Return normalized-axis endpoint labels for one trajectory type."""
+    if axis_orientation == "task_progression":
+        if trajectory_type == "center_to_left":
+            return "C", "L"
+        if trajectory_type == "left_to_center":
+            return "L", "C"
+        if trajectory_type == "center_to_right":
+            return "C", "R"
+        if trajectory_type == "right_to_center":
+            return "R", "C"
+        raise ValueError(f"Unknown trajectory type {trajectory_type!r}.")
+    if axis_orientation != "branch_position":
+        raise ValueError(f"Unknown axis_orientation {axis_orientation!r}.")
     if "left" in trajectory_type:
         return "C", "L"
     if "right" in trajectory_type:
@@ -297,8 +345,19 @@ def get_trajectory_endpoint_labels(trajectory_type: str) -> tuple[str, str]:
     raise ValueError(f"Unknown trajectory type {trajectory_type!r}.")
 
 
-def get_movement_arrow_points(trajectory_type: str) -> tuple[tuple[float, float], tuple[float, float]]:
+def get_movement_arrow_points(
+    trajectory_type: str,
+    *,
+    axis_orientation: str = "branch_position",
+) -> tuple[tuple[float, float], tuple[float, float]]:
     """Return axes-fraction start/end points for the movement-direction arrow."""
+    if axis_orientation == "task_progression":
+        return (
+            (MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y),
+            (1.0 - MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y),
+        )
+    if axis_orientation != "branch_position":
+        raise ValueError(f"Unknown axis_orientation {axis_orientation!r}.")
     if trajectory_type.startswith("center_to_"):
         return (
             (MOVEMENT_AXIS_ARROW_MARGIN, MOVEMENT_AXIS_Y),
@@ -312,9 +371,17 @@ def get_movement_arrow_points(trajectory_type: str) -> tuple[tuple[float, float]
     raise ValueError(f"Unknown trajectory type {trajectory_type!r}.")
 
 
-def add_movement_axis_arrow(ax: "Axes", trajectory_type: str) -> None:
+def add_movement_axis_arrow(
+    ax: "Axes",
+    trajectory_type: str,
+    *,
+    axis_orientation: str = "branch_position",
+) -> None:
     """Draw a bottom movement-direction arrow for one trajectory column."""
-    start, end = get_movement_arrow_points(trajectory_type)
+    start, end = get_movement_arrow_points(
+        trajectory_type,
+        axis_orientation=axis_orientation,
+    )
     ax.annotate(
         "",
         xy=end,
@@ -332,9 +399,17 @@ def add_movement_axis_arrow(ax: "Axes", trajectory_type: str) -> None:
     )
 
 
-def add_movement_axis_labels(ax: "Axes", trajectory_type: str) -> None:
+def add_movement_axis_labels(
+    ax: "Axes",
+    trajectory_type: str,
+    *,
+    axis_orientation: str = "branch_position",
+) -> None:
     """Draw endpoint labels aligned to the movement-direction arrow."""
-    left_label, right_label = get_trajectory_endpoint_labels(trajectory_type)
+    left_label, right_label = get_trajectory_endpoint_labels(
+        trajectory_type,
+        axis_orientation=axis_orientation,
+    )
     for x, label in ((0.0, left_label), (1.0, right_label)):
         ax.text(
             x,
@@ -347,10 +422,59 @@ def add_movement_axis_labels(ax: "Axes", trajectory_type: str) -> None:
         )
 
 
-def add_movement_axis_annotations(ax: "Axes", trajectory_type: str) -> None:
+def add_movement_axis_annotations(
+    ax: "Axes",
+    trajectory_type: str,
+    *,
+    axis_orientation: str = "branch_position",
+) -> None:
     """Draw aligned endpoint labels and movement-direction arrow."""
-    add_movement_axis_labels(ax, trajectory_type)
-    add_movement_axis_arrow(ax, trajectory_type)
+    add_movement_axis_labels(
+        ax,
+        trajectory_type,
+        axis_orientation=axis_orientation,
+    )
+    add_movement_axis_arrow(
+        ax,
+        trajectory_type,
+        axis_orientation=axis_orientation,
+    )
+
+
+def add_normalized_path_heatmap_axis(ax: "Axes") -> None:
+    """Label one bottom-row heatmap with normalized path coordinates."""
+    ax.set_xticks([0.0, 1.0])
+    ax.set_xticklabels(["0", "1"])
+    ax.tick_params(
+        axis="x",
+        labelsize=PANEL_E_TICK_LABEL_FONTSIZE,
+        length=0.9,
+        width=0.35,
+        pad=1,
+    )
+
+
+def add_centered_below_axis_text(
+    fig: Any,
+    axes: Sequence["Axes"],
+    text: str,
+    *,
+    y_offset: float = 0.01,
+    fontsize: float = 9.0,
+) -> "Text":
+    """Add text centered below a group of axes."""
+    boxes = [ax.get_position() for ax in axes]
+    x0 = min(box.x0 for box in boxes)
+    x1 = max(box.x1 for box in boxes)
+    y0 = min(box.y0 for box in boxes)
+    return fig.text(
+        (x0 + x1) / 2,
+        y0 - y_offset,
+        text,
+        ha="center",
+        va="top",
+        fontsize=fontsize,
+    )
 
 
 def add_centered_axis_text(
@@ -840,14 +964,30 @@ def load_motor_delta_table(
     datasets: Sequence[DatasetId],
     region: str = MOTOR_DELTA_REGION,
     delta_metric: str = MOTOR_DELTA_METRIC,
+    min_tuning_stability_correlation: float | None = (
+        MOTOR_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> Any:
-    """Load pooled V1 motor+DPP versus motor delta log-likelihood values."""
+    """Load pooled V1 motor+DPP versus motor deltas for stable dark-epoch units."""
     import pandas as pd
     import xarray as xr
 
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         animal_name, date, epoch = normalize_dataset_id(dataset)
+        stable_units = load_units_by_tuning_stability(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            region=region,
+            epoch=epoch,
+            min_tuning_stability_correlation=min_tuning_stability_correlation,
+        )
+        stable_unit_set = (
+            {int(unit) for unit in np.asarray(stable_units).reshape(-1)}
+            if stable_units is not None
+            else None
+        )
         nested_cv_path = find_motor_nested_cv_path(
             data_root=data_root,
             animal_name=animal_name,
@@ -867,18 +1007,21 @@ def load_motor_delta_table(
         finally:
             fit_dataset.close()
 
-        rows.extend(
-            {
-                "animal_name": animal_name,
-                "date": date,
-                "epoch": epoch,
-                "region": region,
-                "unit": int(unit),
-                "delta_log_likelihood_bits_per_spike": float(value),
-                "source_path": str(nested_cv_path),
-            }
-            for unit, value in zip(units, values, strict=True)
-        )
+        for unit, value in zip(units, values, strict=True):
+            unit_id = int(unit)
+            if stable_unit_set is not None and unit_id not in stable_unit_set:
+                continue
+            rows.append(
+                {
+                    "animal_name": animal_name,
+                    "date": date,
+                    "epoch": epoch,
+                    "region": region,
+                    "unit": unit_id,
+                    "delta_log_likelihood_bits_per_spike": float(value),
+                    "source_path": str(nested_cv_path),
+                }
+            )
 
     if not rows:
         return pd.DataFrame(columns=MOTOR_DELTA_TABLE_COLUMNS)
@@ -898,13 +1041,29 @@ def load_encoding_delta_table(
     n_folds: int = ENCODING_COMPARISON_N_FOLDS,
     place_bin_size_cm: float = ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
     min_spikes: int = ENCODING_COMPARISON_MIN_SPIKES,
+    min_tuning_stability_correlation: float | None = (
+        ENCODING_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> Any:
-    """Load pooled V1 DPP-versus-absolute-model delta log-likelihood values."""
+    """Load pooled V1 DPP-versus-absolute-model deltas for stable dark-epoch units."""
     import pandas as pd
 
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         animal_name, date, epoch = normalize_dataset_id(dataset)
+        stable_units = load_units_by_tuning_stability(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            region=region,
+            epoch=epoch,
+            min_tuning_stability_correlation=min_tuning_stability_correlation,
+        )
+        stable_unit_set = (
+            {int(unit) for unit in np.asarray(stable_units).reshape(-1)}
+            if stable_units is not None
+            else None
+        )
         summary_path = find_encoding_summary_path(
             data_root=data_root,
             animal_name=animal_name,
@@ -930,6 +1089,13 @@ def load_encoding_delta_table(
 
         if int(min_spikes) > 0:
             table = table[np.asarray(table["n_spikes"], dtype=float) >= int(min_spikes)]
+        if stable_unit_set is not None:
+            units = np.asarray(table.index)
+            stable_mask = np.asarray(
+                [int(unit) in stable_unit_set for unit in units],
+                dtype=bool,
+            )
+            table = table.iloc[stable_mask]
         units = np.asarray(table.index)
         n_spikes = np.asarray(table["n_spikes"], dtype=int)
         for comparison, label, source_column in ENCODING_DPP_COMPARISONS:
@@ -990,6 +1156,117 @@ def extract_tuning_curve_arrays(tuning_curve: Any) -> tuple[np.ndarray, np.ndarr
     return units, values
 
 
+def compute_unit_movement_firing_rates(spikes: Any, movement_interval: Any) -> dict[Any, float]:
+    """Return mean firing rates for all units during one movement interval."""
+    duration = float(movement_interval.tot_length())
+    unit_ids = list(spikes.keys())
+    if duration <= 0:
+        return {unit_id: 0.0 for unit_id in unit_ids}
+
+    counts = spikes.count(ep=movement_interval).to_numpy()
+    rates = np.sum(np.asarray(counts, dtype=float), axis=0).ravel() / duration
+    return {
+        unit_id: float(rate)
+        for unit_id, rate in zip(unit_ids, rates, strict=True)
+    }
+
+
+def select_units_by_movement_firing_rate(
+    movement_firing_rates: dict[Any, float],
+    min_movement_firing_rate_hz: float | None,
+) -> np.ndarray:
+    """Return units whose movement firing rate meets the requested threshold."""
+    if min_movement_firing_rate_hz is None:
+        return np.asarray(list(movement_firing_rates.keys()))
+    if min_movement_firing_rate_hz < 0:
+        raise ValueError("min_movement_firing_rate_hz must be non-negative.")
+    return np.asarray(
+        [
+            unit_id
+            for unit_id, rate in movement_firing_rates.items()
+            if rate >= min_movement_firing_rate_hz
+        ]
+    )
+
+
+def select_units_by_tuning_stability(
+    stability_table: Any,
+    min_tuning_stability_correlation: float | None,
+) -> np.ndarray:
+    """Return units stable in at least one trajectory at the requested threshold."""
+    if min_tuning_stability_correlation is None:
+        return np.asarray(stability_table["unit"].drop_duplicates())
+    if min_tuning_stability_correlation < -1.0:
+        raise ValueError("min_tuning_stability_correlation must be at least -1.")
+
+    correlations = np.asarray(stability_table["stability_correlation"], dtype=float)
+    stable_rows = stability_table[
+        np.isfinite(correlations)
+        & (correlations >= float(min_tuning_stability_correlation))
+    ]
+    return np.asarray(stable_rows["unit"].drop_duplicates())
+
+
+def load_units_by_tuning_stability(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    min_tuning_stability_correlation: float | None,
+) -> np.ndarray | None:
+    """Return units passing the saved odd/even tuning-stability criterion."""
+    if min_tuning_stability_correlation is None:
+        return None
+
+    import pandas as pd
+
+    table_path = get_stability_table_path(data_root, animal_name, date)
+    if not table_path.exists():
+        raise FileNotFoundError(
+            "Missing task-progression stability table. Expected "
+            f"{table_path}. Run `python -m v1ca1.task_progression.stability` "
+            "for this session first."
+        )
+    table = pd.read_parquet(table_path)
+    table = table[
+        (table["epoch"].astype(str) == str(epoch))
+        & (table["region"].astype(str) == str(region))
+        & (table["trajectory_type"].astype(str).isin(PANEL_D_TRAJECTORY_TYPES))
+    ]
+    return select_units_by_tuning_stability(
+        table,
+        min_tuning_stability_correlation,
+    )
+
+
+def filter_tuning_curve_units(tuning_curve: Any | None, included_units: np.ndarray) -> Any | None:
+    """Return one tuning curve restricted to the requested units."""
+    if tuning_curve is None:
+        return None
+    if len(tuning_curve.dims) != 2:
+        raise ValueError(
+            "Expected a 2D tuning curve with unit and position dimensions. "
+            f"Got dims {tuning_curve.dims!r}."
+        )
+    unit_dim = tuning_curve.dims[0]
+    units = np.asarray(tuning_curve.coords[unit_dim].values)
+    unit_mask = np.isin(units, np.asarray(included_units))
+    return tuning_curve.isel({unit_dim: np.flatnonzero(unit_mask)})
+
+
+def filter_tuning_curves_by_units(
+    curves_by_trajectory: dict[str, Any | None],
+    included_units: np.ndarray,
+) -> dict[str, Any | None]:
+    """Return trajectory tuning curves restricted to requested units."""
+    return {
+        trajectory_type: filter_tuning_curve_units(curve, included_units)
+        for trajectory_type, curve in curves_by_trajectory.items()
+    }
+
+
 def normalize_linear_position_by_trajectory(
     animal_name: str,
     linear_position_by_trajectory: dict[str, Any],
@@ -1023,6 +1300,9 @@ def compute_dark_epoch_tuning_curves(
     position_offset: int,
     speed_threshold_cm_s: float,
     sigma_bins: float,
+    use_trajectory_direction: bool = False,
+    min_movement_firing_rate_hz: float | None = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = None,
 ) -> dict[str, Any]:
     """Compute odd/even normalized-position tuning curves for one dark epoch."""
     session = prepare_heatmap_session(
@@ -1042,6 +1322,7 @@ def compute_dark_epoch_tuning_curves(
         session["timestamps_position"][selected_epoch],
         session["trajectory_intervals"][selected_epoch],
         position_offset=position_offset,
+        use_trajectory_direction=use_trajectory_direction,
     )
     normalized_position_by_trajectory = normalize_linear_position_by_trajectory(
         animal_name,
@@ -1055,13 +1336,33 @@ def compute_dark_epoch_tuning_curves(
         bin_edges=build_normalized_position_bins(position_bin_count),
         sigma_bins=sigma_bins,
     )
+    movement_firing_rates = compute_unit_movement_firing_rates(
+        session["spikes_by_region"][region],
+        session["movement_by_run"][selected_epoch],
+    )
+    included_units = select_units_by_movement_firing_rate(
+        movement_firing_rates,
+        min_movement_firing_rate_hz,
+    )
+    stable_units = load_units_by_tuning_stability(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        region=region,
+        epoch=selected_epoch,
+        min_tuning_stability_correlation=min_tuning_stability_correlation,
+    )
+    if stable_units is not None:
+        included_units = np.intersect1d(included_units, stable_units)
     return {
         "animal_name": animal_name,
         "date": date,
         "region": region,
         "epoch": selected_epoch,
-        "odd_curves": odd_curves,
-        "even_curves": even_curves,
+        "odd_curves": filter_tuning_curves_by_units(odd_curves, included_units),
+        "even_curves": filter_tuning_curves_by_units(even_curves, included_units),
+        "included_units": included_units,
+        "movement_firing_rates_hz": movement_firing_rates,
     }
 
 
@@ -1419,30 +1720,115 @@ def _concatenate_value_parts(parts: list[np.ndarray], position_bin_count: int) -
     return np.vstack(parts)
 
 
-def build_pooled_panel_values(
+def align_panel_values_to_unit_order(
+    display_values: np.ndarray,
+    display_units: np.ndarray,
+    reference_units: np.ndarray,
+    unit_order: np.ndarray,
+) -> np.ndarray:
+    """Align one display matrix to reference units and apply the learned unit order."""
+    display_values = np.asarray(display_values, dtype=float)
+    display_units = np.asarray(display_units)
+    reference_units = np.asarray(reference_units)
+    unit_order = np.asarray(unit_order, dtype=int)
+
+    if display_values.ndim != 2:
+        raise ValueError(f"Expected a 2D tuning matrix, got shape {display_values.shape}.")
+    if display_values.shape[0] != display_units.size:
+        raise ValueError(
+            "Display matrix rows must match the number of display units. "
+            f"Got {display_values.shape[0]} rows and {display_units.size} units."
+        )
+    if unit_order.shape != (reference_units.size,):
+        raise ValueError(
+            "unit_order must contain one index per reference unit. "
+            f"Got shape {unit_order.shape} for {reference_units.size} units."
+        )
+
+    aligned = np.full((reference_units.size, display_values.shape[1]), np.nan, dtype=float)
+    index_by_unit = {unit: index for index, unit in enumerate(display_units.tolist())}
+    for reference_index, unit in enumerate(reference_units.tolist()):
+        display_index = index_by_unit.get(unit)
+        if display_index is not None:
+            aligned[reference_index] = display_values[display_index]
+    return aligned[unit_order]
+
+
+def normalize_panel_values_across_trajectories(
+    sorted_values_by_trajectory: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Normalize each unit by its maximum across all displayed trajectories."""
+    if not sorted_values_by_trajectory:
+        return {}
+
+    combined_values = np.concatenate(
+        list(sorted_values_by_trajectory.values()),
+        axis=1,
+    )
+    row_max = np.full(combined_values.shape[0], np.nan, dtype=float)
+    finite_rows = np.isfinite(combined_values).any(axis=1)
+    if np.any(finite_rows):
+        row_max[finite_rows] = np.nanmax(combined_values[finite_rows], axis=1)
+
+    valid_rows = np.isfinite(row_max) & (row_max > 0)
+    normalized_by_trajectory: dict[str, np.ndarray] = {}
+    for trajectory_type, values in sorted_values_by_trajectory.items():
+        normalized = np.full_like(values, np.nan, dtype=float)
+        if np.any(valid_rows):
+            normalized[valid_rows] = values[valid_rows] / row_max[valid_rows, None]
+        normalized_by_trajectory[trajectory_type] = normalized
+    return normalized_by_trajectory
+
+
+def normalize_panel_values_per_trajectory(values: np.ndarray) -> np.ndarray:
+    """Normalize each unit by its maximum within one displayed trajectory."""
+    values = np.asarray(values, dtype=float)
+    row_max = np.full(values.shape[0], np.nan, dtype=float)
+    finite_rows = np.isfinite(values).any(axis=1)
+    if np.any(finite_rows):
+        row_max[finite_rows] = np.nanmax(values[finite_rows], axis=1)
+
+    valid_rows = np.isfinite(row_max) & (row_max > 0)
+    normalized = np.full_like(values, np.nan, dtype=float)
+    if np.any(valid_rows):
+        normalized[valid_rows] = values[valid_rows] / row_max[valid_rows, None]
+    return normalized
+
+
+def build_pooled_panel_values_and_unit_order(
     curve_sets: Sequence[dict[str, Any]],
     *,
     position_bin_count: int,
-) -> dict[tuple[str, str], np.ndarray]:
-    """Return normalized heatmap panels pooled across data sets."""
+    trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+    """Return normalized pooled heatmaps and their row unit keys."""
+    trajectory_types = tuple(trajectory_types)
+    if firing_rate_normalization not in {
+        PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+        PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+    }:
+        raise ValueError(
+            f"Unknown firing_rate_normalization {firing_rate_normalization!r}."
+        )
     odd_units_by_trajectory: dict[str, list[np.ndarray]] = {
-        trajectory_type: [] for trajectory_type in TRAJECTORY_TYPES
+        trajectory_type: [] for trajectory_type in trajectory_types
     }
     odd_values_by_trajectory: dict[str, list[np.ndarray]] = {
-        trajectory_type: [] for trajectory_type in TRAJECTORY_TYPES
+        trajectory_type: [] for trajectory_type in trajectory_types
     }
     even_units_by_trajectory: dict[str, list[np.ndarray]] = {
-        trajectory_type: [] for trajectory_type in TRAJECTORY_TYPES
+        trajectory_type: [] for trajectory_type in trajectory_types
     }
     even_values_by_trajectory: dict[str, list[np.ndarray]] = {
-        trajectory_type: [] for trajectory_type in TRAJECTORY_TYPES
+        trajectory_type: [] for trajectory_type in trajectory_types
     }
 
     for curve_set in curve_sets:
         animal_name = str(curve_set["animal_name"])
         date = str(curve_set["date"])
         region = str(curve_set["region"])
-        for trajectory_type in TRAJECTORY_TYPES:
+        for trajectory_type in trajectory_types:
             odd_curve = curve_set["odd_curves"].get(trajectory_type)
             if odd_curve is not None:
                 units, values = extract_tuning_curve_arrays(odd_curve)
@@ -1460,7 +1846,8 @@ def build_pooled_panel_values(
                 even_values_by_trajectory[trajectory_type].append(values)
 
     panels: dict[tuple[str, str], np.ndarray] = {}
-    for order_trajectory in TRAJECTORY_TYPES:
+    ordered_unit_keys_by_trajectory: dict[str, np.ndarray] = {}
+    for order_trajectory in trajectory_types:
         reference_units = _concatenate_unit_parts(odd_units_by_trajectory[order_trajectory])
         order_values = _concatenate_value_parts(
             odd_values_by_trajectory[order_trajectory],
@@ -1470,26 +1857,68 @@ def build_pooled_panel_values(
             unit_order = compute_unit_order(order_values)
         else:
             unit_order = np.asarray([], dtype=int)
+        ordered_unit_keys_by_trajectory[order_trajectory] = (
+            reference_units[unit_order] if unit_order.size else reference_units
+        )
 
-        for plot_trajectory in TRAJECTORY_TYPES:
+        sorted_values_by_plot_trajectory: dict[str, np.ndarray] = {}
+        for plot_trajectory in trajectory_types:
             display_units = _concatenate_unit_parts(even_units_by_trajectory[plot_trajectory])
             display_values = _concatenate_value_parts(
                 even_values_by_trajectory[plot_trajectory],
                 position_bin_count,
             )
             if unit_order.size == 0 or display_units.size == 0:
-                panels[(order_trajectory, plot_trajectory)] = np.full(
+                sorted_values_by_plot_trajectory[plot_trajectory] = np.full(
                     (reference_units.size, position_bin_count),
                     np.nan,
                     dtype=float,
                 )
                 continue
-            panels[(order_trajectory, plot_trajectory)] = align_and_normalize_panel_values(
-                display_values,
-                display_units,
-                reference_units,
-                unit_order,
+            sorted_values_by_plot_trajectory[plot_trajectory] = (
+                align_panel_values_to_unit_order(
+                    display_values,
+                    display_units,
+                    reference_units,
+                    unit_order,
+                )
             )
+
+        if (
+            firing_rate_normalization
+            == PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION
+        ):
+            normalized_values_by_plot_trajectory = (
+                normalize_panel_values_across_trajectories(
+                    sorted_values_by_plot_trajectory,
+                )
+            )
+        else:
+            normalized_values_by_plot_trajectory = {
+                trajectory_type: normalize_panel_values_per_trajectory(values)
+                for trajectory_type, values in sorted_values_by_plot_trajectory.items()
+            }
+        for plot_trajectory in trajectory_types:
+            panels[(order_trajectory, plot_trajectory)] = (
+                normalized_values_by_plot_trajectory[plot_trajectory]
+            )
+    return panels, ordered_unit_keys_by_trajectory
+
+
+def build_pooled_panel_values(
+    curve_sets: Sequence[dict[str, Any]],
+    *,
+    position_bin_count: int,
+    trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+) -> dict[tuple[str, str], np.ndarray]:
+    """Return normalized heatmap panels pooled across data sets."""
+    panels, _ordered_unit_keys_by_trajectory = build_pooled_panel_values_and_unit_order(
+        curve_sets,
+        position_bin_count=position_bin_count,
+        trajectory_types=trajectory_types,
+        firing_rate_normalization=firing_rate_normalization,
+    )
     return panels
 
 
@@ -1545,8 +1974,28 @@ def build_panel_d_cache_metadata(
     position_offset: int,
     speed_threshold_cm_s: float,
     sigma_bins: float,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+    min_movement_firing_rate_hz: float | None = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+    ),
 ) -> dict[str, Any]:
     """Return metadata that identifies one Panel D heatmap cache."""
+    if min_movement_firing_rate_hz is not None and min_movement_firing_rate_hz < 0:
+        raise ValueError("min_movement_firing_rate_hz must be non-negative.")
+    if (
+        min_tuning_stability_correlation is not None
+        and min_tuning_stability_correlation < -1.0
+    ):
+        raise ValueError("min_tuning_stability_correlation must be at least -1.")
+    if firing_rate_normalization == PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION:
+        cache_version = PANEL_D_CACHE_VERSION
+    elif firing_rate_normalization == PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION:
+        cache_version = PANEL_D_ACROSS_TRAJECTORY_CACHE_VERSION
+    else:
+        raise ValueError(
+            f"Unknown firing_rate_normalization {firing_rate_normalization!r}."
+        )
     dataset_metadata = []
     for dataset in datasets:
         animal_name, date, dark_epoch = normalize_dataset_id(dataset)
@@ -1558,20 +2007,30 @@ def build_panel_d_cache_metadata(
             }
         )
 
-    return {
-        "cache_version": PANEL_D_CACHE_VERSION,
+    metadata = {
+        "cache_version": cache_version,
         "figure": DEFAULT_OUTPUT_NAME,
         "panel": "D",
         "data_root": str(Path(data_root)),
         "region": str(region),
         "datasets": dataset_metadata,
-        "trajectory_types": list(TRAJECTORY_TYPES),
+        "trajectory_types": list(PANEL_D_TRAJECTORY_TYPES),
+        "linear_position_orientation": PANEL_D_LINEAR_POSITION_ORIENTATION,
         "position_bin_count": int(position_bin_count),
         "position_offset": int(position_offset),
         "speed_threshold_cm_s": float(speed_threshold_cm_s),
         "sigma_bins": float(sigma_bins),
         "pooled_builder": "build_pooled_panel_values",
     }
+    if min_movement_firing_rate_hz is not None:
+        metadata["min_movement_firing_rate_hz"] = float(min_movement_firing_rate_hz)
+    if min_tuning_stability_correlation is not None:
+        metadata["min_tuning_stability_correlation"] = float(
+            min_tuning_stability_correlation
+        )
+    if firing_rate_normalization != PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION:
+        metadata["firing_rate_normalization"] = firing_rate_normalization
+    return metadata
 
 
 def build_panel_d_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
@@ -1589,9 +2048,30 @@ def build_panel_d_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
         else "mixed-" + "_".join(unique_dark_epochs)
     )
     dataset_token = _build_panel_d_dataset_cache_token(dataset_metadata)
+    orientation_token = _format_panel_d_cache_token(
+        metadata["linear_position_orientation"]
+    )
     filename = (
         f"{PANEL_D_CACHE_PREFIX}_{region_token}_dark{dark_epoch_token}"
         f"_datasets-{dataset_token}"
+        f"_orient{orientation_token}"
+    )
+    if "firing_rate_normalization" in metadata:
+        normalization_token = _format_panel_d_cache_token(
+            metadata["firing_rate_normalization"]
+        )
+        filename += f"_norm{normalization_token}"
+    if "min_movement_firing_rate_hz" in metadata:
+        filename += (
+            "_minmovefr"
+            f"{_format_panel_d_cache_number(metadata['min_movement_firing_rate_hz'])}"
+        )
+    if "min_tuning_stability_correlation" in metadata:
+        filename += (
+            "_minstab"
+            f"{_format_panel_d_cache_number(metadata['min_tuning_stability_correlation'])}"
+        )
+    filename += (
         f"_posbins{int(metadata['position_bin_count'])}"
         f"_offset{int(metadata['position_offset'])}"
         f"_speed{_format_panel_d_cache_number(metadata['speed_threshold_cm_s'])}"
@@ -1601,15 +2081,26 @@ def build_panel_d_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
     return Path(cache_dir) / filename
 
 
+def _panel_d_metadata_trajectory_types(metadata: dict[str, Any]) -> tuple[str, ...]:
+    """Return the Panel D trajectory order encoded in cache metadata."""
+    return tuple(str(trajectory) for trajectory in metadata["trajectory_types"])
+
+
 def _panel_d_cache_array_name(order_trajectory: str, plot_trajectory: str) -> str:
     """Return the array name for one Panel D heatmap matrix."""
     return f"{order_trajectory}__{plot_trajectory}"
+
+
+def _panel_d_cache_unit_order_array_name(order_trajectory: str) -> str:
+    """Return the array name for one Panel D ordered unit-key vector."""
+    return f"unit_order__{order_trajectory}"
 
 
 def save_panel_d_cache(
     cache_path: Path,
     panels: dict[tuple[str, str], np.ndarray],
     metadata: dict[str, Any],
+    ordered_unit_keys_by_trajectory: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Write one Panel D heatmap cache as compressed NumPy arrays."""
     cache_path = Path(cache_path)
@@ -1617,19 +2108,25 @@ def save_panel_d_cache(
     payload: dict[str, Any] = {
         PANEL_D_CACHE_METADATA_KEY: np.asarray(json.dumps(metadata, sort_keys=True)),
     }
-    for order_trajectory in TRAJECTORY_TYPES:
-        for plot_trajectory in TRAJECTORY_TYPES:
+    trajectory_types = _panel_d_metadata_trajectory_types(metadata)
+    for order_trajectory in trajectory_types:
+        for plot_trajectory in trajectory_types:
             payload[_panel_d_cache_array_name(order_trajectory, plot_trajectory)] = (
                 np.asarray(panels[(order_trajectory, plot_trajectory)], dtype=float)
+            )
+        if ordered_unit_keys_by_trajectory is not None:
+            payload[_panel_d_cache_unit_order_array_name(order_trajectory)] = np.asarray(
+                ordered_unit_keys_by_trajectory[order_trajectory],
+                dtype=str,
             )
     np.savez_compressed(cache_path, **payload)
 
 
-def load_panel_d_cache(
+def load_panel_d_cache_payload(
     cache_path: Path,
     expected_metadata: dict[str, Any],
-) -> dict[tuple[str, str], np.ndarray] | None:
-    """Return cached Panel D heatmap matrices when metadata still matches."""
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]] | None:
+    """Return cached Panel D heatmaps and row unit keys when metadata matches."""
     cache_path = Path(cache_path)
     if not cache_path.exists():
         return None
@@ -1642,8 +2139,9 @@ def load_panel_d_cache(
                 return None
 
             panels: dict[tuple[str, str], np.ndarray] = {}
-            for order_trajectory in TRAJECTORY_TYPES:
-                for plot_trajectory in TRAJECTORY_TYPES:
+            trajectory_types = _panel_d_metadata_trajectory_types(expected_metadata)
+            for order_trajectory in trajectory_types:
+                for plot_trajectory in trajectory_types:
                     array_name = _panel_d_cache_array_name(
                         order_trajectory,
                         plot_trajectory,
@@ -1652,13 +2150,48 @@ def load_panel_d_cache(
                         data[array_name],
                         dtype=float,
                     )
-            return panels
+            ordered_unit_keys_by_trajectory = {}
+            for order_trajectory in trajectory_types:
+                array_name = _panel_d_cache_unit_order_array_name(order_trajectory)
+                if array_name in data.files:
+                    ordered_unit_keys_by_trajectory[order_trajectory] = np.asarray(
+                        data[array_name],
+                        dtype=str,
+                    )
+            return panels, ordered_unit_keys_by_trajectory
     except Exception as exc:
         print(f"Ignoring unreadable Panel D cache at {cache_path}: {exc}")
         return None
 
 
-def load_or_compute_panel_d_heatmap_panels(
+def load_panel_d_cache(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[tuple[str, str], np.ndarray] | None:
+    """Return cached Panel D heatmap matrices when metadata still matches."""
+    payload = load_panel_d_cache_payload(cache_path, expected_metadata)
+    if payload is None:
+        return None
+    panels, _ordered_unit_keys_by_trajectory = payload
+    return panels
+
+
+def load_panel_d_ordered_unit_keys(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[str, np.ndarray] | None:
+    """Return cached Panel D row unit keys when metadata still matches."""
+    payload = load_panel_d_cache_payload(cache_path, expected_metadata)
+    if payload is None:
+        return None
+    _panels, ordered_unit_keys_by_trajectory = payload
+    trajectory_types = _panel_d_metadata_trajectory_types(expected_metadata)
+    if any(trajectory not in ordered_unit_keys_by_trajectory for trajectory in trajectory_types):
+        return None
+    return ordered_unit_keys_by_trajectory
+
+
+def load_or_compute_panel_d_heatmap_payload(
     *,
     data_root: Path,
     datasets: Sequence[DatasetId],
@@ -1669,8 +2202,14 @@ def load_or_compute_panel_d_heatmap_panels(
     sigma_bins: float,
     panel_d_cache_dir: Path | None,
     refresh_panel_d_cache: bool,
-) -> dict[tuple[str, str], np.ndarray]:
-    """Load cached Panel D panels or compute and cache them."""
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+    min_movement_firing_rate_hz: float | None = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+    ),
+    require_ordered_unit_keys: bool = False,
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+    """Load or compute Panel D heatmaps and their row unit keys."""
     metadata = build_panel_d_cache_metadata(
         data_root=data_root,
         datasets=datasets,
@@ -1679,6 +2218,9 @@ def load_or_compute_panel_d_heatmap_panels(
         position_offset=position_offset,
         speed_threshold_cm_s=speed_threshold_cm_s,
         sigma_bins=sigma_bins,
+        firing_rate_normalization=firing_rate_normalization,
+        min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+        min_tuning_stability_correlation=min_tuning_stability_correlation,
     )
     cache_path = (
         build_panel_d_cache_path(panel_d_cache_dir, metadata)
@@ -1686,10 +2228,17 @@ def load_or_compute_panel_d_heatmap_panels(
         else None
     )
     if cache_path is not None and not refresh_panel_d_cache:
-        cached_panels = load_panel_d_cache(cache_path, metadata)
-        if cached_panels is not None:
-            print(f"Loaded Panel D cache from {cache_path}.")
-            return cached_panels
+        cached_payload = load_panel_d_cache_payload(cache_path, metadata)
+        if cached_payload is not None:
+            panels, ordered_unit_keys_by_trajectory = cached_payload
+            trajectory_types = _panel_d_metadata_trajectory_types(metadata)
+            has_unit_order = all(
+                trajectory in ordered_unit_keys_by_trajectory
+                for trajectory in trajectory_types
+            )
+            if has_unit_order or not require_ordered_unit_keys:
+                print(f"Loaded Panel D cache from {cache_path}.")
+                return panels, ordered_unit_keys_by_trajectory
 
     print(f"Building pooled dark-epoch heatmap for region {region}.")
     curve_sets = []
@@ -1707,16 +2256,61 @@ def load_or_compute_panel_d_heatmap_panels(
                 position_offset=position_offset,
                 speed_threshold_cm_s=speed_threshold_cm_s,
                 sigma_bins=sigma_bins,
+                use_trajectory_direction=True,
+                min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+                min_tuning_stability_correlation=min_tuning_stability_correlation,
             )
         )
 
-    panels = build_pooled_panel_values(
+    panels, ordered_unit_keys_by_trajectory = build_pooled_panel_values_and_unit_order(
         curve_sets,
         position_bin_count=position_bin_count,
+        trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+        firing_rate_normalization=firing_rate_normalization,
     )
     if cache_path is not None:
-        save_panel_d_cache(cache_path, panels, metadata)
+        save_panel_d_cache(
+            cache_path,
+            panels,
+            metadata,
+            ordered_unit_keys_by_trajectory=ordered_unit_keys_by_trajectory,
+        )
         print(f"Saved Panel D cache to {cache_path}.")
+    return panels, ordered_unit_keys_by_trajectory
+
+
+def load_or_compute_panel_d_heatmap_panels(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_d_cache_dir: Path | None,
+    refresh_panel_d_cache: bool,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+    min_movement_firing_rate_hz: float | None = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+    ),
+) -> dict[tuple[str, str], np.ndarray]:
+    """Load cached Panel D panels or compute and cache them."""
+    panels, _ordered_unit_keys_by_trajectory = load_or_compute_panel_d_heatmap_payload(
+        data_root=data_root,
+        datasets=datasets,
+        region=region,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+        panel_d_cache_dir=panel_d_cache_dir,
+        refresh_panel_d_cache=refresh_panel_d_cache,
+        firing_rate_normalization=firing_rate_normalization,
+        min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+        min_tuning_stability_correlation=min_tuning_stability_correlation,
+    )
     return panels
 
 
@@ -1747,11 +2341,14 @@ def plot_dark_heatmap_regions(
             panel_d_cache_dir=panel_d_cache_dir,
             refresh_panel_d_cache=refresh_panel_d_cache,
         )
-        start_row = region_index * len(TRAJECTORY_TYPES)
-        stop_row = start_row + len(TRAJECTORY_TYPES)
+        start_row = region_index * len(PANEL_D_TRAJECTORY_TYPES)
+        stop_row = start_row + len(PANEL_D_TRAJECTORY_TYPES)
         image = plot_pooled_heatmap_grid(
             heatmap_axes[start_row:stop_row, :],
             panels,
+            trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+            axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+            cmap=PANEL_D_HEATMAP_CMAP,
         )
         if color_image is None and image is not None:
             color_image = image
@@ -1761,24 +2358,29 @@ def plot_dark_heatmap_regions(
 def plot_pooled_heatmap_grid(
     axes: np.ndarray,
     panels: dict[tuple[str, str], np.ndarray],
+    *,
+    trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
+    axis_orientation: str = "branch_position",
+    cmap: str = "viridis",
 ) -> "AxesImage | None":
     """Plot one pooled 4x4 odd/even trajectory heatmap grid."""
+    trajectory_types = tuple(trajectory_types)
     color_image = None
-    for row_index, order_trajectory in enumerate(TRAJECTORY_TYPES):
+    for row_index, order_trajectory in enumerate(trajectory_types):
         row_size = max(
             panels[(order_trajectory, plot_trajectory)].shape[0]
-            for plot_trajectory in TRAJECTORY_TYPES
+            for plot_trajectory in trajectory_types
         )
         y_limit = max(row_size, 1)
-        for col_index, plot_trajectory in enumerate(TRAJECTORY_TYPES):
+        for col_index, plot_trajectory in enumerate(trajectory_types):
             ax: Axes = axes[row_index, col_index]
             ax.set_xlim(0.0, 1.0)
             ax.set_ylim(y_limit, 0)
             ax.set_xticks([])
             ax.set_yticks([])
 
-            if row_index == len(TRAJECTORY_TYPES) - 1:
-                add_movement_axis_annotations(ax, plot_trajectory)
+            if row_index == len(trajectory_types) - 1:
+                add_normalized_path_heatmap_axis(ax)
 
             panel_values = panels[(order_trajectory, plot_trajectory)]
             if not has_plottable_values(panel_values):
@@ -1792,7 +2394,7 @@ def plot_pooled_heatmap_grid(
                 extent=[0.0, 1.0, panel_values.shape[0], 0],
                 vmin=0.0,
                 vmax=1.0,
-                cmap="viridis",
+                cmap=cmap,
             )
             add_task_progression_segment_boundary_lines(ax)
             if color_image is None:
@@ -2570,7 +3172,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     ax.text(
         0.68,
         0.97,
-        "Motor+DGP better",
+        "Motor+DPP better",
         ha="left",
         va="top",
         fontsize=5.5,
@@ -2690,7 +3292,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DGP better",
+        "DPP better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -2698,8 +3300,8 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     summary_label_by_comparison = {
-        "dpp_vs_absolute_place": "DGP > abs place",
-        "dpp_vs_absolute_task_progression": "DGP > dist.-to-reward",
+        "dpp_vs_absolute_place": "DPP > abs place",
+        "dpp_vs_absolute_task_progression": "DPP > dist.-to-reward",
     }
     for row_index, (comparison, summary, color) in enumerate(summary_rows):
         ax.text(
@@ -2970,7 +3572,7 @@ def plot_panel_e_rate_axis(
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
     ax.set_xlabel(
-        "Nom. goal progression",
+        TASK_PROGRESSION_XLABEL,
         fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
         labelpad=1,
     )
@@ -3078,6 +3680,64 @@ def plot_panel_e_examples(
         )
 
 
+def find_dataset_dark_epoch(
+    datasets: Sequence[DatasetId],
+    animal_name: str,
+    date: str,
+) -> str | None:
+    """Return the requested dark epoch for one data set, if it is listed."""
+    for dataset in datasets:
+        dataset_animal, dataset_date, dataset_dark_epoch = normalize_dataset_id(dataset)
+        if dataset_animal == animal_name and dataset_date == date:
+            return dataset_dark_epoch
+    return None
+
+
+def plot_dark_light_example_panel(
+    ax: "Axes",
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_example_cache_dir: Path | None,
+    refresh_panel_example_cache: bool,
+) -> None:
+    """Draw the Figure 4A dark/light visual-cell example inside Figure 1."""
+    from v1ca1.paper_figures.figure_3 import (
+        PANEL_A_EXAMPLE,
+        load_panel_a_example_data,
+        plot_panel_a_example,
+    )
+
+    animal_name, date, region, unit_id = PANEL_A_EXAMPLE
+    example = load_panel_a_example_data(
+        data_root=data_root,
+        animal_name=animal_name,
+        date=date,
+        region=region,
+        unit_id=unit_id,
+        dark_epoch=find_dataset_dark_epoch(datasets, animal_name, date),
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+        panel_example_cache_dir=panel_example_cache_dir,
+        refresh_panel_example_cache=refresh_panel_example_cache,
+    )
+    plot_panel_a_example(
+        ax,
+        example,
+        visual_label_colors=PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
+        trajectory_epoch_color_overrides=PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
+    )
+    for child_axis in ax.child_axes:
+        if child_axis.get_xlabel():
+            child_axis.xaxis.label.set_text(TASK_PROGRESSION_XLABEL)
+
+
 def make_figure_1(
     *,
     data_root: Path,
@@ -3095,6 +3755,8 @@ def make_figure_1(
     refresh_panel_d_cache: bool = False,
     panel_e_cache_dir: Path | None = None,
     refresh_panel_e_cache: bool = False,
+    panel_dark_light_example_cache_dir: Path | None = None,
+    refresh_panel_dark_light_example_cache: bool = False,
 ) -> Path:
     """Build and save Figure 1."""
     import matplotlib.pyplot as plt
@@ -3109,8 +3771,13 @@ def make_figure_1(
         if panel_e_cache_dir is None
         else Path(panel_e_cache_dir)
     )
+    panel_dark_light_example_cache_dir = (
+        Path(output_path).parent / "cache"
+        if panel_dark_light_example_cache_dir is None
+        else Path(panel_dark_light_example_cache_dir)
+    )
     apply_paper_style()
-    n_region_rows = len(regions) * len(TRAJECTORY_TYPES)
+    n_region_rows = len(regions) * len(PANEL_D_TRAJECTORY_TYPES)
     heatmap_height_mm = DEFAULT_HEATMAP_HEIGHT_MM * max(len(regions), 1)
     fig_height_mm = (
         DEFAULT_TOP_ROW_HEIGHT_MM
@@ -3152,11 +3819,30 @@ def make_figure_1(
     panel_b_axis.set_title("Task design", fontsize=9, pad=2)
     label_axis(panel_b_axis, "A", x=-0.04, y=1.02)
 
-    heatmap_grid = main_grid[:, 1].subgridspec(
+    panel_dark_light_axis = fig.add_subplot(main_grid[0, 1])
+    plot_dark_light_example_panel(
+        panel_dark_light_axis,
+        data_root=data_root,
+        datasets=datasets,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+        panel_example_cache_dir=panel_dark_light_example_cache_dir,
+        refresh_panel_example_cache=refresh_panel_dark_light_example_cache,
+    )
+    panel_dark_light_axis.set_title(
+        PANEL_DARK_LIGHT_EXAMPLE_TITLE,
+        fontsize=8,
+        pad=2,
+    )
+    label_axis(panel_dark_light_axis, "B", x=-0.02, y=1.02)
+
+    heatmap_grid = main_grid[1, 1].subgridspec(
         nrows=n_region_rows + 1,
-        ncols=len(TRAJECTORY_TYPES) + 1,
+        ncols=len(PANEL_D_TRAJECTORY_TYPES) + 1,
         height_ratios=[0.42, *([1.0] * n_region_rows)],
-        width_ratios=[0.48, *([1.0] * len(TRAJECTORY_TYPES))],
+        width_ratios=[0.48, *([1.0] * len(PANEL_D_TRAJECTORY_TYPES))],
     )
     panel_d_axis = fig.add_subplot(main_grid[1, 0])
     panel_e_examples = [
@@ -3177,8 +3863,8 @@ def make_figure_1(
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
     plot_panel_e_examples(panel_d_axis, panel_e_examples)
-    panel_d_axis.set_title("Example dark DGP coding cells", fontsize=8, pad=2)
-    label_axis(panel_d_axis, "B", x=-0.04, y=1.02)
+    panel_d_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
+    label_axis(panel_d_axis, "C", x=-0.04, y=1.02)
 
     spacer_axis = fig.add_subplot(outer_grid[2])
     spacer_axis.axis("off")
@@ -3202,7 +3888,7 @@ def make_figure_1(
     )
     plot_motor_delta_panel(panel_f_axis, motor_delta_table)
     panel_f_axis.set_title("Comparison to motor", fontsize=8, pad=2)
-    label_axis(panel_f_axis, "D", x=-0.04, y=1.02)
+    label_axis(panel_f_axis, "E", x=-0.04, y=1.02)
     encoding_delta_table = load_encoding_delta_table(
         data_root=data_root,
         datasets=datasets,
@@ -3211,7 +3897,7 @@ def make_figure_1(
     )
     plot_encoding_delta_panel(panel_g_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
-    label_axis(panel_g_axis, "E", x=-0.08, y=1.02)
+    label_axis(panel_g_axis, "F", x=-0.08, y=1.02)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
         datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
@@ -3219,11 +3905,14 @@ def make_figure_1(
     )
     plot_decoding_error_panel(panel_h_axis, decoding_error_table)
     panel_h_axis.set_title("Cross trajectory decoding", fontsize=8, pad=2)
-    label_axis(panel_h_axis, "F", x=-0.04, y=1.02)
+    label_axis(panel_h_axis, "G", x=-0.04, y=1.02)
 
     axes = np.asarray(
         [
-            [fig.add_subplot(heatmap_grid[row, col]) for col in range(len(TRAJECTORY_TYPES) + 1)]
+            [
+                fig.add_subplot(heatmap_grid[row, col])
+                for col in range(len(PANEL_D_TRAJECTORY_TYPES) + 1)
+            ]
             for row in range(n_region_rows + 1)
         ],
         dtype=object,
@@ -3234,7 +3923,11 @@ def make_figure_1(
     tuning_schematic_axes = axes[0, 1:]
     order_schematic_axes = axes[1:, 0]
     heatmap_axes = axes[1:, 1:]
-    for ax, trajectory_type in zip(tuning_schematic_axes, TRAJECTORY_TYPES, strict=True):
+    for ax, trajectory_type in zip(
+        tuning_schematic_axes,
+        PANEL_D_TRAJECTORY_TYPES,
+        strict=True,
+    ):
         draw_w_track_schematic(
             ax,
             trajectory_name=trajectory_type,
@@ -3242,12 +3935,13 @@ def make_figure_1(
             fill_track=True,
         )
     for row_index, ax in enumerate(order_schematic_axes):
+        trajectory_type = PANEL_D_TRAJECTORY_TYPES[
+            row_index % len(PANEL_D_TRAJECTORY_TYPES)
+        ]
         draw_order_schematic(
             ax,
-            TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)],
-            arrow_color=PANEL_E_TRAJECTORY_COLORS[
-                TRAJECTORY_TYPES[row_index % len(TRAJECTORY_TYPES)]
-            ],
+            trajectory_type,
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
         )
 
     color_image = plot_dark_heatmap_regions(
@@ -3297,7 +3991,14 @@ def make_figure_1(
         y_offset=HEATMAP_ORDER_LABEL_OFFSET,
         rotation=90,
     )
-    label_axis(corner_axis, "C", x=-0.12, y=1.04)
+    add_centered_below_axis_text(
+        fig,
+        heatmap_axes[-1, :],
+        TASK_PROGRESSION_XLABEL,
+        y_offset=HEATMAP_PATH_LABEL_OFFSET,
+        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
+    )
+    label_axis(corner_axis, "D", x=-0.12, y=1.04)
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 1 to {output_path}")
@@ -3359,6 +4060,23 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--refresh-panel-e-cache",
         action="store_true",
         help="Recompute Panel E and overwrite its cache even when a matching cache exists.",
+    )
+    parser.add_argument(
+        "--panel-dark-light-example-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for cached moved Figure 4A example-cell data. "
+            "Default: <output-dir>/cache."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-panel-dark-light-example-cache",
+        action="store_true",
+        help=(
+            "Recompute the moved Figure 4A example cell and overwrite its "
+            "cache even when a matching cache exists."
+        ),
     )
     parser.add_argument(
         "--format",
@@ -3453,6 +4171,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.panel_e_cache_dir is not None
         else args.output_dir / "cache"
     )
+    panel_dark_light_example_cache_dir = (
+        args.panel_dark_light_example_cache_dir
+        if args.panel_dark_light_example_cache_dir is not None
+        else args.output_dir / "cache"
+    )
     make_figure_1(
         data_root=args.data_root,
         asset_dir=args.asset_dir,
@@ -3469,6 +4192,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         refresh_panel_d_cache=args.refresh_panel_d_cache,
         panel_e_cache_dir=panel_e_cache_dir,
         refresh_panel_e_cache=args.refresh_panel_e_cache,
+        panel_dark_light_example_cache_dir=panel_dark_light_example_cache_dir,
+        refresh_panel_dark_light_example_cache=(
+            args.refresh_panel_dark_light_example_cache
+        ),
     )
 
 

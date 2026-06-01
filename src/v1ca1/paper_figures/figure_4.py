@@ -30,17 +30,14 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_REGIONS,
     DEFAULT_SIGMA_BINS,
     FIGURE_FORMATS,
-    PANEL_A_EXAMPLE,
     PANEL_GH_WIDTH_RATIOS,
     PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
     PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y,
     PANEL_H_SHARED_DARK_TRACK_CENTER_Y,
     PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y,
     build_output_path,
-    load_panel_a_example_data,
     load_panel_glm_data,
     parse_dataset_id,
-    plot_panel_a_example,
     plot_panel_g_model_architecture,
     plot_panel_h_swap_delta,
 )
@@ -54,18 +51,23 @@ from v1ca1.paper_figures.style import (
 
 DEFAULT_OUTPUT_NAME = "figure_4"
 DEFAULT_FIGURE_WIDTH_MM = FIGURE_2_WIDTH_MM
-DEFAULT_FIGURE_HEIGHT_MM = FIGURE_2_HEIGHT_MM * 1.3
+PANEL_A_TO_GH_HEIGHT_RATIOS = (0.637, 1.3)
+DEFAULT_FIGURE_HEIGHT_MM = (
+    FIGURE_2_HEIGHT_MM
+    * 1.3
+    * PANEL_A_TO_GH_HEIGHT_RATIOS[1]
+    / sum(PANEL_A_TO_GH_HEIGHT_RATIOS)
+)
 FIGURE_4_CONSTRAINED_LAYOUT_PADS = {
     "h_pad": 0.01,
     "w_pad": 0.01,
     "hspace": 0.01,
     "wspace": 0.02,
 }
-PANEL_A_TO_GH_HEIGHT_RATIOS = (0.637, 1.3)
 PANEL_BC_LABEL_Y = 1.03
 PANEL_BC_TITLE_PAD = 0.5
 PANEL_B_SCHEMATIC_HEIGHT_FRACTION = 0.72
-PANEL_B_SCHEMATIC_TRACK_SIZE = (0.22, 0.40)
+PANEL_B_SCHEMATIC_TRACK_SIZE = (0.2512, 0.316)
 PANEL_B_EXAMPLE_AXIS_BOUNDS = (0.0, 0.01, 1.0, 0.44)
 PANEL_B_EXAMPLE_FIELD_Y = 0.13
 PANEL_B_EXAMPLE_FIELD_HEIGHT = 0.62
@@ -87,13 +89,14 @@ PANEL_B_SEGMENT_MODULATION_LABEL_Y = 0.595
 PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
 PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)
 PANEL_C_DELTA_AXIS_BOUNDS = (0.39, 0.35, 0.60, 0.59)
+PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION = 0.5
 PANEL_C_DELTA_GRID_BOUNDS = (
     (0.035, 0.42, 0.445, 0.50),
     (0.535, 0.42, 0.445, 0.50),
     (0.035, -0.22, 0.445, 0.50),
     (0.535, -0.22, 0.445, 0.50),
 )
-PANEL_C_DELTA_XLABEL_Y = -0.30
+PANEL_C_DELTA_XLABEL_Y = -0.40
 PANEL_C_EXAMPLE_AXIS_BOUNDS = (
     (0.201, -0.18, 0.248, 0.19),
     (0.591, -0.18, 0.248, 0.19),
@@ -177,11 +180,6 @@ def make_figure_4(
     """Build and save Figure 4."""
     import matplotlib.pyplot as plt
 
-    panel_example_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_example_cache_dir is None
-        else Path(panel_example_cache_dir)
-    )
     quant_region = str(regions[0]) if regions else DEFAULT_REGIONS[0]
     panel_glm_payload = load_panel_glm_data(
         data_root=data_root,
@@ -189,6 +187,9 @@ def make_figure_4(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        swap_delta_min_tuning_stability_correlation=(
+            PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
+        ),
     )
 
     apply_paper_style()
@@ -197,13 +198,7 @@ def make_figure_4(
         constrained_layout=True,
     )
     fig.get_layout_engine().set(**FIGURE_4_CONSTRAINED_LAYOUT_PADS)
-    outer_grid = fig.add_gridspec(
-        nrows=2,
-        ncols=1,
-        height_ratios=PANEL_A_TO_GH_HEIGHT_RATIOS,
-    )
-    panel_a_axis = fig.add_subplot(outer_grid[0, 0])
-    glm_grid = outer_grid[1, 0].subgridspec(
+    glm_grid = fig.add_gridspec(
         nrows=1,
         ncols=2,
         width_ratios=PANEL_GH_WIDTH_RATIOS,
@@ -211,22 +206,6 @@ def make_figure_4(
     panel_b_axis = fig.add_subplot(glm_grid[0, 0])
     panel_c_axis = fig.add_subplot(glm_grid[0, 1])
 
-    panel_a_animal, panel_a_date, panel_a_region, panel_a_unit = PANEL_A_EXAMPLE
-    panel_a_example = load_panel_a_example_data(
-        data_root=data_root,
-        animal_name=panel_a_animal,
-        date=panel_a_date,
-        region=panel_a_region,
-        unit_id=panel_a_unit,
-        dark_epoch=dark_epoch,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
-        panel_example_cache_dir=panel_example_cache_dir,
-        refresh_panel_example_cache=refresh_panel_example_cache,
-    )
-    plot_panel_a_example(panel_a_axis, panel_a_example)
     plot_panel_g_model_architecture(
         panel_b_axis,
         panel_glm_payload["dark_light_examples"],
@@ -281,14 +260,8 @@ def make_figure_4(
         example_icon_bounds=PANEL_C_EXAMPLE_ICON_BOUNDS,
     )
 
-    label_axis(panel_a_axis, "A", x=-0.02, y=1.00)
-    label_axis(panel_b_axis, "B", x=-0.035, y=PANEL_BC_LABEL_Y)
-    label_axis(panel_c_axis, "C", x=-0.035, y=PANEL_BC_LABEL_Y)
-    panel_a_axis.set_title(
-        "Example visual cell in different visual conditions",
-        fontsize=8,
-        pad=2,
-    )
+    label_axis(panel_b_axis, "A", x=-0.035, y=PANEL_BC_LABEL_Y)
+    label_axis(panel_c_axis, "B", x=-0.035, y=PANEL_BC_LABEL_Y)
     panel_b_axis.set_title(
         "Two models that relate dark and light activity",
         fontsize=8,

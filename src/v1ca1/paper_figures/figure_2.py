@@ -57,7 +57,7 @@ DEFAULT_OUTPUT_NAME = "figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
-DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "02_r1")
+DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "10_r5")
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_FIGURE_HEIGHT_MM = 72.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
@@ -131,11 +131,11 @@ PANEL_E_CHANCE_LEVELS = {
 PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S = (-0.4, -0.2, 0.0, 0.2)
 PANEL_E_GLM_TARGET_WINDOW_S = DEFAULT_RIPPLE_WINDOW_S
 PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S = 0.0
-PANEL_E_GLM_EPOCH_ORDER = ("light",)
+PANEL_E_GLM_EPOCH_ORDER = ("dark",)
 HEATMAP_EPOCH_ORDER = ("light", "dark", "sleep")
-PANEL_A_EPOCH_ORDER = ("light",)
-PANEL_C_EPOCH_ORDER = ("light",)
-PANEL_D_EPOCH_ORDER = ("light",)
+PANEL_A_EPOCH_ORDER = ("dark",)
+PANEL_C_EPOCH_ORDER = ("dark",)
+PANEL_D_EPOCH_ORDER = ("dark",)
 HEATMAP_EPOCH_LABELS = {
     "light": "Light run",
     "dark": "Dark run",
@@ -149,16 +149,19 @@ GLM_EPOCH_COLORS = EPOCH_TYPE_COLORS
 NONSIGNIFICANT_COLOR = NEUTRAL_COLORS["nonsignificant"]
 SIGNIFICANCE_P_VALUE = 0.05
 PANEL_C_SIGNIFICANCE_P_VALUE = 0.05
-PANEL_C_SOURCE_COMPARISON_COLOR = GLM_EPOCH_COLORS["light"]
+PANEL_BC_SIGNIFICANT_UNIT_COLOR = REGION_COLORS["v1"]
+PANEL_C_SOURCE_COMPARISON_COLOR = PANEL_BC_SIGNIFICANT_UNIT_COLOR
 PANEL_D_SIGNIFICANCE_P_VALUE = PANEL_C_SIGNIFICANCE_P_VALUE
 PANEL_D_MIN_DEVIANCE_EXPLAINED = 0.0
 PANEL_D_POINT_COLOR = REGION_COLORS["v1"]
 PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
 PANEL_D_DARK_ACTIVITY_COLORS = {
-    "inactive": "#CC79A7",
-    "active": "#009E73",
+    "inactive": EPOCH_TYPE_COLORS["light"],
+    "active": SCHEMATIC_COLORS["dark_basis"],
 }
-PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
+PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
+PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
+PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.1, 0.3)
 DARK_MOVEMENT_FR_CACHE_VERSION = 1
 DARK_MOVEMENT_FR_CACHE_COLUMNS = ("unit", "dark_firing_rate_hz")
 
@@ -4010,7 +4013,7 @@ def plot_glm_analysis_panel(
     finite_neglog_p = np.concatenate([values for values in all_neglog_p if values.size]) if any(
         values.size for values in all_neglog_p
     ) else np.asarray([], dtype=float)
-    x_min, x_max = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
+    x_min, x_max = PANEL_B_DEVIANCE_EXPLAINED_LIMITS
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
     plot_left = 0.52
@@ -4034,7 +4037,7 @@ def plot_glm_analysis_panel(
                 scatter_top - scatter_bottom,
             ]
         )
-        epoch_color = GLM_EPOCH_COLORS.get(epoch_payload["epoch_type"], MODEL_COLOR)
+        epoch_color = PANEL_BC_SIGNIFICANT_UNIT_COLOR
         plot_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
         plot_ax.axhline(
             -np.log10(PANEL_C_SIGNIFICANCE_P_VALUE),
@@ -5354,7 +5357,7 @@ def _plot_dark_active_same_turn_similarity_histogram(
 
     ax.set_xlim(*x_limits)
     ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel("Dark DGP corr.", fontsize=5.5, labelpad=1.0)
+    ax.set_xlabel("Dark DPP corr.", fontsize=5.5, labelpad=1.0)
     ax.set_ylabel("Frac. units", fontsize=5.5, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -5658,23 +5661,7 @@ def plot_glm_behavior_association_panel(
 
 def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
     """Return shared deviance-explained limits for source-mode comparisons."""
-    if table is None or len(table) == 0:
-        return PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
-    values = np.concatenate(
-        [
-            np.asarray(table["mean_activity_devexp_mean"], dtype=float),
-            np.asarray(table["vector_devexp_mean"], dtype=float),
-        ]
-    )
-    finite_values = values[np.isfinite(values)]
-    if not finite_values.size:
-        return PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
-    lower = float(PANEL_CD_DEVIANCE_EXPLAINED_LIMITS[0])
-    upper = max(float(PANEL_CD_DEVIANCE_EXPLAINED_LIMITS[1]), float(np.nanmax(finite_values)))
-    upper = np.ceil(upper * 10.0) / 10.0
-    if upper <= lower:
-        upper = lower + 0.1
-    return float(lower), float(upper)
+    return PANEL_C_SOURCE_COMPARISON_LIMITS
 
 
 def _plot_source_predictor_comparison_axis(
@@ -5716,49 +5703,20 @@ def _plot_source_predictor_comparison_axis(
             else np.full(len(table), np.nan, dtype=float)
         )
         valid = np.isfinite(x_values) & np.isfinite(y_values)
-        if np.any(valid):
+        significant = (
+            valid
+            & np.isfinite(p_values)
+            & (p_values < float(p_value_threshold))
+        )
+        if np.any(significant):
             if pooled and {"animal_name", "date"}.issubset(table.columns):
-                for (_animal_name, _date), dataset_rows in table.loc[valid].groupby(
+                for (_animal_name, _date), dataset_rows in table.loc[significant].groupby(
                     ["animal_name", "date"],
                     sort=True,
                 ):
-                    dataset_p_values = np.asarray(
-                        dataset_rows["vector_devexp_p_value"],
-                        dtype=float,
-                    )
-                    dataset_significant = (
-                        np.isfinite(dataset_p_values)
-                        & (dataset_p_values < float(p_value_threshold))
-                    )
-                    dataset_nonsignificant = ~dataset_significant
-                    if np.any(dataset_nonsignificant):
-                        ax.scatter(
-                            dataset_rows.loc[
-                                dataset_nonsignificant,
-                                "mean_activity_devexp_mean",
-                            ],
-                            dataset_rows.loc[
-                                dataset_nonsignificant,
-                                "vector_devexp_mean",
-                            ],
-                            s=3.8,
-                            color=NONSIGNIFICANT_COLOR,
-                            alpha=0.28,
-                            edgecolors="none",
-                            rasterized=True,
-                            zorder=2,
-                        )
-                    if not np.any(dataset_significant):
-                        continue
                     ax.scatter(
-                        dataset_rows.loc[
-                            dataset_significant,
-                            "mean_activity_devexp_mean",
-                        ],
-                        dataset_rows.loc[
-                            dataset_significant,
-                            "vector_devexp_mean",
-                        ],
+                        dataset_rows["mean_activity_devexp_mean"],
+                        dataset_rows["vector_devexp_mean"],
                         s=4.2,
                         color=PANEL_C_SOURCE_COMPARISON_COLOR,
                         alpha=0.42,
@@ -5767,35 +5725,17 @@ def _plot_source_predictor_comparison_axis(
                         zorder=3,
                     )
             else:
-                significant = (
-                    valid
-                    & np.isfinite(p_values)
-                    & (p_values < float(p_value_threshold))
+                ax.scatter(
+                    x_values[significant],
+                    y_values[significant],
+                    s=4.2,
+                    color=PANEL_C_SOURCE_COMPARISON_COLOR,
+                    alpha=0.42,
+                    edgecolors="none",
+                    rasterized=True,
+                    zorder=3,
                 )
-                nonsignificant = valid & ~significant
-                if np.any(nonsignificant):
-                    ax.scatter(
-                        x_values[nonsignificant],
-                        y_values[nonsignificant],
-                        s=3.8,
-                        color=NONSIGNIFICANT_COLOR,
-                        alpha=0.28,
-                        edgecolors="none",
-                        rasterized=True,
-                        zorder=2,
-                    )
-                if np.any(significant):
-                    ax.scatter(
-                        x_values[significant],
-                        y_values[significant],
-                        s=4.2,
-                        color=PANEL_C_SOURCE_COMPARISON_COLOR,
-                        alpha=0.42,
-                        edgecolors="none",
-                        rasterized=True,
-                        zorder=3,
-                    )
-            deltas = y_values[valid] - x_values[valid]
+            deltas = y_values[significant] - x_values[significant]
             vector_greater_fraction = float(np.mean(deltas > 0.0))
             if summary_location == "lower_right":
                 text_x = 0.97
@@ -5815,7 +5755,7 @@ def _plot_source_predictor_comparison_axis(
             ax.text(
                 text_x,
                 text_y,
-                f"n={int(np.sum(valid))}\n"
+                f"n={int(np.sum(significant))}\n"
                 f"frac vector>mean={vector_greater_fraction:.2f}",
                 ha=text_ha,
                 va=text_va,
@@ -5826,7 +5766,7 @@ def _plot_source_predictor_comparison_axis(
             ax.text(
                 0.5,
                 0.5,
-                "No finite\nvalues",
+                "No p<0.05\nunits",
                 ha="center",
                 va="center",
                 fontsize=5.5,
@@ -5933,7 +5873,7 @@ def plot_glm_source_predictor_comparison_panel(
         ax.text(
             0.98,
             0.035,
-            f"Color: vector p<{SIGNIFICANCE_P_VALUE:g}; gray: n.s.",
+            f"Showing vector p<{SIGNIFICANCE_P_VALUE:g} units",
             ha="right",
             va="bottom",
             fontsize=5.2,
@@ -6202,7 +6142,7 @@ def make_figure_2(
         show_note=False,
     )
     axes[3].set_title(
-        "Relationship to dark-active DGP cells",
+        "Relationship to dark-active DPP cells",
         fontsize=7.2,
         pad=2,
     )

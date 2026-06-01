@@ -34,6 +34,7 @@ from v1ca1.paper_figures.figure_4 import (
     PANEL_B_EXAMPLE_ROW_HEIGHT,
     PANEL_B_EXAMPLE_XLABEL_Y,
     PANEL_B_FIELD_LABEL_Y,
+    PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_B_MODEL_LABEL_FONTSIZE,
     PANEL_B_MODEL_LABEL_X,
     PANEL_B_SCHEMATIC_HEIGHT_FRACTION,
@@ -97,7 +98,12 @@ def test_default_cli_matches_figure_2_canvas() -> None:
     assert args.panel_example_cache_dir is None
     assert args.refresh_panel_example_cache is False
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(FIGURE_2_WIDTH_MM)
-    assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(FIGURE_2_HEIGHT_MM * 1.3)
+    assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
+        FIGURE_2_HEIGHT_MM
+        * 1.3
+        * PANEL_A_TO_GH_HEIGHT_RATIOS[1]
+        / sum(PANEL_A_TO_GH_HEIGHT_RATIOS)
+    )
     assert DEFAULT_REGIONS == ("v1",)
     assert FIGURE_4_CONSTRAINED_LAYOUT_PADS == pytest.approx(
         {"h_pad": 0.01, "w_pad": 0.01, "hspace": 0.01, "wspace": 0.02}
@@ -106,7 +112,7 @@ def test_default_cli_matches_figure_2_canvas() -> None:
     assert PANEL_BC_LABEL_Y == pytest.approx(1.03)
     assert PANEL_BC_TITLE_PAD == pytest.approx(0.5)
     assert PANEL_B_SCHEMATIC_HEIGHT_FRACTION == pytest.approx(0.72)
-    assert PANEL_B_SCHEMATIC_TRACK_SIZE == pytest.approx((0.22, 0.40))
+    assert PANEL_B_SCHEMATIC_TRACK_SIZE == pytest.approx((0.2512, 0.316))
     assert PANEL_B_EXAMPLE_AXIS_BOUNDS == pytest.approx((0.0, 0.01, 1.0, 0.44))
     assert PANEL_B_EXAMPLE_FIELD_Y == pytest.approx(0.13)
     assert PANEL_B_EXAMPLE_FIELD_HEIGHT == pytest.approx(0.62)
@@ -121,6 +127,7 @@ def test_default_cli_matches_figure_2_canvas() -> None:
     assert PANEL_B_EXAMPLE_ROW_HEIGHT == pytest.approx(0.46)
     assert PANEL_B_EXAMPLE_ROW_GAP == pytest.approx(0.05)
     assert PANEL_B_FIELD_LABEL_Y == pytest.approx(0.9619, abs=1e-4)
+    assert PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
     assert PANEL_B_MODEL_LABEL_X == pytest.approx(0.03)
     assert PANEL_B_MODEL_LABEL_FONTSIZE == pytest.approx(5.8)
     assert PANEL_B_COMPONENT_LABEL_FONTSIZE == pytest.approx(5.8)
@@ -141,7 +148,7 @@ def test_default_cli_matches_figure_2_canvas() -> None:
         strict=True,
     ):
         assert actual_bounds == pytest.approx(expected_bounds)
-    assert PANEL_C_DELTA_XLABEL_Y == pytest.approx(-0.30)
+    assert PANEL_C_DELTA_XLABEL_Y == pytest.approx(-0.40)
     assert len(PANEL_C_EXAMPLE_AXIS_BOUNDS) == 2
     assert PANEL_C_EXAMPLE_AXIS_BOUNDS[0] == pytest.approx(
         (0.201, -0.18, 0.248, 0.19)
@@ -177,10 +184,6 @@ def test_make_figure_4_uses_scaled_height_and_moved_panel_labels(
 
     calls: dict[str, object] = {}
 
-    def fake_load_panel_a_example_data(**kwargs: object) -> dict[str, object]:
-        calls["panel_a_kwargs"] = kwargs
-        return {"example": "panel-a"}
-
     def fake_load_panel_glm_data(**kwargs: object) -> dict[str, object]:
         calls["glm_kwargs"] = kwargs
         return {
@@ -188,9 +191,6 @@ def test_make_figure_4_uses_scaled_height_and_moved_panel_labels(
             "swap_delta": "panel-c-delta",
             "swap_examples": ["panel-c-example"],
         }
-
-    def fake_plot_panel_a_example(ax: object, example: object) -> None:
-        calls["panel_a_example"] = example
 
     def fake_plot_panel_g_model_architecture(
         ax: object,
@@ -224,18 +224,8 @@ def test_make_figure_4_uses_scaled_height_and_moved_panel_labels(
 
     monkeypatch.setattr(
         figure_4_module,
-        "load_panel_a_example_data",
-        fake_load_panel_a_example_data,
-    )
-    monkeypatch.setattr(
-        figure_4_module,
         "load_panel_glm_data",
         fake_load_panel_glm_data,
-    )
-    monkeypatch.setattr(
-        figure_4_module,
-        "plot_panel_a_example",
-        fake_plot_panel_a_example,
     )
     monkeypatch.setattr(
         figure_4_module,
@@ -266,14 +256,14 @@ def test_make_figure_4_uses_scaled_height_and_moved_panel_labels(
 
     assert saved_path == output_path
     assert calls["figsize"][0] == pytest.approx(FIGURE_2_WIDTH_MM / 25.4)
-    assert calls["figsize"][1] == pytest.approx(FIGURE_2_HEIGHT_MM * 1.3 / 25.4)
-    assert calls["panel_labels"] == ["A", "B", "C"]
+    assert calls["figsize"][1] == pytest.approx(DEFAULT_FIGURE_HEIGHT_MM / 25.4)
+    assert calls["panel_labels"] == ["A", "B"]
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["panel_a_kwargs"]["panel_example_cache_dir"] == tmp_path / "cache"
-    assert calls["panel_a_kwargs"]["position_bin_count"] == 100
     assert calls["glm_kwargs"]["region"] == "v1"
-    assert calls["panel_a_example"] == {"example": "panel-a"}
+    assert calls["glm_kwargs"][
+        "swap_delta_min_tuning_stability_correlation"
+    ] == pytest.approx(PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION)
     assert calls["panel_b_examples"] == ["panel-b"]
     assert calls["panel_b_kwargs"]["independent_track_center_y"] == pytest.approx(
         PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y

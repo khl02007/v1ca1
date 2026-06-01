@@ -3,9 +3,12 @@ from __future__ import annotations
 """Generate Supplementary Figure 1 per-data-set model comparison panels."""
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from v1ca1.helper.session import DEFAULT_DATA_ROOT
 from v1ca1.paper_figures.datasets import (
@@ -17,27 +20,49 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_COMPARISON_REGION,
     DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_1_WIDTH_MM,
+    DEFAULT_POSITION_BIN_COUNT,
+    DEFAULT_POSITION_OFFSET,
     ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
     ENCODING_COMPARISON_REGION,
+    HEATMAP_COLORBAR_LABELPAD,
+    HEATMAP_COLORBAR_LABEL_FONTSIZE,
+    HEATMAP_COLORBAR_PAD,
     MOTOR_DELTA_REGION,
+    PANEL_D_CACHE_METADATA_KEY,
+    PANEL_D_CACHE_PREFIX,
+    PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+    PANEL_D_HEATMAP_CMAP,
+    PANEL_D_LINEAR_POSITION_ORIENTATION,
+    PANEL_D_TRAJECTORY_TYPES,
+    PANEL_E_TRAJECTORY_COLORS,
     STABILITY_REGIONS,
+    DEFAULT_SIGMA_BINS,
+    DEFAULT_SPEED_THRESHOLD_CM_S,
+    build_panel_d_cache_metadata,
     draw_panel_a_anatomy_assets,
+    draw_order_schematic,
     load_decoding_absolute_error_table,
     load_dark_epoch_stability_table,
     load_encoding_delta_table,
     load_motor_delta_table,
+    load_or_compute_panel_d_heatmap_panels,
     parse_dataset_id,
     plot_decoding_error_panel,
     plot_encoding_delta_panel,
     plot_motor_delta_panel,
+    plot_pooled_heatmap_grid,
     plot_stability_panel,
 )
+from v1ca1.paper_figures.figure_2 import load_dark_movement_firing_rate_table
 from v1ca1.paper_figures.style import (
+    EMPHASIS_HISTOGRAM_KWARGS,
+    REGION_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
     save_figure,
 )
+from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
 
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
@@ -47,6 +72,15 @@ DEFAULT_FIGURE_WIDTH_MM = FIGURE_1_WIDTH_MM
 DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM = 40.0
 DEFAULT_DATASET_PANEL_HEIGHT_MM = 26.0
 DEFAULT_SECTION_SPACER_MM = 5.0
+PANEL_D_NORMALIZATION_COMPARISON_WSPACE = 0.08
+PANEL_D_NORMALIZATION_HEATMAP_WSPACE = 0.0
+PANEL_D_NORMALIZATION_HEATMAP_HSPACE = 0.0
+PANEL_D_NORMALIZATION_TITLE_FONTSIZE = 7.2
+PANEL_D_PER_TRAJECTORY_CACHE_VERSION = 2
+PANEL_D_NORMALIZATION_REGION = "v1"
+DARK_MOVEMENT_FIRING_RATE_REGION = "v1"
+DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ = 0.5
+DARK_MOVEMENT_FIRING_RATE_BIN_COUNT = 24
 MODEL_COMPARISON_GRID_WSPACE = -0.10
 MODEL_COMPARISON_SECOND_COLUMN_SHIFT_PT = -10.0
 MODEL_COMPARISON_THIRD_COLUMN_SHIFT_PT = -33.0
@@ -289,6 +323,441 @@ def plot_pooled_stability_panel(
     plot_stability_panel(ax, stability_table)
 
 
+def load_pooled_dark_movement_firing_rate_table(
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    *,
+    region: str = DARK_MOVEMENT_FIRING_RATE_REGION,
+    cache_dir: Path | None = None,
+    refresh_cache: bool = False,
+) -> Any:
+    """Return pooled V1 dark movement firing rates across data sets."""
+    import pandas as pd
+
+    tables = []
+    for dataset in datasets:
+        animal_name, date, dark_epoch = normalize_dataset_id(dataset)
+        table = load_dark_movement_firing_rate_table(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            dark_epoch=dark_epoch,
+            region=region,
+            cache_dir=cache_dir,
+            refresh_cache=refresh_cache,
+        ).copy()
+        table["animal_name"] = animal_name
+        table["date"] = date
+        table["dark_epoch"] = dark_epoch
+        tables.append(table)
+
+    if not tables:
+        return pd.DataFrame(
+            columns=[
+                "animal_name",
+                "date",
+                "dark_epoch",
+                "unit",
+                "dark_firing_rate_hz",
+            ]
+        )
+    return pd.concat(tables, ignore_index=True)
+
+
+def get_log_histogram_edges(
+    values: np.ndarray,
+    *,
+    reference_hz: float,
+    bin_count: int,
+) -> np.ndarray:
+    """Return log-spaced histogram edges spanning positive values and a reference."""
+    if reference_hz <= 0.0:
+        raise ValueError("reference_hz must be positive for a log-scale histogram.")
+    if bin_count <= 0:
+        raise ValueError("bin_count must be positive.")
+
+    positive_values = values[np.isfinite(values) & (values > 0.0)]
+    if positive_values.size:
+        lower_reference = min(float(np.nanmin(positive_values)), float(reference_hz))
+        upper_reference = max(float(np.nanmax(positive_values)), float(reference_hz))
+    else:
+        lower_reference = float(reference_hz) / 10.0
+        upper_reference = float(reference_hz) * 10.0
+
+    lower_edge = 10.0 ** np.floor(np.log10(lower_reference))
+    upper_edge = 10.0 ** np.ceil(np.log10(upper_reference))
+    if upper_edge <= lower_edge:
+        upper_edge = lower_edge * 10.0
+
+    edges = np.geomspace(lower_edge, upper_edge, int(bin_count) + 1)
+    return np.sort(np.unique(np.append(edges, float(reference_hz))))
+
+
+def plot_pooled_dark_movement_firing_rate_histogram(
+    ax: Any,
+    dark_movement_firing_rate_table: Any,
+    *,
+    threshold_hz: float = DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ,
+    region: str = DARK_MOVEMENT_FIRING_RATE_REGION,
+    bin_count: int = DARK_MOVEMENT_FIRING_RATE_BIN_COUNT,
+) -> None:
+    """Plot pooled dark movement firing-rate distribution for V1 cells."""
+    if (
+        dark_movement_firing_rate_table is None
+        or "dark_firing_rate_hz" not in dark_movement_firing_rate_table
+    ):
+        values = np.asarray([], dtype=float)
+    else:
+        values = np.asarray(
+            dark_movement_firing_rate_table["dark_firing_rate_hz"],
+            dtype=float,
+        )
+    finite_values = values[np.isfinite(values)]
+    positive_values = finite_values[finite_values > 0.0]
+    bin_edges = get_log_histogram_edges(
+        positive_values,
+        reference_hz=threshold_hz,
+        bin_count=bin_count,
+    )
+
+    ax.axvline(
+        threshold_hz,
+        color="0.20",
+        linestyle="--",
+        linewidth=0.8,
+        zorder=3,
+    )
+    if finite_values.size == 0:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite\nrates",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    else:
+        if positive_values.size:
+            weights = np.full(
+                positive_values.shape,
+                1.0 / finite_values.size,
+                dtype=float,
+            )
+            ax.hist(
+                positive_values,
+                bins=bin_edges,
+                weights=weights,
+                color=REGION_COLORS.get(region, "0.4"),
+                **EMPHASIS_HISTOGRAM_KWARGS,
+                zorder=2,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No positive\nrates",
+                ha="center",
+                va="center",
+                fontsize=6,
+                transform=ax.transAxes,
+            )
+
+        fraction_above_threshold = float(np.mean(finite_values > float(threshold_hz)))
+        ax.text(
+            0.04,
+            0.96,
+            f"{fraction_above_threshold:.0%} > {threshold_hz:g} Hz\nn={finite_values.size}",
+            ha="left",
+            va="top",
+            fontsize=5.6,
+            color=REGION_COLORS.get(region, "0.25"),
+            transform=ax.transAxes,
+        )
+        zero_count = int(np.sum(finite_values <= 0.0))
+        if zero_count:
+            ax.text(
+                0.04,
+                0.06,
+                f"{zero_count} at 0 Hz",
+                ha="left",
+                va="bottom",
+                fontsize=4.8,
+                color="0.35",
+                transform=ax.transAxes,
+            )
+
+    ax.set_xscale("log")
+    ax.set_xlim(float(bin_edges[0]), float(bin_edges[-1]))
+    ax.set_ylim(bottom=0.0)
+    ax.set_xlabel("Movement firing rate (Hz)", fontsize=6.2, labelpad=1.0)
+    ax.set_ylabel("Frac. V1 cells", fontsize=6.2, labelpad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=5.6, length=1.8, pad=1)
+
+
+def plot_pooled_dark_movement_firing_rate_panel(
+    ax: Any,
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    cache_dir: Path | None,
+    refresh_cache: bool = False,
+) -> None:
+    """Load and plot pooled V1 dark movement firing rates."""
+    table = load_pooled_dark_movement_firing_rate_table(
+        data_root,
+        datasets,
+        region=DARK_MOVEMENT_FIRING_RATE_REGION,
+        cache_dir=cache_dir,
+        refresh_cache=refresh_cache,
+    )
+    plot_pooled_dark_movement_firing_rate_histogram(
+        ax,
+        table,
+        threshold_hz=DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ,
+        region=DARK_MOVEMENT_FIRING_RATE_REGION,
+    )
+
+
+def build_panel_d_per_trajectory_cache_metadata(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+) -> dict[str, Any]:
+    """Return metadata for the legacy per-trajectory Figure 1D cache."""
+    metadata = build_panel_d_cache_metadata(
+        data_root=data_root,
+        datasets=datasets,
+        region=region,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+        min_movement_firing_rate_hz=None,
+        min_tuning_stability_correlation=None,
+    )
+    metadata["cache_version"] = PANEL_D_PER_TRAJECTORY_CACHE_VERSION
+    metadata.pop("firing_rate_normalization", None)
+    return metadata
+
+
+def load_panel_d_cache_if_metadata_matches(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[tuple[str, str], np.ndarray] | None:
+    """Return Panel D arrays from one cache only when metadata matches exactly."""
+    try:
+        with np.load(cache_path, allow_pickle=False) as data:
+            if PANEL_D_CACHE_METADATA_KEY not in data.files:
+                return None
+            cached_metadata = json.loads(str(data[PANEL_D_CACHE_METADATA_KEY].item()))
+            if cached_metadata != expected_metadata:
+                return None
+
+            trajectory_types = tuple(
+                str(trajectory) for trajectory in expected_metadata["trajectory_types"]
+            )
+            panels: dict[tuple[str, str], np.ndarray] = {}
+            for order_trajectory in trajectory_types:
+                for plot_trajectory in trajectory_types:
+                    array_name = f"{order_trajectory}__{plot_trajectory}"
+                    if array_name not in data.files:
+                        return None
+                    panels[(order_trajectory, plot_trajectory)] = np.asarray(
+                        data[array_name],
+                        dtype=float,
+                    )
+            return panels
+    except Exception:
+        return None
+
+
+def load_panel_d_per_trajectory_panels(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_d_cache_dir: Path,
+) -> dict[tuple[str, str], np.ndarray]:
+    """Load the saved legacy Figure 1D per-trajectory normalization cache."""
+    metadata = build_panel_d_per_trajectory_cache_metadata(
+        data_root=data_root,
+        datasets=datasets,
+        region=region,
+        position_bin_count=position_bin_count,
+        position_offset=position_offset,
+        speed_threshold_cm_s=speed_threshold_cm_s,
+        sigma_bins=sigma_bins,
+    )
+    cache_paths = sorted(
+        Path(panel_d_cache_dir).glob(
+            f"{PANEL_D_CACHE_PREFIX}_*cachev{PANEL_D_PER_TRAJECTORY_CACHE_VERSION}.npz"
+        )
+    )
+    for cache_path in cache_paths:
+        panels = load_panel_d_cache_if_metadata_matches(cache_path, metadata)
+        if panels is not None:
+            print(f"Loaded per-trajectory Panel D cache from {cache_path}.")
+            return panels
+
+    raise FileNotFoundError(
+        "No matching legacy per-trajectory Figure 1D cache was found in "
+        f"{panel_d_cache_dir}. Regenerate the cachev2 Panel D heatmap before "
+        "building this comparison."
+    )
+
+
+def plot_panel_d_normalization_heatmap(
+    fig: Any,
+    subplot_spec: Any,
+    panels: dict[tuple[str, str], np.ndarray],
+    *,
+    title: str,
+    panel_label: str,
+) -> Any | None:
+    """Plot one compact Figure 1D heatmap grid for a normalization mode."""
+    trajectory_types = PANEL_D_TRAJECTORY_TYPES
+    grid = subplot_spec.subgridspec(
+        nrows=len(trajectory_types) + 2,
+        ncols=len(trajectory_types) + 1,
+        height_ratios=[0.24, 0.42, *([1.0] * len(trajectory_types))],
+        width_ratios=[0.48, *([1.0] * len(trajectory_types))],
+        wspace=PANEL_D_NORMALIZATION_HEATMAP_WSPACE,
+        hspace=PANEL_D_NORMALIZATION_HEATMAP_HSPACE,
+    )
+    title_axis = fig.add_subplot(grid[0, :])
+    title_axis.axis("off")
+    title_axis.text(
+        0.5,
+        0.5,
+        title,
+        ha="center",
+        va="center",
+        fontsize=PANEL_D_NORMALIZATION_TITLE_FONTSIZE,
+    )
+    label_axis(title_axis, panel_label, x=-0.02, y=0.0)
+
+    axes = np.asarray(
+        [
+            [
+                fig.add_subplot(grid[row + 1, col])
+                for col in range(len(trajectory_types) + 1)
+            ]
+            for row in range(len(trajectory_types) + 1)
+        ],
+        dtype=object,
+    )
+    corner_axis = axes[0, 0]
+    corner_axis.axis("off")
+    for ax, trajectory_type in zip(axes[0, 1:], trajectory_types, strict=True):
+        draw_w_track_schematic(
+            ax,
+            trajectory_name=trajectory_type,
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+            fill_track=True,
+        )
+    for row_index, ax in enumerate(axes[1:, 0]):
+        trajectory_type = trajectory_types[row_index % len(trajectory_types)]
+        draw_order_schematic(
+            ax,
+            trajectory_type,
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+        )
+
+    heatmap_axes = axes[1:, 1:]
+    color_image = plot_pooled_heatmap_grid(
+        heatmap_axes,
+        panels,
+        trajectory_types=trajectory_types,
+        axis_orientation=PANEL_D_LINEAR_POSITION_ORIENTATION,
+        cmap=PANEL_D_HEATMAP_CMAP,
+    )
+    if color_image is not None:
+        colorbar = fig.colorbar(
+            color_image,
+            ax=heatmap_axes.ravel().tolist(),
+            shrink=0.28,
+            pad=HEATMAP_COLORBAR_PAD,
+            aspect=7,
+            ticks=[0.0, 1.0],
+        )
+        colorbar.ax.set_yticklabels(["0", "1"])
+        colorbar.ax.tick_params(length=2)
+        colorbar.set_label(
+            "Norm. FR",
+            rotation=90,
+            labelpad=HEATMAP_COLORBAR_LABELPAD,
+            fontsize=HEATMAP_COLORBAR_LABEL_FONTSIZE,
+        )
+    return color_image
+
+
+def plot_panel_d_normalization_comparison(
+    fig: Any,
+    subplot_spec: Any,
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    panel_d_cache_dir: Path,
+) -> None:
+    """Plot side-by-side Figure 1D heatmaps for the two normalization modes."""
+    per_trajectory_panels = load_panel_d_per_trajectory_panels(
+        data_root=data_root,
+        datasets=datasets,
+        region=PANEL_D_NORMALIZATION_REGION,
+        position_bin_count=DEFAULT_POSITION_BIN_COUNT,
+        position_offset=DEFAULT_POSITION_OFFSET,
+        speed_threshold_cm_s=DEFAULT_SPEED_THRESHOLD_CM_S,
+        sigma_bins=DEFAULT_SIGMA_BINS,
+        panel_d_cache_dir=panel_d_cache_dir,
+    )
+    across_trajectory_panels = load_or_compute_panel_d_heatmap_panels(
+        data_root=data_root,
+        datasets=datasets,
+        region=PANEL_D_NORMALIZATION_REGION,
+        position_bin_count=DEFAULT_POSITION_BIN_COUNT,
+        position_offset=DEFAULT_POSITION_OFFSET,
+        speed_threshold_cm_s=DEFAULT_SPEED_THRESHOLD_CM_S,
+        sigma_bins=DEFAULT_SIGMA_BINS,
+        panel_d_cache_dir=panel_d_cache_dir,
+        refresh_panel_d_cache=False,
+        firing_rate_normalization=PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+        min_movement_firing_rate_hz=None,
+        min_tuning_stability_correlation=None,
+    )
+
+    comparison_grid = subplot_spec.subgridspec(
+        nrows=1,
+        ncols=2,
+        wspace=PANEL_D_NORMALIZATION_COMPARISON_WSPACE,
+    )
+    plot_panel_d_normalization_heatmap(
+        fig,
+        comparison_grid[0, 0],
+        per_trajectory_panels,
+        title="Per-trajectory normalization",
+        panel_label="D",
+    )
+    plot_panel_d_normalization_heatmap(
+        fig,
+        comparison_grid[0, 1],
+        across_trajectory_panels,
+        title="Across-trajectory normalization",
+        panel_label="E",
+    )
+
+
 def make_supplementary_figure_1(
     *,
     data_root: Path,
@@ -297,10 +766,17 @@ def make_supplementary_figure_1(
     datasets: Sequence[DatasetId],
     encoding_place_bin_size_cm: float,
     dpi: int,
+    dark_movement_fr_cache_dir: Path | None = None,
+    refresh_dark_movement_fr_cache: bool = False,
 ) -> Path:
     """Build and save Supplementary Figure 1."""
     import matplotlib.pyplot as plt
 
+    dark_movement_fr_cache_dir = (
+        Path(output_path).parent / "cache"
+        if dark_movement_fr_cache_dir is None
+        else Path(dark_movement_fr_cache_dir)
+    )
     apply_paper_style()
     model_row_height_mm = DEFAULT_DATASET_PANEL_HEIGHT_MM * max(len(datasets), 1)
     fig_height_mm = (
@@ -323,23 +799,34 @@ def make_supplementary_figure_1(
     )
     moved_grid = outer_grid[0].subgridspec(
         nrows=1,
-        ncols=2,
-        width_ratios=[0.42, 0.58],
-        wspace=0.15,
+        ncols=3,
+        width_ratios=[0.30, 0.30, 0.40],
+        wspace=0.18,
     )
     moved_anatomy_axis = fig.add_subplot(moved_grid[0, 0])
     draw_panel_a_anatomy_assets(moved_anatomy_axis, asset_dir=asset_dir)
     moved_anatomy_axis.set_title("Probe and histology", fontsize=8, pad=2)
     label_axis(moved_anatomy_axis, "A", x=-0.02, y=1.01)
 
-    moved_stability_axis = fig.add_subplot(moved_grid[0, 1])
+    moved_firing_rate_axis = fig.add_subplot(moved_grid[0, 1])
+    plot_pooled_dark_movement_firing_rate_panel(
+        moved_firing_rate_axis,
+        data_root=data_root,
+        datasets=datasets,
+        cache_dir=dark_movement_fr_cache_dir,
+        refresh_cache=refresh_dark_movement_fr_cache,
+    )
+    moved_firing_rate_axis.set_title("Dark movement firing rates", fontsize=8, pad=2)
+    label_axis(moved_firing_rate_axis, "B", x=-0.02, y=1.01)
+
+    moved_stability_axis = fig.add_subplot(moved_grid[0, 2])
     plot_pooled_stability_panel(
         moved_stability_axis,
         data_root=data_root,
         datasets=datasets,
     )
     moved_stability_axis.set_title("Pooled tuning stability", fontsize=8, pad=2)
-    label_axis(moved_stability_axis, "B", x=-0.02, y=1.01)
+    label_axis(moved_stability_axis, "C", x=-0.02, y=1.01)
 
     moved_spacer_axis = fig.add_subplot(outer_grid[1])
     moved_spacer_axis.axis("off")
@@ -375,7 +862,7 @@ def make_supplementary_figure_1(
     panel_c_axis.set_title("Cross trajectory decoding", fontsize=8, pad=2)
     for ax, label in zip(
         (panel_a_axis, panel_b_axis, panel_c_axis),
-        ("C", "D", "E"),
+        ("D", "E", "F"),
         strict=True,
     ):
         label_axis(ax, label, x=-0.02, y=1.01)
@@ -420,6 +907,20 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Directory containing moved Figure 1 assets. Default: {DEFAULT_ASSET_DIR}",
     )
     parser.add_argument(
+        "--dark-movement-fr-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for cached dark movement firing-rate tables. "
+            "Default: <output-dir>/cache."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-dark-movement-fr-cache",
+        action="store_true",
+        help="Recompute and overwrite cached dark movement firing-rate tables.",
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -462,6 +963,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_name,
         args.output_format,
     )
+    dark_movement_fr_cache_dir = (
+        args.dark_movement_fr_cache_dir
+        if args.dark_movement_fr_cache_dir is not None
+        else args.output_dir / "cache"
+    )
     make_supplementary_figure_1(
         data_root=args.data_root,
         asset_dir=args.asset_dir,
@@ -469,6 +975,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         datasets=datasets,
         encoding_place_bin_size_cm=args.encoding_place_bin_size_cm,
         dpi=args.dpi,
+        dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
     )
 
 

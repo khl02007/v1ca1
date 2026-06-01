@@ -82,6 +82,42 @@ def test_smooth_values_nan_aware_preserves_fully_unsupported_rows() -> None:
     assert np.isfinite(smoothed[0, :3]).all()
 
 
+def test_heatmap_track_graph_can_use_true_trajectory_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_get_wtrack_branch_graph(**kwargs):
+        calls.append(kwargs)
+        return object(), []
+
+    monkeypatch.setattr(
+        heatmap,
+        "get_wtrack_branch_graph",
+        fake_get_wtrack_branch_graph,
+    )
+
+    heatmap.get_legacy_heatmap_track_graph("L14", "left_to_center")
+    heatmap.get_legacy_heatmap_track_graph(
+        "L14",
+        "left_to_center",
+        use_trajectory_direction=True,
+    )
+
+    assert calls == [
+        {
+            "animal_name": "L14",
+            "branch_side": "left",
+            "direction": "from_center",
+        },
+        {
+            "animal_name": "L14",
+            "branch_side": "left",
+            "direction": "to_center",
+        },
+    ]
+
+
 def test_parse_arguments_does_not_expose_position_source_flags() -> None:
     args = parse_arguments(
         [
