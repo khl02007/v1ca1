@@ -95,8 +95,6 @@ def test_default_cli_matches_figure_2_canvas() -> None:
     assert DEFAULT_OUTPUT_NAME == "figure_4"
     assert args.output_dir == DEFAULT_OUTPUT_DIR
     assert args.region is None
-    assert args.panel_example_cache_dir is None
-    assert args.refresh_panel_example_cache is False
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(FIGURE_2_WIDTH_MM)
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         FIGURE_2_HEIGHT_MM
@@ -247,10 +245,6 @@ def test_make_figure_4_uses_scaled_height_and_moved_panel_labels(
         regions=("v1",),
         light_epoch=None,
         dark_epoch=None,
-        position_bin_count=100,
-        position_offset=5,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
         dpi=300,
     )
 

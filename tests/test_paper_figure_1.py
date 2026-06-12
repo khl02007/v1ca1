@@ -58,7 +58,10 @@ from v1ca1.paper_figures.figure_1 import (
     MOTOR_MIN_TUNING_STABILITY_CORRELATION,
     MOTOR_NESTED_CV_RELATIVE_DIR,
     NEURON_SCALE_BAR_COUNT,
+    PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
+    PANEL_DARK_LIGHT_RASTER_COLOR,
     PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
+    PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS,
     PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
     PANEL_E_EXAMPLES,
     PANEL_E_AXIS_LABEL_FONTSIZE,
@@ -966,6 +969,32 @@ def test_dark_light_visual_color_configuration_swaps_right_arm_trajectories() ->
     }
 
 
+def test_dark_light_raster_background_configuration_marks_visual_segments() -> None:
+    green = figure_1_module.VISUAL_CONDITION_COLORS["02_r1"]
+    magenta = figure_1_module.VISUAL_CONDITION_COLORS["06_r3"]
+
+    assert PANEL_DARK_LIGHT_RASTER_COLOR == "black"
+    assert PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA == pytest.approx(0.18)
+    assert PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS == {
+        "center_to_left": {
+            "02_r1": ((0.6, 1.0, green),),
+            "06_r3": ((0.6, 1.0, magenta),),
+        },
+        "center_to_right": {
+            "02_r1": ((0.6, 1.0, magenta),),
+            "06_r3": ((0.6, 1.0, green),),
+        },
+        "left_to_center": {
+            "02_r1": ((0.0, 0.4, green),),
+            "06_r3": ((0.0, 0.4, magenta),),
+        },
+        "right_to_center": {
+            "02_r1": ((0.0, 0.4, magenta),),
+            "06_r3": ((0.0, 0.4, green),),
+        },
+    }
+
+
 def test_plot_dark_light_example_panel_uses_visual_color_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1015,7 +1044,10 @@ def test_plot_dark_light_example_panel_uses_visual_color_overrides(
     assert observed["example"] == {"example": True}
     assert observed["plot_kwargs"] == {
         "visual_label_colors": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
+        "raster_color": PANEL_DARK_LIGHT_RASTER_COLOR,
         "trajectory_epoch_color_overrides": PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
+        "trajectory_epoch_backgrounds": PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS,
+        "epoch_background_alpha": PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
     }
     plt.close(fig)
 

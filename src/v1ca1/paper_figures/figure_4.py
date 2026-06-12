@@ -9,8 +9,6 @@ from typing import Any
 
 from v1ca1.helper.session import (
     DEFAULT_DATA_ROOT,
-    DEFAULT_POSITION_OFFSET,
-    DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
 )
 from v1ca1.paper_figures.datasets import (
@@ -26,9 +24,7 @@ from v1ca1.paper_figures.figure_2 import (
 from v1ca1.paper_figures.figure_3 import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
-    DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_REGIONS,
-    DEFAULT_SIGMA_BINS,
     FIGURE_FORMATS,
     PANEL_GH_WIDTH_RATIOS,
     PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
@@ -169,13 +165,7 @@ def make_figure_4(
     regions: Sequence[str],
     light_epoch: str | None,
     dark_epoch: str | None,
-    position_bin_count: int,
-    position_offset: int,
-    speed_threshold_cm_s: float,
-    sigma_bins: float,
     dpi: int,
-    panel_example_cache_dir: Path | None = None,
-    refresh_panel_example_cache: bool = False,
 ) -> Path:
     """Build and save Figure 4."""
     import matplotlib.pyplot as plt
@@ -305,20 +295,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
     )
     parser.add_argument(
-        "--panel-example-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for cached Panel A example-cell rasters and rate curves. "
-            "Default: <output-dir>/cache."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-example-cache",
-        action="store_true",
-        help="Recompute Panel A example-cell data and overwrite matching caches.",
-    )
-    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -360,36 +336,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--position-bin-count",
-        type=int,
-        default=DEFAULT_POSITION_BIN_COUNT,
-        help=(
-            "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {DEFAULT_POSITION_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
-    )
-    parser.add_argument(
         "--dpi",
         type=int,
         default=300,
@@ -408,11 +354,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_name,
         args.output_format,
     )
-    panel_example_cache_dir = (
-        args.panel_example_cache_dir
-        if args.panel_example_cache_dir is not None
-        else args.output_dir / "cache"
-    )
     make_figure_4(
         data_root=args.data_root,
         output_path=output_path,
@@ -420,13 +361,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         regions=regions,
         light_epoch=args.light_epoch,
         dark_epoch=args.dark_epoch,
-        position_bin_count=args.position_bin_count,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
-        sigma_bins=args.sigma_bins,
         dpi=args.dpi,
-        panel_example_cache_dir=panel_example_cache_dir,
-        refresh_panel_example_cache=args.refresh_panel_example_cache,
     )
 
 

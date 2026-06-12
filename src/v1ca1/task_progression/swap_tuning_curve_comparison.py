@@ -5,10 +5,8 @@ from __future__ import annotations
 This script fits trajectory-specific task-progression tuning curves with
 `pynapple.compute_tuning_curves` in a dark training epoch, a light training
 epoch, and a light test epoch. For each trajectory, only the configured swapped
-segment in the light test epoch is scored against two explanations:
-
-- empirical task prediction: same dark tuning times paired light/dark gain
-- empirical visual prediction: paired light tuning from the opposite arm
+segment in the light test epoch is scored against empirical visual and
+task-coordinate transfer predictions.
 """
 
 import argparse
@@ -33,7 +31,6 @@ from v1ca1.task_progression._session import (
     build_task_progression_bins,
     compute_movement_firing_rates,
     get_analysis_path,
-    get_task_progression_figure_dir,
     get_task_progression_output_dir,
     prepare_task_progression_session,
 )
@@ -46,6 +43,14 @@ DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
 DEFAULT_BIN_SIZE_S = 0.02
 DEFAULT_SIGMA_BINS = 1.0
 POS_BOUNDS = (0.0, 1.0)
+EMPIRICAL_MODEL_NAMES = (
+    "empirical_visual",
+    "empirical_dark",
+    "empirical_pointwise_multiplicative_ratio",
+    "empirical_segment_multiplicative_ratio",
+    "empirical_pointwise_additive_delta",
+    "empirical_segment_additive_delta",
+)
 SWAP_CONFIG = {
     "center_to_left": {
         "source_trajectory": "center_to_right",
@@ -261,36 +266,26 @@ def prepare_tuning_matrix(
     )
 
 
-def pearson_correlation(
-    curve_a: np.ndarray,
-    curve_b: np.ndarray,
-    *,
-    eps: float = 1e-12,
-) -> float:
-    """Return Pearson correlation after dropping non-finite bins."""
-    a = np.asarray(curve_a, dtype=float).reshape(-1)
-    b = np.asarray(curve_b, dtype=float).reshape(-1)
-    valid = np.isfinite(a) & np.isfinite(b)
-    if np.count_nonzero(valid) < 2:
-        return np.nan
-    a = a[valid]
-    b = b[valid]
-    if np.std(a) <= eps or np.std(b) <= eps:
-        return np.nan
-    return float(np.corrcoef(a, b)[0, 1])
+def _sanitize_tuning_matrix(values: np.ndarray) -> np.ndarray:
+    """Return a finite nonnegative tuning matrix."""
+    matrix = np.asarray(values, dtype=float)
+    return np.clip(np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
 
 
-def build_empirical_task_tuning(
+def build_empirical_swap_tunings(
     same_dark_tuning: np.ndarray,
     other_light_tuning: np.ndarray,
     other_dark_tuning: np.ndarray,
+    bin_centers: np.ndarray,
+    segment_edges: np.ndarray,
+    segment_index: int,
     *,
     epsilon: float = 1e-10,
-) -> np.ndarray:
-    """Return same-dark tuning modulated by paired light/dark empirical gain."""
-    same_dark = np.asarray(same_dark_tuning, dtype=float)
-    other_light = np.asarray(other_light_tuning, dtype=float)
-    other_dark = np.asarray(other_dark_tuning, dtype=float)
+) -> dict[str, np.ndarray]:
+    """Return empirical visual and task-coordinate swap tuning predictions."""
+    same_dark = _sanitize_tuning_matrix(same_dark_tuning)
+    other_light = _sanitize_tuning_matrix(other_light_tuning)
+    other_dark = _sanitize_tuning_matrix(other_dark_tuning)
     if same_dark.shape != other_light.shape or same_dark.shape != other_dark.shape:
         raise ValueError(
             "same_dark_tuning, other_light_tuning, and other_dark_tuning must "
@@ -298,53 +293,37 @@ def build_empirical_task_tuning(
             f"and {other_dark.shape}."
         )
 
-    same_dark = np.where(np.isfinite(same_dark), same_dark, 0.0)
-    other_light = np.where(np.isfinite(other_light), other_light, 0.0)
-    other_dark = np.where(np.isfinite(other_dark), other_dark, 0.0)
-    gain = np.maximum(other_light, float(epsilon)) / np.maximum(
-        other_dark,
-        float(epsilon),
-    )
-    return np.maximum(same_dark, float(epsilon)) * gain
-
-
-def compute_segment_correlations(
-    test_light_tuning: np.ndarray,
-    task_empirical_tuning: np.ndarray,
-    visual_empirical_tuning: np.ndarray,
-    bin_centers: np.ndarray,
-    segment_edges: np.ndarray,
-    segment_index: int,
-) -> dict[str, np.ndarray]:
-    """Return segment-restricted correlations for each unit."""
-    test_curve = np.asarray(test_light_tuning, dtype=float)
-    task_curve = np.asarray(task_empirical_tuning, dtype=float)
-    visual_curve = np.asarray(visual_empirical_tuning, dtype=float)
-    if test_curve.shape != task_curve.shape or test_curve.shape != visual_curve.shape:
+    segment_bins = segment_mask(bin_centers, segment_edges, segment_index)
+    if not np.any(segment_bins):
         raise ValueError(
-            "test, task-empirical, and visual-empirical tuning matrices must have "
-            f"matching shapes. Got {test_curve.shape}, {task_curve.shape}, "
-            f"{visual_curve.shape}."
+            f"No TP bins fell inside segment_index={segment_index} for empirical "
+            "segment-scalar tuning construction."
         )
 
-    bin_mask = segment_mask(bin_centers, segment_edges, segment_index)
-    n_units = test_curve.shape[1]
-    corr_task = np.full((n_units,), np.nan, dtype=float)
-    corr_visual = np.full((n_units,), np.nan, dtype=float)
-    for unit_index in range(n_units):
-        corr_task[unit_index] = pearson_correlation(
-            test_curve[bin_mask, unit_index],
-            task_curve[bin_mask, unit_index],
-        )
-        corr_visual[unit_index] = pearson_correlation(
-            test_curve[bin_mask, unit_index],
-            visual_curve[bin_mask, unit_index],
-        )
+    eps = float(epsilon)
+    pointwise_ratio = other_light / np.clip(other_dark, eps, None)
+    segment_ratio = np.sum(other_light[segment_bins], axis=0) / np.clip(
+        np.sum(other_dark[segment_bins], axis=0),
+        eps,
+        None,
+    )
+    pointwise_delta = other_light - other_dark
+    segment_delta = np.mean(
+        other_light[segment_bins] - other_dark[segment_bins],
+        axis=0,
+    )
 
+    tunings = {
+        "empirical_visual": other_light,
+        "empirical_dark": same_dark,
+        "empirical_pointwise_multiplicative_ratio": same_dark * pointwise_ratio,
+        "empirical_segment_multiplicative_ratio": same_dark * segment_ratio[None, :],
+        "empirical_pointwise_additive_delta": same_dark + pointwise_delta,
+        "empirical_segment_additive_delta": same_dark + segment_delta[None, :],
+    }
     return {
-        "corr_task_empirical": corr_task,
-        "corr_visual_empirical": corr_visual,
-        "delta_corr_task_vs_visual": corr_task - corr_visual,
+        model_name: np.clip(np.asarray(tunings[model_name], dtype=float), eps, None)
+        for model_name in EMPIRICAL_MODEL_NAMES
     }
 
 
@@ -368,8 +347,7 @@ def _poisson_log_likelihood(
 def score_segment_binned_counts(
     spike_counts: np.ndarray,
     positions: np.ndarray,
-    task_empirical_tuning: np.ndarray,
-    visual_empirical_tuning: np.ndarray,
+    tunings_by_model: dict[str, np.ndarray],
     bin_edges: np.ndarray,
     segment_edges: np.ndarray,
     segment_index: int,
@@ -377,7 +355,7 @@ def score_segment_binned_counts(
     bin_size_s: float,
     epsilon: float = 1e-10,
 ) -> dict[str, np.ndarray | float]:
-    """Score two tuning-curve models on binned counts within one TP segment."""
+    """Score empirical tuning-curve models on binned counts within one TP segment."""
     counts = np.asarray(spike_counts, dtype=float)
     if counts.ndim == 1:
         counts = counts[:, None]
@@ -388,84 +366,74 @@ def score_segment_binned_counts(
             f"Got {counts.shape[0]} and {positions.size}."
         )
 
-    task_curve = np.asarray(task_empirical_tuning, dtype=float)
-    visual_curve = np.asarray(visual_empirical_tuning, dtype=float)
-    if task_curve.shape != visual_curve.shape:
-        raise ValueError(
-            "task_empirical_tuning and visual_empirical_tuning must have matching "
-            f"shapes. Got {task_curve.shape} and {visual_curve.shape}."
-        )
-    if task_curve.ndim != 2 or task_curve.shape[1] != counts.shape[1]:
+    model_curves = []
+    for model_name in EMPIRICAL_MODEL_NAMES:
+        if model_name not in tunings_by_model:
+            raise ValueError(f"Missing empirical tuning curve for model={model_name!r}.")
+        model_curves.append(np.asarray(tunings_by_model[model_name], dtype=float))
+    reference_shape = model_curves[0].shape
+    for model_name, curve in zip(EMPIRICAL_MODEL_NAMES, model_curves, strict=True):
+        if curve.shape != reference_shape:
+            raise ValueError(
+                "All empirical tuning curves must have matching shapes. "
+                f"Model {model_name!r} has shape {curve.shape}; expected "
+                f"{reference_shape}."
+            )
+    if len(reference_shape) != 2 or reference_shape[1] != counts.shape[1]:
         raise ValueError(
             "Tuning curves must be shaped `(tp_bin, unit)` and match counts. "
-            f"Got curve shape={task_curve.shape}, count shape={counts.shape}."
+            f"Got curve shape={reference_shape}, count shape={counts.shape}."
         )
 
     valid = np.isfinite(positions) & segment_mask(positions, segment_edges, segment_index)
     counts = counts[valid]
     positions = positions[valid]
-    n_units = task_curve.shape[1]
+    n_models = len(model_curves)
+    n_units = reference_shape[1]
     if counts.size == 0:
-        empty = np.full((n_units,), np.nan, dtype=float)
-        zeros = np.zeros((n_units,), dtype=float)
+        empty = np.full((n_models, n_units), np.nan, dtype=float)
+        zeros = np.zeros((n_models, n_units), dtype=float)
         return {
-            "test_light_spike_sum": zeros,
+            "test_light_spike_sum": np.zeros((n_units,), dtype=float),
             "test_light_bin_count": 0.0,
             "test_light_duration_s": 0.0,
-            "ll_task_empirical_sum": zeros,
-            "ll_visual_empirical_sum": zeros,
-            "ll_task_empirical_per_spike": empty.copy(),
-            "ll_visual_empirical_per_spike": empty.copy(),
-            "delta_ll_sum_task_vs_visual": zeros,
-            "delta_ll_bits_task_vs_visual": zeros,
-            "delta_ll_bits_per_spike_task_vs_visual": empty.copy(),
+            "ll_sum": zeros,
+            "ll_bits_per_spike": empty.copy(),
+            "ll_bits_per_s": empty.copy(),
         }
 
     bin_edges = np.asarray(bin_edges, dtype=float).reshape(-1)
     bin_index = np.digitize(positions, bin_edges) - 1
-    bin_index = np.clip(bin_index, 0, task_curve.shape[0] - 1)
-    task_rates = task_curve[bin_index, :]
-    visual_rates = visual_curve[bin_index, :]
-    task_ll = _poisson_log_likelihood(
-        counts,
-        task_rates,
-        bin_size_s=bin_size_s,
-        epsilon=epsilon,
-    )
-    visual_ll = _poisson_log_likelihood(
-        counts,
-        visual_rates,
-        bin_size_s=bin_size_s,
-        epsilon=epsilon,
+    bin_index = np.clip(bin_index, 0, reference_shape[0] - 1)
+    ll_sum = np.stack(
+        [
+            _poisson_log_likelihood(
+                counts,
+                curve[bin_index, :],
+                bin_size_s=bin_size_s,
+                epsilon=epsilon,
+            )
+            for curve in model_curves
+        ],
+        axis=0,
     )
     spike_sum = np.sum(counts, axis=0)
-    delta_sum = task_ll - visual_ll
+    duration_s = float(counts.shape[0] * float(bin_size_s))
     with np.errstate(divide="ignore", invalid="ignore"):
-        task_per_spike = np.where(spike_sum > 0, task_ll / spike_sum, np.nan)
-        visual_per_spike = np.where(spike_sum > 0, visual_ll / spike_sum, np.nan)
-        delta_bits_per_spike = np.where(
-            spike_sum > 0,
-            delta_sum / (np.log(2.0) * spike_sum),
+        ll_bits_per_spike = np.where(
+            spike_sum[None, :] > 0,
+            ll_sum / (np.log(2.0) * spike_sum[None, :]),
             np.nan,
         )
+        ll_bits_per_s = ll_sum / (np.log(2.0) * duration_s)
 
     return {
         "test_light_spike_sum": np.asarray(spike_sum, dtype=float),
         "test_light_bin_count": float(counts.shape[0]),
-        "test_light_duration_s": float(counts.shape[0] * float(bin_size_s)),
-        "ll_task_empirical_sum": np.asarray(task_ll, dtype=float),
-        "ll_visual_empirical_sum": np.asarray(visual_ll, dtype=float),
-        "ll_task_empirical_per_spike": np.asarray(task_per_spike, dtype=float),
-        "ll_visual_empirical_per_spike": np.asarray(visual_per_spike, dtype=float),
-        "delta_ll_sum_task_vs_visual": np.asarray(delta_sum, dtype=float),
-        "delta_ll_bits_task_vs_visual": np.asarray(
-            delta_sum / np.log(2.0),
-            dtype=float,
-        ),
-        "delta_ll_bits_per_spike_task_vs_visual": np.asarray(
-            delta_bits_per_spike,
-            dtype=float,
-        ),
+        "test_light_duration_s": duration_s,
+        "ll_sum": np.asarray(ll_sum, dtype=float),
+        "ll_bits_per_spike": np.asarray(ll_bits_per_spike, dtype=float),
+        "ll_bits_per_s": np.asarray(ll_bits_per_s, dtype=float),
     }
 
 
@@ -474,15 +442,14 @@ def score_tuning_curves_on_segment(
     spikes: Any,
     task_progression: Any,
     epoch: Any,
-    task_empirical_tuning: np.ndarray,
-    visual_empirical_tuning: np.ndarray,
+    tunings_by_model: dict[str, np.ndarray],
     bin_edges: np.ndarray,
     segment_edges: np.ndarray,
     segment_index: int,
     bin_size_s: float,
     unit_ids: np.ndarray,
 ) -> dict[str, np.ndarray | float]:
-    """Bin spikes and score both tuning-curve models on one swapped segment."""
+    """Bin spikes and score empirical tuning-curve models on one swapped segment."""
     counts = spikes.count(float(bin_size_s), ep=epoch)
     count_unit_ids = np.asarray(counts.columns)
     if count_unit_ids.shape != unit_ids.shape or not np.all(count_unit_ids == unit_ids):
@@ -498,8 +465,7 @@ def score_tuning_curves_on_segment(
     return score_segment_binned_counts(
         spike_counts,
         positions.reshape(-1),
-        task_empirical_tuning,
-        visual_empirical_tuning,
+        tunings_by_model,
         bin_edges,
         segment_edges,
         segment_index,
@@ -677,23 +643,22 @@ def run_region_comparison(
         sigma_bins=sigma_bins,
     )
 
-    metric_names = (
-        "test_light_spike_sum",
-        "ll_task_empirical_sum",
-        "ll_visual_empirical_sum",
-        "ll_task_empirical_per_spike",
-        "ll_visual_empirical_per_spike",
-        "delta_ll_sum_task_vs_visual",
-        "delta_ll_bits_task_vs_visual",
-        "delta_ll_bits_per_spike_task_vs_visual",
-        "corr_task_empirical",
-        "corr_visual_empirical",
-        "delta_corr_task_vs_visual",
-    )
+    model_names = np.asarray(EMPIRICAL_MODEL_NAMES, dtype=str)
+    metric_names = ("ll_sum", "ll_bits_per_spike", "ll_bits_per_s")
     metrics = {
-        metric_name: np.full((n_trajectories, n_units), np.nan, dtype=float)
+        metric_name: np.full(
+            (model_names.size, n_trajectories, n_units),
+            np.nan,
+            dtype=float,
+        )
         for metric_name in metric_names
     }
+    model_tuning = np.full(
+        (model_names.size, n_trajectories, bin_centers.size, n_units),
+        np.nan,
+        dtype=float,
+    )
+    test_light_spike_sum = np.full((n_trajectories, n_units), np.nan, dtype=float)
     test_light_bin_count = np.zeros((n_trajectories,), dtype=float)
     test_light_duration_s = np.zeros((n_trajectories,), dtype=float)
     segment_bin_masks = np.zeros((n_trajectories, bin_centers.size), dtype=bool)
@@ -715,13 +680,16 @@ def run_region_comparison(
         same_dark_curve = dark_tuning[trajectory]
         other_dark_curve = dark_tuning[source_trajectory]
         other_light_curve = light_tuning[source_trajectory]
-        task_empirical_curve = build_empirical_task_tuning(
+        tunings_by_model = build_empirical_swap_tunings(
             same_dark_curve,
             other_light_curve,
             other_dark_curve,
+            bin_centers,
+            segment_edges,
+            segment_index,
         )
-        visual_empirical_curve = other_light_curve
-        test_curve = test_tuning[trajectory]
+        for model_index, model_name in enumerate(EMPIRICAL_MODEL_NAMES):
+            model_tuning[model_index, trajectory_index] = tunings_by_model[model_name]
         epoch = _trajectory_movement_interval(
             trajectory_intervals[light_test_epoch],
             movement_by_run[light_test_epoch],
@@ -731,44 +699,35 @@ def run_region_comparison(
             spikes=spikes,
             task_progression=task_progression_by_epoch[light_test_epoch][trajectory],
             epoch=epoch,
-            task_empirical_tuning=task_empirical_curve,
-            visual_empirical_tuning=visual_empirical_curve,
+            tunings_by_model=tunings_by_model,
             bin_edges=bin_edges,
             segment_edges=segment_edges,
             segment_index=segment_index,
             bin_size_s=bin_size_s,
             unit_ids=unit_ids,
         )
-        correlations = compute_segment_correlations(
-            test_curve,
-            task_empirical_curve,
-            visual_empirical_curve,
-            bin_centers,
-            segment_edges,
-            segment_index,
-        )
         for metric_name in metric_names:
-            if metric_name in score:
-                metrics[metric_name][trajectory_index] = np.asarray(
-                    score[metric_name],
-                    dtype=float,
-                )
-            else:
-                metrics[metric_name][trajectory_index] = np.asarray(
-                    correlations[metric_name],
-                    dtype=float,
-                )
+            metrics[metric_name][:, trajectory_index] = np.asarray(
+                score[metric_name],
+                dtype=float,
+            )
+        test_light_spike_sum[trajectory_index] = np.asarray(
+            score["test_light_spike_sum"],
+            dtype=float,
+        )
         test_light_bin_count[trajectory_index] = float(score["test_light_bin_count"])
         test_light_duration_s[trajectory_index] = float(score["test_light_duration_s"])
 
     return {
         "unit_ids": np.asarray(unit_ids),
+        "model_names": model_names,
         "bin_edges": bin_edges,
         "bin_centers": bin_centers,
         "segment_edges": np.asarray(segment_edges, dtype=float),
         "swap_source_trajectory": swap_source,
         "swap_segment_index": swap_segment_index,
         "segment_bin_mask": segment_bin_masks,
+        "model_tuning": model_tuning,
         "same_dark_tuning": np.stack(
             [dark_tuning[trajectory] for trajectory in TRAJECTORY_TYPES],
             axis=0,
@@ -789,24 +748,6 @@ def run_region_comparison(
         ),
         "test_light_tuning": np.stack(
             [test_tuning[trajectory] for trajectory in TRAJECTORY_TYPES],
-            axis=0,
-        ),
-        "task_empirical_tuning": np.stack(
-            [
-                build_empirical_task_tuning(
-                    dark_tuning[trajectory],
-                    light_tuning[str(SWAP_CONFIG[trajectory]["source_trajectory"])],
-                    dark_tuning[str(SWAP_CONFIG[trajectory]["source_trajectory"])],
-                )
-                for trajectory in TRAJECTORY_TYPES
-            ],
-            axis=0,
-        ),
-        "visual_empirical_tuning": np.stack(
-            [
-                light_tuning[str(SWAP_CONFIG[trajectory]["source_trajectory"])]
-                for trajectory in TRAJECTORY_TYPES
-            ],
             axis=0,
         ),
         "train_dark_same_rate_hz": np.stack(
@@ -831,6 +772,7 @@ def run_region_comparison(
             [test_rates[trajectory] for trajectory in TRAJECTORY_TYPES],
             axis=0,
         ),
+        "test_light_spike_sum": test_light_spike_sum,
         "test_light_bin_count": test_light_bin_count,
         "test_light_duration_s": test_light_duration_s,
         "metrics": metrics,
@@ -852,14 +794,15 @@ def build_results_table(
     min_dark_fr_hz: float,
     min_light_fr_hz: float,
 ) -> pd.DataFrame:
-    """Return one long-form metric table with one row per trajectory and unit."""
+    """Return one long-form metric table with one row per model, trajectory, and unit."""
     rows: list[dict[str, Any]] = []
     unit_ids = np.asarray(result["unit_ids"])
+    model_names = np.asarray(result["model_names"], dtype=str)
     segment_edges = np.asarray(result["segment_edges"], dtype=float)
     for trajectory_index, trajectory in enumerate(TRAJECTORY_TYPES):
         segment_index = int(result["swap_segment_index"][trajectory_index])
         for unit_index, unit_id in enumerate(unit_ids):
-            row = {
+            base_row = {
                 "animal_name": animal_name,
                 "date": date,
                 "region": region,
@@ -895,6 +838,9 @@ def build_results_table(
                 "test_light_target_rate_hz": float(
                     result["test_light_target_rate_hz"][trajectory_index, unit_index]
                 ),
+                "test_light_spike_sum": float(
+                    result["test_light_spike_sum"][trajectory_index, unit_index]
+                ),
                 "test_light_bin_count": float(
                     result["test_light_bin_count"][trajectory_index]
                 ),
@@ -902,9 +848,14 @@ def build_results_table(
                     result["test_light_duration_s"][trajectory_index]
                 ),
             }
-            for metric_name, values in result["metrics"].items():
-                row[metric_name] = float(values[trajectory_index, unit_index])
-            rows.append(row)
+            for model_index, model_name in enumerate(model_names):
+                row = dict(base_row)
+                row["model"] = str(model_name)
+                for metric_name, values in result["metrics"].items():
+                    row[metric_name] = float(
+                        values[model_index, trajectory_index, unit_index]
+                    )
+                rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -932,8 +883,25 @@ def build_region_dataset(
     import xarray as xr
 
     unit_ids = np.asarray(result["unit_ids"])
+    model_names = np.asarray(result["model_names"], dtype=str)
     segment_edges = np.asarray(result["segment_edges"], dtype=float)
     swap_segment_index = np.asarray(result["swap_segment_index"], dtype=int)
+    empirical_model_formulas = {
+        "empirical_visual": "other_light",
+        "empirical_dark": "same_dark",
+        "empirical_pointwise_multiplicative_ratio": (
+            "same_dark * other_light / max(other_dark, epsilon)"
+        ),
+        "empirical_segment_multiplicative_ratio": (
+            "same_dark * sum(other_light_in_swap_segment) / "
+            "max(sum(other_dark_in_swap_segment), epsilon)"
+        ),
+        "empirical_pointwise_additive_delta": "same_dark + other_light - other_dark",
+        "empirical_segment_additive_delta": (
+            "same_dark + mean(other_light_in_swap_segment - "
+            "other_dark_in_swap_segment)"
+        ),
+    }
     dataset = xr.Dataset(
         data_vars={
             "dark_train_movement_firing_rate_hz": (
@@ -956,13 +924,9 @@ def build_region_dataset(
                 ("trajectory", "tp_bin", "unit"),
                 np.asarray(result["other_light_tuning"], dtype=float),
             ),
-            "task_empirical_tuning_hz": (
-                ("trajectory", "tp_bin", "unit"),
-                np.asarray(result["task_empirical_tuning"], dtype=float),
-            ),
-            "visual_empirical_tuning_hz": (
-                ("trajectory", "tp_bin", "unit"),
-                np.asarray(result["visual_empirical_tuning"], dtype=float),
+            "model_tuning_hz": (
+                ("model", "trajectory", "tp_bin", "unit"),
+                np.asarray(result["model_tuning"], dtype=float),
             ),
             "test_light_tuning_hz": (
                 ("trajectory", "tp_bin", "unit"),
@@ -983,6 +947,10 @@ def build_region_dataset(
             "test_light_target_rate_hz": (
                 ("trajectory", "unit"),
                 np.asarray(result["test_light_target_rate_hz"], dtype=float),
+            ),
+            "test_light_spike_sum": (
+                ("trajectory", "unit"),
+                np.asarray(result["test_light_spike_sum"], dtype=float),
             ),
             "segment_bin_mask": (
                 ("trajectory", "tp_bin"),
@@ -1021,13 +989,14 @@ def build_region_dataset(
             "segment_edges": ("segment_edge", segment_edges),
         },
         coords={
+            "model": model_names,
             "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
             "unit": unit_ids,
             "tp_bin": np.asarray(result["bin_centers"], dtype=float),
             "segment_edge": np.arange(segment_edges.size, dtype=int),
         },
         attrs={
-            "schema_version": "1",
+            "schema_version": "2",
             "animal_name": animal_name,
             "date": date,
             "region": region,
@@ -1040,11 +1009,12 @@ def build_region_dataset(
             "apply_fr_filter": bool(apply_fr_filter),
             "min_dark_fr_hz": float(min_dark_fr_hz),
             "min_light_fr_hz": float(min_light_fr_hz),
-            "primary_ll_delta": "task_empirical_minus_visual_empirical_bits_per_spike",
-            "primary_corr_delta": "task_empirical_minus_visual_empirical",
             "scoring_scope": "light_test_swapped_segment_only",
             "training_tuning_scope": "full_trajectory_movement_interval",
-            "task_empirical_formula": "same_dark * other_light / other_dark",
+            "empirical_model_formulas_json": json.dumps(
+                empirical_model_formulas,
+                sort_keys=True,
+            ),
             "swap_rule_json": json.dumps(SWAP_CONFIG, sort_keys=True),
             "sources_json": json.dumps(sources, sort_keys=True),
         },
@@ -1052,143 +1022,10 @@ def build_region_dataset(
 
     for metric_name, values in result["metrics"].items():
         dataset[metric_name] = (
-            ("trajectory", "unit"),
+            ("model", "trajectory", "unit"),
             np.asarray(values, dtype=float),
         )
     return dataset
-
-
-def histogram_edges_including_zero(values: np.ndarray) -> np.ndarray:
-    """Return histogram edges that explicitly include zero."""
-    finite = np.asarray(values, dtype=float).reshape(-1)
-    finite = finite[np.isfinite(finite)]
-    if finite.size == 0:
-        return np.asarray([-0.5, 0.0, 0.5], dtype=float)
-
-    auto_edges = np.asarray(np.histogram_bin_edges(finite, bins="auto"), dtype=float)
-    if auto_edges.size < 2:
-        center = float(finite[0])
-        return np.asarray([center - 0.5, 0.0, center + 0.5], dtype=float)
-    if np.any(np.isclose(auto_edges, 0.0)):
-        return auto_edges
-    if 0.0 < float(auto_edges[0]):
-        return np.concatenate(([0.0], auto_edges))
-    if 0.0 > float(auto_edges[-1]):
-        return np.concatenate((auto_edges, [0.0]))
-    return np.unique(np.concatenate((auto_edges, [0.0])))
-
-
-def plot_delta_ll_histograms(
-    table: pd.DataFrame,
-    *,
-    region: str,
-    fig_path: Path,
-) -> Path:
-    """Save a 2x2 fraction histogram for the LL delta metric."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharey=True)
-    axes_flat = axes.ravel()
-    column = "delta_ll_bits_per_spike_task_vs_visual"
-    for axis, trajectory in zip(axes_flat, TRAJECTORY_TYPES, strict=True):
-        values = pd.to_numeric(
-            table.loc[table["trajectory"] == trajectory, column],
-            errors="coerce",
-        ).to_numpy(dtype=float)
-        values = values[np.isfinite(values)]
-        if values.size:
-            weights = np.ones(values.size, dtype=float) / values.size
-            axis.hist(
-                values,
-                bins=histogram_edges_including_zero(values),
-                weights=weights,
-                color="0.35",
-                edgecolor="white",
-            )
-            median_value = float(np.median(values))
-            fraction_positive = float(np.mean(values > 0.0))
-        else:
-            axis.text(0.5, 0.5, "No finite values", ha="center", va="center")
-            median_value = np.nan
-            fraction_positive = np.nan
-
-        axis.axvline(0.0, color="crimson", linestyle="--", linewidth=1.0)
-        axis.set_title(trajectory)
-        axis.set_xlabel("Task empirical - visual empirical LL (bits/spike)")
-        axis.text(
-            0.98,
-            0.95,
-            f"n={values.size}\nmedian={median_value:.3g}\nfrac>0={fraction_positive:.3f}",
-            ha="right",
-            va="top",
-            transform=axis.transAxes,
-            fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "0.85", "alpha": 0.9},
-        )
-
-    axes_flat[0].set_ylabel("Fraction of cells")
-    axes_flat[2].set_ylabel("Fraction of cells")
-    fig.suptitle(f"{region.upper()} swapped-segment task-vs-visual LL", fontsize=12)
-    fig.tight_layout()
-    fig_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return fig_path
-
-
-def plot_correlation_scatter(
-    table: pd.DataFrame,
-    *,
-    region: str,
-    fig_path: Path,
-) -> Path:
-    """Save a 2x2 scatter plot comparing same-dark and other-light correlations."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, sharey=True)
-    axes_flat = axes.ravel()
-    for axis, trajectory in zip(axes_flat, TRAJECTORY_TYPES, strict=True):
-        traj_rows = table[table["trajectory"] == trajectory]
-        x = pd.to_numeric(traj_rows["corr_task_empirical"], errors="coerce").to_numpy(
-            dtype=float
-        )
-        y = pd.to_numeric(traj_rows["corr_visual_empirical"], errors="coerce").to_numpy(
-            dtype=float
-        )
-        valid = np.isfinite(x) & np.isfinite(y)
-        if np.any(valid):
-            axis.scatter(x[valid], y[valid], s=20, alpha=0.65, color="tab:blue")
-        else:
-            axis.text(0.5, 0.5, "No finite values", ha="center", va="center")
-        axis.plot([-1.0, 1.0], [-1.0, 1.0], "k--", linewidth=1.0)
-        axis.set_xlim(-1.05, 1.05)
-        axis.set_ylim(-1.05, 1.05)
-        axis.set_aspect("equal", adjustable="box")
-        axis.set_title(trajectory)
-        axis.text(
-            0.04,
-            0.96,
-            f"n={int(np.count_nonzero(valid))}",
-            ha="left",
-            va="top",
-            transform=axis.transAxes,
-            fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "0.85", "alpha": 0.9},
-        )
-
-    axes_flat[2].set_xlabel("corr(test light, task empirical)")
-    axes_flat[3].set_xlabel("corr(test light, task empirical)")
-    axes_flat[0].set_ylabel("corr(test light, visual empirical)")
-    axes_flat[2].set_ylabel("corr(test light, visual empirical)")
-    fig.suptitle(
-        f"{region.upper()} swapped-segment task-vs-visual correlation",
-        fontsize=12,
-    )
-    fig.tight_layout()
-    fig_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(fig_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return fig_path
 
 
 def _output_stem(
@@ -1351,7 +1188,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip figure generation and only save data outputs.",
+        help="Accepted for compatibility; plots are not generated by this script.",
     )
     return parser.parse_args()
 
@@ -1386,9 +1223,7 @@ def main() -> None:
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
     data_dir = get_task_progression_output_dir(analysis_path, Path(__file__).stem)
-    fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     data_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir.mkdir(parents=True, exist_ok=True)
 
     segment_edges = (
         derive_default_segment_edges(args.animal_name)
@@ -1419,7 +1254,6 @@ def main() -> None:
 
     saved_tables: list[Path] = []
     saved_datasets: list[Path] = []
-    saved_figures: list[Path] = []
     skipped_regions: list[dict[str, Any]] = []
     for region in args.regions:
         print(f"Preparing region {region.upper()}.")
@@ -1535,18 +1369,6 @@ def main() -> None:
         print(f"Saved table to {table_path}.")
         print(f"Saved dataset to {dataset_path}.")
 
-        if not args.no_plots:
-            delta_fig = fig_dir / f"{stem}_delta_ll_hist.png"
-            corr_fig = fig_dir / f"{stem}_correlation_scatter.png"
-            saved_figures.append(
-                plot_delta_ll_histograms(table, region=region, fig_path=delta_fig)
-            )
-            saved_figures.append(
-                plot_correlation_scatter(table, region=region, fig_path=corr_fig)
-            )
-            print(f"Saved LL delta histogram to {delta_fig}.")
-            print(f"Saved correlation scatter to {corr_fig}.")
-
     log_path = write_run_log(
         analysis_path=analysis_path,
         script_name="v1ca1.task_progression.swap_tuning_curve_comparison",
@@ -1570,15 +1392,12 @@ def main() -> None:
             "swap_rule": SWAP_CONFIG,
             "saved_tables": [str(path) for path in saved_tables],
             "saved_datasets": [str(path) for path in saved_datasets],
-            "saved_figures": [str(path) for path in saved_figures],
             "skipped_regions": skipped_regions,
         },
     )
     print(f"Saved run log to {log_path}.")
     if saved_tables:
         print(f"Saved {len(saved_tables)} table(s) and {len(saved_datasets)} dataset(s).")
-    if saved_figures:
-        print(f"Saved {len(saved_figures)} figure(s) to {fig_dir}.")
     if skipped_regions:
         print(f"Skipped {len(skipped_regions)} region(s): {skipped_regions!r}.")
 

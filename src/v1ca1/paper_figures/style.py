@@ -66,6 +66,7 @@ TRAJECTORY_COLORS: dict[str, str] = {
 MODEL_CLASS_COLORS: dict[str, str] = {
     "visual": "#4D4D4D",
     "task_segment_bump": "#E7298A",
+    "task_segment_scalar": "#7570B3",
 }
 ENCODING_COMPARISON_COLORS: dict[str, str] = {
     "dpp_vs_absolute_place": "#7570B3",

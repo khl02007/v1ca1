@@ -27,7 +27,7 @@ cleaned-DLC head position samples are analyzed. A run log is written under
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,11 @@ DEFAULT_SLIDING_WINDOW_SIZE_BINS = 4
 DEFAULT_RANDOM_STATE = 47
 DEFAULT_CROSS_TRAJ_FR_THRESHOLD_HZ = 0.5
 DEFAULT_MIN_BIN_COUNT = 5
+STABILITY_RELATIVE_PATH = (
+    Path("task_progression")
+    / "stability"
+    / "odd_even_task_progression_stability.parquet"
+)
 SUMMARY_MODES = ("mean_std", "median_iqr")
 ERROR_MODES = ("signed", "absolute")
 SAME_INBOUND_OUTBOUND_CROSS_ARM_FAMILY = "same_inbound_outbound_cross_arm"
@@ -109,6 +114,27 @@ def _cross_trajectory_pair_suffix(
 ) -> str:
     """Return the filename suffix for one directed cross-trajectory decode."""
     return f"{transfer_family}_{encoding_trajectory}_to_{decoding_trajectory}"
+
+
+def _format_float_token(value: float) -> str:
+    """Return a compact file-name token for one numeric value."""
+    return f"{float(value):g}".replace("-", "m").replace(".", "p")
+
+
+def build_stability_filter_token(
+    min_tuning_stability_correlation: float | None,
+) -> str | None:
+    """Return the optional cross-trajectory output token for stability filtering."""
+    if min_tuning_stability_correlation is None:
+        return None
+    return f"stable{_format_float_token(min_tuning_stability_correlation)}"
+
+
+def _add_optional_token(prefix: str, output_token: str | None) -> str:
+    """Append one optional file-name token to a prefix."""
+    if output_token is None:
+        return prefix
+    return f"{prefix}_{output_token}"
 
 
 def _format_transfer_family_label(transfer_family: str) -> str:
@@ -310,6 +336,132 @@ def _get_active_unit_ids(
         for unit_id, rate in zip(unit_ids, np.asarray(firing_rates, dtype=float), strict=False)
         if np.isfinite(rate) and float(rate) > threshold_hz
     ]
+
+
+def get_stability_table_path(analysis_path: Path) -> Path:
+    """Return the saved odd/even tuning-stability table path."""
+    return analysis_path / STABILITY_RELATIVE_PATH
+
+
+def load_tuning_stability_table(
+    *,
+    analysis_path: Path,
+    animal_name: str,
+    date: str,
+) -> pd.DataFrame:
+    """Load one session's saved odd/even tuning-stability table."""
+    table_path = get_stability_table_path(analysis_path)
+    if not table_path.exists():
+        raise FileNotFoundError(
+            "Missing task-progression stability table required by "
+            "--min-tuning-stability-correlation. Expected "
+            f"{table_path}. Run `python -m v1ca1.task_progression.stability "
+            f"--animal-name {animal_name} --date {date}` first."
+        )
+    return pd.read_parquet(table_path)
+
+
+def select_stable_unit_correlations(
+    stability_table: pd.DataFrame,
+    *,
+    region: str,
+    epoch: str,
+) -> pd.Series:
+    """Return each unit's maximum stability across trajectory types in one epoch."""
+    table = stability_table[
+        (stability_table["region"].astype(str) == str(region))
+        & (stability_table["epoch"].astype(str) == str(epoch))
+        & (stability_table["trajectory_type"].astype(str).isin(TRAJECTORY_TYPES))
+    ].copy()
+    if table.empty:
+        return pd.Series(dtype=float)
+
+    correlations = np.asarray(table["stability_correlation"], dtype=float)
+    table = table[np.isfinite(correlations)]
+    if table.empty:
+        return pd.Series(dtype=float)
+    return table.groupby("unit")["stability_correlation"].max()
+
+
+def build_cross_trajectory_unit_selection_table(
+    *,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    unit_ids: Sequence[Any],
+    movement_firing_rates: np.ndarray,
+    cross_traj_fr_threshold_hz: float,
+    min_tuning_stability_correlation: float | None,
+    stability_table: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Return the per-unit cross-trajectory decoder inclusion audit table."""
+    unit_ids = list(unit_ids)
+    firing_rates = np.full(len(unit_ids), np.nan, dtype=float)
+    rates = np.asarray(movement_firing_rates, dtype=float).reshape(-1)
+    for index, rate in enumerate(rates):
+        if index >= len(firing_rates):
+            break
+        firing_rates[index] = rate
+
+    passes_firing_rate = np.isfinite(firing_rates) & (
+        firing_rates > float(cross_traj_fr_threshold_hz)
+    )
+    max_stability_by_unit: pd.Series
+    if min_tuning_stability_correlation is None:
+        max_stability_by_unit = pd.Series(dtype=float)
+        passes_stability = np.ones(len(unit_ids), dtype=bool)
+    else:
+        if stability_table is None:
+            raise ValueError(
+                "stability_table is required when min_tuning_stability_correlation is set."
+            )
+        max_stability_by_unit = select_stable_unit_correlations(
+            stability_table,
+            region=region,
+            epoch=epoch,
+        )
+        passes_stability = np.asarray(
+            [
+                np.isfinite(max_stability_by_unit.get(unit_id, np.nan))
+                and float(max_stability_by_unit.get(unit_id, np.nan))
+                >= float(min_tuning_stability_correlation)
+                for unit_id in unit_ids
+            ],
+            dtype=bool,
+        )
+
+    selected = passes_firing_rate & passes_stability
+    return pd.DataFrame(
+        {
+            "animal_name": animal_name,
+            "date": date,
+            "region": region,
+            "epoch": epoch,
+            "unit": [int(unit_id) for unit_id in unit_ids],
+            "movement_firing_rate_hz": firing_rates,
+            "passes_firing_rate_threshold": passes_firing_rate,
+            "max_stability_correlation": [
+                float(max_stability_by_unit.get(unit_id, np.nan)) for unit_id in unit_ids
+            ],
+            "passes_tuning_stability_threshold": passes_stability,
+            "selected_for_cross_trajectory_decoding": selected,
+            "cross_traj_fr_threshold_hz": float(cross_traj_fr_threshold_hz),
+            "min_tuning_stability_correlation": (
+                np.nan
+                if min_tuning_stability_correlation is None
+                else float(min_tuning_stability_correlation)
+            ),
+        }
+    )
+
+
+def get_selected_cross_trajectory_unit_ids(selection_table: pd.DataFrame) -> list[int]:
+    """Return unit ids selected by one cross-trajectory audit table."""
+    selected = selection_table["selected_for_cross_trajectory_decoding"].to_numpy(
+        dtype=bool
+    )
+    return [int(unit) for unit in selection_table.loc[selected, "unit"].to_numpy()]
 
 
 def _subset_spikes(spikes: Any, unit_ids: list[Any]) -> Any:
@@ -817,12 +969,15 @@ def save_within_epoch_tsds(
 def save_cross_trajectory_tsds(
     true_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]],
     decoded_by_region: dict[str, dict[str, dict[tuple[str, str, str], Any]]],
+    *,
     save_dir: Path,
+    output_token: str | None = None,
 ) -> list[Path]:
     """Save cross-trajectory decoded and true task-progression Tsds as `.npz` files."""
     saved_paths: list[Path] = []
     for region, values_by_epoch in true_by_region.items():
         for epoch, values_by_pair in values_by_epoch.items():
+            prefix = _add_optional_token(f"{region}_{epoch}", output_token)
             for (
                 transfer_family,
                 encoding_trajectory,
@@ -833,13 +988,11 @@ def save_cross_trajectory_tsds(
                     encoding_trajectory,
                     decoding_trajectory,
                 )
-                true_path = save_dir / f"{region}_{epoch}_{suffix}_true_tp_cross_traj.npz"
+                true_path = save_dir / f"{prefix}_{suffix}_true_tp_cross_traj.npz"
                 true_tsd.save(true_path)
                 saved_paths.append(true_path)
 
-                decoded_path = (
-                    save_dir / f"{region}_{epoch}_{suffix}_decoded_tp_cross_traj.npz"
-                )
+                decoded_path = save_dir / f"{prefix}_{suffix}_decoded_tp_cross_traj.npz"
                 decoded_by_region[region][epoch][
                     (
                         transfer_family,
@@ -848,6 +1001,26 @@ def save_cross_trajectory_tsds(
                     )
                 ].save(decoded_path)
                 saved_paths.append(decoded_path)
+    return saved_paths
+
+
+def save_cross_trajectory_selected_unit_tables(
+    selected_unit_tables: dict[str, dict[str, pd.DataFrame]],
+    *,
+    save_dir: Path,
+    output_token: str | None,
+) -> list[Path]:
+    """Save one cross-trajectory selected-unit audit table per region and epoch."""
+    if output_token is None:
+        return []
+
+    saved_paths: list[Path] = []
+    for region, tables_by_epoch in selected_unit_tables.items():
+        for epoch, table in tables_by_epoch.items():
+            prefix = _add_optional_token(f"{region}_{epoch}", output_token)
+            path = save_dir / f"{prefix}_cross_trajectory_selected_units.parquet"
+            table.to_parquet(path)
+            saved_paths.append(path)
     return saved_paths
 
 
@@ -882,7 +1055,7 @@ def save_comparison_tables(
     return saved_paths
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the decoding workflow."""
     parser = argparse.ArgumentParser(
         description="Compare place and task-progression decoding with lap-wise cross-validation"
@@ -955,6 +1128,17 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--min-tuning-stability-correlation",
+        type=float,
+        default=None,
+        help=(
+            "Optional odd/even task-progression tuning-stability threshold used to "
+            "select units for cross-trajectory decoding. Units must pass this "
+            "threshold in at least one trajectory in the decoded epoch. "
+            "Default: disabled"
+        ),
+    )
+    parser.add_argument(
         "--error-mode",
         choices=ERROR_MODES,
         default="signed",
@@ -966,7 +1150,13 @@ def parse_arguments() -> argparse.Namespace:
         default="median_iqr",
         help="How to summarize per-bin decoding error bars in the plots. Default: median_iqr",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if (
+        args.min_tuning_stability_correlation is not None
+        and args.min_tuning_stability_correlation < -1.0
+    ):
+        parser.error("--min-tuning-stability-correlation must be at least -1.")
+    return args
 
 
 def main() -> None:
@@ -998,6 +1188,18 @@ def main() -> None:
     fig_dir = get_task_progression_figure_dir(analysis_path, Path(__file__).stem)
     save_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
+    cross_trajectory_output_token = build_stability_filter_token(
+        args.min_tuning_stability_correlation
+    )
+    stability_table = (
+        load_tuning_stability_table(
+            analysis_path=analysis_path,
+            animal_name=args.animal_name,
+            date=args.date,
+        )
+        if args.min_tuning_stability_correlation is not None
+        else None
+    )
 
     min_lap_counts = validate_fold_count(
         session["trajectory_intervals"],
@@ -1034,13 +1236,11 @@ def main() -> None:
     epoch_cross_binned_tables: dict[str, dict[str, dict[tuple[str, str, str], pd.DataFrame]]] = {
         region: {} for region in selected_regions
     }
+    selected_unit_tables: dict[str, dict[str, pd.DataFrame]] = {
+        region: {} for region in selected_regions
+    }
 
     for region in selected_regions:
-        active_unit_ids = _get_active_unit_ids(
-            session["spikes_by_region"][region],
-            movement_firing_rates[region][dark_epoch],
-            threshold_hz=args.cross_traj_fr_threshold_hz,
-        )
         for epoch in session["run_epochs"]:
             true_place, decoded_place = decode_cv(
                 spikes=session["spikes_by_region"][region],
@@ -1070,6 +1270,19 @@ def main() -> None:
             decoded_place_by_region[region][epoch] = decoded_place
             true_tp_by_region[region][epoch] = true_tp
             decoded_tp_by_region[region][epoch] = decoded_tp
+            selection_table = build_cross_trajectory_unit_selection_table(
+                animal_name=args.animal_name,
+                date=args.date,
+                region=region,
+                epoch=epoch,
+                unit_ids=list(session["spikes_by_region"][region].keys()),
+                movement_firing_rates=movement_firing_rates[region][epoch],
+                cross_traj_fr_threshold_hz=args.cross_traj_fr_threshold_hz,
+                min_tuning_stability_correlation=args.min_tuning_stability_correlation,
+                stability_table=stability_table,
+            )
+            selected_unit_tables[region][epoch] = selection_table
+            active_unit_ids = get_selected_cross_trajectory_unit_ids(selection_table)
 
             true_tp_cross, decoded_tp_cross = decode_task_cross_trajectory(
                 spikes=session["spikes_by_region"][region],
@@ -1192,10 +1405,11 @@ def main() -> None:
             encoding_trajectory = pair_spec["source_trajectory"]
             decoding_trajectory = pair_spec["target_trajectory"]
             family_label = _format_transfer_family_label(transfer_family)
+            figure_prefix = _add_optional_token(region, cross_trajectory_output_token)
             figure_path = (
                 fig_dir
                 / (
-                    f"{region}_"
+                    f"{figure_prefix}_"
                     f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
                     "_tp_cross_traj_error_by_epoch.png"
                 )
@@ -1296,10 +1510,14 @@ def main() -> None:
                     dark_epoch=dark_epoch,
                 )
                 cross_binned_comparison_tables[region][light_epoch][key] = comparison
+                figure_prefix = _add_optional_token(
+                    f"{region}_{light_epoch}_{dark_epoch}",
+                    cross_trajectory_output_token,
+                )
                 figure_path = (
                     fig_dir
                     / (
-                        f"{region}_{light_epoch}_{dark_epoch}_"
+                        f"{figure_prefix}_"
                         f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
                         "_tp_cross_traj_de.png"
                     )
@@ -1341,6 +1559,14 @@ def main() -> None:
             true_tp_cross_by_region,
             decoded_tp_cross_by_region,
             save_dir=save_dir,
+            output_token=cross_trajectory_output_token,
+        )
+    )
+    saved_cross_trajectory_selected_unit_tables = (
+        save_cross_trajectory_selected_unit_tables(
+            selected_unit_tables,
+            save_dir=save_dir,
+            output_token=cross_trajectory_output_token,
         )
     )
 
@@ -1349,10 +1575,15 @@ def main() -> None:
         save_dir=save_dir,
         suffix="decoding_summary",
     )
+    cross_epoch_metric_suffix = (
+        f"{cross_trajectory_output_token}_cross_trajectory_decoding_summary"
+        if cross_trajectory_output_token is not None
+        else "cross_trajectory_decoding_summary"
+    )
     saved_epoch_cross_metric_tables = save_epoch_metric_tables(
         epoch_cross_metric_tables,
         save_dir=save_dir,
-        suffix="cross_trajectory_decoding_summary",
+        suffix=cross_epoch_metric_suffix,
     )
     saved_epoch_binned_tables: list[Path] = []
     for region, tables_by_epoch in epoch_binned_tables.items():
@@ -1363,6 +1594,10 @@ def main() -> None:
                 saved_epoch_binned_tables.append(path)
     for region, tables_by_epoch in epoch_cross_binned_tables.items():
         for epoch, tables_by_pair in tables_by_epoch.items():
+            prefix = _add_optional_token(
+                f"{region}_{epoch}",
+                cross_trajectory_output_token,
+            )
             for (
                 transfer_family,
                 encoding_trajectory,
@@ -1371,7 +1606,7 @@ def main() -> None:
                 path = (
                     save_dir
                     / (
-                        f"{region}_{epoch}_"
+                        f"{prefix}_"
                         f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
                         "_tp_cross_traj_error_by_position.parquet"
                     )
@@ -1384,10 +1619,15 @@ def main() -> None:
         suffix="decoding_comparison",
         dark_epoch=dark_epoch,
     )
+    light_dark_cross_metric_suffix = (
+        f"{cross_trajectory_output_token}_cross_trajectory_decoding_comparison"
+        if cross_trajectory_output_token is not None
+        else "cross_trajectory_decoding_comparison"
+    )
     saved_light_dark_cross_metric_tables = save_comparison_tables(
         light_dark_cross_metric_tables,
         save_dir=save_dir,
-        suffix="cross_trajectory_decoding_comparison",
+        suffix=light_dark_cross_metric_suffix,
         dark_epoch=dark_epoch,
     )
 
@@ -1403,6 +1643,10 @@ def main() -> None:
                 saved_binned_tables.append(path)
     for region, tables_by_light_epoch in cross_binned_comparison_tables.items():
         for light_epoch, tables_by_pair in tables_by_light_epoch.items():
+            prefix = _add_optional_token(
+                f"{region}_{light_epoch}_{dark_epoch}",
+                cross_trajectory_output_token,
+            )
             for (
                 transfer_family,
                 encoding_trajectory,
@@ -1411,13 +1655,32 @@ def main() -> None:
                 path = (
                     save_dir
                     / (
-                        f"{region}_{light_epoch}_{dark_epoch}_"
+                        f"{prefix}_"
                         f"{_cross_trajectory_pair_suffix(transfer_family, encoding_trajectory, decoding_trajectory)}"
                         "_tp_cross_traj_error_by_position.parquet"
                     )
                 )
                 table.to_parquet(path)
                 saved_binned_tables.append(path)
+
+    selected_unit_counts = {
+        region: {
+            epoch: {
+                "n_units": int(len(table)),
+                "n_passing_firing_rate_threshold": int(
+                    table["passes_firing_rate_threshold"].sum()
+                ),
+                "n_passing_tuning_stability_threshold": int(
+                    table["passes_tuning_stability_threshold"].sum()
+                ),
+                "n_selected_for_cross_trajectory_decoding": int(
+                    table["selected_for_cross_trajectory_decoding"].sum()
+                ),
+            }
+            for epoch, table in tables_by_epoch.items()
+        }
+        for region, tables_by_epoch in selected_unit_tables.items()
+    }
 
     log_path = write_run_log(
         analysis_path=analysis_path,
@@ -1435,6 +1698,8 @@ def main() -> None:
             "bin_size_s": args.bin_size_s,
             "sliding_window_size_bins": args.sliding_window_size_bins,
             "cross_traj_fr_threshold_hz": args.cross_traj_fr_threshold_hz,
+            "min_tuning_stability_correlation": args.min_tuning_stability_correlation,
+            "cross_trajectory_output_token": cross_trajectory_output_token,
             "error_mode": args.error_mode,
             "error_summary": args.error_summary,
             "random_state": DEFAULT_RANDOM_STATE,
@@ -1448,6 +1713,10 @@ def main() -> None:
                 dict(pair_spec) for pair_spec in DECODING_TP_TRANSFER_PAIR_SPECS
             ],
             "saved_npz_paths": saved_npz_paths,
+            "saved_cross_trajectory_selected_unit_tables": (
+                saved_cross_trajectory_selected_unit_tables
+            ),
+            "cross_trajectory_selected_unit_counts": selected_unit_counts,
             "saved_epoch_metric_tables": saved_epoch_metric_tables,
             "saved_epoch_cross_metric_tables": saved_epoch_cross_metric_tables,
             "saved_epoch_binned_tables": saved_epoch_binned_tables,

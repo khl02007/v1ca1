@@ -13,59 +13,32 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_LIGHT_EPOCH,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PANEL_AB_HEIGHT_MM,
-    DEFAULT_PANEL_A_HEIGHT_MM,
+    DEFAULT_PANEL_A_WIDTH_FRACTION,
     DEFAULT_PANEL_B_WIDTH_FRACTION,
-    DEFAULT_PANEL_C_WIDTH_FRACTION,
     DEFAULT_PANEL_DEF_HEIGHT_MM,
-    DEFAULT_PANEL_GH_HEIGHT_MM,
     DEFAULT_REGIONS,
-    PANEL_A_EPOCH_COLORS,
-    PANEL_A_EXAMPLE,
-    PANEL_A_LIGHT_EPOCHS,
-    PANEL_A_TRAJECTORIES,
     PANEL_B_CACHE_VERSION,
-    PANEL_B_EXAMPLE_TOP,
-    PANEL_B_FIRST_EXAMPLE_Y_SHIFT,
+    PANEL_A_EXAMPLE_TOP,
+    PANEL_A_FIRST_EXAMPLE_Y_SHIFT,
     PANEL_B_HEATMAP_CMAP,
     PANEL_B_LINEAR_POSITION_ORIENTATION,
     PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_B_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_B_TRAJECTORY_TYPES,
-    PANEL_C_DARK_EPOCH_BACKGROUND,
-    PANEL_C_EXAMPLES,
-    PANEL_C_TRAJECTORY_COLORS,
-    PANEL_D_SCATTER_ALPHA,
-    PANEL_D_SCATTER_SIZE,
-    PANEL_E_MIN_TUNING_STABILITY_CORRELATION,
-    PANEL_E_X_LIMITS,
-    PANEL_F_CROSS_COMPARISONS,
-    PANEL_F_NORM_ERROR_YLIM,
-    PANEL_F_PLACE_ERROR_YLIM,
-    PANEL_F_SUMMARY_TEXT_FONTSIZE,
-    PANEL_G_ARROW_COLOR,
-    PANEL_G_BASIS_DARK_COLOR,
-    PANEL_G_COMPONENT_LABEL_FONTSIZE,
-    PANEL_G_DARK_TRACK_CENTER_X,
-    PANEL_G_EXAMPLE_HEIGHT_FRACTION,
-    PANEL_G_EXAMPLE_WIDTH_FRACTION,
-    PANEL_G_EXAMPLES,
-    PANEL_G_LIGHT_TRACK_CENTER_X,
-    PANEL_G_MODEL_COLORS,
-    PANEL_GH_WIDTH_RATIOS,
-    PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM,
-    PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT,
-    PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X,
-    PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X,
-    PANEL_G_INDEPENDENT_BASIS_ICON_TOP,
-    PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH,
-    PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
-    PANEL_G_INDEPENDENT_TRACK_CENTER_Y,
-    PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X,
-    PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
-    PANEL_G_SCHEMATIC_INSET_ZORDER,
-    PANEL_G_SCHEMATIC_TEXT_ZORDER,
-    PANEL_G_SCHEMATIC_WIDTH_FRACTION,
-    PANEL_G_SHARED_TRACK_CENTER_Y,
+    PANEL_A_DARK_EPOCH_BACKGROUND,
+    PANEL_A_EXAMPLES,
+    PANEL_TRAJECTORY_COLORS,
+    PANEL_C_SCATTER_ALPHA,
+    PANEL_C_SCATTER_SIZE,
+    PANEL_D_MIN_TUNING_STABILITY_CORRELATION,
+    PANEL_D_ENCODING_X_LIMITS,
+    PANEL_E_CROSS_COMPARISONS,
+    PANEL_E_NORM_ERROR_YLIM,
+    PANEL_E_PLACE_ERROR_YLIM,
+    PANEL_QUANT_SUMMARY_TEXT_FONTSIZE,
+    GLM_TRAJECTORY_ARROW_COLOR,
+    GLM_BASIS_DARK_COLOR,
+    GLM_MODEL_COLORS,
     PANEL_H_DELTA_TRAJECTORIES,
     PANEL_H_EXAMPLES,
     PANEL_H_DELTA_AXIS_BOUNDS,
@@ -79,8 +52,7 @@ from v1ca1.paper_figures.figure_3 import (
     build_panel_b_cache_path,
     build_panel_example_cache_metadata,
     build_panel_example_cache_path,
-    build_panel_d_similarity_pairs,
-    build_panel_a_epoch_specs,
+    build_panel_c_similarity_pairs,
     build_output_path,
     get_decoding_summary_path,
     get_dark_light_glm_selected_path,
@@ -91,28 +63,26 @@ from v1ca1.paper_figures.figure_3 import (
     get_stability_table_path,
     get_tuning_similarity_path,
     load_panel_h_swap_delta_table,
-    load_panel_e_encoding_delta_table,
-    load_panel_f_decoding_error_table,
+    load_panel_d_encoding_delta_table,
+    load_panel_e_decoding_error_table,
     load_panel_quantification_data,
     load_or_compute_panel_example_data,
     make_light_epoch_dataset_ids,
     parse_arguments,
     parse_dataset_id,
-    plot_panel_d_similarity,
-    plot_panel_e_encoding_delta_histogram,
-    plot_panel_f_decoding_error,
-    plot_panel_g_model_architecture,
+    plot_panel_c_similarity,
+    plot_panel_d_encoding_delta_histogram,
+    plot_panel_e_decoding_error,
     plot_panel_h_swap_delta,
-    plot_panel_a_example,
     plot_epoch_path_rate_axis,
     plot_light_heatmap_regions,
-    plot_panel_c_examples,
+    plot_panel_a_examples,
     save_panel_b_cache,
     save_panel_example_cache,
     load_panel_b_cache,
     load_panel_example_cache,
     setup_light_heatmap_panel,
-    validate_panel_c_trajectories,
+    validate_panel_a_trajectories,
 )
 
 
@@ -277,7 +247,60 @@ def test_load_panel_h_swap_delta_table_filters_by_dark_tuning_stability(
     )
 
 
-def test_load_panel_e_encoding_delta_table_filters_by_tuning_stability(
+def test_load_panel_h_swap_delta_table_can_select_segment_scalar_model(
+    tmp_path: Path,
+) -> None:
+    xr = pytest.importorskip("xarray")
+
+    swap_path = get_swap_glm_selected_comparison_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        dark_epoch="08_r4",
+        light_train_epoch="02_r1",
+        light_test_epoch="06_r3",
+    )
+    swap_path.parent.mkdir(parents=True, exist_ok=True)
+    delta = np.asarray(
+        [
+            [[0.0, 0.0]],
+            [[0.1, 0.2]],
+            [[0.3, 0.4]],
+        ],
+        dtype=float,
+    )
+    xr.Dataset(
+        {
+            PANEL_H_SWAP_DELTA_VARIABLE: (
+                ("model", "trajectory", "unit"),
+                delta,
+            )
+        },
+        coords={
+            "model": ["visual", "task_segment_bump", "task_segment_scalar"],
+            "trajectory": ["center_to_left"],
+            "unit": [11, 12],
+        },
+    ).to_netcdf(swap_path)
+
+    table = load_panel_h_swap_delta_table(
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        dark_epoch=None,
+        light_epoch_pairs=(("02_r1", "06_r3"),),
+        model_name="task_segment_scalar",
+    )
+
+    assert table["model_name"].tolist() == [
+        "task_segment_scalar",
+        "task_segment_scalar",
+    ]
+    assert table["delta_ll_bits_per_spike"].tolist() == pytest.approx([0.3, 0.4])
+
+
+def test_load_panel_d_encoding_delta_table_filters_by_tuning_stability(
     tmp_path: Path,
 ) -> None:
     pd = pytest.importorskip("pandas")
@@ -332,7 +355,7 @@ def test_load_panel_e_encoding_delta_table_filters_by_tuning_stability(
         }
     ).to_parquet(stability_path)
 
-    table = load_panel_e_encoding_delta_table(
+    table = load_panel_d_encoding_delta_table(
         data_root=tmp_path,
         datasets=[("L14", "20240611", "08_r4")],
         region="v1",
@@ -340,7 +363,7 @@ def test_load_panel_e_encoding_delta_table_filters_by_tuning_stability(
         dark_epoch="08_r4",
     )
 
-    assert PANEL_E_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
+    assert PANEL_D_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
     assert table[["epoch_type", "unit"]].to_dict("records") == [
         {"epoch_type": "light", "unit": 11},
         {"epoch_type": "dark", "unit": 12},
@@ -608,33 +631,11 @@ def test_load_or_compute_panel_example_data_uses_matching_cache(
     assert np.array_equal(loaded["firing_rates"]["left_to_center"][1], np.asarray([3.0]))
 
 
-def test_panel_a_example_configuration_uses_requested_cell_and_epochs() -> None:
-    assert PANEL_A_EXAMPLE == ("L14", "20240611", "v1", 229)
-    assert PANEL_A_TRAJECTORIES == (
-        "center_to_left",
-        "center_to_right",
-        "left_to_center",
-        "right_to_center",
-    )
-    assert PANEL_A_LIGHT_EPOCHS == ("02_r1", "06_r3")
-    assert build_panel_a_epoch_specs("L14", "20240611", dark_epoch=None) == (
-        ("02_r1", "02_r1", "02_r1"),
-        ("06_r3", "06_r3", "06_r3"),
-        ("dark", "Dark", "08_r4"),
-    )
 
-
-def test_panel_c_example_configuration_uses_requested_trajectory_pairs() -> None:
-    assert PANEL_C_EXAMPLES == (
+def test_panel_a_example_configuration_uses_requested_trajectory_pairs() -> None:
+    assert PANEL_A_EXAMPLES == (
         ("L14", "20240611", "v1", 34, ("center_to_left", "right_to_center")),
         ("L15", "20241121", "v1", 473, ("center_to_right", "left_to_center")),
-    )
-
-
-def test_panel_g_example_configuration_uses_requested_cells() -> None:
-    assert PANEL_G_EXAMPLES == (
-        ("L15", "20241121", "v1", 426, "center_to_right"),
-        ("L14", "20240611", "v1", 99, "center_to_left"),
     )
 
 
@@ -645,52 +646,17 @@ def test_panel_h_example_configuration_uses_requested_cells() -> None:
     )
 
 
-def test_validate_panel_c_trajectories_rejects_unknown_names() -> None:
-    assert validate_panel_c_trajectories(["center_to_left", "right_to_center"]) == (
+def test_validate_panel_a_trajectories_rejects_unknown_names() -> None:
+    assert validate_panel_a_trajectories(["center_to_left", "right_to_center"]) == (
         "center_to_left",
         "right_to_center",
     )
-    with pytest.raises(ValueError, match="Unknown panel C trajectory"):
-        validate_panel_c_trajectories(["center_to_left", "bad"])
+    with pytest.raises(ValueError, match="Unknown panel A trajectory"):
+        validate_panel_a_trajectories(["center_to_left", "bad"])
 
 
-def _fake_panel_a_example() -> dict[str, object]:
-    trajectories = (
-        "center_to_left",
-        "center_to_right",
-        "left_to_center",
-        "right_to_center",
-    )
-    position = np.asarray([0.0, 0.5, 1.0], dtype=float)
-    epoch_order = ("02_r1", "06_r3", "dark")
-    return {
-        "animal_name": "L14",
-        "date": "20240611",
-        "region": "v1",
-        "unit_id": 229,
-        "trajectories": trajectories,
-        "epoch_order": epoch_order,
-        "epoch_labels": {"02_r1": "02_r1", "06_r3": "06_r3", "dark": "Dark"},
-        "epoch_examples": {
-            epoch: {
-                "raster_positions": {
-                    trajectory: [np.asarray([0.1, 0.4]), np.asarray([0.7])]
-                    for trajectory in trajectories
-                },
-                "firing_rates": {
-                    trajectory: (
-                        position,
-                        np.asarray([0.0, 1.0 + index, 0.5], dtype=float),
-                    )
-                    for index, trajectory in enumerate(trajectories)
-                },
-            }
-            for epoch in epoch_order
-        },
-    }
 
-
-def _fake_panel_b_example(trajectories: tuple[str, ...]) -> dict[str, object]:
+def _fake_panel_a_example(trajectories: tuple[str, ...]) -> dict[str, object]:
     position = np.asarray([0.0, 0.5, 1.0], dtype=float)
     return {
         "animal_name": "L14",
@@ -725,74 +691,12 @@ def _fake_panel_b_example(trajectories: tuple[str, ...]) -> dict[str, object]:
     }
 
 
-def _fake_panel_g_examples() -> list[dict[str, object]]:
-    grid = np.linspace(0.0, 1.0, 5)
-    return [
-        {
-            "animal_name": "L15",
-            "date": "20241121",
-            "region": "v1",
-            "light_epoch": "02_r1",
-            "dark_epoch": "10_r5",
-            "trajectory": "center_to_left",
-            "unit_id": 40,
-            "score": 0.3,
-            "tp_grid": grid,
-            "segment_edges": np.asarray([0.0, 0.4, 0.6, 1.0], dtype=float),
-            "empirical": {
-                "dark": (grid, np.asarray([0.0, 1.1, 2.2, 0.8, 0.0])),
-                "light": (grid, np.asarray([0.0, 0.4, 1.1, 1.9, 0.4])),
-            },
-            "models": {
-                "visual": {
-                    "dark_hz": np.asarray([0.0, 1.0, 2.0, 1.0, 0.0]),
-                    "light_hz": np.asarray([0.0, 0.5, 1.0, 2.0, 0.5]),
-                    "score": 0.4,
-                },
-                "task_segment_bump": {
-                    "dark_hz": np.asarray([0.0, 1.0, 2.0, 1.0, 0.0]),
-                    "light_hz": np.asarray([0.0, 1.0, 2.4, 1.4, 0.0]),
-                    "score": 0.3,
-                },
-            },
-        },
-        {
-            "animal_name": "L14",
-            "date": "20240611",
-            "region": "v1",
-            "light_epoch": "02_r1",
-            "dark_epoch": "08_r4",
-            "trajectory": "right_to_center",
-            "unit_id": 22,
-            "score": 0.2,
-            "tp_grid": grid,
-            "segment_edges": np.asarray([0.0, 0.4, 0.6, 1.0], dtype=float),
-            "empirical": {
-                "dark": (grid, np.asarray([0.0, 0.7, 1.2, 1.4, 0.3])),
-                "light": (grid, np.asarray([0.0, 0.9, 1.5, 1.2, 0.1])),
-            },
-            "models": {
-                "visual": {
-                    "dark_hz": np.asarray([0.0, 0.5, 1.0, 1.5, 0.5]),
-                    "light_hz": np.asarray([0.0, 1.0, 1.7, 1.0, 0.2]),
-                    "score": 0.25,
-                },
-                "task_segment_bump": {
-                    "dark_hz": np.asarray([0.0, 0.5, 1.0, 1.5, 0.5]),
-                    "light_hz": np.asarray([0.0, 0.6, 1.3, 1.8, 0.5]),
-                    "score": 0.2,
-                },
-            },
-        },
-    ]
-
-
 def test_plot_epoch_path_rate_axis_overlays_path_type_curves() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    example = _fake_panel_b_example(("center_to_left", "right_to_center"))
+    example = _fake_panel_a_example(("center_to_left", "right_to_center"))
     fig, ax = plt.subplots()
     plot_epoch_path_rate_axis(
         ax,
@@ -805,8 +709,8 @@ def test_plot_epoch_path_rate_axis_overlays_path_type_curves() -> None:
 
     assert len(ax.lines) == 4
     assert [line.get_color() for line in ax.lines[:2]] == [
-        PANEL_C_TRAJECTORY_COLORS["center_to_left"],
-        PANEL_C_TRAJECTORY_COLORS["right_to_center"],
+        PANEL_TRAJECTORY_COLORS["center_to_left"],
+        PANEL_TRAJECTORY_COLORS["right_to_center"],
     ]
     assert [line.get_xdata()[0] for line in ax.lines[2:]] == pytest.approx(
         list(SEGMENT_BOUNDARIES)
@@ -818,161 +722,20 @@ def test_plot_epoch_path_rate_axis_overlays_path_type_curves() -> None:
     plt.close(fig)
 
 
-def test_plot_panel_a_example_draws_epoch_rasters_and_bottom_rate_axes() -> None:
+
+def test_plot_panel_a_examples_stacks_two_curve_blocks() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import to_rgba
-    from matplotlib.patches import Circle, Ellipse, Polygon
-
-    fig, ax = plt.subplots()
-    plot_panel_a_example(ax, _fake_panel_a_example())
-
-    assert len(ax.child_axes) == 15
-    condition_axes = ax.child_axes[:3]
-    schematic_axes = ax.child_axes[3::3]
-    raster_axes = ax.child_axes[4::3]
-    first_trajectory_raster_ax = raster_axes[0]
-    rate_axes = ax.child_axes[5::3]
-    condition_text = [
-        [text.get_text() for text in condition_ax.texts]
-        for condition_ax in condition_axes
-    ]
-    assert condition_text == [["A", "B"], ["B", "A"], []]
-    condition_patches = [
-        patch
-        for condition_ax in condition_axes
-        for patch in condition_ax.patches
-        if isinstance(patch, Polygon)
-    ]
-    assert condition_patches[0].get_facecolor()[3] == pytest.approx(0.0)
-    assert condition_patches[1].get_facecolor()[3] == pytest.approx(0.0)
-    assert condition_patches[2].get_facecolor()[:3] == pytest.approx((0.0, 0.0, 0.0))
-    track_x = condition_patches[0].get_xy()[:, 0]
-    track_y = condition_patches[0].get_xy()[:, 1]
-    assert condition_axes[0].texts[0].get_position()[0] < np.min(track_x)
-    assert condition_axes[0].texts[1].get_position()[0] > np.max(track_x)
-    assert condition_axes[0].texts[0].get_position()[1] == pytest.approx(
-        0.5 * (np.min(track_y) + np.max(track_y))
-    )
-    assert len(ax.texts) == 0
-    assert len(schematic_axes) == 4
-    assert len(raster_axes) == 4
-    assert len(rate_axes) == 4
-    assert all(len(rate_ax.lines) == 5 for rate_ax in rate_axes)
-    assert [line.get_color() for line in rate_axes[-1].lines[:3]] == [
-        PANEL_A_EPOCH_COLORS["02_r1"],
-        PANEL_A_EPOCH_COLORS["06_r3"],
-        PANEL_A_EPOCH_COLORS["dark"],
-    ]
-    assert [line.get_xdata()[0] for line in rate_axes[-1].lines[3:]] == pytest.approx(
-        [0.4, 0.6]
-    )
-    assert all(
-        rate_ax.get_xlabel() == figure_3_module.TASK_PROGRESSION_XLABEL
-        for rate_ax in rate_axes
-    )
-    assert len(first_trajectory_raster_ax.lines) == 10
-    assert [line.get_color() for line in first_trajectory_raster_ax.lines[:2]] == [
-        PANEL_A_EPOCH_COLORS["02_r1"],
-        PANEL_A_EPOCH_COLORS["02_r1"],
-    ]
-    assert [line.get_color() for line in first_trajectory_raster_ax.lines[2:4]] == [
-        PANEL_A_EPOCH_COLORS["06_r3"],
-        PANEL_A_EPOCH_COLORS["06_r3"],
-    ]
-    assert [line.get_color() for line in first_trajectory_raster_ax.lines[4:6]] == [
-        PANEL_A_EPOCH_COLORS["dark"],
-        PANEL_A_EPOCH_COLORS["dark"],
-    ]
-    assert first_trajectory_raster_ax.lines[0].get_markersize() == pytest.approx(0.55)
-    assert first_trajectory_raster_ax.lines[0].get_markeredgewidth() == pytest.approx(0.21)
-    assert [
-        first_trajectory_raster_ax.lines[index].get_xdata()[0]
-        for index in (-2, -1)
-    ] == pytest.approx([0.4, 0.6])
-    assert first_trajectory_raster_ax.get_facecolor() == pytest.approx(to_rgba("white"))
-    assert any(
-        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_C_DARK_EPOCH_BACKGROUND))
-        for patch in first_trajectory_raster_ax.patches
-    )
-    assert all(rate_ax.get_legend() is None for rate_ax in rate_axes)
-    plt.close(fig)
-
-
-def test_plot_panel_a_example_allows_visual_label_and_trajectory_color_overrides() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    green = PANEL_A_EPOCH_COLORS["02_r1"]
-    magenta = PANEL_A_EPOCH_COLORS["06_r3"]
-    dark = PANEL_A_EPOCH_COLORS["dark"]
-    trajectory_epoch_color_overrides = {
-        trajectory_type: {
-            "02_r1": magenta,
-            "06_r3": green,
-        }
-        for trajectory_type in ("center_to_right", "right_to_center")
-    }
-
-    fig, ax = plt.subplots()
-    plot_panel_a_example(
-        ax,
-        _fake_panel_a_example(),
-        visual_label_colors={"A": green, "B": magenta},
-        trajectory_epoch_color_overrides=trajectory_epoch_color_overrides,
-    )
-
-    condition_axes = ax.child_axes[:3]
-    raster_axes = ax.child_axes[4::3]
-    rate_axes = ax.child_axes[5::3]
-    assert [text.get_color() for text in condition_axes[0].texts] == [green, magenta]
-    assert [text.get_color() for text in condition_axes[1].texts] == [magenta, green]
-    assert [line.get_color() for line in rate_axes[0].lines[:3]] == [
-        green,
-        magenta,
-        dark,
-    ]
-    assert [line.get_color() for line in rate_axes[1].lines[:3]] == [
-        magenta,
-        green,
-        dark,
-    ]
-    assert [line.get_color() for line in rate_axes[3].lines[:3]] == [
-        magenta,
-        green,
-        dark,
-    ]
-    for raster_axis in (raster_axes[1], raster_axes[3]):
-        assert [line.get_color() for line in raster_axis.lines[:2]] == [
-            magenta,
-            magenta,
-        ]
-        assert [line.get_color() for line in raster_axis.lines[2:4]] == [
-            green,
-            green,
-        ]
-        assert [line.get_color() for line in raster_axis.lines[4:6]] == [
-            dark,
-            dark,
-        ]
-    plt.close(fig)
-
-
-def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import to_rgba
-    from matplotlib.patches import Circle, Ellipse, Polygon
+    from matplotlib.patches import Polygon
 
     fig, ax = plt.subplots()
     examples = [
-        _fake_panel_b_example(("center_to_left", "right_to_center")),
-        _fake_panel_b_example(("center_to_right", "left_to_center")),
+        _fake_panel_a_example(("center_to_left", "right_to_center")),
+        _fake_panel_a_example(("center_to_right", "left_to_center")),
     ]
-    plot_panel_c_examples(
+    plot_panel_a_examples(
         ax,
         examples,
     )
@@ -980,7 +743,7 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
     assert len(ax.child_axes) == 2
     parent_position = ax.get_position()
     assert ax.child_axes[0].get_position().y1 == pytest.approx(
-        parent_position.y0 + parent_position.height * PANEL_B_EXAMPLE_TOP
+        parent_position.y0 + parent_position.height * PANEL_A_EXAMPLE_TOP
     )
     for example_index, (example_ax, example) in enumerate(zip(ax.child_axes, examples), start=1):
         assert [text.get_text() for text in example_ax.texts] == [
@@ -988,7 +751,7 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
         ]
         assert example_ax.texts[0].get_position()[0] == pytest.approx(0.50)
         expected_title_y = (
-            0.885 + PANEL_B_FIRST_EXAMPLE_Y_SHIFT
+            0.885 + PANEL_A_FIRST_EXAMPLE_Y_SHIFT
             if example_index == 1
             else 0.885
         )
@@ -1008,8 +771,8 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
         raster_axes = example_ax.child_axes[2:4]
         rate_axes = example_ax.child_axes[4:]
         assert [schematic_ax.lines[0].get_color() for schematic_ax in schematic_axes] == [
-            PANEL_C_TRAJECTORY_COLORS[example["trajectories"][1]],
-            PANEL_C_TRAJECTORY_COLORS[example["trajectories"][0]],
+            PANEL_TRAJECTORY_COLORS[example["trajectories"][1]],
+            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
         ]
         assert all(len(raster_ax.lines) == 6 for raster_ax in raster_axes)
         raster_position = raster_axes[0].get_position()
@@ -1033,8 +796,8 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
             rate_axes[0].get_position().width
         )
         assert [line.get_color() for line in raster_axes[0].lines[:2]] == [
-            PANEL_C_TRAJECTORY_COLORS[example["trajectories"][0]],
-            PANEL_C_TRAJECTORY_COLORS[example["trajectories"][0]],
+            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
+            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
         ]
         assert raster_axes[0].lines[0].get_markersize() == pytest.approx(0.55)
         assert raster_axes[0].lines[0].get_markeredgewidth() == pytest.approx(0.21)
@@ -1051,10 +814,10 @@ def test_plot_panel_c_examples_stacks_two_curve_blocks() -> None:
         assert [raster_ax.get_title() for raster_ax in raster_axes] == ["Dark", "Light"]
         assert [rate_ax.get_title() for rate_ax in rate_axes] == ["", ""]
         assert raster_axes[0].get_facecolor() == pytest.approx(
-            to_rgba(PANEL_C_DARK_EPOCH_BACKGROUND)
+            to_rgba(PANEL_A_DARK_EPOCH_BACKGROUND)
         )
         assert rate_axes[0].get_facecolor() == pytest.approx(
-            to_rgba(PANEL_C_DARK_EPOCH_BACKGROUND)
+            to_rgba(PANEL_A_DARK_EPOCH_BACKGROUND)
         )
         assert raster_axes[1].get_facecolor() == pytest.approx(to_rgba("white"))
         assert rate_axes[1].get_facecolor() == pytest.approx(to_rgba("white"))
@@ -1359,7 +1122,7 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
                 "n_samples": 30,
             }
         )
-        for comparison, label, _family, _pairs in PANEL_F_CROSS_COMPARISONS:
+        for comparison, label, _family, _pairs in PANEL_E_CROSS_COMPARISONS:
             decoding_rows.append(
                 {
                     "animal_name": "pooled",
@@ -1378,16 +1141,20 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     decoding_table = pandas.DataFrame(decoding_rows)
 
     fig, axes = plt.subplots(nrows=1, ncols=3)
-    plot_panel_d_similarity(axes[0], similarity_table)
-    plot_panel_e_encoding_delta_histogram(axes[1], delta_table)
-    plot_panel_f_decoding_error(axes[2], decoding_table)
+    plot_panel_c_similarity(axes[0], similarity_table)
+    plot_panel_d_encoding_delta_histogram(axes[1], delta_table)
+    plot_panel_e_decoding_error(axes[2], decoding_table)
 
-    paired = build_panel_d_similarity_pairs(similarity_table)
+    paired = build_panel_c_similarity_pairs(similarity_table)
+    assert paired["comparison_label"].astype(str).tolist() == [
+        "right_turn",
+        "right_turn",
+    ]
     assert paired[["similarity_light", "similarity_dark"]].to_numpy().ravel() == pytest.approx(
-        [0.6, 0.3, 0.1, 0.4]
+        [0.6, 0.3, 0.05, 0.4]
     )
-    assert axes[0].get_xlabel() == "Light same-turn\ntuning corr."
-    assert axes[0].get_ylabel() == "Dark same-turn\ntuning corr."
+    assert axes[0].get_xlabel() == "Light tuning corr."
+    assert axes[0].get_ylabel() == "Dark tuning corr."
     assert axes[0].get_aspect() == pytest.approx(1.0)
     assert axes[0].lines[0].get_linestyle() == "--"
     assert axes[0].lines[0].get_xdata().tolist() == [-1.0, 1.0]
@@ -1397,9 +1164,9 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert axes[0].texts[0].get_horizontalalignment() == "right"
     assert axes[0].texts[0].get_verticalalignment() == "bottom"
     assert len(axes[0].collections) == 1
-    assert axes[0].collections[0].get_alpha() == pytest.approx(PANEL_D_SCATTER_ALPHA)
+    assert axes[0].collections[0].get_alpha() == pytest.approx(PANEL_C_SCATTER_ALPHA)
     assert axes[0].collections[0].get_sizes().tolist() == pytest.approx(
-        [PANEL_D_SCATTER_SIZE]
+        [PANEL_C_SCATTER_SIZE]
     )
     assert axes[1].get_xlabel() == "Δ log likelihood (bits/spike)"
     assert axes[1].get_ylabel() == "Frac."
@@ -1418,10 +1185,10 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert light_summary_text.get_horizontalalignment() == "left"
     assert dark_summary_text.get_horizontalalignment() == "left"
     assert light_summary_text.get_fontsize() == pytest.approx(
-        PANEL_F_SUMMARY_TEXT_FONTSIZE
+        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
     )
     assert dark_summary_text.get_fontsize() == pytest.approx(
-        PANEL_F_SUMMARY_TEXT_FONTSIZE
+        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
     )
     assert light_summary_text.get_position()[0] == pytest.approx(
         dpp_text.get_position()[0]
@@ -1454,19 +1221,19 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert dark_count_text.get_verticalalignment() == "bottom"
     assert animal_count_text.get_verticalalignment() == "bottom"
     assert light_count_text.get_fontsize() == pytest.approx(
-        PANEL_F_SUMMARY_TEXT_FONTSIZE
+        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
     )
     assert dark_count_text.get_fontsize() == pytest.approx(
-        PANEL_F_SUMMARY_TEXT_FONTSIZE
+        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
     )
     assert animal_count_text.get_fontsize() == pytest.approx(
-        PANEL_F_SUMMARY_TEXT_FONTSIZE
+        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
     )
     assert light_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
     assert dark_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["dark"]
     assert animal_count_text.get_color() == "0.25"
     assert axes[1].get_legend() is None
-    assert axes[1].get_xlim() == pytest.approx(PANEL_E_X_LIMITS)
+    assert axes[1].get_xlim() == pytest.approx(PANEL_D_ENCODING_X_LIMITS)
     assert len(axes[1].lines) == 1
     assert axes[1].lines[0].get_color() == "black"
     assert axes[1].lines[0].get_linestyle() == "--"
@@ -1481,18 +1248,26 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert cross_ax.get_ylabel() == "Abs. norm. error"
     assert cross_ax.yaxis.label.get_size() == pytest.approx(5.8)
     assert place_ax.get_ylabel() == ""
-    assert place_ax.get_ylim() == pytest.approx(PANEL_F_PLACE_ERROR_YLIM)
-    assert cross_ax.get_ylim() == pytest.approx(PANEL_F_NORM_ERROR_YLIM)
+    assert place_ax.get_ylim() == pytest.approx(PANEL_E_PLACE_ERROR_YLIM)
+    assert cross_ax.get_ylim() == pytest.approx(PANEL_E_NORM_ERROR_YLIM)
     assert [text.get_text() for text in place_ax.get_xticklabels()] == ["Light", "Dark"]
     assert [text.get_text() for text in cross_ax.get_xticklabels()] == ["Light", "Dark"]
     assert [text.get_text() for text in cross_ax.texts] == [
         "Light med. 0.22",
         "Dark med. 0.25",
     ]
+    assert [text.get_position()[0] for text in cross_ax.texts] == pytest.approx(
+        [figure_3_module.PANEL_E_SUMMARY_TEXT_X] * 2
+    )
+    assert all(text.get_horizontalalignment() == "right" for text in cross_ax.texts)
     assert [text.get_text() for text in place_ax.texts] == [
         "Light med. 0.01",
         "Dark med. 0.02",
     ]
+    assert [text.get_position()[0] for text in place_ax.texts] == pytest.approx(
+        [figure_3_module.PANEL_E_PLACE_SUMMARY_TEXT_X] * 2
+    )
+    assert all(text.get_horizontalalignment() == "left" for text in place_ax.texts)
     assert place_ax.get_legend() is None
     assert cross_ax.get_legend() is None
     assert len(cross_ax.get_xticklabels()) == 2
@@ -1501,7 +1276,7 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     plt.close(fig)
 
 
-def test_load_panel_f_decoding_error_table_pools_registered_datasets(
+def test_load_panel_e_decoding_error_table_pools_registered_datasets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pandas = pytest.importorskip("pandas")
@@ -1535,7 +1310,7 @@ def test_load_panel_f_decoding_error_table_pools_registered_datasets(
         lambda _animal_name: 100.0,
     )
 
-    table = load_panel_f_decoding_error_table(
+    table = load_panel_e_decoding_error_table(
         data_root=Path("/analysis"),
         datasets=[
             ("L12", "20240421", "08_r4"),
@@ -1552,7 +1327,7 @@ def test_load_panel_f_decoding_error_table_pools_registered_datasets(
     assert set(table["date"]) == {"pooled"}
     assert len(table[table["analysis"] == "place"]) == 2
     assert len(table[table["analysis"] == "cross_trajectory"]) == (
-        2 * len(PANEL_F_CROSS_COMPARISONS)
+        2 * len(PANEL_E_CROSS_COMPARISONS)
     )
     light_place = table[
         (table["analysis"] == "place") & (table["epoch_type"] == "light")
@@ -1563,7 +1338,7 @@ def test_load_panel_f_decoding_error_table_pools_registered_datasets(
     ].iloc[0]
     assert light_place["n_samples"] == 4 * 2
     assert light_cross["n_samples"] == (
-        4 * len(PANEL_F_CROSS_COMPARISONS[0][3]) * 2
+        4 * len(PANEL_E_CROSS_COMPARISONS[0][3]) * 2
     )
     assert any("L19" in call for call in calls)
 
@@ -1583,25 +1358,16 @@ def test_dark_glm_schematic_tracks_can_reserve_white_stimulus_labels() -> None:
         }
     )
 
-    fig, axes = plt.subplots(nrows=1, ncols=2)
-    plot_panel_g_model_architecture(
-        axes[0],
-        [],
-        show_dark_track_labels=True,
-    )
+    fig, axis = plt.subplots()
     plot_panel_h_swap_delta(
-        axes[1],
+        axis,
         swap_delta_table,
         [],
         show_dark_track_labels=True,
     )
 
-    panel_g_schematic_ax = axes[0].child_axes[0]
-    panel_h_schematic_ax = axes[1].child_axes[0]
-    dark_track_axes = [
-        panel_g_schematic_ax.child_axes[index]
-        for index in (0, 3)
-    ] + [panel_h_schematic_ax.child_axes[3]]
+    panel_h_schematic_ax = axis.child_axes[0]
+    dark_track_axes = [panel_h_schematic_ax.child_axes[3]]
     for track_ax in dark_track_axes:
         visible_labels = [text for text in track_ax.texts if text.get_text() in {"A", "B"}]
         assert sorted(text.get_text() for text in visible_labels) == ["A", "B"]
@@ -1610,7 +1376,84 @@ def test_dark_glm_schematic_tracks_can_reserve_white_stimulus_labels() -> None:
     plt.close(fig)
 
 
-def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
+def test_plot_panel_h_swap_delta_can_use_segment_scalar_model() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    pandas = pytest.importorskip("pandas")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    model_colors = {"visual": "#D73027", "task_segment_scalar": "#1A9850"}
+    swap_delta_table = pandas.DataFrame(
+        {
+            "delta_ll_bits_per_spike": [0.2] * len(PANEL_H_DELTA_TRAJECTORIES),
+            "light_train_epoch": ["02_r1"] * len(PANEL_H_DELTA_TRAJECTORIES),
+            "light_test_epoch": ["06_r3"] * len(PANEL_H_DELTA_TRAJECTORIES),
+            "trajectory": list(PANEL_H_DELTA_TRAJECTORIES),
+            "model_name": ["task_segment_scalar"] * len(PANEL_H_DELTA_TRAJECTORIES),
+        }
+    )
+    swap_example = {
+        "animal_name": "L15",
+        "region": "v1",
+        "unit_id": 40,
+        "trajectory": "center_to_left",
+        "model_name": "task_segment_scalar",
+        "delta_ll_bits_per_spike": 0.25,
+        "segment_start": 0.4,
+        "segment_end": 0.6,
+        "tp_grid": np.asarray([0.4, 0.5, 0.6]),
+        "observed_position": np.asarray([0.4, 0.5, 0.6]),
+        "observed_rate_hz": np.asarray([0.2, 1.5, 0.4]),
+        "models": {
+            "visual": np.asarray([0.1, 0.8, 0.2]),
+            "task_segment_scalar": np.asarray([0.2, 1.2, 0.3]),
+        },
+    }
+    second_swap_example = dict(swap_example)
+    second_swap_example["unit_id"] = 41
+    second_swap_example["observed_rate_hz"] = np.asarray([0.3, 1.1, 0.4])
+
+    fig, axis = plt.subplots()
+    plot_panel_h_swap_delta(
+        axis,
+        swap_delta_table,
+        [swap_example, second_swap_example],
+        model_name="task_segment_scalar",
+        model_colors=model_colors,
+    )
+
+    schematic_ax, delta_ax, _first_example_ax, second_example_ax = axis.child_axes
+    assert any(
+        text.get_text() == "Segment scalar\nmodel" for text in schematic_ax.texts
+    )
+    hist_axes = delta_ax.child_axes[1::2]
+    assert all(
+        "Segment scalar\nbetter" in [text.get_text() for text in hist_ax.texts]
+        for hist_ax in hist_axes
+    )
+    first_hist_text_colors = {
+        text.get_text(): text.get_color() for text in hist_axes[0].texts
+    }
+    assert first_hist_text_colors["Independent\nbetter"] == model_colors["visual"]
+    assert first_hist_text_colors["Segment scalar\nbetter"] == model_colors[
+        "task_segment_scalar"
+    ]
+    assert [line.get_color() for line in second_example_ax.lines[1:]] == [
+        model_colors["visual"],
+        model_colors["task_segment_scalar"],
+    ]
+    assert second_example_ax.get_legend() is not None
+    assert [
+        text.get_text() for text in second_example_ax.get_legend().get_texts()
+    ] == [
+        "Empirical",
+        "Independent",
+        "Segment scalar",
+    ]
+    plt.close(fig)
+
+
+def test_plot_panel_h_swap_delta_uses_schematic_histograms_and_examples() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     pandas = pytest.importorskip("pandas")
     matplotlib.use("Agg")
@@ -1650,269 +1493,17 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         "visual": np.asarray([0.2, 0.6, 0.3]),
         "task_segment_bump": np.asarray([0.3, 1.1, 0.4]),
     }
-    fig, axes = plt.subplots(nrows=1, ncols=2)
-    plot_panel_g_model_architecture(axes[0], _fake_panel_g_examples())
-    plot_panel_h_swap_delta(axes[1], swap_delta_table, [swap_example, second_swap_example])
+    fig, axis = plt.subplots()
+    plot_panel_h_swap_delta(axis, swap_delta_table, [swap_example, second_swap_example])
     fig.canvas.draw()
-
-    assert len(axes[0].child_axes) == 2
-    schematic_ax, example_ax = axes[0].child_axes
-    assert example_ax.get_position().width / axes[0].get_position().width == pytest.approx(
-        PANEL_G_EXAMPLE_WIDTH_FRACTION
-    )
-    assert schematic_ax.get_position().width / axes[0].get_position().width == pytest.approx(
-        PANEL_G_SCHEMATIC_WIDTH_FRACTION
-    )
-    assert schematic_ax.get_position().height / axes[0].get_position().height == pytest.approx(
-        PANEL_G_SCHEMATIC_HEIGHT_FRACTION
-    )
-    assert example_ax.get_position().height / axes[0].get_position().height == pytest.approx(
-        PANEL_G_EXAMPLE_HEIGHT_FRACTION
-    )
-    assert schematic_ax.get_position().y0 > example_ax.get_position().y0
-    example_labels = [
-        text for text in example_ax.texts if text.get_text().startswith("Example")
-    ]
-    assert [text.get_text() for text in example_labels] == ["Example 1", "Example 2"]
-    assert all(text.get_fontsize() > 4.8 for text in example_labels)
-    assert all(text.get_position()[1] > 0.93 for text in example_labels)
-    shared_x_labels = [
-        text
-        for text in example_ax.texts
-        if text.get_text() == figure_3_module.TASK_PROGRESSION_XLABEL
-    ]
-    assert len(shared_x_labels) == 2
-    assert all(
-        text.get_fontsize() == pytest.approx(3.7) for text in shared_x_labels
-    )
-    assert all(
-        text.get_position()[1] == pytest.approx(-0.145)
-        for text in shared_x_labels
-    )
-    assert len(example_ax.child_axes) == 6
-    example_icon_axes = [example_ax.child_axes[index] for index in (0, 3)]
-    field_axes = [example_ax.child_axes[index] for index in (1, 2, 4, 5)]
-    assert all(len(field_ax.lines) == 5 for field_ax in field_axes)
-    assert all(len(icon_ax.lines) > 0 for icon_ax in example_icon_axes)
-    assert all(
-        icon_ax.get_position().x1 < field_ax.get_position().x0
-        for icon_ax, field_ax in zip(example_icon_axes, field_axes[::2], strict=True)
-    )
-    assert all(field_ax.get_xlabel() == "" for field_ax in field_axes)
-    assert field_axes[0].get_ylabel() == "FR (Hz)"
-    assert field_axes[2].get_ylabel() == "FR (Hz)"
-    assert field_axes[0].get_facecolor() == pytest.approx(
-        to_rgba(PANEL_C_DARK_EPOCH_BACKGROUND)
-    )
-    assert field_axes[2].get_facecolor() == pytest.approx(
-        to_rgba(PANEL_C_DARK_EPOCH_BACKGROUND)
-    )
-    assert [field_ax.get_title() for field_ax in field_axes[:2]] == [
-        "Dark",
-        "Light",
-    ]
-    assert field_axes[0].get_legend() is None
-    assert field_axes[3].get_legend() is not None
-    assert [text.get_text() for text in field_axes[3].get_legend().get_texts()] == [
-        "Empirical",
-        "Independent",
-        "Shared scaffold",
-    ]
-    assert field_axes[3].get_legend()._loc == 6
-    assert [
-        text.get_text()
-        for text in schematic_ax.texts
-        if text.get_text()
-    ] == [
-        "Dark field",
-        "Light field",
-        "Independent\nmodel",
-        "Shared-scaffold\nmodel",
-        "Independent\nbasis functions",
-        "Segment-specific modulation",
-        "+",
-    ]
-    assert len(schematic_ax.child_axes) == 6
-    panel_g_top_dark_ax = schematic_ax.child_axes[0]
-    panel_g_basis_ax = schematic_ax.child_axes[1]
-    panel_g_top_light_ax = schematic_ax.child_axes[2]
-    panel_g_bottom_dark_ax = schematic_ax.child_axes[3]
-    panel_g_segment_modulation_ax = schematic_ax.child_axes[4]
-    panel_g_bottom_light_ax = schematic_ax.child_axes[5]
-    schematic_position = schematic_ax.get_position()
-    independent_model_text = next(
-        text for text in schematic_ax.texts if text.get_text() == "Independent\nmodel"
-    )
-    independent_basis_text = next(
-        text
-        for text in schematic_ax.texts
-        if text.get_text() == "Independent\nbasis functions"
-    )
-    shared_model_text = next(
-        text for text in schematic_ax.texts if text.get_text() == "Shared-scaffold\nmodel"
-    )
-    segment_modulation_text = next(
-        text
-        for text in schematic_ax.texts
-        if text.get_text() == "Segment-specific modulation"
-    )
-    assert independent_model_text.get_zorder() == pytest.approx(
-        PANEL_G_SCHEMATIC_TEXT_ZORDER
-    )
-    assert panel_g_top_dark_ax.get_zorder() == pytest.approx(
-        PANEL_G_SCHEMATIC_INSET_ZORDER
-    )
-    assert independent_model_text.get_zorder() > panel_g_top_dark_ax.get_zorder()
-    assert independent_model_text.get_position()[1] == pytest.approx(
-        PANEL_G_INDEPENDENT_TRACK_CENTER_Y
-    )
-    assert shared_model_text.get_position()[1] == pytest.approx(PANEL_G_SHARED_TRACK_CENTER_Y)
-    assert independent_basis_text.get_position()[1] == pytest.approx(
-        PANEL_G_INDEPENDENT_BASIS_LABEL_Y
-    )
-    assert independent_basis_text.get_fontsize() == pytest.approx(
-        PANEL_G_COMPONENT_LABEL_FONTSIZE
-    )
-    assert segment_modulation_text.get_position()[0] == pytest.approx(
-        PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X
-    )
-    assert segment_modulation_text.get_position()[1] > PANEL_G_SHARED_TRACK_CENTER_Y
-    assert segment_modulation_text.get_fontsize() == pytest.approx(
-        PANEL_G_COMPONENT_LABEL_FONTSIZE
-    )
-    assert all(
-        text.get_text() != "C"
-        for track_ax in schematic_ax.child_axes
-        for text in track_ax.texts
-    )
-
-    def _axis_center_x(axis):
-        position = axis.get_position()
-        return position.x0 + position.width / 2.0
 
     def _axis_center_y(axis):
         position = axis.get_position()
         return position.y0 + position.height / 2.0
 
-    assert _axis_center_x(panel_g_top_dark_ax) == pytest.approx(
-        _axis_center_x(panel_g_bottom_dark_ax)
-    )
-    assert _axis_center_x(panel_g_top_dark_ax) == pytest.approx(
-        schematic_position.x0
-        + schematic_position.width * PANEL_G_DARK_TRACK_CENTER_X
-    )
-    assert _axis_center_x(panel_g_top_light_ax) == pytest.approx(
-        _axis_center_x(panel_g_bottom_light_ax)
-    )
-    assert _axis_center_x(panel_g_top_light_ax) == pytest.approx(
-        schematic_position.x0
-        + schematic_position.width * PANEL_G_LIGHT_TRACK_CENTER_X
-    )
-    assert _axis_center_x(panel_g_segment_modulation_ax) == pytest.approx(
-        schematic_position.x0
-        + schematic_position.width * PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X
-    )
-    assert _axis_center_x(panel_g_basis_ax) == pytest.approx(
-        0.5
-        * (
-            _axis_center_x(panel_g_top_dark_ax)
-            + _axis_center_x(panel_g_top_light_ax)
-        )
-    )
-    basis_position = panel_g_basis_ax.get_position()
-    assert basis_position.height == pytest.approx(
-        schematic_position.height * PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT
-    )
-    assert basis_position.width == pytest.approx(
-        schematic_position.width * PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH
-    )
-    basis_visual_center_y = basis_position.y0 + basis_position.height * 0.5 * (
-        PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM
-        + PANEL_G_INDEPENDENT_BASIS_ICON_TOP
-    )
-    assert basis_visual_center_y == pytest.approx(_axis_center_y(panel_g_top_dark_ax))
-    assert _axis_center_y(panel_g_bottom_dark_ax) < (
-        _axis_center_y(panel_g_top_dark_ax)
-        - schematic_ax.get_position().height * 0.45
-    )
-    assert panel_g_basis_ax.lines[0].get_xdata().tolist() == pytest.approx([0.21, 0.79])
-    assert panel_g_basis_ax.lines[1].get_xdata().tolist() == pytest.approx(
-        [PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X] * 2
-    )
-    assert panel_g_basis_ax.lines[2].get_xdata().tolist() == pytest.approx(
-        [PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X] * 2
-    )
-    assert PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X == pytest.approx(0.43)
-    assert PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X == pytest.approx(0.57)
-    assert (
-        PANEL_G_INDEPENDENT_BASIS_ICON_RIGHT_X
-        - PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X
-    ) == pytest.approx(0.14)
-    assert panel_g_basis_ax.lines[1].get_ydata().tolist() == pytest.approx(
-        [PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM, PANEL_G_INDEPENDENT_BASIS_ICON_TOP]
-    )
-    assert panel_g_basis_ax.lines[2].get_ydata().tolist() == pytest.approx(
-        [PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM, PANEL_G_INDEPENDENT_BASIS_ICON_TOP]
-    )
-    dark_basis_patches = [
-        patch
-        for track_ax in (panel_g_top_dark_ax, panel_g_bottom_dark_ax)
-        for patch in track_ax.patches
-        if isinstance(patch, Circle)
-    ]
-    assert len(dark_basis_patches) > 0
-    assert all(
-        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
-        for patch in dark_basis_patches
-    )
-    assert all(
-        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
-        for patch in dark_basis_patches
-    )
-    shared_light_basis_patches = [
-        patch
-        for patch in panel_g_bottom_light_ax.patches
-        if isinstance(patch, Circle)
-    ]
-    assert len(shared_light_basis_patches) > 0
-    assert all(
-        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
-        for patch in shared_light_basis_patches
-    )
-    assert all(
-        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
-        for patch in shared_light_basis_patches
-    )
-    segment_modulation_ovals = [
-        patch
-        for patch in panel_g_segment_modulation_ax.patches
-        if type(patch) is Ellipse
-    ]
-    shared_light_ovals = [
-        patch
-        for patch in panel_g_bottom_light_ax.patches
-        if type(patch) is Ellipse
-    ]
-    assert len(segment_modulation_ovals) == 3
-    assert len(shared_light_ovals) == 3
-    track_patches = [
-        patch
-        for track_ax in schematic_ax.child_axes
-        for patch in track_ax.patches
-        if isinstance(patch, Polygon)
-    ]
-    assert len(track_patches) == 5
-    panel_g_track_axes = [
-        schematic_ax.child_axes[index]
-        for index in (0, 2, 3, 4, 5)
-    ]
-    assert all(
-        any(line.get_color() == PANEL_G_ARROW_COLOR for line in track_ax.lines)
-        for track_ax in panel_g_track_axes
-    )
-    assert len(axes[1].child_axes) == 4
-    schematic_h_ax, delta_h_ax, first_example_h_ax, second_example_h_ax = axes[1].child_axes
-    parent_h_position = axes[1].get_position()
+    assert len(axis.child_axes) == 4
+    schematic_h_ax, delta_h_ax, first_example_h_ax, second_example_h_ax = axis.child_axes
+    parent_h_position = axis.get_position()
     schematic_h_position = schematic_h_ax.get_position()
     delta_h_position = delta_h_ax.get_position()
     assert schematic_h_position.width / parent_h_position.width == pytest.approx(
@@ -1972,13 +1563,9 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         for patch in panel_h_track_patches
     ] == pytest.approx([PANEL_H_SCHEMATIC_TRACK_LINEWIDTH] * 5)
     assert all(
-        any(line.get_color() == PANEL_G_ARROW_COLOR for line in track_ax.lines)
+        any(line.get_color() == GLM_TRAJECTORY_ARROW_COLOR for line in track_ax.lines)
         for track_ax in schematic_h_ax.child_axes
     )
-    def _axis_center_y(axis):
-        position = axis.get_position()
-        return position.y0 + position.height / 2.0
-
     panel_h_independent_train_ax = schematic_h_ax.child_axes[0]
     panel_h_segment_modulation_ax = schematic_h_ax.child_axes[2]
     panel_h_dark_ax = schematic_h_ax.child_axes[3]
@@ -1995,7 +1582,7 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
     ]
     assert len(panel_h_dark_basis_patches) > 0
     assert all(
-        patch.get_facecolor() == pytest.approx(to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7))
+        patch.get_facecolor() == pytest.approx(to_rgba(GLM_BASIS_DARK_COLOR, 0.7))
         for patch in panel_h_dark_basis_patches
     )
     panel_h_shared_light_basis_patches = [
@@ -2008,7 +1595,7 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         patch
         for patch in panel_h_shared_light_basis_patches
         if patch.get_facecolor() == pytest.approx(
-            to_rgba(PANEL_G_BASIS_DARK_COLOR, 0.7)
+            to_rgba(GLM_BASIS_DARK_COLOR, 0.7)
         )
     ]
     shared_light_unfilled_basis_patches = [
@@ -2066,8 +1653,8 @@ def test_plot_glm_panels_use_model_schematic_and_swap_delta() -> None:
         assert shared_better_text.get_horizontalalignment() == "right"
         assert independent_better_text.get_fontsize() == pytest.approx(4.0)
         assert shared_better_text.get_fontsize() == pytest.approx(4.0)
-        assert independent_better_text.get_color() == PANEL_G_MODEL_COLORS["visual"]
-        assert shared_better_text.get_color() == PANEL_G_MODEL_COLORS[
+        assert independent_better_text.get_color() == GLM_MODEL_COLORS["visual"]
+        assert shared_better_text.get_color() == GLM_MODEL_COLORS[
             "task_segment_bump"
         ]
         summary_text = next(text for text in child_texts if "% >0\nmed." in text.get_text())
@@ -2177,13 +1764,10 @@ def test_default_cli_matches_manuscript_figure_format() -> None:
     assert DEFAULT_PANEL_AB_HEIGHT_MM == pytest.approx(
         figure_3_module.DEFAULT_HEATMAP_HEIGHT_MM
     )
-    assert DEFAULT_PANEL_A_HEIGHT_MM == pytest.approx(DEFAULT_PANEL_AB_HEIGHT_MM)
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_PANEL_AB_HEIGHT_MM + DEFAULT_PANEL_DEF_HEIGHT_MM
     )
     assert DEFAULT_PANEL_DEF_HEIGHT_MM == pytest.approx(30.0)
-    assert DEFAULT_PANEL_GH_HEIGHT_MM == pytest.approx(42.0)
-    assert PANEL_GH_WIDTH_RATIOS == pytest.approx((0.4, 0.6))
     assert DEFAULT_PANEL_B_WIDTH_FRACTION == pytest.approx(0.7)
-    assert DEFAULT_PANEL_C_WIDTH_FRACTION == pytest.approx(0.3)
+    assert DEFAULT_PANEL_A_WIDTH_FRACTION == pytest.approx(0.3)
     assert PANEL_B_HEATMAP_CMAP == "viridis"
