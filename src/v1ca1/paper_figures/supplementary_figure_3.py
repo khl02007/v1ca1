@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Generate Supplementary Figure 3 heatmap and per-animal Figure 3C-F panels."""
+"""Generate Supplementary Figure 3 cvPCA and motor-control panels."""
 
 import argparse
 import hashlib
@@ -25,8 +25,6 @@ from v1ca1.paper_figures.datasets import (
 )
 from v1ca1.paper_figures.figure_1 import (
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
-    HEATMAP_COLORBAR_LABELPAD,
-    HEATMAP_COLORBAR_LABEL_FONTSIZE,
     PANEL_D_HEATMAP_CMAP,
     align_panel_values_to_unit_order,
     build_normalized_position_bins,
@@ -43,31 +41,24 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_3_WIDTH_MM,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
-    DEFAULT_PANEL_BC_HEIGHT_MM,
+    DEFAULT_PANEL_AB_HEIGHT_MM,
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_REGIONS,
     DEFAULT_SIGMA_BINS,
     FIGURE_FORMATS,
     PANEL_B_LINEAR_POSITION_ORIENTATION,
     PANEL_B_TRAJECTORY_TYPES,
-    PANEL_DEF_WIDTH_RATIOS,
-    PANEL_C_COLORBAR_PAD,
-    PANEL_C_NEURON_SCALE_BAR_X,
     add_centered_axis_text,
     add_segment_boundary_lines,
     build_output_path,
-    draw_neuron_scale_bar,
     get_dark_epoch,
     get_light_epoch,
-    load_panel_d_similarity_table,
-    load_panel_e_encoding_delta_table,
-    load_panel_f_decoding_error_table,
     parse_dataset_id,
-    plot_panel_d_similarity,
-    plot_panel_e_encoding_delta_histogram,
-    plot_panel_f_decoding_error,
     plot_pooled_heatmap_grid,
-    setup_light_heatmap_panel,
+)
+from v1ca1.motor.compare_epoch_motor_behavior import (
+    MOTOR_VARIABLES,
+    VARIABLE_LABELS,
 )
 from v1ca1.raster.plot_place_field_heatmap import (
     build_linear_position_by_trajectory,
@@ -77,6 +68,7 @@ from v1ca1.raster.plot_place_field_heatmap import (
 )
 from v1ca1.paper_figures.style import (
     COMPACT_HISTOGRAM_KWARGS,
+    EPOCH_TYPE_COLORS,
     NEUTRAL_COLORS,
     TRAJECTORY_COLORS,
     apply_paper_style,
@@ -88,29 +80,61 @@ from v1ca1.paper_figures.style import (
 
 DEFAULT_OUTPUT_NAME = "supplementary_figure_3"
 DEFAULT_FIGURE_WIDTH_MM = FIGURE_3_WIDTH_MM
-DEFAULT_SECTION_SPACER_MM = 3.0
-DEFAULT_BOTTOM_SECTION_SPACER_MM = 14.0
-DEFAULT_REORDERED_HEATMAP_HEIGHT_MM = DEFAULT_PANEL_BC_HEIGHT_MM
-DEFAULT_PER_ANIMAL_GRID_HEIGHT_MM = FIGURE_3_HEIGHT_MM
-DEFAULT_DARK_LIGHT_CORRELATION_HEIGHT_MM = 22.0
-DEFAULT_STABILITY_OVERLAY_HEIGHT_MM = 22.0
+DEFAULT_SECTION_SPACER_MM = 10.0
+DEFAULT_BOTTOM_SECTION_SPACER_MM = 22.0
+PANEL_A_CV_PCA_SIZE_FRACTION = 0.40
+DEFAULT_REORDERED_HEATMAP_HEIGHT_MM = (
+    DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
+)
+DEFAULT_MOTOR_GRID_HEIGHT_MM = FIGURE_3_HEIGHT_MM + 55.0
+DEFAULT_MOTOR_SUMMARY_HEIGHT_MM = 35.0
 DEFAULT_FIGURE_HEIGHT_MM = (
     DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
     + DEFAULT_SECTION_SPACER_MM
-    + DEFAULT_PER_ANIMAL_GRID_HEIGHT_MM
+    + DEFAULT_MOTOR_GRID_HEIGHT_MM
     + DEFAULT_BOTTOM_SECTION_SPACER_MM
-    + DEFAULT_DARK_LIGHT_CORRELATION_HEIGHT_MM
-    + DEFAULT_STABILITY_OVERLAY_HEIGHT_MM
+    + DEFAULT_MOTOR_SUMMARY_HEIGHT_MM
 )
-ANIMAL_ROW_LABEL_FONTSIZE = 5.2
-PER_ANIMAL_COLUMN_WIDTH_RATIOS = (
-    PANEL_DEF_WIDTH_RATIOS[0],
-    PANEL_DEF_WIDTH_RATIOS[0],
-    PANEL_DEF_WIDTH_RATIOS[1],
-    PANEL_DEF_WIDTH_RATIOS[2],
+MOTOR_GRID_HSPACE = 0.28
+MOTOR_GRID_WSPACE = 0.18
+MOTOR_SUMMARY_GRID_WSPACE = 0.24
+MOTOR_PANEL_ANIMAL_NAME = "L14"
+MOTOR_PANEL_LIGHT_EPOCH = "02_r1"
+MOTOR_PANEL_RELATIVE_PATH = Path("motor") / "epoch_motor_progression_summary.parquet"
+MOTOR_PANEL_COLUMNS = (
+    "epoch",
+    "trajectory_type",
+    "variable",
+    "progression_bin_index",
+    "progression_bin_center",
+    "median",
+    "q25",
+    "q75",
 )
-PER_ANIMAL_GRID_HSPACE = 0.22
-PER_ANIMAL_GRID_WSPACE = 0.20
+MOTOR_PANEL_EPOCH_COLORS = {
+    "dark": EPOCH_TYPE_COLORS["dark"],
+    "light": EPOCH_TYPE_COLORS["light"],
+}
+MOTOR_SUMMARY_ANIMAL_COLORS = {
+    "L12": "#4C78A8",
+    "L14": "#66C2A5",
+    "L15": "#FC8D62",
+    "L19": "#E78AC3",
+}
+MOTOR_PANEL_TRAJECTORY_LABELS = {
+    "right_to_center": "R -> C",
+    "center_to_left": "C -> L",
+    "left_to_center": "L -> C",
+    "center_to_right": "C -> R",
+}
+MOTOR_PANEL_VARIABLE_LABELS = {
+    "speed_cm_s": "Speed\n(cm/s)",
+    "acceleration_cm_s2": "Accel.\n(cm/s2)",
+    "head_direction_deg": "Head dir.\n(deg)",
+    "head_angular_velocity_deg_s": "Head ang. vel.\n(deg/s)",
+    "head_angular_acceleration_deg_s2": "Head ang. accel.\n(deg/s2)",
+    "head_angular_speed_deg_s": "Head ang. speed\n(deg/s)",
+}
 PANEL_TITLE_FONTSIZE = 8.0
 STABILITY_FILTERED_SIMILARITY_MIN_CORRELATION = 0.5
 DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
@@ -160,6 +184,21 @@ REORDERED_HEATMAP_TITLE = "Fig. 1D cells in light"
 REORDERED_HEATMAP_CMAP = PANEL_D_HEATMAP_CMAP
 REORDERED_HEATMAP_VMAX = 1.0
 REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION = 0.5
+PANEL_A_CV_PCA_REGION = "v1"
+PANEL_A_CV_PCA_LIGHT_EPOCH = "06_r3"
+PANEL_A_CV_PCA_TITLE = "V1 cvPCA dimensionality"
+PANEL_A_CV_PCA_RELATIVE_DIR = Path("signal_dim") / "cv_pca"
+PANEL_A_CV_PCA_COLUMNS = (
+    "animal_name",
+    "date",
+    "region",
+    "dark_epoch",
+    "light_epoch",
+    "source_condition",
+    "target_condition",
+    "n_units",
+    "source_cv_participation_ratio",
+)
 PANEL_A_FIGURE_1D_ORDER_MODE = "figure_1d_order"
 PANEL_A_ORDER_MODES = (
     PANEL_A_FIGURE_1D_ORDER_MODE,
@@ -204,11 +243,618 @@ def set_panel_a_dot_alpha(ax: object) -> None:
         collection.set_alpha(PANEL_A_SCATTER_ALPHA)
 
 
+def build_panel_a_cv_pca_summary_path(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+) -> Path:
+    """Return the hardcoded V1 light-vs-registered-dark cvPCA summary path."""
+    stem = (
+        f"{PANEL_A_CV_PCA_REGION}_{PANEL_A_CV_PCA_LIGHT_EPOCH}_vs_"
+        f"{dark_epoch}_cv_pca_summary.parquet"
+    )
+    return (
+        Path(data_root)
+        / str(animal_name)
+        / str(date)
+        / PANEL_A_CV_PCA_RELATIVE_DIR
+        / stem
+    )
+
+
 def _require_table_columns(table: Any, path: Path, columns: Sequence[str]) -> None:
     """Validate that a loaded table has the required columns."""
     missing = [column for column in columns if column not in table.columns]
     if missing:
         raise ValueError(f"Table {path} is missing columns {missing!r}.")
+
+
+def load_panel_a_cv_pca_participation_ratio_table(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+) -> Any:
+    """Load paired dark/light cvPCA participation ratios for Supplementary Figure 3A."""
+    import pandas as pd
+
+    missing_paths = []
+    rows: list[dict[str, Any]] = []
+    for dataset in datasets:
+        animal_name, date, dark_epoch = normalize_dataset_id(dataset)
+        path = build_panel_a_cv_pca_summary_path(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+            dark_epoch=dark_epoch,
+        )
+        if not path.exists():
+            missing_paths.append(
+                f"{animal_name} {date} {PANEL_A_CV_PCA_REGION} "
+                f"{PANEL_A_CV_PCA_LIGHT_EPOCH} vs {dark_epoch}: {path}"
+            )
+            continue
+
+        table = pd.read_parquet(path)
+        _require_table_columns(table, path, PANEL_A_CV_PCA_COLUMNS)
+        for condition in ("dark", "light"):
+            matches = table.loc[
+                (table["source_condition"] == condition)
+                & (table["target_condition"] == condition)
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Expected one {condition!r} within-condition cvPCA row in "
+                    f"{path}, found {len(matches)}."
+                )
+            match = matches.iloc[0]
+            participation_ratio = float(match["source_cv_participation_ratio"])
+            if not np.isfinite(participation_ratio):
+                raise ValueError(
+                    f"Participation ratio for {condition!r} in {path} is not finite."
+                )
+            rows.append(
+                {
+                    "animal_name": animal_name,
+                    "date": date,
+                    "region": PANEL_A_CV_PCA_REGION,
+                    "dark_epoch": dark_epoch,
+                    "light_epoch": PANEL_A_CV_PCA_LIGHT_EPOCH,
+                    "condition": condition,
+                    "participation_ratio": participation_ratio,
+                    "n_units": int(match["n_units"]),
+                    "source_path": path,
+                }
+            )
+
+    if missing_paths:
+        message = "\n".join(f"- {path}" for path in missing_paths)
+        raise FileNotFoundError(
+            "Missing Supplementary Figure 3A cvPCA summary files:\n" + message
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_panel_a_cv_pca_participation_ratios(ax: object, table: Any) -> None:
+    """Plot paired dark/light cvPCA participation ratios for manuscript sessions."""
+    condition_positions = {"dark": 0.0, "light": 1.0}
+    dark_color = EPOCH_TYPE_COLORS["dark"]
+    light_color = EPOCH_TYPE_COLORS["light"]
+    for (_animal_name, _date), session_table in table.groupby(
+        ["animal_name", "date"],
+        sort=False,
+    ):
+        values = {}
+        for condition in ("dark", "light"):
+            condition_values = session_table.loc[
+                session_table["condition"] == condition,
+                "participation_ratio",
+            ].to_numpy(dtype=float)
+            if condition_values.size != 1:
+                raise ValueError(
+                    "Expected one participation ratio per condition for each "
+                    f"session, found {condition_values.size} for {condition!r}."
+                )
+            values[condition] = float(condition_values[0])
+        ax.plot(
+            [condition_positions["dark"], condition_positions["light"]],
+            [values["dark"], values["light"]],
+            color="0.58",
+            linewidth=0.85,
+            alpha=0.85,
+            zorder=1,
+        )
+        ax.scatter(
+            [condition_positions["dark"], condition_positions["light"]],
+            [values["dark"], values["light"]],
+            color=[dark_color, light_color],
+            edgecolor="black",
+            linewidth=0.35,
+            s=16,
+            zorder=2,
+        )
+
+    values = table["participation_ratio"].to_numpy(dtype=float)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size:
+        value_min = float(np.min(finite_values))
+        value_max = float(np.max(finite_values))
+        value_range = value_max - value_min
+        pad = max(0.08 * value_range, 0.08)
+        ax.set_ylim(value_min - pad, value_max + pad)
+    ax.set_xlim(-0.35, 1.35)
+    ax.set_xticks(
+        [condition_positions["dark"], condition_positions["light"]],
+        ["Dark", "Light"],
+    )
+    ax.set_ylabel("Participation ratio")
+    ax.set_title(PANEL_A_CV_PCA_TITLE, fontsize=PANEL_TITLE_FONTSIZE, pad=2)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def build_motor_progression_summary_path(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+) -> Path:
+    """Return the motor progression summary path for one data set."""
+    return Path(data_root) / str(animal_name) / str(date) / MOTOR_PANEL_RELATIVE_PATH
+
+
+def load_panel_b_motor_progression_table(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    light_epoch: str = MOTOR_PANEL_LIGHT_EPOCH,
+) -> Any:
+    """Load motor progression summaries for the Supplementary Figure 3B grid."""
+    import pandas as pd
+
+    missing_paths = []
+    missing_entries = []
+    tables = []
+    for dataset in datasets:
+        animal_name, date, dark_epoch = normalize_dataset_id(dataset)
+        path = build_motor_progression_summary_path(
+            data_root=data_root,
+            animal_name=animal_name,
+            date=date,
+        )
+        if not path.exists():
+            missing_paths.append(f"{animal_name} {date}: {path}")
+            continue
+
+        table = pd.read_parquet(path)
+        _require_table_columns(table, path, MOTOR_PANEL_COLUMNS)
+        table = table.copy()
+        for column in ("epoch", "trajectory_type", "variable"):
+            table[column] = table[column].astype(str)
+
+        required_epochs = {"dark": str(dark_epoch), "light": str(light_epoch)}
+        for epoch_type, epoch in required_epochs.items():
+            epoch_table = table.loc[table["epoch"] == epoch]
+            if epoch_table.empty:
+                missing_entries.append(
+                    f"{animal_name} {date}: missing {epoch_type} epoch {epoch!r}"
+                )
+                continue
+            for variable_name in MOTOR_VARIABLES:
+                for trajectory_type in PANEL_B_TRAJECTORY_TYPES:
+                    has_rows = np.any(
+                        (epoch_table["variable"] == str(variable_name))
+                        & (epoch_table["trajectory_type"] == str(trajectory_type))
+                    )
+                    if not has_rows:
+                        missing_entries.append(
+                            f"{animal_name} {date}: missing {epoch!r} "
+                            f"{variable_name} {trajectory_type}"
+                        )
+
+        selected = table.loc[
+            table["epoch"].isin(required_epochs.values())
+            & table["variable"].isin(MOTOR_VARIABLES)
+            & table["trajectory_type"].isin(PANEL_B_TRAJECTORY_TYPES)
+        ].copy()
+        selected["animal_name"] = animal_name
+        selected["date"] = date
+        selected["dark_epoch"] = dark_epoch
+        selected["light_epoch"] = str(light_epoch)
+        selected["dataset_label"] = f"{animal_name} {date}"
+        selected["epoch_type"] = np.where(
+            selected["epoch"].to_numpy(dtype=str) == str(dark_epoch),
+            "dark",
+            "light",
+        )
+        selected["source_path"] = path
+        tables.append(selected)
+
+    if missing_paths:
+        message = "\n".join(f"- {path}" for path in missing_paths)
+        raise FileNotFoundError(
+            "Missing Supplementary Figure 3B motor progression files:\n" + message
+        )
+    if missing_entries:
+        message = "\n".join(f"- {entry}" for entry in missing_entries)
+        raise ValueError(
+            "Motor progression summaries are incomplete for Supplementary Figure 3B:\n"
+            + message
+        )
+    if not tables:
+        raise ValueError("No motor progression tables were loaded for Supplementary Figure 3B.")
+    return pd.concat(tables, ignore_index=True)
+
+
+def _set_motor_panel_row_limits(axes: np.ndarray, table: Any) -> None:
+    """Apply one y-axis range per motor variable row."""
+    for row_index, variable_name in enumerate(MOTOR_VARIABLES):
+        values = table.loc[
+            table["variable"].astype(str) == str(variable_name),
+            ["q25", "median", "q75"],
+        ].to_numpy(dtype=float).ravel()
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        y_min = float(np.min(finite))
+        y_max = float(np.max(finite))
+        y_range = y_max - y_min
+        y_pad = max(0.06 * y_range, 1.0 if y_range == 0.0 else 0.0)
+        for ax in axes[row_index, :]:
+            ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+
+def plot_panel_b_motor_progression_grid(
+    axes: np.ndarray,
+    table: Any,
+    *,
+    datasets: Sequence[DatasetId],
+) -> None:
+    """Plot one animal's median motor variables and IQR over normalized position."""
+    from matplotlib.lines import Line2D
+
+    axes = np.asarray(axes, dtype=object)
+    expected_shape = (len(MOTOR_VARIABLES), len(PANEL_B_TRAJECTORY_TYPES))
+    if axes.shape != expected_shape:
+        raise ValueError(f"Expected axes shape {expected_shape}, got {axes.shape}.")
+
+    dataset_order = []
+    for dataset in datasets:
+        normalized_dataset = normalize_dataset_id(dataset)
+        if str(normalized_dataset[0]) == MOTOR_PANEL_ANIMAL_NAME:
+            dataset_order.append(normalized_dataset)
+    if not dataset_order:
+        raise ValueError(
+            "Supplementary Figure 3B is configured to plot "
+            f"{MOTOR_PANEL_ANIMAL_NAME}, but no matching dataset was supplied."
+        )
+
+    panel_table = table.loc[
+        table["animal_name"].astype(str) == MOTOR_PANEL_ANIMAL_NAME
+    ].copy()
+    if panel_table.empty:
+        raise ValueError(
+            "Supplementary Figure 3B motor table has no rows for "
+            f"{MOTOR_PANEL_ANIMAL_NAME}."
+        )
+    epoch_labels = {"dark": "Dark", "light": "Light"}
+
+    for row_index, variable_name in enumerate(MOTOR_VARIABLES):
+        variable_table = panel_table.loc[
+            panel_table["variable"].astype(str) == str(variable_name)
+        ]
+        for column_index, trajectory_type in enumerate(PANEL_B_TRAJECTORY_TYPES):
+            ax = axes[row_index, column_index]
+            trajectory_table = variable_table.loc[
+                variable_table["trajectory_type"].astype(str) == str(trajectory_type)
+            ]
+            for animal_name, date, _dark_epoch in dataset_order:
+                dataset_table = trajectory_table.loc[
+                    (trajectory_table["animal_name"].astype(str) == str(animal_name))
+                    & (trajectory_table["date"].astype(str) == str(date))
+                ]
+                for epoch_type in ("dark", "light"):
+                    epoch_table = dataset_table.loc[
+                        dataset_table["epoch_type"].astype(str) == epoch_type
+                    ].sort_values("progression_bin_index", kind="stable")
+                    if epoch_table.empty:
+                        continue
+                    color = MOTOR_PANEL_EPOCH_COLORS[epoch_type]
+                    x_values = epoch_table["progression_bin_center"].to_numpy(dtype=float)
+                    q25_values = epoch_table["q25"].to_numpy(dtype=float)
+                    q75_values = epoch_table["q75"].to_numpy(dtype=float)
+                    ax.fill_between(
+                        x_values,
+                        q25_values,
+                        q75_values,
+                        color=color,
+                        alpha=0.16,
+                        linewidth=0,
+                    )
+                    ax.plot(
+                        x_values,
+                        epoch_table["median"].to_numpy(dtype=float),
+                        color=color,
+                        linewidth=0.9,
+                        alpha=0.90,
+                    )
+
+            ax.set_xlim(0.0, 1.0)
+            ax.grid(True, alpha=0.18, linewidth=0.4)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            if row_index == 0:
+                ax.set_title(
+                    MOTOR_PANEL_TRAJECTORY_LABELS.get(str(trajectory_type), str(trajectory_type)),
+                    fontsize=6.0,
+                    pad=1.5,
+                )
+            if column_index == 0:
+                ax.set_ylabel(
+                    MOTOR_PANEL_VARIABLE_LABELS.get(
+                        str(variable_name),
+                        VARIABLE_LABELS.get(str(variable_name), str(variable_name)),
+                    ),
+                    fontsize=5.2,
+                )
+            else:
+                ax.set_ylabel("")
+                ax.tick_params(axis="y", labelleft=False)
+            if row_index == len(MOTOR_VARIABLES) - 1:
+                ax.set_xlabel("Norm. position", fontsize=5.4)
+            else:
+                ax.set_xlabel("")
+                ax.tick_params(axis="x", labelbottom=False)
+            ax.tick_params(axis="both", labelsize=4.8, length=2.0)
+
+    _set_motor_panel_row_limits(axes, panel_table)
+
+    epoch_handles = [
+        Line2D([0], [0], color=MOTOR_PANEL_EPOCH_COLORS["dark"], linewidth=1.0),
+        Line2D([0], [0], color=MOTOR_PANEL_EPOCH_COLORS["light"], linewidth=1.0),
+    ]
+    axes[0, 0].legend(
+        epoch_handles,
+        [epoch_labels["dark"], epoch_labels["light"]],
+        frameon=False,
+        fontsize=4.8,
+        loc="upper left",
+        handlelength=1.5,
+        borderpad=0.1,
+        labelspacing=0.2,
+    )
+
+
+def _motor_summary_animal_color(animal_name: str) -> str:
+    """Return a stable color for one motor-summary data set."""
+    return MOTOR_SUMMARY_ANIMAL_COLORS.get(str(animal_name), "0.35")
+
+
+def compute_motor_profile_correlation(dark_values: np.ndarray, light_values: np.ndarray) -> float:
+    """Return the Pearson correlation between paired dark and light motor profiles."""
+    dark_values = np.asarray(dark_values, dtype=float).reshape(-1)
+    light_values = np.asarray(light_values, dtype=float).reshape(-1)
+    if dark_values.shape != light_values.shape:
+        raise ValueError(
+            "Dark and light motor profiles must have matching shapes. "
+            f"Got {dark_values.shape} and {light_values.shape}."
+        )
+    finite_mask = np.isfinite(dark_values) & np.isfinite(light_values)
+    if np.count_nonzero(finite_mask) < 2:
+        return float("nan")
+    dark_finite = dark_values[finite_mask]
+    light_finite = light_values[finite_mask]
+    if np.nanstd(dark_finite) <= 0.0 or np.nanstd(light_finite) <= 0.0:
+        return float("nan")
+    return float(np.corrcoef(dark_finite, light_finite)[0, 1])
+
+
+def build_panel_c_motor_profile_correlation_table(
+    table: Any,
+    *,
+    datasets: Sequence[DatasetId],
+) -> Any:
+    """Summarize dark-light motor profile correlations by data set and trajectory."""
+    import pandas as pd
+
+    required_columns = (
+        "animal_name",
+        "date",
+        "dark_epoch",
+        "light_epoch",
+        "epoch_type",
+        "trajectory_type",
+        "variable",
+        "progression_bin_index",
+        "median",
+    )
+    _require_table_columns(table, Path("motor_progression_table"), required_columns)
+
+    rows: list[dict[str, Any]] = []
+    for dataset in datasets:
+        animal_name, date, _dark_epoch = normalize_dataset_id(dataset)
+        dataset_table = table.loc[
+            (table["animal_name"].astype(str) == str(animal_name))
+            & (table["date"].astype(str) == str(date))
+        ]
+        for variable_name in MOTOR_VARIABLES:
+            variable_table = dataset_table.loc[
+                dataset_table["variable"].astype(str) == str(variable_name)
+            ]
+            for trajectory_type in PANEL_B_TRAJECTORY_TYPES:
+                trajectory_table = variable_table.loc[
+                    variable_table["trajectory_type"].astype(str) == str(trajectory_type)
+                ]
+                dark_table = trajectory_table.loc[
+                    trajectory_table["epoch_type"].astype(str) == "dark"
+                ][["progression_bin_index", "median"]]
+                light_table = trajectory_table.loc[
+                    trajectory_table["epoch_type"].astype(str) == "light"
+                ][["progression_bin_index", "median"]]
+                paired = pd.merge(
+                    dark_table,
+                    light_table,
+                    on="progression_bin_index",
+                    suffixes=("_dark", "_light"),
+                    how="inner",
+                ).sort_values("progression_bin_index", kind="stable")
+                correlation = compute_motor_profile_correlation(
+                    paired["median_dark"].to_numpy(dtype=float),
+                    paired["median_light"].to_numpy(dtype=float),
+                )
+                dark_epoch = (
+                    dataset_table["dark_epoch"].astype(str).iloc[0]
+                    if not dataset_table.empty
+                    else ""
+                )
+                light_epoch = (
+                    dataset_table["light_epoch"].astype(str).iloc[0]
+                    if not dataset_table.empty
+                    else ""
+                )
+                rows.append(
+                    {
+                        "animal_name": str(animal_name),
+                        "date": str(date),
+                        "dark_epoch": dark_epoch,
+                        "light_epoch": light_epoch,
+                        "trajectory_type": str(trajectory_type),
+                        "variable": str(variable_name),
+                        "correlation": correlation,
+                        "n_bins": int(len(paired)),
+                    }
+                )
+
+    return pd.DataFrame.from_records(
+        rows,
+        columns=[
+            "animal_name",
+            "date",
+            "dark_epoch",
+            "light_epoch",
+            "trajectory_type",
+            "variable",
+            "correlation",
+            "n_bins",
+        ],
+    )
+
+
+def plot_panel_c_motor_profile_correlations(
+    axes: Sequence[Any],
+    table: Any,
+    *,
+    datasets: Sequence[DatasetId],
+) -> None:
+    """Plot dark-light motor profile correlations for each data set."""
+    from matplotlib.lines import Line2D
+
+    axes = np.asarray(axes, dtype=object).reshape(-1)
+    expected_count = len(PANEL_B_TRAJECTORY_TYPES)
+    if axes.shape != (expected_count,):
+        raise ValueError(f"Expected {expected_count} axes, got {axes.shape}.")
+
+    animal_order = list(
+        dict.fromkeys(str(normalize_dataset_id(dataset)[0]) for dataset in datasets)
+    )
+    y_positions = np.arange(len(MOTOR_VARIABLES), dtype=float)
+    if len(animal_order) <= 1:
+        jitter_values = np.zeros(len(animal_order), dtype=float)
+    else:
+        jitter_values = np.linspace(-0.18, 0.18, len(animal_order))
+    y_jitter_by_animal = {
+        animal_name: jitter
+        for animal_name, jitter in zip(animal_order, jitter_values, strict=True)
+    }
+
+    for column_index, trajectory_type in enumerate(PANEL_B_TRAJECTORY_TYPES):
+        ax = axes[column_index]
+        trajectory_table = table.loc[
+            table["trajectory_type"].astype(str) == str(trajectory_type)
+        ]
+        for variable_index, variable_name in enumerate(MOTOR_VARIABLES):
+            variable_table = trajectory_table.loc[
+                trajectory_table["variable"].astype(str) == str(variable_name)
+            ]
+            for animal_name in animal_order:
+                animal_table = variable_table.loc[
+                    variable_table["animal_name"].astype(str) == animal_name
+                ]
+                if animal_table.empty:
+                    continue
+                value = float(animal_table["correlation"].iloc[0])
+                if not np.isfinite(value):
+                    continue
+                ax.scatter(
+                    value,
+                    float(variable_index) + y_jitter_by_animal[animal_name],
+                    s=14,
+                    color=_motor_summary_animal_color(animal_name),
+                    edgecolors="white",
+                    linewidths=0.25,
+                    alpha=0.95,
+                    zorder=3,
+                )
+
+        ax.axvline(0.0, color="0.65", linewidth=0.6, linestyle="--", zorder=1)
+        ax.axvline(1.0, color="0.80", linewidth=0.5, zorder=1)
+        ax.set_xlim(-1.05, 1.05)
+        ax.set_ylim(-0.6, len(MOTOR_VARIABLES) - 0.4)
+        ax.invert_yaxis()
+        ax.set_xticks([-1.0, 0.0, 1.0])
+        ax.set_title(
+            MOTOR_PANEL_TRAJECTORY_LABELS.get(str(trajectory_type), str(trajectory_type)),
+            fontsize=6.0,
+            pad=1.5,
+        )
+        ax.grid(True, axis="x", alpha=0.18, linewidth=0.4)
+        ax.grid(True, axis="y", alpha=0.10, linewidth=0.35)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(axis="both", labelsize=4.8, length=2.0)
+        ax.set_xlabel("Profile corr.", fontsize=5.4)
+        if column_index == 0:
+            ax.set_yticks(
+                y_positions,
+                [
+                    MOTOR_PANEL_VARIABLE_LABELS.get(
+                        str(variable_name),
+                        VARIABLE_LABELS.get(str(variable_name), str(variable_name)),
+                    ).replace("\n", " ")
+                    for variable_name in MOTOR_VARIABLES
+                ],
+            )
+            ax.set_ylabel("Motor variable", fontsize=5.4)
+        else:
+            ax.set_yticks(y_positions)
+            ax.tick_params(axis="y", labelleft=False)
+
+    animal_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            color=_motor_summary_animal_color(animal_name),
+            markeredgecolor="white",
+            markeredgewidth=0.25,
+            markersize=3.5,
+        )
+        for animal_name in animal_order
+    ]
+    axes[-1].legend(
+        animal_handles,
+        animal_order,
+        frameon=False,
+        fontsize=4.8,
+        loc="lower right",
+        bbox_to_anchor=(1.0, 1.02),
+        borderpad=0.1,
+        labelspacing=0.2,
+        handletextpad=0.3,
+    )
 
 
 def load_epoch_stable_units_by_tuning_stability(
@@ -1625,17 +2271,6 @@ def make_supplementary_figure_3(
     import matplotlib.pyplot as plt
 
     datasets = [normalize_dataset_id(dataset) for dataset in datasets]
-    animal_groups = group_datasets_by_animal(datasets)
-    figure_1d_cache_dir = (
-        Path(output_path).parent / "cache"
-        if figure_1d_cache_dir is None
-        else Path(figure_1d_cache_dir)
-    )
-    panel_a_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_a_cache_dir is None
-        else Path(panel_a_cache_dir)
-    )
 
     apply_paper_style()
     fig = plt.figure(
@@ -1652,15 +2287,14 @@ def make_supplementary_figure_3(
         return output_path
 
     outer_grid = fig.add_gridspec(
-        nrows=6,
+        nrows=5,
         ncols=1,
         height_ratios=[
             DEFAULT_REORDERED_HEATMAP_HEIGHT_MM,
             DEFAULT_SECTION_SPACER_MM,
-            DEFAULT_PER_ANIMAL_GRID_HEIGHT_MM,
+            DEFAULT_MOTOR_GRID_HEIGHT_MM,
             DEFAULT_BOTTOM_SECTION_SPACER_MM,
-            DEFAULT_DARK_LIGHT_CORRELATION_HEIGHT_MM,
-            DEFAULT_STABILITY_OVERLAY_HEIGHT_MM,
+            DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
         ],
         hspace=0.04,
         left=PANEL_A_GRID_LEFT,
@@ -1672,253 +2306,91 @@ def make_supplementary_figure_3(
         nrows=1,
         ncols=3,
         width_ratios=[
-            PANEL_A_HEATMAP_SIDE_SPACER_FRACTION,
-            PANEL_A_HEATMAP_WIDTH_FRACTION,
-            PANEL_A_HEATMAP_SIDE_SPACER_FRACTION,
+            (1.0 - PANEL_A_CV_PCA_SIZE_FRACTION) / 2.0,
+            PANEL_A_CV_PCA_SIZE_FRACTION,
+            (1.0 - PANEL_A_CV_PCA_SIZE_FRACTION) / 2.0,
         ],
         wspace=0.0,
     )
-
-    heatmap_panels = {
-        PANEL_A_FIGURE_1D_ORDER_MODE: setup_light_heatmap_panel(
-            fig,
-            panel_a_grid[0, 1],
-            regions=(region,),
-        ),
-    }
-    color_image = None
-    colorbar_axes = []
-    for order_mode, heatmap_panel in heatmap_panels.items():
-        image = plot_dark_ordered_light_heatmap_regions(
-            heatmap_panel["heatmap_axes"],
-            data_root=data_root,
-            datasets=datasets,
-            regions=(region,),
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-            position_bin_count=position_bin_count,
-            position_offset=position_offset,
-            speed_threshold_cm_s=speed_threshold_cm_s,
-            sigma_bins=sigma_bins,
-            figure_1d_cache_dir=figure_1d_cache_dir,
-            panel_a_cache_dir=panel_a_cache_dir,
-            refresh_panel_a_cache=refresh_panel_a_cache,
-            order_mode=order_mode,
-        )
-        if color_image is None and image is not None:
-            color_image = image
-        colorbar_axes.extend(heatmap_panel["heatmap_axes"].ravel().tolist())
-    if color_image is not None:
-        colorbar = fig.colorbar(
-            color_image,
-            ax=colorbar_axes,
-            shrink=0.24,
-            pad=PANEL_C_COLORBAR_PAD,
-            aspect=7,
-            ticks=[0.0, 1.0],
-        )
-        colorbar.ax.set_yticklabels(["0", "1"])
-        colorbar.ax.tick_params(length=2)
-        colorbar.set_label(
-            "Norm. FR",
-            rotation=90,
-            labelpad=HEATMAP_COLORBAR_LABELPAD,
-            fontsize=HEATMAP_COLORBAR_LABEL_FONTSIZE,
-        )
-    draw_neuron_scale_bar(
-        heatmap_panels[PANEL_A_FIGURE_1D_ORDER_MODE]["heatmap_axes"][-1, -1],
-        x=PANEL_C_NEURON_SCALE_BAR_X,
+    panel_a_axis = fig.add_subplot(panel_a_grid[0, 1])
+    panel_a_cv_pca_table = load_panel_a_cv_pca_participation_ratio_table(
+        data_root=data_root,
+        datasets=datasets,
     )
+    plot_panel_a_cv_pca_participation_ratios(panel_a_axis, panel_a_cv_pca_table)
 
     spacer_axis = fig.add_subplot(outer_grid[1, 0])
     spacer_axis.axis("off")
 
-    per_animal_grid = outer_grid[2, 0].subgridspec(
-        nrows=len(animal_groups),
-        ncols=len(PER_ANIMAL_COLUMN_WIDTH_RATIOS),
-        width_ratios=PER_ANIMAL_COLUMN_WIDTH_RATIOS,
-        hspace=PER_ANIMAL_GRID_HSPACE,
-        wspace=PER_ANIMAL_GRID_WSPACE,
+    motor_grid = outer_grid[2, 0].subgridspec(
+        nrows=len(MOTOR_VARIABLES),
+        ncols=len(PANEL_B_TRAJECTORY_TYPES),
+        hspace=MOTOR_GRID_HSPACE,
+        wspace=MOTOR_GRID_WSPACE,
     )
-    for row_index, (animal_name, animal_datasets) in enumerate(animal_groups.items()):
-        panel_d_axis = fig.add_subplot(per_animal_grid[row_index, 0])
-        similarity_table = load_panel_d_similarity_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_d_similarity(panel_d_axis, similarity_table)
-        set_panel_a_dot_alpha(panel_d_axis)
-        panel_d_axis.text(
-            0.04,
-            0.13,
-            format_animal_row_label(animal_name, animal_datasets),
-            ha="left",
-            va="bottom",
-            fontsize=ANIMAL_ROW_LABEL_FONTSIZE,
-            transform=panel_d_axis.transAxes,
-            color="0.25",
-        )
-
-        stable_similarity_axis = fig.add_subplot(per_animal_grid[row_index, 1])
-        stable_similarity_table = filter_panel_d_similarity_table_by_tuning_stability(
-            similarity_table,
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_d_similarity(stable_similarity_axis, stable_similarity_table)
-        set_panel_a_dot_alpha(stable_similarity_axis)
-
-        panel_e_axis = fig.add_subplot(per_animal_grid[row_index, 2])
-        encoding_delta_table = load_panel_e_encoding_delta_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_e_encoding_delta_histogram(panel_e_axis, encoding_delta_table)
-
-        panel_f_axis = fig.add_subplot(per_animal_grid[row_index, 3])
-        decoding_error_table = load_panel_f_decoding_error_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-        plot_panel_f_decoding_error(panel_f_axis, decoding_error_table)
-
-        if row_index < len(animal_groups) - 1:
-            hide_x_axis_labels(panel_d_axis)
-            hide_x_axis_labels(stable_similarity_axis)
-            hide_x_axis_labels(panel_e_axis)
-            for child_axis in panel_f_axis.child_axes:
-                hide_x_axis_labels(child_axis)
-
-        if row_index == 0:
-            panel_d_axis.set_title(
-                "Fig. 3C similarity",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            stable_similarity_axis.set_title(
-                "Fig. 3C stable similarity",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            panel_e_axis.set_title(
-                "Fig. 3D encoding",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            panel_f_axis.set_title(
-                "Fig. 3E decoding",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            label_axis(panel_d_axis, "B", x=-0.48, y=1.05)
-            label_axis(stable_similarity_axis, "C", x=-0.48, y=1.05)
-            label_axis(panel_e_axis, "D", x=-0.22, y=1.05)
-            label_axis(panel_f_axis, "E", x=-0.10, y=1.05)
+    motor_axes = np.asarray(
+        [
+            [
+                fig.add_subplot(motor_grid[row_index, column_index])
+                for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
+            ]
+            for row_index in range(len(MOTOR_VARIABLES))
+        ],
+        dtype=object,
+    )
+    motor_table = load_panel_b_motor_progression_table(
+        data_root=data_root,
+        datasets=datasets,
+    )
+    plot_panel_b_motor_progression_grid(
+        motor_axes,
+        motor_table,
+        datasets=datasets,
+    )
 
     bottom_spacer_axis = fig.add_subplot(outer_grid[3, 0])
     bottom_spacer_axis.axis("off")
-    correlation_grid = outer_grid[4, 0].subgridspec(
+    motor_summary_grid = outer_grid[4, 0].subgridspec(
         nrows=1,
         ncols=len(PANEL_B_TRAJECTORY_TYPES),
-        wspace=DARK_LIGHT_CORRELATION_GRID_WSPACE,
+        wspace=MOTOR_SUMMARY_GRID_WSPACE,
     )
-    correlation_axes = [
-        fig.add_subplot(correlation_grid[0, column_index])
+    motor_summary_axes = [
+        fig.add_subplot(motor_summary_grid[0, column_index])
         for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
     ]
-    dark_light_correlation_table = load_dark_light_tuning_correlation_table(
-        data_root=data_root,
+    motor_profile_correlation_table = build_panel_c_motor_profile_correlation_table(
+        motor_table,
         datasets=datasets,
-        region=region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
     )
-    plot_dark_light_tuning_correlation_histograms(
-        correlation_axes,
-        dark_light_correlation_table,
-    )
-
-    overlay_grid = outer_grid[5, 0].subgridspec(
-        nrows=1,
-        ncols=len(PANEL_B_TRAJECTORY_TYPES),
-        wspace=DARK_LIGHT_CORRELATION_GRID_WSPACE,
-    )
-    overlay_axes = [
-        fig.add_subplot(overlay_grid[0, column_index])
-        for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
-    ]
-    light_stability_table = load_light_tuning_stability_table(
-        data_root=data_root,
+    plot_panel_c_motor_profile_correlations(
+        motor_summary_axes,
+        motor_profile_correlation_table,
         datasets=datasets,
-        region=region,
-        light_epoch=light_epoch,
-    )
-    plot_dark_light_with_light_stability_histograms(
-        overlay_axes,
-        dark_light_correlation_table,
-        light_stability_table,
     )
 
     fig.canvas.draw()
     add_centered_axis_text(
         fig,
-        correlation_axes,
-        "Dark-light tuning similarity",
+        motor_summary_axes,
+        "Dark-light motor profile correlation",
         y_offset=0.025,
         fontsize=PANEL_TITLE_FONTSIZE,
     )
-    label_axis(correlation_axes[0], "F", x=-0.30, y=1.05)
+    label_axis(motor_summary_axes[0], "C", x=-0.30, y=1.05)
     add_centered_axis_text(
         fig,
-        overlay_axes,
-        "Dark-light similarity and light odd/even stability",
-        y_offset=0.025,
+        motor_axes[0, :],
+        "Motor variables over normalized path progression across dark and light",
+        y_offset=0.010,
         fontsize=PANEL_TITLE_FONTSIZE,
     )
-    label_axis(overlay_axes[0], "G", x=-0.30, y=1.05)
-    for heatmap_panel in heatmap_panels.values():
-        add_centered_axis_text(
-            fig,
-            heatmap_panel["tuning_schematic_axes"],
-            REORDERED_HEATMAP_TITLE,
-            y_offset=0.006,
-            fontsize=PANEL_TITLE_FONTSIZE,
-        )
-        add_centered_axis_text(
-            fig,
-            heatmap_panel["tuning_schematic_axes"],
-            "Tuning",
-            y_offset=-0.026,
-            fontsize=8.0,
-        )
-        add_centered_axis_text(
-            fig,
-            heatmap_panel["order_schematic_axes"],
-            "Order",
-            y_offset=-0.006,
-            rotation=90,
-        )
+    label_axis(motor_axes[0, 0], "B", x=-0.28, y=1.05)
     label_axis(
-        heatmap_panels[PANEL_A_FIGURE_1D_ORDER_MODE]["corner_axis"],
+        panel_a_axis,
         "A",
-        x=-0.12,
-        y=0.52,
+        x=-0.035,
+        y=1.05,
     )
 
     save_figure(fig, output_path, dpi=dpi)
@@ -1931,7 +2403,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Supplementary Figure 3 generation."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate Supplementary Figure 3 reordered heatmap and per-animal "
+            "Generate Supplementary Figure 3 cvPCA and per-animal "
             "Figure 3C-E panels."
         )
     )
@@ -2025,14 +2497,17 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Directory for cached Supplementary Figure 3A heatmap matrices. "
-            "Default: output directory/cache."
+            "Deprecated compatibility option; current Supplementary Figure 3A "
+            "reads cvPCA parquet summaries."
         ),
     )
     parser.add_argument(
         "--refresh-panel-a-cache",
         action="store_true",
-        help="Recompute Supplementary Figure 3A and overwrite matching caches.",
+        help=(
+            "Deprecated compatibility option; current Supplementary Figure 3A "
+            "does not use cached panel data."
+        ),
     )
     parser.add_argument(
         "--dpi",

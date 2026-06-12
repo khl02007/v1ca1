@@ -11,14 +11,20 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     DEFAULT_FIGURE_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_BOTTOM_SECTION_SPACER_MM,
-    DEFAULT_DARK_LIGHT_CORRELATION_HEIGHT_MM,
     DEFAULT_OUTPUT_NAME,
-    DEFAULT_PER_ANIMAL_GRID_HEIGHT_MM,
+    DEFAULT_MOTOR_GRID_HEIGHT_MM,
+    DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
     DEFAULT_REORDERED_HEATMAP_HEIGHT_MM,
     DEFAULT_SECTION_SPACER_MM,
-    DEFAULT_STABILITY_OVERLAY_HEIGHT_MM,
     DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ,
+    MOTOR_PANEL_ANIMAL_NAME,
+    MOTOR_PANEL_LIGHT_EPOCH,
+    MOTOR_VARIABLES,
     PANEL_A_CACHE_VERSION,
+    PANEL_A_CV_PCA_LIGHT_EPOCH,
+    PANEL_A_CV_PCA_REGION,
+    PANEL_A_CV_PCA_SIZE_FRACTION,
+    PANEL_A_CV_PCA_TITLE,
     PANEL_A_FIGURE_1D_ORDER_MODE,
     REORDERED_HEATMAP_CMAP,
     REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION,
@@ -28,6 +34,10 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     build_figure_1d_ordered_light_panel_values,
     build_panel_a_cache_metadata,
     build_panel_a_cache_path,
+    build_panel_a_cv_pca_summary_path,
+    build_panel_c_motor_profile_correlation_table,
+    build_motor_progression_summary_path,
+    compute_motor_profile_correlation,
     compute_tuning_curve_correlation,
     filter_panel_d_similarity_table_by_tuning_stability,
     filter_ordered_unit_keys_by_unit_set,
@@ -35,9 +45,14 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     load_dark_light_tuning_correlation_table,
     load_light_tuning_stability_table,
     load_panel_a_cache,
+    load_panel_a_cv_pca_participation_ratio_table,
+    load_panel_b_motor_progression_table,
     load_dark_ordered_light_panel_values,
     make_supplementary_figure_3,
     parse_arguments,
+    plot_panel_a_cv_pca_participation_ratios,
+    plot_panel_b_motor_progression_grid,
+    plot_panel_c_motor_profile_correlations,
     plot_dark_ordered_light_heatmap_regions,
     plot_dark_light_tuning_correlation_histograms,
     plot_dark_light_with_light_stability_histograms,
@@ -56,10 +71,9 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
         + DEFAULT_SECTION_SPACER_MM
-        + DEFAULT_PER_ANIMAL_GRID_HEIGHT_MM
+        + DEFAULT_MOTOR_GRID_HEIGHT_MM
         + DEFAULT_BOTTOM_SECTION_SPACER_MM
-        + DEFAULT_DARK_LIGHT_CORRELATION_HEIGHT_MM
-        + DEFAULT_STABILITY_OVERLAY_HEIGHT_MM
+        + DEFAULT_MOTOR_SUMMARY_HEIGHT_MM
     )
     assert DEFAULT_FIGURE_HEIGHT_MM > figure_3_module.DEFAULT_FIGURE_HEIGHT_MM
     assert args.region == figure_3_module.DEFAULT_REGIONS[0]
@@ -72,6 +86,10 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
     assert REORDERED_HEATMAP_CMAP == supp_figure_3_module.PANEL_D_HEATMAP_CMAP
     assert REORDERED_HEATMAP_VMAX == pytest.approx(1.0)
     assert REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION == pytest.approx(0.5)
+    assert PANEL_A_CV_PCA_SIZE_FRACTION == pytest.approx(0.40)
+    assert DEFAULT_REORDERED_HEATMAP_HEIGHT_MM == pytest.approx(
+        figure_3_module.DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
+    )
 
 
 def test_panel_a_cache_path_and_roundtrip(tmp_path: Path) -> None:
@@ -120,6 +138,272 @@ def test_panel_a_cache_path_and_roundtrip(tmp_path: Path) -> None:
     stale_metadata = dict(metadata)
     stale_metadata["position_bin_count"] = 4
     assert load_panel_a_cache(cache_path, stale_metadata) is None
+
+
+def test_panel_a_cv_pca_loader_reads_hardcoded_v1_light_summary(
+    tmp_path: Path,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    summary_path = build_panel_a_cv_pca_summary_path(
+        data_root=tmp_path,
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+    )
+    summary_path.parent.mkdir(parents=True)
+    pandas.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L14", "L14"],
+            "date": ["20240611"] * 4,
+            "region": [PANEL_A_CV_PCA_REGION] * 4,
+            "dark_epoch": ["08_r4"] * 4,
+            "light_epoch": [PANEL_A_CV_PCA_LIGHT_EPOCH] * 4,
+            "source_condition": ["dark", "dark", "light", "light"],
+            "target_condition": ["dark", "light", "dark", "light"],
+            "n_units": [37] * 4,
+            "source_cv_participation_ratio": [5.0, 5.0, 8.0, 8.0],
+        }
+    ).to_parquet(summary_path, index=False)
+
+    table = load_panel_a_cv_pca_participation_ratio_table(
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+    )
+
+    assert summary_path.name == "v1_06_r3_vs_08_r4_cv_pca_summary.parquet"
+    assert table["condition"].tolist() == ["dark", "light"]
+    assert table["participation_ratio"].tolist() == [5.0, 8.0]
+    assert table["n_units"].tolist() == [37, 37]
+    assert table["source_path"].tolist() == [summary_path, summary_path]
+
+
+def test_panel_a_cv_pca_loader_raises_for_missing_summary(tmp_path: Path) -> None:
+    with pytest.raises(
+        FileNotFoundError,
+        match="Missing Supplementary Figure 3A cvPCA summary files",
+    ):
+        load_panel_a_cv_pca_participation_ratio_table(
+            data_root=tmp_path,
+            datasets=[("L14", "20240611", "08_r4")],
+        )
+
+
+def test_plot_panel_a_cv_pca_participation_ratios_shows_paired_sessions() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pandas.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L15", "L15"],
+            "date": ["20240611", "20240611", "20241121", "20241121"],
+            "condition": ["dark", "light", "dark", "light"],
+            "participation_ratio": [4.0, 6.0, 5.0, 7.0],
+        }
+    )
+    fig, ax = plt.subplots()
+
+    plot_panel_a_cv_pca_participation_ratios(ax, table)
+
+    assert ax.get_title() == PANEL_A_CV_PCA_TITLE
+    assert ax.get_ylabel() == "Participation ratio"
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["Dark", "Light"]
+    assert len(ax.lines) == 2
+    y_min, y_max = ax.get_ylim()
+    assert 0.0 < y_min < 4.0
+    assert y_max > 7.0
+    plt.close(fig)
+
+
+def _make_motor_progression_rows(
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    dark_epoch: str = "08_r4",
+    light_epoch: str = MOTOR_PANEL_LIGHT_EPOCH,
+) -> list[dict[str, object]]:
+    rows = []
+    for epoch_index, epoch in enumerate((dark_epoch, light_epoch)):
+        for trajectory_index, trajectory_type in enumerate(
+            figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        ):
+            for variable_index, variable_name in enumerate(MOTOR_VARIABLES):
+                for bin_index, bin_center in enumerate((0.25, 0.75)):
+                    rows.append(
+                        {
+                            "epoch": epoch,
+                            "trajectory_type": trajectory_type,
+                            "variable": variable_name,
+                            "progression_bin_index": bin_index,
+                            "progression_bin_start": bin_index * 0.5,
+                            "progression_bin_end": (bin_index + 1) * 0.5,
+                            "progression_bin_center": bin_center,
+                            "sample_count": 10,
+                            "median": (
+                                variable_index
+                                + trajectory_index * 0.1
+                                + epoch_index * 0.2
+                                + bin_index * 0.05
+                            ),
+                            "q25": 0.0,
+                            "q75": 1.0,
+                        }
+                    )
+    return rows
+
+
+def test_panel_b_motor_loader_reads_light_and_registered_dark(tmp_path: Path) -> None:
+    pandas = pytest.importorskip("pandas")
+    path = build_motor_progression_summary_path(
+        data_root=tmp_path,
+        animal_name="L14",
+        date="20240611",
+    )
+    path.parent.mkdir(parents=True)
+    pandas.DataFrame(_make_motor_progression_rows()).to_parquet(path, index=False)
+
+    table = load_panel_b_motor_progression_table(
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+    )
+
+    assert set(table["epoch"].astype(str)) == {"08_r4", MOTOR_PANEL_LIGHT_EPOCH}
+    assert set(table["epoch_type"].astype(str)) == {"dark", "light"}
+    assert table["animal_name"].unique().tolist() == ["L14"]
+    assert table["source_path"].unique().tolist() == [path]
+
+
+def test_plot_panel_b_motor_progression_grid_uses_example_epoch_medians_and_iqr() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for animal_name, date, dark_epoch in (
+        (MOTOR_PANEL_ANIMAL_NAME, "20240222", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+    ):
+        for row in _make_motor_progression_rows(
+            animal_name=animal_name,
+            date=date,
+            dark_epoch=dark_epoch,
+        ):
+            row["animal_name"] = animal_name
+            row["date"] = date
+            row["dark_epoch"] = dark_epoch
+            row["light_epoch"] = MOTOR_PANEL_LIGHT_EPOCH
+            row["dataset_label"] = f"{animal_name} {date}"
+            row["epoch_type"] = "dark" if row["epoch"] == dark_epoch else "light"
+            rows.append(row)
+    table = pandas.DataFrame(rows)
+    fig, axes = plt.subplots(
+        nrows=len(MOTOR_VARIABLES),
+        ncols=len(figure_3_module.PANEL_B_TRAJECTORY_TYPES),
+    )
+
+    plot_panel_b_motor_progression_grid(
+        axes,
+        table,
+        datasets=[
+            (MOTOR_PANEL_ANIMAL_NAME, "20240222", "08_r4"),
+            ("L15", "20241121", "10_r5"),
+        ],
+    )
+
+    assert axes[0, 0].get_title() != ""
+    assert axes[-1, 0].get_xlabel() == "Norm. position"
+    assert axes[0, 0].get_ylabel()
+    assert len(axes[0, 0].lines) == 2
+    assert len(axes[0, 0].collections) == 2
+    assert all(line.get_linestyle() == "-" for line in axes[0, 0].lines)
+    assert axes[0, 0].get_legend() is not None
+    assert axes[0, -1].get_legend() is None
+    plt.close(fig)
+
+
+def test_build_panel_c_motor_profile_correlation_table_uses_paired_bins() -> None:
+    pandas = pytest.importorskip("pandas")
+
+    rows = []
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+    ]
+    for animal_name, date, dark_epoch in datasets:
+        for row in _make_motor_progression_rows(
+            animal_name=animal_name,
+            date=date,
+            dark_epoch=dark_epoch,
+        ):
+            row["animal_name"] = animal_name
+            row["date"] = date
+            row["dark_epoch"] = dark_epoch
+            row["light_epoch"] = MOTOR_PANEL_LIGHT_EPOCH
+            row["epoch_type"] = "dark" if row["epoch"] == dark_epoch else "light"
+            rows.append(row)
+
+    table = build_panel_c_motor_profile_correlation_table(
+        pandas.DataFrame(rows),
+        datasets=datasets,
+    )
+
+    assert len(table) == (
+        len(datasets)
+        * len(MOTOR_VARIABLES)
+        * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+    )
+    assert set(table["animal_name"]) == {"L14", "L15"}
+    assert table["n_bins"].unique().tolist() == [2]
+    assert np.allclose(table["correlation"].to_numpy(dtype=float), 1.0)
+    assert compute_motor_profile_correlation(
+        np.asarray([0.0, 1.0]),
+        np.asarray([1.0, 0.0]),
+    ) == pytest.approx(-1.0)
+
+
+def test_plot_panel_c_motor_profile_correlations_draws_animal_dots() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+    ]
+    rows = []
+    for animal_index, (animal_name, date, dark_epoch) in enumerate(datasets):
+        for trajectory_type in figure_3_module.PANEL_B_TRAJECTORY_TYPES:
+            for variable_index, variable_name in enumerate(MOTOR_VARIABLES):
+                rows.append(
+                    {
+                        "animal_name": animal_name,
+                        "date": date,
+                        "dark_epoch": dark_epoch,
+                        "light_epoch": MOTOR_PANEL_LIGHT_EPOCH,
+                        "trajectory_type": trajectory_type,
+                        "variable": variable_name,
+                        "correlation": 0.8 + animal_index * 0.05 - variable_index * 0.01,
+                        "n_bins": 20,
+                    }
+                )
+    fig, axes = plt.subplots(ncols=len(figure_3_module.PANEL_B_TRAJECTORY_TYPES))
+
+    plot_panel_c_motor_profile_correlations(
+        axes,
+        pandas.DataFrame(rows),
+        datasets=datasets,
+    )
+
+    assert axes[0].get_title() != ""
+    assert axes[0].get_xlabel() == "Profile corr."
+    assert axes[0].get_ylabel() == "Motor variable"
+    assert axes[0].get_xlim() == pytest.approx((-1.05, 1.05))
+    assert axes[-1].get_legend() is not None
+    assert any(axis.collections for axis in axes)
+    plt.close(fig)
 
 
 def test_group_datasets_by_animal_preserves_input_order() -> None:
@@ -707,7 +991,7 @@ def test_plot_dark_light_with_light_stability_histograms_overlays_step() -> None
     plt.close(fig)
 
 
-def test_make_supplementary_figure_3_plots_per_animal_figure_3def(
+def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -716,125 +1000,68 @@ def test_make_supplementary_figure_3_plots_per_animal_figure_3def(
     matplotlib.use("Agg")
 
     calls: dict[str, object] = {}
-    similarity_calls = []
-    encoding_calls = []
-    decoding_calls = []
-    heatmap_calls = []
-    dark_light_correlation_calls = []
-    light_stability_calls = []
-    overlay_plot_calls = []
-    stability_filter_calls = []
+    panel_a_cv_pca_load_calls = []
+    panel_a_cv_pca_plot_tables = []
+    motor_load_calls = []
+    motor_plot_calls = []
+    motor_summary_build_calls = []
+    motor_summary_plot_calls = []
 
-    def fake_load_panel_d_similarity_table(**kwargs: object):
-        similarity_calls.append(kwargs)
+    def fake_load_panel_a_cv_pca_participation_ratio_table(**kwargs: object):
+        panel_a_cv_pca_load_calls.append(kwargs)
         return pandas.DataFrame(
             {
-                "animal_name": ["L14"],
-                "date": ["20240611"],
-                "unit": [1],
-                "comparison_label": ["left_turn"],
-                "epoch_type": ["light"],
-                "similarity": [0.5],
+                "animal_name": ["L14", "L14", "L15", "L15"],
+                "date": ["20240611", "20240611", "20241121", "20241121"],
+                "condition": ["dark", "light", "dark", "light"],
+                "participation_ratio": [4.0, 6.0, 5.0, 7.0],
             }
         )
 
-    def fake_load_panel_e_encoding_delta_table(**kwargs: object):
-        encoding_calls.append(kwargs)
+    def fake_plot_panel_a_cv_pca_participation_ratios(ax, table):
+        panel_a_cv_pca_plot_tables.append(table)
+        ax.text(0.5, 0.5, "A")
+
+    def fake_load_panel_b_motor_progression_table(**kwargs: object):
+        motor_load_calls.append(kwargs)
         return pandas.DataFrame(
             {
-                "animal_name": ["L14"],
-                "date": ["20240611"],
-                "unit": [1],
-                "epoch_type": ["light"],
-                "delta_bits_tp_vs_place": [0.2],
+                "animal_name": ["L14", "L14"],
+                "date": ["20240611", "20240611"],
+                "trajectory_type": [figure_3_module.PANEL_B_TRAJECTORY_TYPES[0]] * 2,
+                "variable": [MOTOR_VARIABLES[0]] * 2,
+                "epoch": ["08_r4", MOTOR_PANEL_LIGHT_EPOCH],
+                "epoch_type": ["dark", "light"],
+                "progression_bin_index": [0, 0],
+                "progression_bin_center": [0.5, 0.5],
+                "median": [1.0, 1.1],
+                "q25": [0.8, 0.9],
+                "q75": [1.2, 1.3],
             }
         )
 
-    def fake_load_panel_f_decoding_error_table(**kwargs: object):
-        decoding_calls.append(kwargs)
+    def fake_plot_panel_b_motor_progression_grid(axes, table, **kwargs: object):
+        motor_plot_calls.append({"axes": axes, "table": table, **kwargs})
+        axes[0, 0].text(0.5, 0.5, "B")
+
+    def fake_build_panel_c_motor_profile_correlation_table(table, **kwargs: object):
+        motor_summary_build_calls.append({"table": table, **kwargs})
         return pandas.DataFrame(
             {
                 "animal_name": ["L14"],
                 "date": ["20240611"],
-                "epoch_type": ["light"],
-                "epoch": ["02_r1"],
-                "analysis": ["place"],
-                "comparison": ["place"],
-                "comparison_label": ["Place"],
-                "q25_error": [0.01],
-                "median_error": [0.02],
-                "q75_error": [0.03],
-                "n_samples": [20],
-            }
-        )
-
-    def fake_plot_panel_d_similarity(ax, table):
-        calls.setdefault("similarity_tables", []).append(table)
-        ax.text(0.5, 0.5, "D")
-
-    def fake_plot_panel_e_encoding_delta_histogram(ax, table):
-        calls.setdefault("encoding_tables", []).append(table)
-        ax.text(0.5, 0.5, "E")
-
-    def fake_plot_panel_f_decoding_error(ax, table):
-        calls.setdefault("decoding_tables", []).append(table)
-        ax.text(0.5, 0.5, "F")
-
-    def fake_plot_dark_ordered_light_heatmap_regions(_axes, **kwargs: object):
-        heatmap_calls.append(kwargs)
-        return None
-
-    def fake_load_dark_light_tuning_correlation_table(**kwargs: object):
-        dark_light_correlation_calls.append(kwargs)
-        return pandas.DataFrame(
-            {
-                "animal_name": ["L14"],
-                "date": ["20240611"],
-                "region": ["v1"],
                 "dark_epoch": ["08_r4"],
-                "light_epoch": ["02_r1"],
+                "light_epoch": [MOTOR_PANEL_LIGHT_EPOCH],
                 "trajectory_type": ["center_to_left"],
-                "unit": [1],
-                "dark_movement_firing_rate_hz": [0.5],
-                "light_movement_firing_rate_hz": [0.5],
-                "correlation": [0.4],
+                "variable": [MOTOR_VARIABLES[0]],
+                "correlation": [0.95],
+                "n_bins": [20],
             }
         )
 
-    def fake_plot_dark_light_tuning_correlation_histograms(axes, table):
-        calls["dark_light_correlation_table"] = table
+    def fake_plot_panel_c_motor_profile_correlations(axes, table, **kwargs: object):
+        motor_summary_plot_calls.append({"axes": axes, "table": table, **kwargs})
         axes[0].text(0.5, 0.5, "E")
-
-    def fake_load_light_tuning_stability_table(**kwargs: object):
-        light_stability_calls.append(kwargs)
-        return pandas.DataFrame(
-            {
-                "animal_name": ["L14"],
-                "date": ["20240611"],
-                "region": ["v1"],
-                "light_epoch": ["02_r1"],
-                "trajectory_type": ["center_to_left"],
-                "unit": [1],
-                "stability_correlation": [0.6],
-            }
-        )
-
-    def fake_plot_dark_light_with_light_stability_histograms(
-        axes,
-        correlation_table,
-        stability_table,
-    ):
-        overlay_plot_calls.append(
-            {
-                "correlation_table": correlation_table,
-                "stability_table": stability_table,
-            }
-        )
-        axes[0].text(0.5, 0.5, "G")
-
-    def fake_filter_panel_d_similarity_table_by_tuning_stability(table, **kwargs):
-        stability_filter_calls.append({"table": table, **kwargs})
-        return table.assign(stability_filtered=True)
 
     def fake_save_figure(figure, output_path: Path, dpi: int):
         calls["figsize"] = figure.get_size_inches()
@@ -850,63 +1077,33 @@ def test_make_supplementary_figure_3_plots_per_animal_figure_3def(
 
     monkeypatch.setattr(
         supp_figure_3_module,
-        "load_panel_d_similarity_table",
-        fake_load_panel_d_similarity_table,
+        "load_panel_a_cv_pca_participation_ratio_table",
+        fake_load_panel_a_cv_pca_participation_ratio_table,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
-        "load_panel_e_encoding_delta_table",
-        fake_load_panel_e_encoding_delta_table,
+        "plot_panel_a_cv_pca_participation_ratios",
+        fake_plot_panel_a_cv_pca_participation_ratios,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
-        "load_panel_f_decoding_error_table",
-        fake_load_panel_f_decoding_error_table,
+        "load_panel_b_motor_progression_table",
+        fake_load_panel_b_motor_progression_table,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
-        "plot_panel_d_similarity",
-        fake_plot_panel_d_similarity,
+        "plot_panel_b_motor_progression_grid",
+        fake_plot_panel_b_motor_progression_grid,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
-        "plot_panel_e_encoding_delta_histogram",
-        fake_plot_panel_e_encoding_delta_histogram,
+        "build_panel_c_motor_profile_correlation_table",
+        fake_build_panel_c_motor_profile_correlation_table,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
-        "plot_panel_f_decoding_error",
-        fake_plot_panel_f_decoding_error,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "plot_dark_ordered_light_heatmap_regions",
-        fake_plot_dark_ordered_light_heatmap_regions,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "load_dark_light_tuning_correlation_table",
-        fake_load_dark_light_tuning_correlation_table,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "plot_dark_light_tuning_correlation_histograms",
-        fake_plot_dark_light_tuning_correlation_histograms,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "load_light_tuning_stability_table",
-        fake_load_light_tuning_stability_table,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "plot_dark_light_with_light_stability_histograms",
-        fake_plot_dark_light_with_light_stability_histograms,
-    )
-    monkeypatch.setattr(
-        supp_figure_3_module,
-        "filter_panel_d_similarity_table_by_tuning_stability",
-        fake_filter_panel_d_similarity_table_by_tuning_stability,
+        "plot_panel_c_motor_profile_correlations",
+        fake_plot_panel_c_motor_profile_correlations,
     )
     monkeypatch.setattr(supp_figure_3_module, "save_figure", fake_save_figure)
 
@@ -927,42 +1124,28 @@ def test_make_supplementary_figure_3_plots_per_animal_figure_3def(
     assert calls["figsize"][1] == pytest.approx(DEFAULT_FIGURE_HEIGHT_MM / 25.4)
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["panel_labels"] == ["A", "B", "C", "D", "E", "F", "G"]
-    assert len(heatmap_calls) == 1
-    assert heatmap_calls[0]["order_mode"] == PANEL_A_FIGURE_1D_ORDER_MODE
-    assert all(call["datasets"] == datasets for call in heatmap_calls)
-    assert all(call["regions"] == ("v1",) for call in heatmap_calls)
-    assert all(
-        call["position_bin_count"] == figure_3_module.DEFAULT_POSITION_BIN_COUNT
-        for call in heatmap_calls
+    assert calls["panel_labels"] == ["A", "B", "C"]
+    assert panel_a_cv_pca_load_calls == [
+        {"data_root": Path("/analysis"), "datasets": datasets}
+    ]
+    assert panel_a_cv_pca_plot_tables[0]["participation_ratio"].tolist() == [
+        4.0,
+        6.0,
+        5.0,
+        7.0,
+    ]
+    assert motor_load_calls == [
+        {"data_root": Path("/analysis"), "datasets": datasets}
+    ]
+    assert motor_plot_calls[0]["axes"].shape == (
+        len(MOTOR_VARIABLES),
+        len(figure_3_module.PANEL_B_TRAJECTORY_TYPES),
     )
-    assert [call["datasets"] for call in similarity_calls] == [[datasets[0]], [datasets[1]]]
-    assert [call["datasets"] for call in encoding_calls] == [[datasets[0]], [datasets[1]]]
-    assert [call["datasets"] for call in decoding_calls] == [[datasets[0]], [datasets[1]]]
-    assert [call["datasets"] for call in dark_light_correlation_calls] == [datasets]
-    assert [call["datasets"] for call in light_stability_calls] == [datasets]
-    assert [call["datasets"] for call in stability_filter_calls] == [
-        [datasets[0]],
-        [datasets[1]],
-    ]
-    assert calls["dark_light_correlation_table"]["correlation"].tolist() == [0.4]
-    assert overlay_plot_calls[0]["correlation_table"]["correlation"].tolist() == [0.4]
-    assert overlay_plot_calls[0]["stability_table"]["stability_correlation"].tolist() == [
-        0.6
-    ]
-    assert all(call["region"] == "v1" for call in similarity_calls)
-    assert len(calls["similarity_tables"]) == 4
-    similarity_stability_flags = [
-        bool(table["stability_filtered"].any())
-        if "stability_filtered" in table
-        else False
-        for table in calls["similarity_tables"]
-    ]
-    assert similarity_stability_flags == [
-        False,
-        True,
-        False,
-        True,
-    ]
-    assert calls["encoding_tables"]
-    assert calls["decoding_tables"]
+    assert motor_plot_calls[0]["datasets"] == datasets
+    assert motor_summary_build_calls[0]["datasets"] == datasets
+    assert motor_summary_build_calls[0]["table"]["median"].tolist() == [1.0, 1.1]
+    assert len(motor_summary_plot_calls[0]["axes"]) == len(
+        figure_3_module.PANEL_B_TRAJECTORY_TYPES
+    )
+    assert motor_summary_plot_calls[0]["datasets"] == datasets
+    assert motor_summary_plot_calls[0]["table"]["correlation"].tolist() == [0.95]
