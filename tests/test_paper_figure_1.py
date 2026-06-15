@@ -7,15 +7,16 @@ import numpy as np
 import pytest
 
 import v1ca1.paper_figures.figure_1 as figure_1_module
+from v1ca1.paper_figures.datasets import DEFAULT_DARK_EPOCH
 from v1ca1.paper_figures.figure_1 import (
     CYCLE_ARROW_LINEWIDTH,
     CYCLE_ARROW_MUTATION_SCALE,
     CYCLE_ARROW_SPECS,
     CYCLE_TRAJECTORY_LAYOUT,
+    BOTTOM_ROW_PANEL_LABEL_X_OFFSETS,
     BOTTOM_ROW_PANEL_WSPACE,
     DEFAULT_ASSET_DIR,
     DEFAULT_BEHAVIOR_ASSET_NAME,
-    DEFAULT_DARK_EPOCH,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_BOTTOM_ROW_HEIGHT_MM,
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
@@ -91,7 +92,10 @@ from v1ca1.paper_figures.figure_1 import (
     TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR,
     TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH,
     TASK_PROGRESSION_XLABEL,
+    TOP_ROW_PANEL_LABEL_X_OFFSETS,
+    TOP_ROW_PANEL_TITLE_FONTSIZES,
     TRAJECTORY_TYPES,
+    add_aligned_panel_headers,
     add_centered_axis_text,
     add_centered_below_axis_text,
     build_normalized_position_bins,
@@ -995,37 +999,26 @@ def test_dark_light_raster_background_configuration_marks_visual_segments() -> N
     }
 
 
-def test_plot_dark_light_example_panel_uses_visual_color_overrides(
+def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import v1ca1.paper_figures.figure_3 as figure_3_source
+    import v1ca1.paper_figures.figure_3 as figure_3_module
 
-    observed: dict[str, object] = {}
+    load_calls: list[dict[str, object]] = []
 
-    def fake_load_panel_a_example_data(**kwargs: object) -> dict[str, object]:
-        observed["load_kwargs"] = kwargs
-        return {"example": True}
-
-    def fake_plot_panel_a_example(
-        _ax: object,
-        example: dict[str, object],
-        **kwargs: object,
-    ) -> None:
-        observed["example"] = example
-        observed["plot_kwargs"] = kwargs
+    def fake_load_or_compute_panel_example_data(**kwargs: object) -> dict[str, object]:
+        load_calls.append(kwargs)
+        example = _fake_panel_e_example(str(kwargs["animal_name"]), int(kwargs["unit_id"]))
+        example["epoch"] = str(kwargs["epoch"])
+        return example
 
     monkeypatch.setattr(
-        figure_3_source,
-        "load_panel_a_example_data",
-        fake_load_panel_a_example_data,
-    )
-    monkeypatch.setattr(
-        figure_3_source,
-        "plot_panel_a_example",
-        fake_plot_panel_a_example,
+        figure_3_module,
+        "load_or_compute_panel_example_data",
+        fake_load_or_compute_panel_example_data,
     )
 
     fig, ax = plt.subplots()
@@ -1041,14 +1034,47 @@ def test_plot_dark_light_example_panel_uses_visual_color_overrides(
         refresh_panel_example_cache=False,
     )
 
-    assert observed["example"] == {"example": True}
-    assert observed["plot_kwargs"] == {
-        "visual_label_colors": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
-        "raster_color": PANEL_DARK_LIGHT_RASTER_COLOR,
-        "trajectory_epoch_color_overrides": PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
-        "trajectory_epoch_backgrounds": PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS,
-        "epoch_background_alpha": PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
+    assert [call["epoch"] for call in load_calls] == ["02_r1", "06_r3", "08_r4"]
+    assert {
+        (
+            call["panel_name"],
+            call["animal_name"],
+            call["date"],
+            call["region"],
+            call["unit_id"],
+            tuple(call["trajectories"]),
+            call["data_root"],
+            call["panel_example_cache_dir"],
+            call["refresh_panel_example_cache"],
+        )
+        for call in load_calls
+    } == {
+        (
+            "A",
+            "L14",
+            "20240611",
+            "v1",
+            229,
+            figure_1_module.PANEL_B_VISUAL_TRAJECTORIES,
+            Path("/analysis"),
+            None,
+            False,
+        )
     }
+    assert len(ax.child_axes) == 15
+    rate_axes = [
+        child_axis
+        for child_axis in ax.child_axes
+        if child_axis.get_xlabel() == TASK_PROGRESSION_XLABEL
+    ]
+    assert len(rate_axes) == 4
+    assert rate_axes[0].get_ylabel() == "FR (Hz)"
+    assert all(rate_axis.get_ylabel() == "" for rate_axis in rate_axes[1:])
+    assert {
+        text.get_text()
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
+    } >= {"A", "B"}
     plt.close(fig)
 
 
@@ -1232,6 +1258,87 @@ def test_add_centered_below_axis_text_places_figure_text() -> None:
     assert text.get_text() == TASK_PROGRESSION_XLABEL
     assert text.get_position()[0] == pytest.approx(expected_x)
     assert text.figure is fig
+    plt.close(fig)
+
+
+def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(ncols=3)
+    titles = (
+        "Comparison to motor",
+        "Comparison to alternative codes",
+        "Cross route decoding",
+    )
+    for axis, title in zip(axes, titles, strict=True):
+        axis.set_title(title, fontsize=8, pad=2)
+    fig.canvas.draw()
+
+    add_aligned_panel_headers(
+        fig,
+        axes,
+        labels=("E", "F", "G"),
+        titles=titles,
+        label_x_offsets=BOTTOM_ROW_PANEL_LABEL_X_OFFSETS,
+        fontsize=8,
+    )
+
+    assert [axis.get_title() for axis in axes] == ["", "", ""]
+    header_texts = fig.texts[-6:]
+    assert [text.get_text() for text in header_texts] == [
+        "E",
+        "Comparison to motor",
+        "F",
+        "Comparison to alternative codes",
+        "G",
+        "Cross route decoding",
+    ]
+    assert {text.get_position()[1] for text in header_texts} == {
+        header_texts[0].get_position()[1]
+    }
+    plt.close(fig)
+
+
+def test_add_aligned_panel_headers_supports_top_row_title_sizes() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(ncols=2)
+    titles = ("Task design", figure_1_module.PANEL_DARK_LIGHT_EXAMPLE_TITLE)
+    for axis, title, title_fontsize in zip(
+        axes,
+        titles,
+        TOP_ROW_PANEL_TITLE_FONTSIZES,
+        strict=True,
+    ):
+        axis.set_title(title, fontsize=title_fontsize, pad=2)
+    fig.canvas.draw()
+
+    add_aligned_panel_headers(
+        fig,
+        axes,
+        labels=("A", "B"),
+        titles=titles,
+        label_x_offsets=TOP_ROW_PANEL_LABEL_X_OFFSETS,
+        title_fontsizes=TOP_ROW_PANEL_TITLE_FONTSIZES,
+    )
+
+    header_texts = fig.texts[-4:]
+    assert [text.get_text() for text in header_texts] == [
+        "A",
+        "Task design",
+        "B",
+        figure_1_module.PANEL_DARK_LIGHT_EXAMPLE_TITLE,
+    ]
+    assert {text.get_position()[1] for text in header_texts} == {
+        header_texts[0].get_position()[1]
+    }
+    assert [text.get_fontsize() for text in header_texts[1::2]] == list(
+        TOP_ROW_PANEL_TITLE_FONTSIZES
+    )
     plt.close(fig)
 
 
@@ -1450,6 +1557,42 @@ def test_draw_behavior_task_design_panel_places_behavior_left_of_cycle(
     assert behavior_ax.get_position().x0 < cycle_ax.get_position().x0
     assert behavior_ax.images
     assert len(cycle_ax.child_axes) == 4
+    plt.close(fig)
+
+
+def test_draw_behavior_task_design_panel_can_rotate_behavior_180(
+    tmp_path: Path,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    behavior_red = np.array(
+        [
+            [0.1, 0.2, 0.3],
+            [0.4, 0.5, 0.6],
+        ]
+    )
+    behavior_image = np.zeros((*behavior_red.shape, 3))
+    behavior_image[..., 0] = behavior_red
+    behavior_path = tmp_path / "behavior.png"
+    mpimg.imsave(behavior_path, behavior_image)
+
+    fig, ax = plt.subplots()
+    draw_behavior_task_design_panel(
+        ax,
+        asset_dir=tmp_path,
+        behavior_asset_name="behavior.png",
+        rotate_behavior_180=True,
+    )
+
+    displayed_red = ax.child_axes[0].images[0].get_array()[..., 0]
+    np.testing.assert_allclose(
+        displayed_red,
+        np.rot90(behavior_red, 2),
+        atol=1.0 / 255.0,
+    )
     plt.close(fig)
 
 

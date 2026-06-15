@@ -17,25 +17,31 @@ from v1ca1.paper_figures.datasets import (
     normalize_figure_epoch_dataset_id,
 )
 from v1ca1.paper_figures.figure_2 import (
+    DEFAULT_FIGURE_CACHE_DIR,
+    DEFAULT_FIGURE_HEIGHT_MM as DEFAULT_FIGURE_2_PANEL_HEIGHT_MM,
+    DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
+    DEFAULT_RIDGE_STRENGTH,
+    DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_XCORR_BIN_SIZE_S,
     DEFAULT_XCORR_DATASET,
     DEFAULT_XCORR_DISPLAY_VMAX,
     DEFAULT_XCORR_MAX_LAG_S,
     DEFAULT_XCORR_STATE,
     DEFAULT_XCORR_TOP_CA1_UNITS,
-    DEFAULT_RIDGE_STRENGTH,
-    DEFAULT_FIGURE_2_GLM_RIPPLE_SELECTION,
-    DEFAULT_RIPPLE_WINDOW_S,
     FIGURE_FORMATS,
     MODEL_COLOR,
     NONSIGNIFICANT_COLOR,
+    PANEL_BC_SIGNIFICANT_UNIT_COLOR,
+    PANEL_C_SIGNIFICANCE_P_VALUE,
     PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S,
     PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S,
+    filter_epoch_payloads,
     get_ripple_glm_model_window_path,
-    load_top_ca1_xcorr_panel_data,
     load_glm_dark_activity_devexp_tables,
     load_glm_epoch_summary_tables,
     load_glm_source_predictor_comparison_tables,
+    load_top_ca1_xcorr_panel_data,
     parse_dataset_id,
     plot_glm_behavior_association_panel,
     plot_glm_source_predictor_comparison_panel,
@@ -58,6 +64,7 @@ DEFAULT_OUTPUT_NAME = "supplementary_figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_XCORR_PANEL_HEIGHT_MM = 54.0
+DEFAULT_FIGURE_2_PANEL_GAP_MM = 5.0
 DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM = 48.0
 DEFAULT_SECTION_HEADER_HEIGHT_MM = 8.0
 DEFAULT_DATASET_ROW_HEIGHT_MM = 13.0
@@ -74,6 +81,9 @@ DEFAULT_EPOCH_TYPES = ("light", "dark", "sleep")
 DEFAULT_PER_ANIMAL_EPOCH_TYPES = ("light",)
 DEFAULT_DARK_ACTIVITY_EPOCH_TYPES = ("light", "sleep")
 DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE = 0.05
+PANEL_C_EPOCH_ORDER = ("dark",)
+PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
+PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.1, 0.3)
 EPOCH_TYPE_LABELS = {
     "light": "Light",
     "dark": "Dark",
@@ -327,25 +337,6 @@ def load_available_glm_scatter_payload(
         "ripple_window_s": float(ripple_window_s),
         "ridge_strength": float(ridge_strength),
     }
-
-
-def get_payload_neglog_p_limit(payload: dict[str, Any]) -> float:
-    """Return a shared y-axis maximum for all loaded scatter panels."""
-    neglog_values = []
-    for selection_rows in payload["rows_by_selection"].values():
-        for dataset_row in selection_rows:
-            for artifact in dataset_row["artifacts"]:
-                table = artifact["summary_table"]
-                p_values = np.asarray(table["ripple_devexp_p_value"], dtype=float)
-                p_values = p_values[np.isfinite(p_values)]
-                if p_values.size:
-                    neglog_values.append(-np.log10(np.clip(p_values, 1e-12, 1.0)))
-    if not neglog_values:
-        return -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35
-    return max(
-        -np.log10(SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE) + 0.35,
-        float(np.nanmax(np.concatenate(neglog_values))) + 0.35,
-    )
 
 
 def plot_glm_scatter_axis(
@@ -1235,6 +1226,237 @@ def plot_per_animal_behavior_association_grid(
     return row_axes
 
 
+def plot_glm_scatter_box_panel(
+    ax: "Axes",
+    epoch_tables: Sequence[dict[str, Any]],
+) -> None:
+    """Plot the Figure 2_2 Panel B scatter and box summaries without schematic."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    if not epoch_tables:
+        ax.text(
+            0.5,
+            0.5,
+            "No GLM data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        return
+
+    all_neglog_p: list[np.ndarray] = []
+    for epoch_payload in epoch_tables:
+        table = epoch_payload["summary_table"]
+        values = np.asarray(table["ripple_devexp_mean"], dtype=float)
+        p_values = np.asarray(table["ripple_devexp_p_value"], dtype=float)
+        valid = np.isfinite(values) & np.isfinite(p_values)
+        all_neglog_p.append(-np.log10(np.clip(p_values[valid], 1e-12, 1.0)))
+
+    finite_neglog_p = (
+        np.concatenate([values for values in all_neglog_p if values.size])
+        if any(values.size for values in all_neglog_p)
+        else np.asarray([], dtype=float)
+    )
+    x_min, x_max = PANEL_B_DEVIANCE_EXPLAINED_LIMITS
+    y_max = (
+        max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4)
+        if finite_neglog_p.size
+        else 2.0
+    )
+
+    plot_left = 0.08
+    plot_right = 0.98
+    scatter_bottom = 0.38
+    scatter_top = 0.94
+    box_bottom = 0.06
+    box_top = 0.29
+    plot_gap = 0.030
+    plot_width = (plot_right - plot_left - plot_gap * (len(epoch_tables) - 1)) / len(
+        epoch_tables
+    )
+    for index, epoch_payload in enumerate(epoch_tables):
+        table = epoch_payload["summary_table"]
+        values = np.asarray(table["ripple_devexp_mean"], dtype=float)
+        p_values = np.asarray(table["ripple_devexp_p_value"], dtype=float)
+        valid = np.isfinite(values) & np.isfinite(p_values)
+        plot_ax = ax.inset_axes(
+            [
+                plot_left + index * (plot_width + plot_gap),
+                scatter_bottom,
+                plot_width,
+                scatter_top - scatter_bottom,
+            ]
+        )
+        epoch_color = PANEL_BC_SIGNIFICANT_UNIT_COLOR
+        plot_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
+        plot_ax.axhline(
+            -np.log10(PANEL_C_SIGNIFICANCE_P_VALUE),
+            color="0.25",
+            linestyle="--",
+            linewidth=0.55,
+            zorder=1,
+        )
+        if np.any(valid):
+            finite_values = values[valid]
+            finite_p_values = p_values[valid]
+            neglog_p = -np.log10(np.clip(finite_p_values, 1e-12, 1.0))
+            significant = finite_p_values < PANEL_C_SIGNIFICANCE_P_VALUE
+            if np.any(~significant):
+                plot_ax.scatter(
+                    finite_values[~significant],
+                    neglog_p[~significant],
+                    s=5,
+                    color=NONSIGNIFICANT_COLOR,
+                    alpha=0.45,
+                    edgecolors="none",
+                    zorder=2,
+                )
+            if np.any(significant):
+                plot_ax.scatter(
+                    finite_values[significant],
+                    neglog_p[significant],
+                    s=6,
+                    color=epoch_color,
+                    alpha=0.55,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            plot_ax.text(
+                0.96,
+                0.05,
+                f"n={int(np.sum(valid))}\nfrac sig={np.mean(significant):.2f}",
+                ha="right",
+                va="bottom",
+                fontsize=4.8,
+                transform=plot_ax.transAxes,
+            )
+        else:
+            plot_ax.text(
+                0.5,
+                0.5,
+                "No finite\nvalues",
+                ha="center",
+                va="center",
+                fontsize=5,
+                transform=plot_ax.transAxes,
+            )
+        panel_title = {
+            "light": "",
+            "dark": "",
+            "sleep": "Sleep",
+        }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
+        if panel_title:
+            plot_ax.set_title(panel_title, fontsize=5.6, pad=1.5)
+        plot_ax.set_xlim(x_min, x_max)
+        plot_ax.set_ylim(0.0, y_max)
+        plot_ax.tick_params(labelbottom=False)
+        if index == 0:
+            plot_ax.set_ylabel(
+                r"-log10 $\mathit{p}$ from shuffle",
+                fontsize=5,
+                labelpad=1.0,
+            )
+        else:
+            plot_ax.set_yticklabels([])
+        plot_ax.spines["top"].set_visible(False)
+        plot_ax.spines["right"].set_visible(False)
+        plot_ax.tick_params(labelsize=4.8, length=1.5, pad=1)
+
+        box_ax = ax.inset_axes(
+            [
+                plot_left + index * (plot_width + plot_gap),
+                box_bottom,
+                plot_width,
+                box_top - box_bottom,
+            ]
+        )
+        if np.any(valid):
+            finite_values = values[valid]
+            finite_p_values = p_values[valid]
+            nonsig_values = finite_values[
+                finite_p_values >= PANEL_C_SIGNIFICANCE_P_VALUE
+            ]
+            sig_values = finite_values[finite_p_values < PANEL_C_SIGNIFICANCE_P_VALUE]
+            box_data = []
+            box_positions = []
+            box_colors = []
+            if nonsig_values.size:
+                box_data.append(nonsig_values)
+                box_positions.append(1)
+                box_colors.append(NONSIGNIFICANT_COLOR)
+            if sig_values.size:
+                box_data.append(sig_values)
+                box_positions.append(2)
+                box_colors.append(epoch_color)
+            if box_data:
+                box_artists = box_ax.boxplot(
+                    box_data,
+                    orientation="horizontal",
+                    positions=box_positions,
+                    widths=0.48,
+                    patch_artist=True,
+                    whis=(0, 100),
+                    showfliers=False,
+                    medianprops={"color": "black", "linewidth": 0.55},
+                    whiskerprops={"color": "0.25", "linewidth": 0.45},
+                    capprops={"color": "0.25", "linewidth": 0.45},
+                )
+                for patch, color in zip(box_artists["boxes"], box_colors, strict=False):
+                    patch.set_facecolor(color)
+                    patch.set_edgecolor("0.25")
+                    patch.set_alpha(0.72)
+                    patch.set_linewidth(0.45)
+        else:
+            box_ax.text(
+                0.5,
+                0.5,
+                "No values",
+                ha="center",
+                va="center",
+                fontsize=4.8,
+                transform=box_ax.transAxes,
+            )
+        box_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
+        box_ax.set_xlim(x_min, x_max)
+        box_ax.set_ylim(0.45, 2.55)
+        box_ax.set_yticks([1, 2])
+        if index == 0:
+            from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
+
+            box_ax.set_yticklabels(["n.s.", ""], fontsize=4.8)
+            text_props = {"fontsize": 4.8}
+            p_label_box = HPacker(
+                children=[
+                    TextArea("p", textprops={**text_props, "fontstyle": "italic"}),
+                    TextArea(f"<{PANEL_C_SIGNIFICANCE_P_VALUE:g}", textprops=text_props),
+                ],
+                align="center",
+                pad=0,
+                sep=0,
+            )
+            box_ax.add_artist(
+                AnnotationBbox(
+                    p_label_box,
+                    (0.0, 2.0),
+                    xycoords=box_ax.get_yaxis_transform(),
+                    xybox=(-1.5, 0.0),
+                    boxcoords="offset points",
+                    box_alignment=(1.0, 0.5),
+                    frameon=False,
+                    pad=0,
+                )
+            )
+        else:
+            box_ax.set_yticklabels([])
+        if index == len(epoch_tables) - 1:
+            box_ax.set_xlabel("Deviance explained", fontsize=5, labelpad=1)
+        box_ax.spines["top"].set_visible(False)
+        box_ax.spines["right"].set_visible(False)
+        box_ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
+        box_ax.tick_params(axis="y", length=0, pad=1)
+
+
 def make_supplementary_figure_2(
     *,
     data_root: Path,
@@ -1250,6 +1472,9 @@ def make_supplementary_figure_2(
     ripple_window_s: float,
     ridge_strength: float,
     dpi: int,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    dark_movement_fr_cache_dir: Path | None = DEFAULT_FIGURE_CACHE_DIR,
+    refresh_dark_movement_fr_cache: bool = False,
 ) -> Path:
     """Build and save Supplementary Figure 2."""
     import matplotlib.pyplot as plt
@@ -1267,19 +1492,21 @@ def make_supplementary_figure_2(
         max_lag_s=xcorr_max_lag_s,
         display_vmax=xcorr_display_vmax,
     )
-    payload = load_per_animal_glm_scatter_payload(
+    glm_epoch_tables = load_glm_epoch_summary_tables(
         data_root,
         datasets,
-        epoch_types=DEFAULT_PER_ANIMAL_EPOCH_TYPES,
+        epoch_types=PANEL_C_EPOCH_ORDER,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
         ridge_strength=ridge_strength,
     )
     source_comparison_payload = load_glm_source_predictor_comparison_tables(
         data_root,
         datasets,
-        ripple_selection=DEFAULT_SOURCE_COMPARISON_RIPPLE_SELECTION,
+        ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
         ridge_strength=ridge_strength,
     )
     behavior_payload = load_glm_dark_activity_devexp_tables(
@@ -1287,88 +1514,91 @@ def make_supplementary_figure_2(
         datasets,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
         ridge_strength=ridge_strength,
+        dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
     )
-    y_limit = get_per_animal_neglog_p_limit(
-        payload,
-        significance_p_value=DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
+    panel_b_epoch_tables = filter_epoch_payloads(
+        glm_epoch_tables,
+        PANEL_C_EPOCH_ORDER,
     )
 
     apply_paper_style()
-    if len(payload.get("epoch_tables", [])) == 1:
-        section_height_mm = DEFAULT_HORIZONTAL_PER_ANIMAL_PANEL_HEIGHT_MM
-    else:
-        n_dataset_rows = max(len(iter_per_animal_glm_keys(payload)), len(datasets), 1)
-        section_height_mm = (
-            DEFAULT_SECTION_HEADER_HEIGHT_MM
-            + DEFAULT_PER_ANIMAL_ROW_HEIGHT_MM * n_dataset_rows
-        )
-    behavior_height_mm = (
-        DEFAULT_BEHAVIOR_ASSOCIATION_HEADER_HEIGHT_MM
-        + DEFAULT_BEHAVIOR_ASSOCIATION_ROW_HEIGHT_MM
-        * max(len(iter_dark_activity_dataset_keys(behavior_payload)), len(datasets), 1)
-    )
     figure_height_mm = (
         DEFAULT_XCORR_PANEL_HEIGHT_MM
-        + section_height_mm
-        + DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM
-        + behavior_height_mm
-        + 3.0 * DEFAULT_SECTION_GAP_MM
+        + DEFAULT_FIGURE_2_PANEL_GAP_MM
+        + DEFAULT_FIGURE_2_PANEL_HEIGHT_MM
     )
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, figure_height_mm),
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=7,
+        nrows=3,
         ncols=1,
         height_ratios=[
             DEFAULT_XCORR_PANEL_HEIGHT_MM,
-            DEFAULT_SECTION_GAP_MM,
-            section_height_mm,
-            DEFAULT_SECTION_GAP_MM,
-            DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM,
-            DEFAULT_SECTION_GAP_MM,
-            behavior_height_mm,
+            DEFAULT_FIGURE_2_PANEL_GAP_MM,
+            DEFAULT_FIGURE_2_PANEL_HEIGHT_MM,
         ],
     )
     xcorr_ax = fig.add_subplot(outer_grid[0])
-    plot_top_ca1_xcorr_panel(xcorr_ax, xcorr_payload)
+    plot_top_ca1_xcorr_panel(xcorr_ax, xcorr_payload, lag_label_y=-0.025)
     xcorr_ax.set_title("CA1-V1 cross correlation during ripples", fontsize=8, pad=2)
     label_axis(xcorr_ax, "A", x=-0.01, y=1.01)
-    top_spacer_ax = fig.add_subplot(outer_grid[1])
-    top_spacer_ax.axis("off")
-    section_ax = fig.add_subplot(outer_grid[2])
-    plot_per_animal_glm_scatter_grid(
-        section_ax,
-        payload,
-        y_limit=y_limit,
-        significance_p_value=DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
-    )
-    label_axis(section_ax, "B", x=-0.01, y=1.01)
-    spacer_ax = fig.add_subplot(outer_grid[3])
+    spacer_ax = fig.add_subplot(outer_grid[1])
     spacer_ax.axis("off")
-    source_comparison_ax = fig.add_subplot(outer_grid[4])
+
+    lower_grid = outer_grid[2].subgridspec(
+        nrows=2,
+        ncols=8,
+        height_ratios=[0.46, 0.54],
+    )
+    panel_b_ax = fig.add_subplot(lower_grid[:, :5])
+    source_comparison_ax = fig.add_subplot(lower_grid[0, 5:])
+    behavior_ax = fig.add_subplot(lower_grid[1, 5:])
+
+    plot_glm_scatter_box_panel(
+        panel_b_ax,
+        panel_b_epoch_tables,
+    )
+    panel_b_ax.set_title(
+        "Predicting V1 activity during ripples\nwith CA1 activity",
+        fontsize=7.2,
+        pad=2,
+    )
     plot_glm_source_predictor_comparison_panel(
         source_comparison_ax,
         source_comparison_payload,
-        include_per_animal=True,
-        include_pooled=False,
+        include_per_animal=False,
+        include_pooled=True,
+        compact_labels=True,
+        show_color_note=False,
+        axis_limits=PANEL_C_SOURCE_COMPARISON_LIMITS,
     )
     source_comparison_ax.set_title(
-        "Per-animal full CA1 spike vector vs mean CA1 activity",
-        fontsize=8,
+        "CA1 spike vector vs. mean CA1 activity",
+        fontsize=7.2,
         pad=2,
     )
-    label_axis(source_comparison_ax, "C", x=-0.01, y=1.01)
-    lower_spacer_ax = fig.add_subplot(outer_grid[5])
-    lower_spacer_ax.axis("off")
-    behavior_ax = fig.add_subplot(outer_grid[6])
-    plot_per_animal_behavior_association_grid(
+    plot_glm_behavior_association_panel(
         behavior_ax,
         behavior_payload,
+        show_note=False,
+        show_significance_marker=False,
     )
-    label_axis(behavior_ax, "D", x=-0.01, y=1.01)
+    behavior_ax.set_title(
+        "Relationship to dark-active DPP cells",
+        fontsize=7.2,
+        pad=2,
+    )
+    for ax, label in zip(
+        (panel_b_ax, source_comparison_ax, behavior_ax),
+        ("B", "C", "D"),
+        strict=True,
+    ):
+        label_axis(ax, label, x=-0.06, y=1.04)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
@@ -1475,7 +1705,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=list(DEFAULT_RIPPLE_SELECTION_MODES),
         help=(
             "Ripple-selection mode to plot. If multiple values are passed, "
-            "only the first is used for the per-animal scatter grid. "
+            "only the first is used for panels B-D. "
             f"Default: {list(DEFAULT_RIPPLE_SELECTION_MODES)!r}"
         ),
     )
@@ -1484,6 +1714,29 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_RIPPLE_WINDOW_S,
         help=f"Ripple-GLM window length in seconds. Default: {DEFAULT_RIPPLE_WINDOW_S}",
+    )
+    parser.add_argument(
+        "--ripple-window-offset-s",
+        type=float,
+        default=DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+        help=(
+            "Ripple-GLM window offset in seconds. "
+            f"Default: {DEFAULT_RIPPLE_WINDOW_OFFSET_S}"
+        ),
+    )
+    parser.add_argument(
+        "--dark-movement-fr-cache-dir",
+        type=Path,
+        default=DEFAULT_FIGURE_CACHE_DIR,
+        help=(
+            "Directory for cached dark movement firing-rate tables used by panel D. "
+            f"Default: {DEFAULT_FIGURE_CACHE_DIR}"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-dark-movement-fr-cache",
+        action="store_true",
+        help="Recompute and overwrite cached dark movement firing-rate tables.",
     )
     parser.add_argument(
         "--ridge-strength",
@@ -1521,7 +1774,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         xcorr_display_vmax=args.xcorr_display_vmax,
         ripple_selection_modes=tuple(args.ripple_selection),
         ripple_window_s=args.ripple_window_s,
+        ripple_window_offset_s=args.ripple_window_offset_s,
         ridge_strength=args.ridge_strength,
+        dark_movement_fr_cache_dir=args.dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
         dpi=args.dpi,
     )
 

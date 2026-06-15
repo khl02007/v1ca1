@@ -12,6 +12,7 @@ from v1ca1.paper_figures.supplementary_figure_2 import (
     DEFAULT_OUTPUT_NAME,
     DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
     DEFAULT_RIPPLE_SELECTION_MODES,
+    DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE,
     build_output_path,
     get_available_offset_glm_artifacts,
@@ -21,6 +22,7 @@ from v1ca1.paper_figures.supplementary_figure_2 import (
     make_supplementary_figure_2,
     parse_arguments,
     plot_dark_firing_rate_devexp_grid,
+    plot_glm_scatter_box_panel,
     plot_per_animal_behavior_association_grid,
     plot_per_animal_glm_scatter_grid,
     plot_selection_scatter_grid,
@@ -45,6 +47,7 @@ def test_default_cli_matches_supplementary_figure_2_defaults() -> None:
     assert DEFAULT_RIPPLE_SELECTION_MODES == ("single",)
     assert DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE == pytest.approx(0.05)
     assert args.dataset is None
+    assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S
     assert DEFAULT_EPOCH_TYPES == ("light", "dark", "sleep")
     assert SUPPLEMENTARY_FIGURE_2_SIGNIFICANCE_P_VALUE == pytest.approx(0.005)
 
@@ -398,7 +401,40 @@ def test_plot_per_animal_behavior_association_grid_splits_animal_rows(
     plt.close(fig)
 
 
-def test_make_supplementary_figure_2_saves_per_animal_scatter(
+def test_plot_glm_scatter_box_panel_omits_schematic() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    summary_table = pd.DataFrame(
+        {
+            "ripple_devexp_mean": [0.10, -0.02, 0.18],
+            "ripple_devexp_p_value": [0.001, 0.2, 0.02],
+        }
+    )
+    epoch_tables = [
+        {
+            "epoch_type": "dark",
+            "label": "Dark run",
+            "summary_table": summary_table,
+        }
+    ]
+
+    fig, ax = plt.subplots()
+    plot_glm_scatter_box_panel(ax, epoch_tables)
+
+    assert len(ax.child_axes) == 2
+    scatter_ax, box_ax = ax.child_axes
+    assert scatter_ax.get_title() == ""
+    assert len(scatter_ax.collections) == 2
+    assert scatter_ax.get_ylabel() == r"-log10 $\mathit{p}$ from shuffle"
+    assert box_ax.get_xlabel() == "Deviance explained"
+    assert [label.get_text() for label in box_ax.get_yticklabels()][0] == "n.s."
+    plt.close(fig)
+
+
+def test_make_supplementary_figure_2_saves_glm_summary_panels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -415,18 +451,13 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
             "ripple_devexp_p_value": [0.001],
         }
     )
-    payload = {
-        "epoch_tables": [
-            {
-                "epoch_type": "light",
-                "label": "Light run",
-                "summary_table": summary_table,
-            },
-        ],
-        "ripple_selection": "single",
-        "ripple_window_s": 0.2,
-        "ridge_strength": 0.1,
-    }
+    glm_epoch_tables = [
+        {
+            "epoch_type": "dark",
+            "label": "Dark run",
+            "summary_table": summary_table,
+        }
+    ]
     source_comparison_payload = {
         "comparison_table": pd.DataFrame(
             {
@@ -444,7 +475,7 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
             {
                 "animal_name": ["L14", "L14"],
                 "date": ["20240611", "20240611"],
-                "epoch_type": ["light", "light"],
+                "epoch_type": ["dark", "dark"],
                 "ripple_devexp_mean": [0.1, 0.2],
                 "ripple_devexp_p_value": [0.001, 0.2],
                 "dark_firing_rate_hz": [0.2, 1.0],
@@ -472,24 +503,35 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
         "load_top_ca1_xcorr_panel_data",
         lambda *_args, **_kwargs: xcorr_payload,
     )
-    def fake_load_per_animal_glm_scatter_payload(*_args, **kwargs):
-        calls["per_animal_kwargs"] = kwargs
-        return payload
+
+    def fake_load_glm_epoch_summary_tables(*_args, **kwargs):
+        calls["glm_epoch_kwargs"] = kwargs
+        return glm_epoch_tables
 
     monkeypatch.setattr(
         supp_figure_2_module,
-        "load_per_animal_glm_scatter_payload",
-        fake_load_per_animal_glm_scatter_payload,
+        "load_glm_epoch_summary_tables",
+        fake_load_glm_epoch_summary_tables,
     )
+
+    def fake_load_source_comparison_tables(*_args, **kwargs):
+        calls["source_kwargs"] = kwargs
+        return source_comparison_payload
+
     monkeypatch.setattr(
         supp_figure_2_module,
         "load_glm_source_predictor_comparison_tables",
-        lambda *_args, **_kwargs: source_comparison_payload,
+        fake_load_source_comparison_tables,
     )
+
+    def fake_load_behavior_tables(*_args, **kwargs):
+        calls["behavior_kwargs"] = kwargs
+        return behavior_payload
+
     monkeypatch.setattr(
         supp_figure_2_module,
         "load_glm_dark_activity_devexp_tables",
-        lambda *_args, **_kwargs: behavior_payload,
+        fake_load_behavior_tables,
     )
 
     def fake_save_figure(figure, output_path: Path, dpi: int):
@@ -502,6 +544,12 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
             if text.get_fontweight() == "bold"
         ]
         calls["axis_titles"] = [ax.get_title() for ax in figure.axes]
+        calls["lag_label_y"] = [
+            text.get_position()[1]
+            for ax in figure.axes
+            for text in ax.texts
+            if text.get_text() == "Lag (s)"
+        ]
         return output_path
 
     monkeypatch.setattr(supp_figure_2_module, "save_figure", fake_save_figure)
@@ -519,6 +567,7 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
         xcorr_display_vmax=5.0,
         ripple_selection_modes=("single",),
         ripple_window_s=0.2,
+        ripple_window_offset_s=0.0,
         ridge_strength=0.1,
         dpi=300,
     )
@@ -526,18 +575,29 @@ def test_make_supplementary_figure_2_saves_per_animal_scatter(
     assert saved_path == output_path
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert calls["per_animal_kwargs"]["epoch_types"] == ("light",)
-    assert calls["per_animal_kwargs"]["ripple_selection"] == "single"
+    assert calls["glm_epoch_kwargs"]["epoch_types"] == ("dark",)
+    assert calls["glm_epoch_kwargs"]["ripple_selection"] == "single"
+    assert calls["glm_epoch_kwargs"]["ripple_window_offset_s"] == 0.0
+    assert calls["source_kwargs"]["ripple_selection"] == "single"
+    assert calls["behavior_kwargs"]["ripple_selection"] == "single"
     assert set(calls["panel_labels"]) >= {
         "A",
         "B",
         "C",
         "D",
     }
-    assert "Relationship to dark-active DGP cells" not in calls["panel_labels"]
+    assert calls["lag_label_y"] == [pytest.approx(-0.025)]
     assert "Figure 2C run scatter by animal (single)" not in calls["panel_labels"]
     assert (
-        "Per-animal full CA1 spike vector vs mean CA1 activity"
+        "Predicting V1 activity during ripples\nwith CA1 activity"
+        in calls["axis_titles"]
+    )
+    assert (
+        "CA1 spike vector vs. mean CA1 activity"
+        in calls["axis_titles"]
+    )
+    assert (
+        "Relationship to dark-active DPP cells"
         in calls["axis_titles"]
     )
     assert all("(single)" not in title for title in calls["axis_titles"])

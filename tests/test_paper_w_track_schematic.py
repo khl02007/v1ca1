@@ -13,6 +13,7 @@ from v1ca1.paper_figures.w_track_schematic import (
     draw_w_track_schematic,
     parse_arguments,
 )
+from v1ca1.paper_figures.style import SCHEMATIC_COLORS
 
 
 def test_build_output_path_uses_requested_format() -> None:
@@ -32,14 +33,20 @@ def test_parse_arguments_defaults_match_paper_schematic_example() -> None:
     assert args.output_format == "pdf"
     assert args.trajectory_name == "center_to_left"
     assert args.stimulus_layout == "stim1"
-    assert args.arrow_color == "dodgerblue"
+    assert args.arrow_color is None
     assert not args.no_basis
 
 
 def test_default_styles_match_three_segment_example() -> None:
     assert len(DEFAULT_BASIS_SEGMENT_STYLES) == 3
-    assert DEFAULT_BASIS_SEGMENT_STYLES[-1]["edge_color"] == "red"
-    assert DEFAULT_BASIS_SEGMENT_STYLES[-1]["fill_color"] == "pink"
+    assert (
+        DEFAULT_BASIS_SEGMENT_STYLES[-1]["edge_color"]
+        == SCHEMATIC_COLORS["light_basis"]
+    )
+    assert (
+        DEFAULT_BASIS_SEGMENT_STYLES[-1]["fill_color"]
+        == SCHEMATIC_COLORS["light_basis"]
+    )
     assert DEFAULT_OVAL_REGIONS == ["center_arm", "left_center_connector", "left_arm"]
     assert len(DEFAULT_OVAL_STYLES) == len(DEFAULT_OVAL_REGIONS)
 

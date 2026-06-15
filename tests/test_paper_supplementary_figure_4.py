@@ -11,28 +11,19 @@ from v1ca1.paper_figures.supplementary_figure_4 import (
     DEFAULT_ANIMAL_ROW_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_OUTPUT_NAME,
-    COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM,
     EMPIRICAL_PAIRWISE_MODEL_NAMES,
-    EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM,
-    FULL_SEGMENT_GAIN_MIN_TUNING_STABILITY_CORRELATION,
-    FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM,
-    GLM_SCALAR_PANEL_HEIGHT_MM,
-    HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM,
     LETTER_HORIZONTAL_MARGIN_IN,
     LETTER_PAPER_WIDTH_IN,
+    MIXED_GLM_FULL_BEST_AXIS_BOUNDS,
+    MIXED_GLM_FULL_DELTA_AXIS_BOUNDS,
     MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM,
-    MULTIPLIER_PANEL_HEIGHT_MM,
     NESTED_DARK_ACTIVE_FR_THRESHOLD_HZ,
-    NESTED_MODULATION_PANEL_HEIGHT_MM,
     NESTED_TUNING_STABILITY_CORRELATION_THRESHOLD,
     SCALAR_MODEL_NAME,
     SCALAR_BASELINE_SCORE_COLUMN,
     SCALAR_BASELINE_SCORE_VARIABLE,
-    SCALAR_PANEL_MODEL_COLORS,
-    SCALAR_PANEL_EXAMPLE_AXIS_BOUNDS,
-    SCALAR_PANEL_EXAMPLE_DELTA_LABEL_POSITIONS,
-    SCALAR_PANEL_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS,
-    SCALAR_PANEL_EXAMPLES,
+    FIGURE_4B_DELTA_SUBPANEL_BOUNDS,
+    FIGURE_4B_DELTA_BOX_WIDTH,
     SCALAR_PANEL_HEIGHT_MM,
     get_figure_height_mm,
     get_swap_tuning_curve_comparison_path,
@@ -45,6 +36,7 @@ from v1ca1.paper_figures.supplementary_figure_4 import (
     load_scalar_multiplier_table,
     make_supplementary_figure_4,
     parse_arguments,
+    plot_figure_4b_delta_ll_boxplots,
 )
 
 
@@ -64,16 +56,17 @@ def test_default_cli_matches_letter_width_with_one_inch_margins() -> None:
     assert get_figure_height_mm(0) == pytest.approx(DEFAULT_ANIMAL_ROW_HEIGHT_MM)
     assert get_figure_height_mm(3) == pytest.approx(
         SCALAR_PANEL_HEIGHT_MM
-        + 3 * DEFAULT_ANIMAL_ROW_HEIGHT_MM
-        + EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM
-        + GLM_SCALAR_PANEL_HEIGHT_MM
         + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-        + HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-        + MULTIPLIER_PANEL_HEIGHT_MM
-        + FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-        + COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-        + NESTED_MODULATION_PANEL_HEIGHT_MM
     )
+    panel_b_left = min(
+        MIXED_GLM_FULL_DELTA_AXIS_BOUNDS[0],
+        MIXED_GLM_FULL_BEST_AXIS_BOUNDS[0],
+    )
+    panel_b_right = max(
+        MIXED_GLM_FULL_DELTA_AXIS_BOUNDS[0] + MIXED_GLM_FULL_DELTA_AXIS_BOUNDS[2],
+        MIXED_GLM_FULL_BEST_AXIS_BOUNDS[0] + MIXED_GLM_FULL_BEST_AXIS_BOUNDS[2],
+    )
+    assert 0.5 * (panel_b_left + panel_b_right) == pytest.approx(0.5)
 
 
 def test_group_datasets_by_animal_preserves_input_order() -> None:
@@ -91,6 +84,108 @@ def test_group_datasets_by_animal_preserves_input_order() -> None:
         ("L14", "20240612", "08_r4"),
     ]
     assert grouped["L15"] == [("L15", "20241121", "10_r5")]
+
+
+def test_plot_figure_4b_delta_ll_boxplots_groups_heldout_values() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import PathPatch
+
+    table = pandas.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L14", "L15", "L15"],
+            "trajectory": [
+                "center_to_left",
+                "center_to_left",
+                "center_to_right",
+                "center_to_left",
+                "right_to_center",
+            ],
+            "light_train_epoch": ["02_r1", "02_r1", "06_r3", "02_r1", "02_r1"],
+            "light_test_epoch": ["06_r3", "06_r3", "02_r1", "06_r3", "06_r3"],
+            "delta_ll_bits_per_spike": [0.1, 0.2, 0.9, -0.1, 0.4],
+        }
+    )
+    fig, axis = plt.subplots()
+
+    plot_figure_4b_delta_ll_boxplots(
+        axis,
+        table,
+        animal_names=("L14", "L15"),
+    )
+    fig.canvas.draw()
+
+    assert len(axis.child_axes) == 2
+    assert len(FIGURE_4B_DELTA_SUBPANEL_BOUNDS) == 4
+    assert [child_axis.get_title() for child_axis in axis.child_axes] == [
+        "L14",
+        "L15",
+    ]
+    boxes = [
+        patch
+        for child_axis in axis.child_axes
+        for patch in child_axis.patches
+        if isinstance(patch, PathPatch)
+    ]
+    assert len(boxes) == 3
+    first_axis = axis.child_axes[0]
+    assert first_axis.get_xlim() == pytest.approx(figure_3_module.PANEL_H_DELTA_X_LIMITS)
+    assert [tick.get_text() for tick in first_axis.get_yticklabels()] == [
+        figure_3_module.PANEL_TRAJECTORY_LABELS[trajectory]
+        for trajectory in figure_3_module.PANEL_H_DELTA_TRAJECTORIES
+    ]
+    assert [
+        line.get_xdata()[0]
+        for child_axis in axis.child_axes
+        for line in child_axis.lines
+        if line.get_linestyle() == "--"
+    ] == pytest.approx([0.0] * len(axis.child_axes))
+    assert any(
+        text.get_text() == "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)"
+        for text in axis.texts
+    )
+    assert boxes[0].get_facecolor() == pytest.approx(
+        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
+    )
+    assert boxes[1].get_facecolor() == pytest.approx(
+        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
+    )
+    assert boxes[2].get_facecolor() == pytest.approx(
+        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["right_to_center"], 0.68)
+    )
+    fraction_labels = [
+        text.get_text()
+        for child_axis in axis.child_axes
+        for text in child_axis.texts
+        if ">0" in text.get_text()
+    ]
+    assert fraction_labels == ["100% >0", "0% >0", "100% >0"]
+    fraction_text_colors = [
+        text.get_color()
+        for child_axis in axis.child_axes
+        for text in child_axis.texts
+        if ">0" in text.get_text()
+    ]
+    assert fraction_text_colors[:2] == [
+        figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
+        figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
+    ]
+    fraction_text_artists = [
+        text
+        for child_axis in axis.child_axes
+        for text in child_axis.texts
+        if ">0" in text.get_text()
+    ]
+    assert all(text.get_position()[0] > 1.0 for text in fraction_text_artists)
+    assert all(text.get_ha() == "left" for text in fraction_text_artists)
+    assert all(not text.get_clip_on() for text in fraction_text_artists)
+    assert FIGURE_4B_DELTA_BOX_WIDTH == pytest.approx(0.13)
+    assert axis.get_legend() is None
+    assert axis.texts[-1].get_text() == "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)"
+    plt.close(fig)
 
 
 def test_load_empirical_pairwise_delta_table_builds_v_ms_as_deltas(
@@ -362,6 +457,56 @@ def test_load_full_segment_log_gain_table_filters_reliable_trajectory_units(
     ].iloc[0]
     assert right_unit_2["full_segment_log_gain"] == pytest.approx(-0.65)
     assert right_unit_2["reliability_epoch"] == "08_r4"
+
+
+def test_filter_swapped_segment_shared_scaffold_gain_table_keeps_requested_rows() -> None:
+    pandas = pytest.importorskip("pandas")
+
+    gain_table = pandas.DataFrame(
+        {
+            "animal_name": ["L00", "L00", "L00", "L00"],
+            "date": ["20000101", "20000101", "20000101", "20000101"],
+            "region": ["v1", "v1", "v1", "v1"],
+            "dark_train_epoch": ["08_r4", "08_r4", "08_r4", "08_r4"],
+            "light_train_epoch": ["02_r1", "02_r1", "02_r1", "02_r1"],
+            "trajectory": [
+                "center_to_left",
+                "center_to_left",
+                "center_to_right",
+                "center_to_right",
+            ],
+            "segment_index_1based": [1, 2, 1, 2],
+            "unit": [1, 1, 2, 2],
+            "full_segment_log_gain": [0.10, 0.20, 0.30, 0.40],
+            "segment_specific_log_gain": [1.10, 1.20, 1.30, 1.40],
+        }
+    )
+    comparison_table = pandas.DataFrame(
+        {
+            "animal_name": ["L00", "L00"],
+            "date": ["20000101", "20000101"],
+            "region": ["v1", "v1"],
+            "dark_train_epoch": ["08_r4", "08_r4"],
+            "light_train_epoch": ["02_r1", "02_r1"],
+            "trajectory": ["center_to_left", "center_to_right"],
+            "unit": [1, 2],
+            "swap_segment_index_1based": [2, 1],
+            "MS_bits_per_spike": [0.60, 0.20],
+            "A_bits_per_spike": [0.50, 0.30],
+        }
+    )
+
+    result = supp_figure_4_module.filter_swapped_segment_shared_scaffold_gain_table(
+        gain_table,
+        comparison_table,
+    )
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["trajectory"] == "center_to_left"
+    assert row["segment_index_1based"] == 2
+    assert row["swap_segment_index_1based"] == 2
+    assert row["segment_specific_log_gain"] == pytest.approx(1.20)
 
 
 def test_load_nested_vision_modulation_table_builds_nested_counts(
@@ -678,6 +823,157 @@ def test_load_mixed_glm_full_additive_delta_table_uses_pointwise_additive(
     ]
 
 
+def test_plot_mixed_glm_full_additive_pairwise_delta_uses_displayed_contrasts() -> None:
+    pandas = pytest.importorskip("pandas")
+
+    class FakePatch:
+        def set_facecolor(self, color: str) -> None:
+            pass
+
+        def set_edgecolor(self, color: str) -> None:
+            pass
+
+        def set_alpha(self, alpha: float) -> None:
+            pass
+
+    class FakeWhisker:
+        def __init__(self, values: np.ndarray) -> None:
+            self._xdata = np.asarray([np.min(values), np.max(values)], dtype=float)
+
+        def get_xdata(self) -> np.ndarray:
+            return self._xdata
+
+    class FakeSpine:
+        def set_visible(self, visible: bool) -> None:
+            pass
+
+    class FakeAxis:
+        transAxes = object()
+
+        def __init__(self) -> None:
+            self.spines = {"top": FakeSpine(), "right": FakeSpine()}
+            self.boxplot_values: list[np.ndarray] = []
+            self.boxplot_kwargs: dict[str, object] = {}
+            self.texts: list[str] = []
+            self.xlim = (-1.0, 1.0)
+            self.yticklabels: list[str] = []
+
+        def axvline(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def text(self, *args: object, **kwargs: object) -> None:
+            self.texts.append(str(args[2]))
+
+        def boxplot(self, values: list[np.ndarray], **kwargs: object) -> dict[str, list[object]]:
+            self.boxplot_values = [np.asarray(value, dtype=float) for value in values]
+            self.boxplot_kwargs = kwargs
+            return {
+                "boxes": [FakePatch() for _value in values],
+                "whiskers": [
+                    FakeWhisker(np.asarray(value, dtype=float))
+                    for value in values
+                    for _side in range(2)
+                ],
+            }
+
+        def legend(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def set_xlim(self, *args: object) -> None:
+            if len(args) == 1:
+                left, right = args[0]
+                self.xlim = (float(left), float(right))
+            else:
+                self.xlim = (float(args[0]), float(args[1]))
+
+        def get_xlim(self) -> tuple[float, float]:
+            return self.xlim
+
+        def set_ylim(self, *args: object) -> None:
+            pass
+
+        def set_yticks(self, ticks: object) -> None:
+            pass
+
+        def set_yticklabels(self, labels: list[str] | tuple[str, ...]) -> None:
+            self.yticklabels = list(labels)
+
+        def set_xlabel(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def tick_params(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    table = pandas.DataFrame(
+        {
+            "trajectory": ["center_to_left", "center_to_left"],
+            "V_bits_per_spike": [1.0, 0.8],
+            "MS_bits_per_spike": [1.2, 0.5],
+            "A_bits_per_spike": [0.7, 0.6],
+        }
+    )
+    axis = FakeAxis()
+
+    supp_figure_4_module.plot_mixed_glm_full_additive_pairwise_delta(
+        axis,
+        table,
+        show_legend=False,
+    )
+
+    assert axis.yticklabels == [
+        "Shared-scaffold - Independent",
+        "Shared-scaffold - Additive",
+        "Independent - Additive",
+    ]
+    assert len(axis.boxplot_values) == 3
+    np.testing.assert_allclose(axis.boxplot_values[0], [0.2, -0.3])
+    np.testing.assert_allclose(axis.boxplot_values[1], [0.5, -0.1])
+    np.testing.assert_allclose(axis.boxplot_values[2], [0.3, 0.2])
+    assert axis.boxplot_kwargs["vert"] is False
+    assert all("Visual" not in text and "MS" not in text for text in axis.texts)
+
+
+def test_plot_mixed_glm_full_additive_best_fraction_bar_displays_model_names(
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pandas.DataFrame({"winner": ["V", "MS", "MS", "A", "tie"]})
+    fig, axis = plt.subplots()
+
+    supp_figure_4_module.plot_mixed_glm_full_additive_best_fraction_bar(axis, table)
+    fig.canvas.draw()
+
+    assert axis.get_title() == "Best model"
+    assert [tick.get_text() for tick in axis.get_yticklabels()] == []
+    assert axis.get_xlabel() == "Frac. cells"
+    assert [patch.get_width() for patch in axis.patches] == pytest.approx(
+        [0.2, 0.4, 0.2, 0.2]
+    )
+    assert [patch.get_x() for patch in axis.patches] == pytest.approx(
+        [0.0, 0.2, 0.6, 0.8]
+    )
+    assert [patch.get_y() for patch in axis.patches] == pytest.approx(
+        [-0.16, -0.16, -0.16, -0.16]
+    )
+    model_texts = [
+        text
+        for text in axis.texts
+        if text.get_text()
+        in {
+            "Independent\n20%",
+            "Shared-\nscaffold\n40%",
+            "Additive\n20%",
+            "tie\n20%",
+        }
+    ]
+    assert len(model_texts) == 4
+    assert all(text.get_color() == "0.20" for text in model_texts)
+    plt.close(fig)
+
+
 def test_plot_hybrid_best_fraction_bar_uses_pairwise_v_h_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -753,7 +1049,7 @@ def test_plot_reverse_hybrid_best_fraction_bar_uses_pairwise_v_h2_winner(
     assert calls[0]["labels"] == ("V", "H2", "tie")
 
 
-def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
+def test_make_supplementary_figure_4_plots_figure_4b_boxes_per_animal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -763,9 +1059,7 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
 
     calls: dict[str, object] = {}
     load_calls = []
-    example_calls = []
-    scalar_plot_calls = []
-    plot_tables = []
+    figure_4b_boxplot_calls = []
     empirical_load_calls = []
     empirical_plot_tables = []
     empirical_best_tables = []
@@ -776,6 +1070,7 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     mixed_plot_tables = []
     mixed_best_tables = []
     mixed_full_load_calls = []
+    mixed_full_tables = []
     mixed_full_plot_tables = []
     mixed_full_best_tables = []
     empirical_multiplicative_plot_tables = []
@@ -788,7 +1083,8 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     multiplier_load_calls = []
     multiplier_plot_tables = []
     full_gain_load_calls = []
-    full_gain_plot_tables = []
+    full_gain_tables = []
+    swapped_gain_plot_tables = []
     combined_gain_plot_tables = []
     nested_modulation_load_calls = []
     nested_modulation_plot_tables = []
@@ -806,28 +1102,18 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
             }
         )
 
-    def fake_plot_figure_4c_histogram_grid(ax, table):
-        plot_tables.append(table)
-        ax.text(0.5, 0.5, "4C")
-
-    def fake_load_panel_h_swap_examples(**kwargs: object):
-        example_calls.append(kwargs)
-        return [{"model_name": SCALAR_MODEL_NAME}]
-
-    def fake_plot_panel_h_swap_delta(
+    def fake_plot_figure_4b_delta_ll_boxplots(
         ax,
         swap_delta_table,
-        swap_examples,
         **kwargs: object,
     ):
-        scalar_plot_calls.append(
+        figure_4b_boxplot_calls.append(
             {
                 "table": swap_delta_table,
-                "examples": swap_examples,
                 "kwargs": kwargs,
             }
         )
-        ax.text(0.5, 0.5, "scalar")
+        ax.text(0.5, 0.5, "4B boxes")
 
     def fake_load_empirical_pairwise_delta_table(**kwargs: object):
         empirical_load_calls.append(kwargs)
@@ -898,17 +1184,25 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
 
     def fake_load_mixed_glm_full_additive_delta_table(**kwargs: object):
         mixed_full_load_calls.append(kwargs)
-        return pandas.DataFrame(
+        table = pandas.DataFrame(
             {
                 "animal_name": ["L14"],
                 "date": ["20240611"],
                 "trajectory": ["center_to_left"],
+                "region": ["v1"],
+                "dark_train_epoch": ["08_r4"],
+                "light_train_epoch": ["02_r1"],
                 "unit": [1],
+                "swap_segment_index_1based": [1],
                 "winner": ["A"],
                 "delta_V_minus_task_bits_per_spike": [0.04],
                 "delta_V_minus_A_bits_per_spike": [-0.02],
+                "MS_bits_per_spike": [0.40],
+                "A_bits_per_spike": [0.30],
             }
         )
+        mixed_full_tables.append(table)
+        return table
 
     def fake_plot_mixed_glm_full_additive_pairwise_delta(
         ax,
@@ -981,7 +1275,7 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
 
     def fake_load_full_segment_log_gain_table(**kwargs: object):
         full_gain_load_calls.append(kwargs)
-        return pandas.DataFrame(
+        table = pandas.DataFrame(
             {
                 "animal_name": ["L14"],
                 "date": ["20240611"],
@@ -990,12 +1284,19 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
                 "segment_index_1based": [1],
                 "unit": [1],
                 "full_segment_log_gain": [0.35],
+                "segment_specific_log_gain": [0.25],
             }
         )
+        full_gain_tables.append(table)
+        return table
 
-    def fake_plot_full_segment_log_gain_histograms(ax, table):
-        full_gain_plot_tables.append(table)
-        ax.text(0.5, 0.5, "full gains")
+    def fake_plot_swapped_segment_shared_scaffold_gain_histograms(
+        ax,
+        gain_table,
+        comparison_table,
+    ):
+        swapped_gain_plot_tables.append((gain_table, comparison_table))
+        ax.text(0.5, 0.5, "swapped gains")
 
     def fake_plot_combined_full_segment_log_gain_histogram(ax, table):
         combined_gain_plot_tables.append(table)
@@ -1031,6 +1332,12 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
             for text in ax.texts
             if text.get_fontweight() == "bold"
         ]
+        calls["axis_titles"] = [
+            ax.get_title()
+            for ax in figure.axes
+            if ax.get_title()
+        ]
+        calls["texts"] = [text.get_text() for ax in figure.axes for text in ax.texts]
         return output_path
 
     monkeypatch.setattr(
@@ -1040,18 +1347,8 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     )
     monkeypatch.setattr(
         supp_figure_4_module,
-        "plot_figure_4c_histogram_grid",
-        fake_plot_figure_4c_histogram_grid,
-    )
-    monkeypatch.setattr(
-        supp_figure_4_module,
-        "load_panel_h_swap_examples",
-        fake_load_panel_h_swap_examples,
-    )
-    monkeypatch.setattr(
-        supp_figure_4_module,
-        "plot_panel_h_swap_delta",
-        fake_plot_panel_h_swap_delta,
+        "plot_figure_4b_delta_ll_boxplots",
+        fake_plot_figure_4b_delta_ll_boxplots,
     )
     monkeypatch.setattr(
         supp_figure_4_module,
@@ -1165,8 +1462,8 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     )
     monkeypatch.setattr(
         supp_figure_4_module,
-        "plot_full_segment_log_gain_histograms",
-        fake_plot_full_segment_log_gain_histograms,
+        "plot_swapped_segment_shared_scaffold_gain_histograms",
+        fake_plot_swapped_segment_shared_scaffold_gain_histograms,
     )
     monkeypatch.setattr(
         supp_figure_4_module,
@@ -1201,15 +1498,7 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     assert calls["figsize"][1] == pytest.approx(
         (
             SCALAR_PANEL_HEIGHT_MM
-            + 2 * DEFAULT_ANIMAL_ROW_HEIGHT_MM
-            + EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM
-            + GLM_SCALAR_PANEL_HEIGHT_MM
             + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-            + HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-            + MULTIPLIER_PANEL_HEIGHT_MM
-            + FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-            + COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-            + NESTED_MODULATION_PANEL_HEIGHT_MM
         )
         / 25.4
     )
@@ -1219,82 +1508,31 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
     assert calls["panel_labels"] == [
         "A",
         "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-        "I",
-        "J",
     ]
-    assert [call["datasets"] for call in load_calls] == [
-        datasets,
-        [datasets[0]],
-        [datasets[1]],
-    ]
+    assert calls["axis_titles"][0] == (
+        "Shared scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory"
+    )
+    assert calls["axis_titles"][1] == (
+        "Comparison between shared-scaffold, independent, and additive model"
+    )
+    assert "Additive segment" not in calls["texts"]
+    assert [call["datasets"] for call in load_calls] == [datasets]
     assert all(call["region"] == "v1" for call in load_calls)
     assert load_calls[0]["model_name"] == SCALAR_MODEL_NAME
     assert load_calls[0]["min_tuning_stability_correlation"] == pytest.approx(
         figure_3_module.PANEL_D_MIN_TUNING_STABILITY_CORRELATION
     )
-    assert "model_name" not in load_calls[1]
-    assert example_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-            "model_name": SCALAR_MODEL_NAME,
-            "example_count": len(SCALAR_PANEL_EXAMPLES),
-            "requested_examples": SCALAR_PANEL_EXAMPLES,
-        }
-    ]
-    assert len(scalar_plot_calls) == 1
-    assert scalar_plot_calls[0]["examples"] == [{"model_name": SCALAR_MODEL_NAME}]
-    assert scalar_plot_calls[0]["kwargs"]["model_name"] == SCALAR_MODEL_NAME
-    assert scalar_plot_calls[0]["kwargs"]["model_colors"] == SCALAR_PANEL_MODEL_COLORS
-    assert scalar_plot_calls[0]["kwargs"]["example_axis_bounds"] == (
-        SCALAR_PANEL_EXAMPLE_AXIS_BOUNDS
-    )
-    assert scalar_plot_calls[0]["kwargs"]["example_delta_label_positions"] == (
-        SCALAR_PANEL_EXAMPLE_DELTA_LABEL_POSITIONS
-    )
-    assert scalar_plot_calls[0]["kwargs"][
-        "example_delta_label_vertical_alignments"
-    ] == SCALAR_PANEL_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
-    assert len(plot_tables) == 2
-    assert empirical_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-        }
-    ]
-    assert len(empirical_plot_tables) == 1
-    assert len(empirical_best_tables) == 1
-    assert glm_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-        }
-    ]
-    assert len(glm_plot_tables) == 1
-    assert len(glm_best_tables) == 1
-    assert mixed_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-        }
-    ]
-    assert len(mixed_plot_tables) == 1
-    assert mixed_plot_tables[0][1] == {"show_legend": False}
-    assert len(mixed_best_tables) == 1
+    assert len(figure_4b_boxplot_calls) == 1
+    assert figure_4b_boxplot_calls[0]["kwargs"] == {"animal_names": ("L14", "L15")}
+    assert len(empirical_load_calls) == 0
+    assert len(empirical_plot_tables) == 0
+    assert len(empirical_best_tables) == 0
+    assert len(glm_load_calls) == 0
+    assert len(glm_plot_tables) == 0
+    assert len(glm_best_tables) == 0
+    assert len(mixed_load_calls) == 0
+    assert len(mixed_plot_tables) == 0
+    assert len(mixed_best_tables) == 0
     assert mixed_full_load_calls == [
         {
             "data_root": Path("/analysis"),
@@ -1304,72 +1542,22 @@ def test_make_supplementary_figure_4_plots_figure_4c_histograms_per_animal(
         }
     ]
     assert len(mixed_full_plot_tables) == 1
+    assert mixed_full_plot_tables[0][0] is mixed_full_tables[0]
     assert mixed_full_plot_tables[0][1] == {"show_legend": False}
     assert len(mixed_full_best_tables) == 1
-    assert len(empirical_multiplicative_plot_tables) == 1
-    assert empirical_multiplicative_plot_tables[0] is empirical_plot_tables[0]
-    assert len(empirical_multiplicative_best_tables) == 1
-    assert empirical_multiplicative_best_tables[0] is empirical_plot_tables[0]
-    assert hybrid_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-        }
-    ]
-    assert len(hybrid_plot_tables) == 1
-    assert len(hybrid_best_tables) == 1
-    assert len(reverse_hybrid_plot_tables) == 1
-    assert reverse_hybrid_plot_tables[0] is hybrid_plot_tables[0]
-    assert len(reverse_hybrid_best_tables) == 1
-    assert reverse_hybrid_best_tables[0] is hybrid_plot_tables[0]
-    assert multiplier_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-        }
-    ]
-    assert len(multiplier_plot_tables) == 1
-    assert full_gain_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-            "min_tuning_stability_correlation": (
-                FULL_SEGMENT_GAIN_MIN_TUNING_STABILITY_CORRELATION
-            ),
-        }
-    ]
-    assert len(full_gain_plot_tables) == 1
-    assert len(combined_gain_plot_tables) == 1
-    assert combined_gain_plot_tables[0] is full_gain_plot_tables[0]
-    assert nested_modulation_load_calls == [
-        {
-            "data_root": Path("/analysis"),
-            "datasets": datasets,
-            "region": "v1",
-            "dark_epoch": None,
-            "full_gain_table": full_gain_plot_tables[0],
-        }
-    ]
-    assert len(nested_modulation_plot_tables) == 1
-    assert nested_modulation_plot_tables[0][0].equals(
-        pandas.DataFrame(
-            {
-                "total_cell_count": [10],
-                "dark_inactive_count": [2],
-                "dark_active_count": [8],
-                "dark_active_unstable_count": [3],
-                "dark_active_stable_count": [5],
-                "dark_active_stable_no_scalar_fit_count": [1],
-                "dark_active_stable_unmodulated_count": [2],
-                "dark_active_stable_modulated_count": [2],
-            }
-        )
-    )
-    assert nested_modulation_plot_tables[0][1]["show_note"] is False
-    assert nested_modulation_plot_tables[0][1]["legend_axis"] is not None
+    assert mixed_full_best_tables[0] is mixed_full_tables[0]
+    assert len(empirical_multiplicative_plot_tables) == 0
+    assert len(empirical_multiplicative_best_tables) == 0
+    assert len(hybrid_load_calls) == 0
+    assert len(hybrid_plot_tables) == 0
+    assert len(hybrid_best_tables) == 0
+    assert len(reverse_hybrid_plot_tables) == 0
+    assert len(reverse_hybrid_best_tables) == 0
+    assert len(multiplier_load_calls) == 0
+    assert len(multiplier_plot_tables) == 0
+    assert len(full_gain_load_calls) == 0
+    assert len(full_gain_tables) == 0
+    assert len(swapped_gain_plot_tables) == 0
+    assert len(combined_gain_plot_tables) == 0
+    assert len(nested_modulation_load_calls) == 0
+    assert len(nested_modulation_plot_tables) == 0

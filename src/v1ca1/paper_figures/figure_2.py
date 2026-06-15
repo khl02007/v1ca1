@@ -26,12 +26,12 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.style import (
-    ANIMAL_COLORS,
     COMPACT_HISTOGRAM_KWARGS,
     EPOCH_TYPE_COLORS,
     HISTOGRAM_KWARGS,
     MODEL_CLASS_COLORS,
     NEUTRAL_COLORS,
+    PANEL_LABEL_KWARGS,
     REGION_COLORS,
     SCHEMATIC_COLORS,
     apply_paper_style,
@@ -57,17 +57,17 @@ DEFAULT_OUTPUT_NAME = "figure_2"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
-DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "10_r5")
+DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_FIGURE_HEIGHT_MM = 72.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
+PANEL_ABC_HEADER_LABEL_X_OFFSETS = (-0.10, -0.10, -0.10)
 DEFAULT_REGIONS = REGIONS
 RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
 RIPPLE_LFP_RELATIVE_DIR = Path("ripple") / "ripple_channels_lfp"
 RIPPLE_MODULATION_RELATIVE_DIR = Path("ripple") / "ripple_modulation"
 RIPPLE_GLM_RELATIVE_DIR = Path("ripple_glm")
 RIPPLE_DECODING_COMPARISON_RELATIVE_DIR = Path("ripple_decoding_comparison")
-ENCODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "encoding_comparison"
 TUNING_ANALYSIS_RELATIVE_DIR = Path("task_progression") / "tuning_analysis"
 MOTOR_NESTED_CV_RELATIVE_DIR = Path("task_progression") / "motor" / "nested_lap_cv"
 DEFAULT_RIPPLE_THRESHOLD_ZSCORE = 2.0
@@ -107,10 +107,6 @@ DEFAULT_XCORR_TOP_CA1_UNITS = 4
 DEFAULT_XCORR_DISPLAY_VMAX = 5.0
 DEFAULT_XCORR_LAG_WINDOW_S = (-0.3, 0.3)
 DEFAULT_PANEL_D_REGION = "v1"
-DEFAULT_PANEL_D_ENCODING_N_FOLDS = 5
-DEFAULT_PANEL_D_PLACE_BIN_SIZE_CM = 4.0
-DEFAULT_PANEL_D_ENCODING_SOURCE_COLUMN = "delta_bits_generalized_place_vs_tp"
-DEFAULT_PANEL_D_MOTOR_DELTA_METRIC = "dll_motor_tp_vs_motor_bits_per_spike"
 PANEL_D_MOTOR_PREFERRED_FILENAME_TOKEN = "_zscore_"
 DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC = "correlation"
 DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL = "pooled_same_turn"
@@ -131,11 +127,11 @@ PANEL_E_CHANCE_LEVELS = {
 PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S = (-0.4, -0.2, 0.0, 0.2)
 PANEL_E_GLM_TARGET_WINDOW_S = DEFAULT_RIPPLE_WINDOW_S
 PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S = 0.0
-PANEL_E_GLM_EPOCH_ORDER = ("dark",)
+PANEL_E_GLM_EPOCH_ORDER = ("light",)
 HEATMAP_EPOCH_ORDER = ("light", "dark", "sleep")
-PANEL_A_EPOCH_ORDER = ("dark",)
-PANEL_C_EPOCH_ORDER = ("dark",)
-PANEL_D_EPOCH_ORDER = ("dark",)
+PANEL_A_EPOCH_ORDER = ("light",)
+PANEL_C_EPOCH_ORDER = ("light",)
+PANEL_D_EPOCH_ORDER = ("light",)
 HEATMAP_EPOCH_LABELS = {
     "light": "Light run",
     "dark": "Dark run",
@@ -159,9 +155,9 @@ PANEL_D_DARK_ACTIVITY_COLORS = {
     "inactive": EPOCH_TYPE_COLORS["light"],
     "active": SCHEMATIC_COLORS["dark_basis"],
 }
-PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
-PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
-PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.1, 0.3)
+PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
+PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
+PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.2, 0.5)
 DARK_MOVEMENT_FR_CACHE_VERSION = 1
 DARK_MOVEMENT_FR_CACHE_COLUMNS = ("unit", "dark_firing_rate_hz")
 
@@ -415,34 +411,6 @@ def get_ripple_glm_model_window_path(
         f"{ridge_suffix}_samplewise_ripple_glm.nc"
     )
     return get_dataset_analysis_path(data_root, animal_name, date) / RIPPLE_GLM_RELATIVE_DIR / filename
-
-
-def format_place_bin_size_token(place_bin_size_cm: float) -> str:
-    """Return the filename token used by task-progression encoding summaries."""
-    value_text = f"{float(place_bin_size_cm):g}".replace("-", "m").replace(".", "p")
-    return f"placebin{value_text}cm"
-
-
-def get_encoding_comparison_summary_path(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    region: str,
-    epoch: str,
-    n_folds: int = DEFAULT_PANEL_D_ENCODING_N_FOLDS,
-    place_bin_size_cm: float = DEFAULT_PANEL_D_PLACE_BIN_SIZE_CM,
-) -> Path:
-    """Return the preferred task-progression encoding-comparison summary path."""
-    data_dir = (
-        get_dataset_analysis_path(data_root, animal_name, date)
-        / ENCODING_COMPARISON_RELATIVE_DIR
-    )
-    place_bin_token = format_place_bin_size_token(place_bin_size_cm)
-    preferred_path = data_dir / f"{region}_{epoch}_cv{n_folds}_{place_bin_token}_encoding_summary.parquet"
-    if preferred_path.exists():
-        return preferred_path
-    return data_dir / f"{region}_{epoch}_cv{n_folds}_encoding_summary.parquet"
 
 
 def find_motor_nested_cv_path(
@@ -3792,7 +3760,12 @@ def _plot_modulation_histogram_inset(
     ax.tick_params(labelsize=5, length=1.5, pad=1)
 
 
-def plot_top_ca1_xcorr_panel(ax: "Axes", payload: dict[str, Any]) -> None:
+def plot_top_ca1_xcorr_panel(
+    ax: "Axes",
+    payload: dict[str, Any],
+    *,
+    lag_label_y: float = 0.035,
+) -> None:
     """Plot top CA1 units' CA1-V1 xcorr heatmaps with a shared V1 order."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -3857,7 +3830,7 @@ def plot_top_ca1_xcorr_panel(ax: "Axes", payload: dict[str, Any]) -> None:
 
     ax.text(
         0.5 * (left + right),
-        0.035,
+        lag_label_y,
         "Lag (s)",
         ha="center",
         va="bottom",
@@ -3920,36 +3893,6 @@ def plot_modulation_index_panel(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=6, length=2, pad=1)
-
-
-def plot_ripple_count_panel(ax: "Axes", count_table: Any) -> None:
-    """Plot the number of thresholded ripples in each data-set epoch."""
-    if count_table.empty:
-        ax.text(0.5, 0.5, "No ripple counts", ha="center", va="center", transform=ax.transAxes)
-        return
-    positions = np.arange(len(count_table), dtype=float)
-    labels = [
-        f"{animal}\n{epoch}"
-        for animal, epoch in zip(
-            count_table["animal_name"].astype(str),
-            count_table["epoch"].astype(str),
-            strict=True,
-        )
-    ]
-    ax.bar(
-        positions,
-        count_table["n_ripples"].to_numpy(dtype=float),
-        color=SCHEMATIC_COLORS["ripple_trace"],
-        alpha=0.82,
-        width=0.7,
-    )
-    ax.set_xticks(positions)
-    ax.set_xticklabels(labels, fontsize=5)
-    ax.set_ylabel("Ripples")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", labelsize=6, length=2, pad=1)
-    ax.tick_params(axis="x", length=0, pad=1)
 
 
 def plot_glm_summary_panel(ax: "Axes", glm_table: Any) -> None:
@@ -4074,7 +4017,7 @@ def plot_glm_analysis_panel(
             plot_ax.text(
                 0.96,
                 0.05,
-                f"n={int(np.sum(valid))}\nsig={np.mean(significant):.2f}",
+                f"n={int(np.sum(valid))}\nfrac sig={np.mean(significant):.2f}",
                 ha="right",
                 va="bottom",
                 fontsize=4.8,
@@ -4101,7 +4044,7 @@ def plot_glm_analysis_panel(
         plot_ax.tick_params(labelbottom=False)
         if index == 0:
             plot_ax.set_ylabel(
-                r"-log10 $\mathit{p}$ from shuffle",
+                "-log10 p from shuffle",
                 fontsize=5,
                 labelpad=1.0,
             )
@@ -4295,130 +4238,6 @@ def compute_significance_distribution_comparison(
         "median_difference": observed_difference,
         "p_value": (exceed_count + 1.0) / (float(n_permutations) + 1.0),
     }
-
-
-def plot_metric_significance_distributions(
-    ax: "Axes",
-    table: Any,
-    *,
-    metric_column: str,
-    x_label: str,
-    title: str,
-    x_limits: tuple[float, float],
-    bin_edges: np.ndarray,
-) -> None:
-    """Plot dark tuning similarity for units significant in each GLM epoch group."""
-    del bin_edges
-    p_column = "ripple_devexp_p_value"
-    if table is None or len(table) == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "No joined\nunits",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
-        ax.set_xlim(*x_limits)
-    else:
-        ax.axvline(0.0, color="0.35", linestyle="--", linewidth=0.55, zorder=1)
-        plot_data = []
-        plot_positions = []
-        plot_colors = []
-        summary_lines = []
-        for position, epoch_type in enumerate(HEATMAP_EPOCH_ORDER, start=1):
-            epoch_rows = table[table["epoch_type"].astype(str) == epoch_type]
-            metric_values = np.asarray(epoch_rows[metric_column], dtype=float)
-            p_values = np.asarray(epoch_rows[p_column], dtype=float)
-            valid = (
-                np.isfinite(metric_values)
-                & np.isfinite(p_values)
-                & (p_values < SIGNIFICANCE_P_VALUE)
-            )
-            values = metric_values[valid]
-            if not values.size:
-                continue
-            plot_data.append(values)
-            plot_positions.append(position)
-            plot_colors.append(GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR))
-            summary_lines.append(
-                f"{HEATMAP_EPOCH_LABELS[epoch_type].split()[0]} n={values.size}, med={np.nanmedian(values):.2f}"
-            )
-        if plot_data:
-            violin_artists = ax.violinplot(
-                plot_data,
-                positions=plot_positions,
-                orientation="horizontal",
-                widths=0.72,
-                showmeans=False,
-                showmedians=False,
-                showextrema=False,
-            )
-            for body, color in zip(violin_artists["bodies"], plot_colors, strict=False):
-                body.set_facecolor(color)
-                body.set_edgecolor("none")
-                body.set_alpha(0.38)
-                body.set_zorder(2)
-            box_artists = ax.boxplot(
-                plot_data,
-                positions=plot_positions,
-                orientation="horizontal",
-                widths=0.25,
-                patch_artist=True,
-                showfliers=False,
-                whis=(5, 95),
-                medianprops={"color": "black", "linewidth": 0.7},
-                whiskerprops={"color": "0.25", "linewidth": 0.55},
-                capprops={"color": "0.25", "linewidth": 0.55},
-            )
-            for patch, color in zip(box_artists["boxes"], plot_colors, strict=False):
-                patch.set_facecolor(color)
-                patch.set_edgecolor("0.25")
-                patch.set_alpha(0.72)
-                patch.set_linewidth(0.55)
-            rng = np.random.default_rng(7)
-            for values, position, color in zip(plot_data, plot_positions, plot_colors, strict=True):
-                jitter = rng.uniform(-0.10, 0.10, size=values.size)
-                ax.scatter(
-                    values,
-                    np.full(values.shape, float(position)) + jitter,
-                    s=3,
-                    color=color,
-                    alpha=0.22,
-                    edgecolors="none",
-                    zorder=3,
-                )
-            if summary_lines:
-                ax.text(
-                    0.97,
-                    0.96,
-                    "\n".join(summary_lines),
-                    ha="right",
-                    va="top",
-                    fontsize=5.2,
-                    transform=ax.transAxes,
-                )
-        else:
-            ax.text(
-                0.5,
-                0.5,
-                "No significant\npairs",
-                ha="center",
-                va="center",
-                fontsize=6,
-                transform=ax.transAxes,
-            )
-        ax.set_xlim(*x_limits)
-
-    ax.set_title(title, fontsize=6.2, pad=1.5)
-    ax.set_xlabel(x_label, fontsize=5.4, labelpad=1)
-    ax.set_yticks([1, 2, 3])
-    ax.set_yticklabels(["Light", "Dark", "Sleep"], fontsize=5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=5, length=1.5, pad=1)
-    ax.tick_params(axis="y", length=0, pad=1)
 
 
 def plot_ripple_decoding_comparison_panel(
@@ -4736,420 +4555,6 @@ def plot_glm_offset_panel(
     )
 
 
-def _plot_deviance_metric_quartiles(
-    ax: "Axes",
-    table: Any,
-    *,
-    y_column: str,
-    y_label: str,
-    title: str,
-    y_limits: tuple[float, float] | None = None,
-    y_ticks: Sequence[float] | None = None,
-    y_scale: str = "linear",
-    y_axis_side: str = "left",
-    reference_y: float | None = None,
-    epoch_type: str = "light",
-    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
-    show_x_ticklabels: bool = True,
-) -> None:
-    """Plot one metric across significant positive ripple-GLM deviance quartiles."""
-    if reference_y is not None:
-        ax.axhline(
-            float(reference_y),
-            color="0.45",
-            linestyle="--",
-            linewidth=0.55,
-            zorder=0,
-        )
-    if table is None or len(table) == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "No joined\nunits",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
-    else:
-        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
-        x_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
-        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
-        y_values = np.asarray(epoch_rows[y_column], dtype=float)
-        valid = (
-            np.isfinite(x_values)
-            & np.isfinite(p_values)
-            & np.isfinite(y_values)
-            & (x_values > float(min_devexp))
-            & (p_values < PANEL_D_SIGNIFICANCE_P_VALUE)
-        )
-        if y_scale == "log":
-            valid &= y_values > 0.0
-        color = GLM_EPOCH_COLORS.get(epoch_type, PANEL_D_POINT_COLOR)
-        if np.any(valid):
-            valid_indices = np.flatnonzero(valid)
-            sorted_indices = valid_indices[np.argsort(x_values[valid_indices])]
-            quartile_indices = np.array_split(sorted_indices, 4)
-            point_x_values = []
-            point_y_values = []
-            median_x_values = []
-            median_y_values = []
-            for quartile_index, group_indices in enumerate(quartile_indices, start=1):
-                if group_indices.size == 0:
-                    continue
-                group_y_values = y_values[group_indices]
-                if group_indices.size == 1:
-                    offsets = np.array([0.0])
-                else:
-                    offsets = np.linspace(-0.16, 0.16, group_indices.size)
-                point_x_values.append(quartile_index + offsets)
-                point_y_values.append(group_y_values)
-                quartile_low, quartile_median, quartile_high = np.nanpercentile(
-                    group_y_values,
-                    [25.0, 50.0, 75.0],
-                )
-                median_x_values.append(float(quartile_index))
-                median_y_values.append(float(quartile_median))
-                ax.plot(
-                    [quartile_index, quartile_index],
-                    [quartile_low, quartile_high],
-                    color="black",
-                    linewidth=0.65,
-                    solid_capstyle="round",
-                    zorder=4,
-                )
-            ax.scatter(
-                np.concatenate(point_x_values),
-                np.concatenate(point_y_values),
-                s=4,
-                color=color,
-                alpha=0.22,
-                edgecolors="none",
-                zorder=2,
-            )
-            ax.plot(
-                median_x_values,
-                median_y_values,
-                color="black",
-                marker="o",
-                markersize=2.4,
-                markerfacecolor="white",
-                markeredgewidth=0.6,
-                linewidth=0.7,
-                zorder=5,
-            )
-
-    ax.set_xlim(0.55, 4.45)
-    ax.set_xticks([1.0, 2.0, 3.0, 4.0])
-    if show_x_ticklabels:
-        ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
-    else:
-        ax.set_xticklabels([])
-    if y_limits is not None:
-        ax.set_ylim(*y_limits)
-    if y_scale == "log":
-        ax.set_yscale("log")
-        ax.set_yticks([1.0, 10.0, 100.0])
-        ax.set_yticklabels(["1", "10", "100"], fontsize=4.4)
-    if y_scale == "linear":
-        if y_ticks is None:
-            y_ticks = [0.0, 0.5, 1.0]
-        ax.set_yticks(y_ticks)
-    if y_axis_side == "right":
-        ax.yaxis.tick_right()
-        ax.yaxis.set_label_position("right")
-        ax.spines["left"].set_visible(False)
-        ax.spines["right"].set_visible(True)
-    else:
-        ax.spines["right"].set_visible(False)
-    ax.set_title(title, fontsize=5.4, pad=0.8)
-    ax.set_ylabel(y_label, fontsize=5.0, labelpad=1.0)
-    ax.spines["top"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
-
-
-def _plot_deviance_metric_quartile_overlays(
-    ax: "Axes",
-    table: Any,
-    *,
-    metrics: Sequence[tuple[str, str, str]],
-    y_label: str,
-    title: str,
-    y_limits: tuple[float, float] | None = None,
-    y_ticks: Sequence[float] | None = None,
-    reference_y: float | None = None,
-    epoch_type: str = "light",
-    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
-) -> None:
-    """Plot multiple metrics across shared ripple-GLM deviance quartiles."""
-    if reference_y is not None:
-        ax.axhline(
-            float(reference_y),
-            color="0.45",
-            linestyle="--",
-            linewidth=0.55,
-            zorder=0,
-        )
-    if table is None or len(table) == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "No joined\nunits",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
-    else:
-        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
-        x_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
-        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
-        y_arrays = [
-            np.asarray(epoch_rows[column], dtype=float)
-            for column, _label, _color in metrics
-        ]
-        valid = (
-            np.isfinite(x_values)
-            & np.isfinite(p_values)
-            & (x_values > float(min_devexp))
-            & (p_values < PANEL_D_SIGNIFICANCE_P_VALUE)
-        )
-        for values in y_arrays:
-            valid &= np.isfinite(values)
-
-        if np.any(valid):
-            valid_indices = np.flatnonzero(valid)
-            sorted_indices = valid_indices[np.argsort(x_values[valid_indices])]
-            quartile_indices = np.array_split(sorted_indices, 4)
-            metric_offsets = (
-                np.linspace(-0.07, 0.07, len(metrics))
-                if len(metrics) > 1
-                else np.array([0.0])
-            )
-            for metric_index, (column, label, color) in enumerate(metrics):
-                y_values = np.asarray(epoch_rows[column], dtype=float)
-                point_x_values = []
-                point_y_values = []
-                median_x_values = []
-                median_y_values = []
-                x_offset = float(metric_offsets[metric_index])
-                for quartile_index, group_indices in enumerate(quartile_indices, start=1):
-                    if group_indices.size == 0:
-                        continue
-                    group_y_values = y_values[group_indices]
-                    if group_indices.size == 1:
-                        offsets = np.array([0.0])
-                    else:
-                        offsets = np.linspace(-0.09, 0.09, group_indices.size)
-                    point_x_values.append(quartile_index + x_offset + offsets)
-                    point_y_values.append(group_y_values)
-                    quartile_low, quartile_median, quartile_high = np.nanpercentile(
-                        group_y_values,
-                        [25.0, 50.0, 75.0],
-                    )
-                    median_x = float(quartile_index + x_offset)
-                    median_x_values.append(median_x)
-                    median_y_values.append(float(quartile_median))
-                    ax.plot(
-                        [median_x, median_x],
-                        [quartile_low, quartile_high],
-                        color=color,
-                        linewidth=0.65,
-                        solid_capstyle="round",
-                        zorder=4,
-                    )
-                ax.scatter(
-                    np.concatenate(point_x_values),
-                    np.concatenate(point_y_values),
-                    s=3.2,
-                    color=color,
-                    alpha=0.16,
-                    edgecolors="none",
-                    zorder=2,
-                )
-                ax.plot(
-                    median_x_values,
-                    median_y_values,
-                    color=color,
-                    marker="o",
-                    markersize=2.3,
-                    markerfacecolor="white",
-                    markeredgewidth=0.6,
-                    linewidth=0.7,
-                    label=label,
-                    zorder=5,
-                )
-            ax.legend(
-                frameon=False,
-                fontsize=3.8,
-                handlelength=1.0,
-                loc="upper left",
-                borderpad=0.1,
-                labelspacing=0.2,
-            )
-
-    ax.set_xlim(0.55, 4.45)
-    ax.set_xticks([1.0, 2.0, 3.0, 4.0])
-    ax.set_xticklabels(["Q1", "Q2", "Q3", "Q4"], fontsize=4.4)
-    if y_limits is not None:
-        ax.set_ylim(*y_limits)
-    if y_ticks is not None:
-        ax.set_yticks(y_ticks)
-    ax.set_title(title, fontsize=5.4, pad=0.8)
-    ax.set_ylabel(y_label, fontsize=5.0, labelpad=1.0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
-
-
-def _plot_glm_significance_metric_distribution(
-    ax: "Axes",
-    table: Any,
-    *,
-    metric_column: str,
-    y_label: str,
-    title: str,
-    epoch_type: str = "light",
-    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
-    min_devexp: float = PANEL_D_MIN_DEVIANCE_EXPLAINED,
-    y_limits: tuple[float, float] | None = None,
-    y_ticks: Sequence[float] | None = None,
-    y_scale: str = "linear",
-    show_x_ticklabels: bool = True,
-    show_y_ticklabels: bool = True,
-    show_counts: bool = False,
-) -> None:
-    """Plot one metric for nonsignificant and significant ripple-GLM cells."""
-    if table is None or len(table) == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "No joined\nunits",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
-        values_by_group: list[np.ndarray] = []
-    else:
-        epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)]
-        metric_values = np.asarray(epoch_rows[metric_column], dtype=float)
-        devexp_values = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
-        p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
-        finite = (
-            np.isfinite(metric_values)
-            & np.isfinite(devexp_values)
-            & np.isfinite(p_values)
-        )
-        if y_scale == "log":
-            finite &= metric_values > 0.0
-        significant = (
-            finite
-            & (devexp_values > float(min_devexp))
-            & (p_values < float(p_value_threshold))
-        )
-        values_by_group = [
-            metric_values[finite & ~significant],
-            metric_values[significant],
-        ]
-        if any(values.size for values in values_by_group):
-            plot_data = [values for values in values_by_group if values.size]
-            plot_positions = [
-                position
-                for position, values in enumerate(values_by_group, start=1)
-                if values.size
-            ]
-            box = ax.boxplot(
-                plot_data,
-                positions=plot_positions,
-                widths=0.38,
-                patch_artist=True,
-                showfliers=False,
-                whis=(5, 95),
-                medianprops={"color": "black", "linewidth": 0.7},
-                whiskerprops={"color": "0.25", "linewidth": 0.55},
-                capprops={"color": "0.25", "linewidth": 0.55},
-            )
-            colors = [NONSIGNIFICANT_COLOR, GLM_EPOCH_COLORS.get(epoch_type, MODEL_COLOR)]
-            for patch, position in zip(box["boxes"], plot_positions, strict=False):
-                patch.set_facecolor(colors[position - 1])
-                patch.set_edgecolor("0.25")
-                patch.set_alpha(0.65)
-                patch.set_linewidth(0.55)
-            rng = np.random.default_rng(31)
-            for position, values in enumerate(values_by_group, start=1):
-                if not values.size:
-                    continue
-                jitter = rng.uniform(-0.14, 0.14, size=values.size)
-                ax.scatter(
-                    np.full(values.shape, float(position)) + jitter,
-                    values,
-                    s=3.2,
-                    color=colors[position - 1],
-                    alpha=0.28,
-                    edgecolors="none",
-                    zorder=3,
-                )
-            ns_count = int(values_by_group[0].size)
-            sig_count = int(values_by_group[1].size)
-            if show_counts:
-                ax.text(
-                    0.98,
-                    0.96,
-                    f"NS n={ns_count}\nSig n={sig_count}",
-                    ha="right",
-                    va="top",
-                    fontsize=4.3,
-                    transform=ax.transAxes,
-                )
-        else:
-            ax.text(
-                0.5,
-                0.5,
-                "No finite\nvalues",
-                ha="center",
-                va="center",
-                fontsize=6,
-                transform=ax.transAxes,
-            )
-
-    finite_values = (
-        np.concatenate([values for values in values_by_group if values.size])
-        if values_by_group and any(values.size for values in values_by_group)
-        else np.asarray([], dtype=float)
-    )
-    if y_limits is not None:
-        ax.set_ylim(*y_limits)
-    elif finite_values.size:
-        low, high = np.nanpercentile(finite_values, [2.0, 98.0])
-        pad = max(0.01, 0.12 * float(high - low))
-        ax.set_ylim(float(low - pad), float(high + pad))
-    if y_scale == "log":
-        ax.set_yscale("log")
-        if y_ticks is None:
-            y_ticks = [1.0, 10.0, 100.0]
-        ax.set_yticks(y_ticks)
-        ax.set_yticklabels([f"{tick:g}" for tick in y_ticks], fontsize=4.4)
-    elif y_ticks is not None:
-        ax.set_yticks(y_ticks)
-    if not show_y_ticklabels:
-        ax.set_yticklabels([])
-    ax.set_xlim(0.45, 2.55)
-    ax.set_xticks([1.0, 2.0])
-    if show_x_ticklabels:
-        ax.set_xticklabels(["NS", "Sig"], fontsize=4.4)
-    else:
-        ax.set_xticklabels([])
-    ax.set_title(title, fontsize=5.4, pad=0.8)
-    ax.set_ylabel(y_label, fontsize=5.0, labelpad=0.8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.4, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=4.4, length=1.5, pad=1)
-
-
 def _plot_dark_activity_devexp_boxplot(
     ax: "Axes",
     table: Any,
@@ -5373,6 +4778,7 @@ def _plot_dark_activity_significant_composition(
     dark_activity_threshold_hz: float,
     p_value_threshold: float,
     title: str,
+    show_significance_marker: bool = True,
 ) -> None:
     """Plot dark activity composition among ripple-GLM significant cells."""
     import pandas as pd
@@ -5527,6 +4933,18 @@ def _plot_dark_activity_significant_composition(
                 va="center",
                 fontsize=4.6,
             )
+        # Pooled dark-active enrichment versus the Supp. Fig. 1B V1 baseline.
+        if show_significance_marker and np.isfinite(fractions[1]):
+            ax.text(
+                min(0.98, fractions[1] + 0.07),
+                positions[1],
+                "*",
+                ha="center",
+                va="center",
+                fontsize=7.0,
+                color="black",
+                zorder=6,
+            )
 
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.4, 2.6)
@@ -5534,7 +4952,38 @@ def _plot_dark_activity_significant_composition(
     ax.set_yticks([1.0, 2.0])
     ax.set_yticklabels(group_labels, fontsize=4.8)
     ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel(f"p<{p_value_threshold:g} frac.", fontsize=5.5, labelpad=1.0)
+    from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
+
+    ax.set_xlabel("")
+    label_font = ax.xaxis.label.get_fontproperties().copy()
+    label_font.set_size(5.5)
+    italic_label_font = label_font.copy()
+    italic_label_font.set_style("italic")
+    p_label_box = HPacker(
+        children=[
+            TextArea("p", textprops={"fontproperties": italic_label_font}),
+            TextArea(
+                f"<{p_value_threshold:g} frac.",
+                textprops={"fontproperties": label_font},
+            ),
+        ],
+        align="center",
+        pad=0,
+        sep=0,
+    )
+    ax.add_artist(
+        AnnotationBbox(
+            p_label_box,
+            (0.5, 0.0),
+            xycoords=ax.transAxes,
+            xybox=(0.0, -15.0),
+            boxcoords="offset points",
+            box_alignment=(0.5, 1.0),
+            frameon=False,
+            pad=0,
+            annotation_clip=False,
+        )
+    )
     ax.set_ylabel("", fontsize=5.5, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -5547,6 +4996,7 @@ def plot_glm_behavior_association_panel(
     payload: Mapping[str, Any],
     *,
     show_note: bool = True,
+    show_significance_marker: bool = True,
 ) -> None:
     """Plot ripple-GLM deviance explained by dark activity group."""
     ax.set_xlim(0.0, 1.0)
@@ -5621,6 +5071,7 @@ def plot_glm_behavior_association_panel(
             dark_activity_threshold_hz=dark_activity_threshold_hz,
             p_value_threshold=PANEL_C_SIGNIFICANCE_P_VALUE,
             title="",
+            show_significance_marker=show_significance_marker,
         )
         devexp_ax = ax.inset_axes(
             [devexp_left, bottom, devexp_width, height]
@@ -5790,6 +5241,7 @@ def plot_glm_source_predictor_comparison_panel(
     include_pooled: bool = True,
     compact_labels: bool = False,
     show_color_note: bool = True,
+    axis_limits: tuple[float, float] | None = None,
 ) -> None:
     """Plot full CA1 vector GLM performance against mean CA1 activity."""
     import pandas as pd
@@ -5801,7 +5253,8 @@ def plot_glm_source_predictor_comparison_panel(
     table = payload.get("comparison_table")
     if table is None:
         table = pd.DataFrame()
-    axis_limits = _compute_source_comparison_axis_limits(table)
+    if axis_limits is None:
+        axis_limits = _compute_source_comparison_axis_limits(table)
     if len(table):
         dataset_keys = sorted(
             {
@@ -5850,7 +5303,7 @@ def plot_glm_source_predictor_comparison_panel(
             axis_limits=axis_limits,
             pooled=pooled,
             p_value_threshold=SIGNIFICANCE_P_VALUE,
-            summary_location="upper_right" if compact_labels else "upper_left",
+            summary_location="lower_right" if compact_labels else "upper_left",
         )
         if compact_labels:
             child_ax.set_xlabel("Mean CA1 devexp", fontsize=5.3, labelpad=1.0)
@@ -5890,35 +5343,6 @@ def plot_glm_source_predictor_comparison_panel(
             fontsize=6.0,
             transform=ax.transAxes,
         )
-
-
-def plot_glm_prediction_context_panel(
-    ax: "Axes",
-    behavior_payload: Mapping[str, Any],
-    source_comparison_payload: Mapping[str, Any],
-) -> None:
-    """Stack the pooled source-control plot above the dark-activity summary."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-
-    source_ax = ax.inset_axes([0.0, 0.55, 1.0, 0.42])
-    plot_glm_source_predictor_comparison_panel(
-        source_ax,
-        source_comparison_payload,
-        include_per_animal=False,
-        include_pooled=True,
-        compact_labels=True,
-        show_color_note=False,
-    )
-    source_ax.set_title("Pooled vector vs mean CA1 activity", fontsize=5.8, pad=1.2)
-
-    behavior_ax = ax.inset_axes([0.0, 0.01, 1.0, 0.49])
-    plot_glm_behavior_association_panel(
-        behavior_ax,
-        behavior_payload,
-        show_note=False,
-    )
 
 
 def filter_epoch_payloads(
@@ -5980,6 +5404,55 @@ def plot_observed_predicted_panel(ax: "Axes", example: dict[str, Any]) -> None:
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=6, length=2, pad=1)
+
+
+def add_aligned_panel_headers(
+    fig: Any,
+    axes: Sequence["Axes"],
+    *,
+    labels: Sequence[str],
+    titles: Sequence[str],
+    label_x_offsets: Sequence[float],
+    fontsize: float,
+) -> None:
+    """Draw panel labels and titles on one shared figure-level baseline."""
+    if not (len(axes) == len(labels) == len(titles) == len(label_x_offsets)):
+        raise ValueError("axes, labels, titles, and label_x_offsets must have equal length.")
+
+    title_y_values = [
+        fig.transFigure.inverted()
+        .transform(axis.title.get_transform().transform(axis.title.get_position()))[1]
+        for axis in axes
+    ]
+    header_y = max(title_y_values)
+
+    label_kwargs = PANEL_LABEL_KWARGS.copy()
+    for axis, label, title, label_x_offset in zip(
+        axes,
+        labels,
+        titles,
+        label_x_offsets,
+        strict=True,
+    ):
+        box = axis.get_position()
+        axis.set_title("")
+        fig.text(
+            box.x0 + label_x_offset * box.width,
+            header_y,
+            label,
+            transform=fig.transFigure,
+            **label_kwargs,
+        )
+        fig.text(
+            (box.x0 + box.x1) / 2.0,
+            header_y,
+            title,
+            ha="center",
+            va="bottom",
+            multialignment="center",
+            fontsize=fontsize,
+            transform=fig.transFigure,
+        )
 
 
 def make_figure_2(
@@ -6147,8 +5620,22 @@ def make_figure_2(
         pad=2,
     )
 
-    for ax, label in zip(axes, ("A", "B", "C", "D"), strict=True):
-        label_axis(ax, label, x=-0.10, y=1.04)
+    label_axis(axes[3], "D", x=-0.10, y=1.04)
+
+    fig.canvas.draw()
+    fig.set_constrained_layout(False)
+    add_aligned_panel_headers(
+        fig,
+        axes[:3],
+        labels=("A", "B", "C"),
+        titles=(
+            "Ripple-triggered\nmean firing rates",
+            "Predicting V1 activity during ripples\nwith CA1 activity",
+            "CA1 spike vector vs. mean CA1 activity",
+        ),
+        label_x_offsets=PANEL_ABC_HEADER_LABEL_X_OFFSETS,
+        fontsize=7.2,
+    )
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)

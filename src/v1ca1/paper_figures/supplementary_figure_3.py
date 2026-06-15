@@ -86,7 +86,7 @@ PANEL_A_CV_PCA_SIZE_FRACTION = 0.40
 DEFAULT_REORDERED_HEATMAP_HEIGHT_MM = (
     DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
 )
-DEFAULT_MOTOR_GRID_HEIGHT_MM = FIGURE_3_HEIGHT_MM + 55.0
+DEFAULT_MOTOR_GRID_HEIGHT_MM = (FIGURE_3_HEIGHT_MM + 55.0) * 0.70
 DEFAULT_MOTOR_SUMMARY_HEIGHT_MM = 35.0
 DEFAULT_FIGURE_HEIGHT_MM = (
     DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
@@ -185,7 +185,7 @@ REORDERED_HEATMAP_CMAP = PANEL_D_HEATMAP_CMAP
 REORDERED_HEATMAP_VMAX = 1.0
 REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION = 0.5
 PANEL_A_CV_PCA_REGION = "v1"
-PANEL_A_CV_PCA_LIGHT_EPOCH = "06_r3"
+PANEL_A_CV_PCA_LIGHT_EPOCH = "02_r1"
 PANEL_A_CV_PCA_TITLE = "V1 cvPCA dimensionality"
 PANEL_A_CV_PCA_RELATIVE_DIR = Path("signal_dim") / "cv_pca"
 PANEL_A_CV_PCA_COLUMNS = (
@@ -229,18 +229,6 @@ def format_animal_row_label(animal_name: str, datasets: Sequence[DatasetId]) -> 
     if not dates:
         return str(animal_name)
     return f"{animal_name}\n{', '.join(dates)}"
-
-
-def hide_x_axis_labels(ax: object) -> None:
-    """Hide x-axis label text and tick labels for repeated row panels."""
-    ax.set_xlabel("")
-    ax.tick_params(axis="x", labelbottom=False)
-
-
-def set_panel_a_dot_alpha(ax: object) -> None:
-    """Make the per-animal Figure 3C scatter points more visible."""
-    for collection in ax.collections:
-        collection.set_alpha(PANEL_A_SCATTER_ALPHA)
 
 
 def build_panel_a_cv_pca_summary_path(
@@ -338,10 +326,10 @@ def load_panel_a_cv_pca_participation_ratio_table(
 
 def plot_panel_a_cv_pca_participation_ratios(ax: object, table: Any) -> None:
     """Plot paired dark/light cvPCA participation ratios for manuscript sessions."""
+    from matplotlib.lines import Line2D
+
     condition_positions = {"dark": 0.0, "light": 1.0}
-    dark_color = EPOCH_TYPE_COLORS["dark"]
-    light_color = EPOCH_TYPE_COLORS["light"]
-    for (_animal_name, _date), session_table in table.groupby(
+    for (animal_name, _date), session_table in table.groupby(
         ["animal_name", "date"],
         sort=False,
     ):
@@ -368,7 +356,7 @@ def plot_panel_a_cv_pca_participation_ratios(ax: object, table: Any) -> None:
         ax.scatter(
             [condition_positions["dark"], condition_positions["light"]],
             [values["dark"], values["light"]],
-            color=[dark_color, light_color],
+            color=_motor_summary_animal_color(str(animal_name)),
             edgecolor="black",
             linewidth=0.35,
             s=16,
@@ -390,6 +378,32 @@ def plot_panel_a_cv_pca_participation_ratios(ax: object, table: Any) -> None:
     )
     ax.set_ylabel("Participation ratio")
     ax.set_title(PANEL_A_CV_PCA_TITLE, fontsize=PANEL_TITLE_FONTSIZE, pad=2)
+    animal_order = list(dict.fromkeys(str(value) for value in table["animal_name"]))
+    animal_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            color=_motor_summary_animal_color(animal_name),
+            markeredgecolor="black",
+            markeredgewidth=0.35,
+            markersize=3.5,
+        )
+        for animal_name in animal_order
+    ]
+    if animal_handles:
+        ax.legend(
+            animal_handles,
+            animal_order,
+            frameon=False,
+            fontsize=4.8,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            borderpad=0.1,
+            labelspacing=0.2,
+            handletextpad=0.3,
+        )
     ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -620,8 +634,11 @@ def plot_panel_b_motor_progression_grid(
         [epoch_labels["dark"], epoch_labels["light"]],
         frameon=False,
         fontsize=4.8,
-        loc="upper left",
+        loc="lower left",
+        bbox_to_anchor=(-0.02, 1.12),
+        ncol=2,
         handlelength=1.5,
+        columnspacing=0.8,
         borderpad=0.1,
         labelspacing=0.2,
     )

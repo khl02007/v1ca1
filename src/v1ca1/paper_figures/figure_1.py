@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +29,6 @@ from v1ca1.helper.session import (
 from v1ca1.helper.plot_wtrack_schematic import get_w_track_geometry
 from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures.datasets import (
-    DEFAULT_DARK_EPOCH,
     DatasetId,
     FigureEpochDatasetId,
     get_dataset_dark_epoch,
@@ -44,6 +43,7 @@ from v1ca1.paper_figures.style import (
     ENCODING_COMPARISON_COLORS,
     HISTOGRAM_KWARGS,
     NEUTRAL_COLORS,
+    PANEL_LABEL_KWARGS,
     RASTER_TICK_KWARGS,
     REGION_COLORS,
     SCHEMATIC_COLORS,
@@ -57,7 +57,6 @@ from v1ca1.paper_figures.style import (
 from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
 from v1ca1.raster.plot_place_field_heatmap import (
     DEFAULT_SIGMA_BINS,
-    align_and_normalize_panel_values,
     build_linear_position_by_trajectory,
     compute_place_tuning_curve,
     compute_odd_even_place_tuning_curves,
@@ -82,6 +81,7 @@ DEFAULT_ASSET_DIR = Path("paper_figures") / "assets" / "figure_1"
 DEFAULT_PROBE_ASSET_NAME = "probe.jpg"
 DEFAULT_HISTOLOGY_ASSET_NAME = "histology.svg"
 DEFAULT_BEHAVIOR_ASSET_NAME = "behavior.png"
+DEFAULT_FIGURE_1A_BEHAVIOR_ASSET_NAME = "behavior_bright.png"
 DEFAULT_POSITION_BIN_COUNT = 50
 DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
@@ -124,6 +124,19 @@ PANEL_E_CACHE_PREFIX = "figure_1_panel_e"
 PANEL_E_CACHE_VERSION = 1
 PANEL_E_CACHE_METADATA_KEY = "__metadata__"
 PANEL_DARK_LIGHT_EXAMPLE_TITLE = "Example visual cell in different visual conditions"
+PANEL_B_VISUAL_EXAMPLE = ("L14", "20240611", "v1", 229)
+PANEL_B_VISUAL_TRAJECTORIES = (
+    "center_to_left",
+    "center_to_right",
+    "left_to_center",
+    "right_to_center",
+)
+PANEL_B_VISUAL_LIGHT_EPOCHS = ("02_r1", "06_r3")
+PANEL_B_VISUAL_EPOCH_LABELS = {
+    "02_r1": "02_r1",
+    "06_r3": "06_r3",
+    "dark": "Dark",
+}
 PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS = {
     "A": VISUAL_CONDITION_COLORS["02_r1"],
     "B": VISUAL_CONDITION_COLORS["06_r3"],
@@ -270,6 +283,9 @@ DECODING_SCHEMATIC_Y = -0.55
 DECODING_SCHEMATIC_WIDTH = 0.132
 DECODING_SCHEMATIC_HEIGHT = 0.198
 DECODING_TRAIN_LABEL_Y = -0.32
+TOP_ROW_PANEL_LABEL_X_OFFSETS = (-0.04, -0.02)
+TOP_ROW_PANEL_TITLE_FONTSIZES = (8.0, 8.0)
+BOTTOM_ROW_PANEL_LABEL_X_OFFSETS = (-0.04, -0.08, -0.04)
 DECODING_YLABEL_FONTSIZE = 7.6
 DECODING_XTICK_LABEL_FONTSIZE = 5.6
 DECODING_MEDIAN_LABEL_FONTSIZE = 4.8
@@ -393,76 +409,6 @@ def get_movement_arrow_points(
     raise ValueError(f"Unknown trajectory type {trajectory_type!r}.")
 
 
-def add_movement_axis_arrow(
-    ax: "Axes",
-    trajectory_type: str,
-    *,
-    axis_orientation: str = "branch_position",
-) -> None:
-    """Draw a bottom movement-direction arrow for one trajectory column."""
-    start, end = get_movement_arrow_points(
-        trajectory_type,
-        axis_orientation=axis_orientation,
-    )
-    ax.annotate(
-        "",
-        xy=end,
-        xytext=start,
-        xycoords="axes fraction",
-        textcoords="axes fraction",
-        arrowprops={
-            "arrowstyle": "->",
-            "color": "black",
-            "linewidth": 0.7,
-            "shrinkA": 0,
-            "shrinkB": 0,
-        },
-        annotation_clip=False,
-    )
-
-
-def add_movement_axis_labels(
-    ax: "Axes",
-    trajectory_type: str,
-    *,
-    axis_orientation: str = "branch_position",
-) -> None:
-    """Draw endpoint labels aligned to the movement-direction arrow."""
-    left_label, right_label = get_trajectory_endpoint_labels(
-        trajectory_type,
-        axis_orientation=axis_orientation,
-    )
-    for x, label in ((0.0, left_label), (1.0, right_label)):
-        ax.text(
-            x,
-            MOVEMENT_AXIS_Y,
-            label,
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-            clip_on=False,
-        )
-
-
-def add_movement_axis_annotations(
-    ax: "Axes",
-    trajectory_type: str,
-    *,
-    axis_orientation: str = "branch_position",
-) -> None:
-    """Draw aligned endpoint labels and movement-direction arrow."""
-    add_movement_axis_labels(
-        ax,
-        trajectory_type,
-        axis_orientation=axis_orientation,
-    )
-    add_movement_axis_arrow(
-        ax,
-        trajectory_type,
-        axis_orientation=axis_orientation,
-    )
-
-
 def add_normalized_path_heatmap_axis(ax: "Axes") -> None:
     """Label one bottom-row heatmap with normalized path coordinates."""
     ax.set_xticks([0.0, 1.0])
@@ -532,6 +478,61 @@ def add_centered_axis_text(
         va="bottom",
         fontsize=fontsize,
     )
+
+
+def add_aligned_panel_headers(
+    fig: Any,
+    axes: Sequence["Axes"],
+    *,
+    labels: Sequence[str],
+    titles: Sequence[str],
+    label_x_offsets: Sequence[float],
+    fontsize: float = 8.0,
+    title_fontsizes: Sequence[float] | None = None,
+) -> None:
+    """Draw panel labels and titles on one shared figure-level baseline."""
+    if title_fontsizes is None:
+        title_fontsizes = (fontsize,) * len(axes)
+    if not (len(axes) == len(labels) == len(titles) == len(label_x_offsets)):
+        raise ValueError("axes, labels, titles, and label_x_offsets must have equal length.")
+    if len(title_fontsizes) != len(axes):
+        raise ValueError("title_fontsizes must have one value per axis.")
+
+    title_y_values = [
+        fig.transFigure.inverted()
+        .transform(axis.title.get_transform().transform(axis.title.get_position()))[1]
+        for axis in axes
+    ]
+    header_y = max(title_y_values)
+
+    label_kwargs = PANEL_LABEL_KWARGS.copy()
+    label_kwargs["fontsize"] = fontsize
+    for axis, label, title, label_x_offset, title_fontsize in zip(
+        axes,
+        labels,
+        titles,
+        label_x_offsets,
+        title_fontsizes,
+        strict=True,
+    ):
+        box = axis.get_position()
+        axis.set_title("")
+        fig.text(
+            box.x0 + label_x_offset * box.width,
+            header_y,
+            label,
+            transform=fig.transFigure,
+            **label_kwargs,
+        )
+        fig.text(
+            (box.x0 + box.x1) / 2.0,
+            header_y,
+            title,
+            ha="center",
+            va="bottom",
+            fontsize=title_fontsize,
+            transform=fig.transFigure,
+        )
 
 
 def get_dark_epoch(animal_name: str, date: str, dark_epoch: str | None = None) -> str:
@@ -1505,13 +1506,16 @@ def load_panel_e_example_data(
         movement_epochs = session["trajectory_intervals"][selected_epoch][
             trajectory_type
         ].intersect(session["movement_by_run"][selected_epoch])
-        tuning_curve = compute_place_tuning_curve(
-            spikes,
-            task_progression,
-            movement_epochs,
-            bin_edges=bin_edges,
-            sigma_bins=sigma_bins,
-        )
+        try:
+            tuning_curve = compute_place_tuning_curve(
+                spikes,
+                task_progression,
+                movement_epochs,
+                bin_edges=bin_edges,
+                sigma_bins=sigma_bins,
+            )
+        except (IndexError, UnboundLocalError):
+            tuning_curve = None
         firing_rates[trajectory_type] = extract_unit_rate_curve(
             tuning_curve,
             unit_id,
@@ -2562,6 +2566,7 @@ def draw_behavior_task_design_panel(
     *,
     asset_dir: Path,
     behavior_asset_name: str = DEFAULT_BEHAVIOR_ASSET_NAME,
+    rotate_behavior_180: bool = False,
 ) -> None:
     """Draw behavior and task-design schematics in one Figure 1B panel."""
     ax.set_xlim(0.0, 1.0)
@@ -2570,6 +2575,8 @@ def draw_behavior_task_design_panel(
 
     behavior_path = get_figure_1_asset_path(asset_dir, behavior_asset_name)
     behavior_image = load_panel_asset_image(behavior_path)
+    if rotate_behavior_180:
+        behavior_image = np.rot90(behavior_image, 2)
 
     behavior_ax = ax.inset_axes([0.00, 0.11, 0.34, 0.76])
     task_ax = ax.inset_axes([0.32, 0.00, 0.68, 1.00])
@@ -2922,46 +2929,12 @@ def draw_w_track_cycle_panel(ax: "Axes") -> None:
     draw_visual_stimuli_schematic(ax)
 
 
-def add_w_track_arm_endpoint_labels(
-    ax: "Axes",
-    *,
-    fontsize: float = 6.0,
-) -> None:
-    """Add center, left, and right arm endpoint labels to one W-track axis."""
-    _outline, points, dims = get_w_track_geometry()
-    y = dims["y2"] + 0.04
-    for arm_name, label in (("left", "L"), ("center", "C"), ("right", "R")):
-        x, _arm_y = points[arm_name]
-        ax.text(
-            x,
-            y,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=fontsize,
-            color="black",
-            zorder=10,
-        )
-
-
 def _fraction_histogram_weights(values: np.ndarray) -> np.ndarray:
     """Return weights that normalize one histogram to a fraction of units."""
     values = np.asarray(values, dtype=float).reshape(-1)
     if values.size == 0:
         return np.asarray([], dtype=float)
     return np.full(values.shape, 1.0 / float(values.size), dtype=float)
-
-
-def _format_delta_summary(values: np.ndarray, *, label: str | None = None) -> str:
-    """Return fraction-positive and median text for delta log-likelihood values."""
-    values = np.asarray(values, dtype=float).reshape(-1)
-    values = values[np.isfinite(values)]
-    prefix = "" if label is None else f"{label}\n"
-    if values.size == 0:
-        return f"{prefix}frac >0: n/a\nmedian: n/a"
-    fraction_positive = float(np.mean(values > 0.0))
-    median = float(np.median(values))
-    return f"{prefix}frac >0: {fraction_positive:.2f}\nmedian: {median:.2f}"
 
 
 def _format_delta_advantage_summary(
@@ -3574,6 +3547,7 @@ def plot_panel_e_rate_axis(
     *,
     y_max: float,
     show_ylabel: bool = False,
+    show_legend: bool = True,
 ) -> None:
     """Plot occupancy-normalized firing rates for a pair of trajectories."""
     for trajectory_type in trajectory_pair:
@@ -3600,7 +3574,8 @@ def plot_panel_e_rate_axis(
     )
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=PANEL_E_AXIS_LABEL_FONTSIZE, labelpad=1)
-    ax.legend(frameon=False, fontsize=3.8, handlelength=0.9, borderpad=0.1)
+    if show_legend:
+        ax.legend(frameon=False, fontsize=3.8, handlelength=0.9, borderpad=0.1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(
@@ -3616,6 +3591,8 @@ def plot_panel_e_example(
     example: dict[str, Any],
     *,
     title: str | None = None,
+    show_ylabel: bool = True,
+    show_rate_legends: bool = True,
 ) -> None:
     """Plot one panel E example with trajectory rasters and firing-rate curves."""
     ax.set_xlim(0.0, 1.0)
@@ -3655,7 +3632,8 @@ def plot_panel_e_example(
                 raster_ax,
                 raster_positions[trajectory_type],
                 trajectory_type,
-                show_ylabel=trajectory_type in {"center_to_left", "right_to_center"},
+                show_ylabel=show_ylabel
+                and trajectory_type in {"center_to_left", "right_to_center"},
             )
 
     finite_rate_maxima = [
@@ -3672,7 +3650,8 @@ def plot_panel_e_example(
             firing_rates,
             trajectory_pair,
             y_max=y_max,
-            show_ylabel=pair_index == 0,
+            show_ylabel=show_ylabel and pair_index == 0,
+            show_legend=show_rate_legends,
         )
 
 
@@ -3715,6 +3694,362 @@ def find_dataset_dark_epoch(
     return None
 
 
+def build_panel_b_visual_epoch_specs(
+    animal_name: str,
+    date: str,
+    *,
+    dark_epoch: str | None,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return panel-B visual epoch keys, labels, and run epoch IDs."""
+    light_specs = tuple(
+        (epoch, PANEL_B_VISUAL_EPOCH_LABELS[epoch], epoch)
+        for epoch in PANEL_B_VISUAL_LIGHT_EPOCHS
+    )
+    return (
+        *light_specs,
+        (
+            "dark",
+            PANEL_B_VISUAL_EPOCH_LABELS["dark"],
+            get_dark_epoch(animal_name, date, dark_epoch),
+        ),
+    )
+
+
+def load_panel_b_visual_example_data(
+    *,
+    data_root: Path,
+    animal_name: str,
+    date: str,
+    region: str,
+    unit_id: int,
+    dark_epoch: str | None,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_example_cache_dir: Path | None = None,
+    refresh_panel_example_cache: bool = False,
+) -> dict[str, Any]:
+    """Load the Figure 1B example cell rasters and rate curves across epochs."""
+    from v1ca1.paper_figures.figure_3 import load_or_compute_panel_example_data
+
+    epoch_specs = build_panel_b_visual_epoch_specs(
+        animal_name,
+        date,
+        dark_epoch=dark_epoch,
+    )
+    epoch_examples = {
+        epoch_key: load_or_compute_panel_example_data(
+            data_root=data_root,
+            panel_name="A",
+            animal_name=animal_name,
+            date=date,
+            epoch=epoch,
+            region=region,
+            unit_id=unit_id,
+            trajectories=PANEL_B_VISUAL_TRAJECTORIES,
+            position_bin_count=position_bin_count,
+            position_offset=position_offset,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+            sigma_bins=sigma_bins,
+            panel_example_cache_dir=panel_example_cache_dir,
+            refresh_panel_example_cache=refresh_panel_example_cache,
+        )
+        for epoch_key, _epoch_label, epoch in epoch_specs
+    }
+    return {
+        "animal_name": animal_name,
+        "date": date,
+        "region": region,
+        "unit_id": unit_id,
+        "epoch_order": tuple(epoch_key for epoch_key, _epoch_label, _epoch in epoch_specs),
+        "epoch_labels": {
+            epoch_key: epoch_label for epoch_key, epoch_label, _epoch in epoch_specs
+        },
+        "epoch_examples": epoch_examples,
+        "trajectories": PANEL_B_VISUAL_TRAJECTORIES,
+    }
+
+
+def _get_panel_b_visual_y_max(example: dict[str, Any]) -> float:
+    """Return a shared firing-rate limit for the Figure 1B example."""
+    maxima: list[float] = []
+    for epoch_payload in example["epoch_examples"].values():
+        for _position, rate in epoch_payload["firing_rates"].values():
+            rate = np.asarray(rate, dtype=float)
+            if np.isfinite(rate).any():
+                maxima.append(float(np.nanmax(rate)))
+    if not maxima:
+        return 1.0
+    return max(1.0, float(np.ceil(max(maxima))))
+
+
+def draw_panel_b_visual_epoch_icon(
+    ax: "Axes",
+    *,
+    left_label: str | None = None,
+    right_label: str | None = None,
+    fill_track: bool = False,
+    label_colors: Mapping[str, str] | None = None,
+) -> None:
+    """Draw one Figure 1B epoch-condition W-track icon."""
+    from matplotlib.patches import Polygon
+
+    outline, _points, dims = get_w_track_geometry()
+    ax.add_patch(
+        Polygon(
+            outline,
+            closed=True,
+            facecolor="black" if fill_track else "none",
+            edgecolor="black",
+            linewidth=0.45,
+            joinstyle="miter",
+        )
+    )
+    if left_label is not None:
+        ax.text(
+            dims["x0"] - 0.58,
+            dims["y2"] / 2,
+            left_label,
+            ha="center",
+            va="center",
+            fontsize=5.2,
+            color=(
+                label_colors.get(left_label, "black")
+                if label_colors is not None
+                else "black"
+            ),
+        )
+    if right_label is not None:
+        ax.text(
+            dims["x5"] + 0.58,
+            dims["y2"] / 2,
+            right_label,
+            ha="center",
+            va="center",
+            fontsize=5.2,
+            color=(
+                label_colors.get(right_label, "black")
+                if label_colors is not None
+                else "black"
+            ),
+        )
+    ax.set_aspect("equal")
+    ax.set_xlim(-0.95, dims["x5"] + 0.95)
+    ax.set_ylim(-0.25, dims["y2"] + 0.25)
+    ax.axis("off")
+
+
+def plot_panel_b_visual_rate_axis(
+    ax: "Axes",
+    example: dict[str, Any],
+    trajectory_type: str,
+    *,
+    y_max: float,
+    show_ylabel: bool = False,
+    show_legend: bool = False,
+    trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> None:
+    """Plot Figure 1B firing-rate curves for one route across epochs."""
+    trajectory_epoch_colors = (
+        trajectory_epoch_color_overrides.get(trajectory_type, {})
+        if trajectory_epoch_color_overrides is not None
+        else {}
+    )
+    for epoch_key in example["epoch_order"]:
+        position, rate = example["epoch_examples"][epoch_key]["firing_rates"][
+            trajectory_type
+        ]
+        ax.plot(
+            position,
+            rate,
+            color=trajectory_epoch_colors.get(
+                epoch_key,
+                VISUAL_CONDITION_COLORS[epoch_key],
+            ),
+            linewidth=0.85,
+            label=example["epoch_labels"][epoch_key],
+        )
+    add_task_progression_segment_boundary_lines(ax)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, y_max)
+    ax.set_xticks([0.0, 1.0])
+    ax.set_yticks([0.0, y_max])
+    ax.set_yticklabels(["0", f"{y_max:g}"])
+    ax.set_xlabel(TASK_PROGRESSION_XLABEL, fontsize=4.8, labelpad=1)
+    if show_ylabel:
+        ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
+    if show_legend:
+        ax.legend(frameon=False, fontsize=4.2, handlelength=1.1, borderpad=0.1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=4.5, length=1.5, pad=1)
+
+
+def plot_panel_b_visual_combined_raster_axis(
+    ax: "Axes",
+    example: dict[str, Any],
+    trajectory_type: str,
+    *,
+    trajectory_epoch_backgrounds: Mapping[
+        str,
+        Mapping[str, Sequence[tuple[float, float, str]]],
+    ]
+    | None = None,
+    epoch_background_alpha: float = PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
+    raster_color: str = PANEL_DARK_LIGHT_RASTER_COLOR,
+) -> None:
+    """Plot all Figure 1B epoch rasters in one stacked axis."""
+    epoch_order = tuple(example["epoch_order"])
+    n_epochs = len(epoch_order)
+    for epoch_index, epoch_key in enumerate(epoch_order):
+        epoch_base = float(n_epochs - epoch_index - 1)
+        if epoch_key == "dark":
+            ax.axhspan(
+                epoch_base,
+                epoch_base + 1.0,
+                color=NEUTRAL_COLORS["dark_epoch_background"],
+                linewidth=0,
+                zorder=0,
+            )
+        if trajectory_epoch_backgrounds is not None:
+            for x0, x1, color in trajectory_epoch_backgrounds.get(
+                trajectory_type,
+                {},
+            ).get(epoch_key, ()):
+                ax.axvspan(
+                    x0,
+                    x1,
+                    ymin=epoch_base / n_epochs,
+                    ymax=(epoch_base + 1.0) / n_epochs,
+                    color=color,
+                    alpha=epoch_background_alpha,
+                    linewidth=0,
+                    zorder=0,
+                )
+
+        trial_positions = example["epoch_examples"][epoch_key]["raster_positions"][
+            trajectory_type
+        ]
+        n_trials = len(trial_positions)
+        for trial_index, positions in enumerate(trial_positions, start=1):
+            positions = np.asarray(positions, dtype=float)
+            if positions.size == 0:
+                continue
+            y_position = epoch_base + (trial_index / max(n_trials + 1, 1))
+            ax.plot(
+                positions,
+                np.full(positions.shape, y_position, dtype=float),
+                "|",
+                color=raster_color,
+                **RASTER_TICK_KWARGS,
+                zorder=3,
+            )
+
+    for separator in range(1, n_epochs):
+        ax.axhline(separator, color="0.82", linewidth=0.35, zorder=1)
+    add_task_progression_segment_boundary_lines(ax)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, float(max(1, n_epochs)))
+    ax.set_xticks([0.0, 1.0])
+    ax.set_xticklabels([])
+    ax.set_yticks([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(length=1.5, pad=1)
+
+
+def plot_panel_b_visual_example(
+    ax: "Axes",
+    example: dict[str, Any],
+    *,
+    visual_label_colors: Mapping[str, str] | None = None,
+    trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    trajectory_epoch_backgrounds: Mapping[
+        str,
+        Mapping[str, Sequence[tuple[float, float, str]]],
+    ]
+    | None = None,
+    epoch_background_alpha: float = PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
+    raster_color: str = PANEL_DARK_LIGHT_RASTER_COLOR,
+) -> None:
+    """Plot the Figure 1B visual example rasters and firing-rate curves."""
+    trajectories = tuple(str(trajectory) for trajectory in example["trajectories"])
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    if not trajectories:
+        ax.text(0.5, 0.5, "No examples", ha="center", va="center", transform=ax.transAxes)
+        return
+
+    left_margin = 0.13
+    right_margin = 0.012
+    column_gap = 0.026
+    column_width = (
+        1.0
+        - left_margin
+        - right_margin
+        - column_gap * (len(trajectories) - 1)
+    ) / len(trajectories)
+    raster_bottom = 0.34
+    raster_height = 0.43
+    y_max = _get_panel_b_visual_y_max(example)
+
+    icon_specs = (
+        {"left_label": "A", "right_label": "B", "fill_track": False},
+        {"left_label": "B", "right_label": "A", "fill_track": False},
+        {"left_label": None, "right_label": None, "fill_track": True},
+    )
+    for row_index, icon_spec in enumerate(icon_specs):
+        epoch_center = raster_bottom + raster_height * (
+            len(icon_specs) - row_index - 0.5
+        ) / len(icon_specs)
+        icon_ax = ax.inset_axes([0.026, epoch_center - 0.061, 0.070, 0.122])
+        draw_panel_b_visual_epoch_icon(
+            icon_ax,
+            **icon_spec,
+            label_colors=visual_label_colors,
+        )
+
+    for trajectory_index, trajectory_type in enumerate(trajectories):
+        left = left_margin + trajectory_index * (column_width + column_gap)
+        schematic_ax = ax.inset_axes(
+            [left + 0.34 * column_width, 0.80, 0.32 * column_width, 0.12]
+        )
+        draw_w_track_schematic(
+            schematic_ax,
+            trajectory_name=trajectory_type,
+            arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
+            track_linewidth=0.45,
+            trajectory_linewidth=0.65,
+            arrow_mutation_scale=5.8,
+            fill_track=False,
+        )
+
+        raster_ax = ax.inset_axes([left, raster_bottom, column_width, raster_height])
+        plot_panel_b_visual_combined_raster_axis(
+            raster_ax,
+            example,
+            trajectory_type,
+            trajectory_epoch_backgrounds=trajectory_epoch_backgrounds,
+            epoch_background_alpha=epoch_background_alpha,
+            raster_color=raster_color,
+        )
+
+        rate_ax = ax.inset_axes([left, 0.147, column_width, 0.16])
+        plot_panel_b_visual_rate_axis(
+            rate_ax,
+            example,
+            trajectory_type,
+            y_max=y_max,
+            show_ylabel=trajectory_index == 0,
+            show_legend=False,
+            trajectory_epoch_color_overrides=trajectory_epoch_color_overrides,
+        )
+
+
 def plot_dark_light_example_panel(
     ax: "Axes",
     *,
@@ -3727,15 +4062,9 @@ def plot_dark_light_example_panel(
     panel_example_cache_dir: Path | None,
     refresh_panel_example_cache: bool,
 ) -> None:
-    """Draw the Figure 4A dark/light visual-cell example inside Figure 1."""
-    from v1ca1.paper_figures.figure_3 import (
-        PANEL_A_EXAMPLE,
-        load_panel_a_example_data,
-        plot_panel_a_example,
-    )
-
-    animal_name, date, region, unit_id = PANEL_A_EXAMPLE
-    example = load_panel_a_example_data(
+    """Draw the Figure 1B visual-condition example neuron."""
+    animal_name, date, region, unit_id = PANEL_B_VISUAL_EXAMPLE
+    example = load_panel_b_visual_example_data(
         data_root=data_root,
         animal_name=animal_name,
         date=date,
@@ -3749,18 +4078,15 @@ def plot_dark_light_example_panel(
         panel_example_cache_dir=panel_example_cache_dir,
         refresh_panel_example_cache=refresh_panel_example_cache,
     )
-    plot_panel_a_example(
+    plot_panel_b_visual_example(
         ax,
         example,
         visual_label_colors=PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
-        raster_color=PANEL_DARK_LIGHT_RASTER_COLOR,
         trajectory_epoch_color_overrides=PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
         trajectory_epoch_backgrounds=PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS,
         epoch_background_alpha=PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
+        raster_color=PANEL_DARK_LIGHT_RASTER_COLOR,
     )
-    for child_axis in ax.child_axes:
-        if child_axis.get_xlabel():
-            child_axis.xaxis.label.set_text(TASK_PROGRESSION_XLABEL)
 
 
 def make_figure_1(
@@ -3840,9 +4166,13 @@ def make_figure_1(
         ],
     )
     panel_b_axis = fig.add_subplot(main_grid[0, 0])
-    draw_behavior_task_design_panel(panel_b_axis, asset_dir=asset_dir)
-    panel_b_axis.set_title("Task design", fontsize=9, pad=2)
-    label_axis(panel_b_axis, "A", x=-0.04, y=1.02)
+    draw_behavior_task_design_panel(
+        panel_b_axis,
+        asset_dir=asset_dir,
+        behavior_asset_name=DEFAULT_FIGURE_1A_BEHAVIOR_ASSET_NAME,
+        rotate_behavior_180=True,
+    )
+    panel_b_axis.set_title("Task design", fontsize=8, pad=2)
 
     panel_dark_light_axis = fig.add_subplot(main_grid[0, 1])
     plot_dark_light_example_panel(
@@ -3861,7 +4191,6 @@ def make_figure_1(
         fontsize=8,
         pad=2,
     )
-    label_axis(panel_dark_light_axis, "B", x=-0.02, y=1.02)
 
     heatmap_grid = main_grid[1, 1].subgridspec(
         nrows=n_region_rows + 1,
@@ -3913,7 +4242,6 @@ def make_figure_1(
     )
     plot_motor_delta_panel(panel_f_axis, motor_delta_table)
     panel_f_axis.set_title("Comparison to motor", fontsize=8, pad=2)
-    label_axis(panel_f_axis, "E", x=-0.04, y=1.02)
     encoding_delta_table = load_encoding_delta_table(
         data_root=data_root,
         datasets=datasets,
@@ -3922,15 +4250,13 @@ def make_figure_1(
     )
     plot_encoding_delta_panel(panel_g_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
-    label_axis(panel_g_axis, "F", x=-0.08, y=1.02)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
         datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
         region=DECODING_COMPARISON_REGION,
     )
     plot_decoding_error_panel(panel_h_axis, decoding_error_table)
-    panel_h_axis.set_title("Cross trajectory decoding", fontsize=8, pad=2)
-    label_axis(panel_h_axis, "G", x=-0.04, y=1.02)
+    panel_h_axis.set_title("Cross route decoding", fontsize=8, pad=2)
 
     axes = np.asarray(
         [
@@ -4003,6 +4329,15 @@ def make_figure_1(
     draw_neuron_scale_bar(heatmap_axes[-1, -1])
 
     fig.canvas.draw()
+    fig.set_constrained_layout(False)
+    add_aligned_panel_headers(
+        fig,
+        (panel_b_axis, panel_dark_light_axis),
+        labels=("A", "B"),
+        titles=("Task design", PANEL_DARK_LIGHT_EXAMPLE_TITLE),
+        label_x_offsets=TOP_ROW_PANEL_LABEL_X_OFFSETS,
+        title_fontsizes=TOP_ROW_PANEL_TITLE_FONTSIZES,
+    )
     add_centered_axis_text(
         fig,
         tuning_schematic_axes,
@@ -4024,6 +4359,18 @@ def make_figure_1(
         fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
     )
     label_axis(corner_axis, "D", x=-0.12, y=1.04)
+    add_aligned_panel_headers(
+        fig,
+        (panel_f_axis, panel_g_axis, panel_h_axis),
+        labels=("E", "F", "G"),
+        titles=(
+            "Comparison to motor",
+            "Comparison to alternative codes",
+            "Cross route decoding",
+        ),
+        label_x_offsets=BOTTOM_ROW_PANEL_LABEL_X_OFFSETS,
+        fontsize=8,
+    )
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 1 to {output_path}")

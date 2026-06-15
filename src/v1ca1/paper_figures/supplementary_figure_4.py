@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Generate Supplementary Figure 4 scalar examples and per-animal histograms."""
+"""Generate Supplementary Figure 4 scalar controls and per-animal summaries."""
 
 import argparse
 from collections.abc import Sequence
@@ -25,35 +25,19 @@ from v1ca1.paper_figures.figure_3 import (
     FIGURE_FORMATS,
     PANEL_TRAJECTORY_COLORS,
     PANEL_H_DELTA_TRAJECTORIES,
+    PANEL_H_DELTA_X_LIMITS,
     PANEL_TRAJECTORY_LABELS,
+    _filter_panel_h_heldout_delta,
     build_output_path,
     get_dark_epoch,
     get_dataset_analysis_path,
     get_dark_light_glm_selected_path,
     get_swap_glm_selected_comparison_path,
-    load_panel_h_swap_examples,
     load_panel_h_swap_delta_table,
     parse_dataset_id,
-    plot_panel_h_swap_delta,
-)
-from v1ca1.paper_figures.figure_3 import (
-    _plot_panel_h_delta_grid as plot_figure_4c_histogram_grid,
 )
 from v1ca1.paper_figures.figure_4 import (
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
-    PANEL_C_DELTA_AXIS_BOUNDS,
-    PANEL_C_DELTA_GRID_BOUNDS,
-    PANEL_C_DELTA_XLABEL_Y,
-    PANEL_C_EXAMPLE_ICON_BOUNDS,
-    PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
-    PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
-    PANEL_C_PREDICTION_LABEL_FONTSIZE,
-    PANEL_C_SCHEMATIC_AXIS_BOUNDS,
-    PANEL_C_SCHEMATIC_TRACK_SIZE,
-    PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
-    PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
-    PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
-    PANEL_C_SHARED_PREDICTION_LABEL_Y,
 )
 from v1ca1.paper_figures.style import (
     apply_paper_style,
@@ -65,30 +49,15 @@ from v1ca1.paper_figures.style import (
 
 DEFAULT_OUTPUT_NAME = "supplementary_figure_4"
 SCALAR_MODEL_NAME = "task_segment_scalar"
-SCALAR_PANEL_EXAMPLES = (
-    ("L15", "20241121", "v1", 27, "center_to_right"),
-    ("L19", "20250930", "v1", 4, "center_to_left"),
-    ("L15", "20241121", "v1", 146, "center_to_right"),
+FIGURE_4B_DELTA_BOX_WIDTH = 0.13
+FIGURE_4B_DELTA_SUBPANEL_BOUNDS = (
+    (0.03, 0.18, 0.22, 0.68),
+    (0.27, 0.18, 0.22, 0.68),
+    (0.51, 0.18, 0.22, 0.68),
+    (0.75, 0.18, 0.22, 0.68),
 )
-SCALAR_PANEL_MODEL_COLORS = {
-    "visual": "#D73027",
-    SCALAR_MODEL_NAME: "#1A9850",
-}
-SCALAR_PANEL_EXAMPLE_AXIS_BOUNDS = (
-    (0.095, -0.18, 0.20, 0.19),
-    (0.405, -0.18, 0.20, 0.19),
-    (0.715, -0.18, 0.20, 0.19),
-)
-SCALAR_PANEL_EXAMPLE_DELTA_LABEL_POSITIONS = (
-    (0.96, 0.94),
-    (0.96, 0.06),
-    (0.96, 0.06),
-)
-SCALAR_PANEL_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS = (
-    "top",
-    "bottom",
-    "bottom",
-)
+MIXED_GLM_FULL_DELTA_AXIS_BOUNDS = (0.115, 0.14, 0.54, 0.70)
+MIXED_GLM_FULL_BEST_AXIS_BOUNDS = (0.695, 0.32, 0.19, 0.32)
 LETTER_PAPER_WIDTH_IN = 8.5
 LETTER_HORIZONTAL_MARGIN_IN = 1.0
 DEFAULT_FIGURE_WIDTH_MM = (
@@ -96,15 +65,7 @@ DEFAULT_FIGURE_WIDTH_MM = (
 ) * 25.4
 SCALAR_PANEL_HEIGHT_MM = 62.0
 DEFAULT_ANIMAL_ROW_HEIGHT_MM = 35.0
-EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM = 47.0
-GLM_SCALAR_PANEL_HEIGHT_MM = 37.0
 MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM = 40.0
-HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM = 40.0
-MULTIPLIER_PANEL_HEIGHT_MM = 37.0
-FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM = 35.0
-COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM = 31.0
-NESTED_MODULATION_PANEL_HEIGHT_MM = 34.0
-ANIMAL_ROW_LABEL_FONTSIZE = 5.2
 PER_ANIMAL_GRID_HSPACE = 0.42
 PANEL_TITLE_FONTSIZE = 8.0
 SWAP_TUNING_CURVE_COMPARISON_RELATIVE_DIR = (
@@ -114,7 +75,6 @@ EMPIRICAL_PAIRWISE_LIGHT_TRAIN_EPOCH = "02_r1"
 EMPIRICAL_PAIRWISE_LIGHT_TEST_EPOCH = "06_r3"
 MULTIPLICATIVE_SEGMENT_LABEL = "Multiplicative segment"
 MULTIPLICATIVE_SEGMENT_SHORT_LABEL = "MS"
-ADDITIVE_SEGMENT_LABEL = "Additive segment"
 ADDITIVE_SEGMENT_SHORT_LABEL = "AS"
 ADDITIVE_LABEL = "Additive"
 ADDITIVE_SHORT_LABEL = "A"
@@ -148,6 +108,15 @@ GLM_SCALAR_BEST_MODEL_COLORS = {
 MIXED_GLM_TASK_LABEL = MULTIPLICATIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_SA_LABEL = ADDITIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_AD_LABEL = ADDITIVE_SHORT_LABEL
+FULL_ADDITIVE_INDEPENDENT_LABEL = "Independent"
+FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL = "Shared-scaffold"
+FULL_ADDITIVE_ADDITIVE_LABEL = ADDITIVE_LABEL
+FULL_ADDITIVE_BEST_MODEL_DISPLAY_LABELS = {
+    "V": FULL_ADDITIVE_INDEPENDENT_LABEL,
+    MIXED_GLM_TASK_LABEL: FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+    MIXED_EMPIRICAL_AD_LABEL: FULL_ADDITIVE_ADDITIVE_LABEL,
+    "tie": "tie",
+}
 HYBRID_GLM_EMPIRICAL_LABEL = "H"
 REVERSE_HYBRID_GLM_EMPIRICAL_LABEL = "H2"
 MIXED_EMPIRICAL_SA_MODEL_NAME = "empirical_segment_additive_delta"
@@ -279,21 +248,158 @@ def format_animal_row_label(animal_name: str, datasets: Sequence[DatasetId]) -> 
     return f"{animal_name}\n{', '.join(dates)}"
 
 
+def plot_figure_4b_delta_ll_boxplots(
+    ax: Any,
+    swap_delta_table: Any,
+    *,
+    animal_names: Sequence[str] | None = None,
+) -> None:
+    """Plot Figure 4B delta LL distributions in animal subpanels."""
+    trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
+    table = _filter_panel_h_heldout_delta(swap_delta_table)
+    if animal_names is None:
+        if table is None or "animal_name" not in table:
+            selected_animals: tuple[str, ...] = ()
+        else:
+            selected_animals = tuple(dict.fromkeys(table["animal_name"].astype(str)))
+    else:
+        selected_animals = tuple(str(animal_name) for animal_name in animal_names)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    trajectory_positions = {
+        trajectory_type: float(len(trajectory_types) - trajectory_index - 1)
+        for trajectory_index, trajectory_type in enumerate(trajectory_types)
+    }
+    required_columns = {"animal_name", "trajectory", "delta_ll_bits_per_spike"}
+    has_required_columns = table is not None and required_columns.issubset(table.columns)
+    any_plotted = False
+
+    for animal_index, animal_name in enumerate(selected_animals):
+        if animal_index >= len(FIGURE_4B_DELTA_SUBPANEL_BOUNDS):
+            break
+        child_ax = ax.inset_axes(FIGURE_4B_DELTA_SUBPANEL_BOUNDS[animal_index])
+        child_ax.axvline(0.0, color="0.35", linestyle="--", linewidth=0.6, zorder=1)
+        plotted_values = []
+        plotted_positions = []
+        plotted_colors = []
+        plotted_positive_fractions = []
+        if has_required_columns:
+            animal_rows = table[
+                table["animal_name"].astype(str) == animal_name
+            ]
+            for trajectory_type in trajectory_types:
+                trajectory_rows = animal_rows[
+                    animal_rows["trajectory"].astype(str) == str(trajectory_type)
+                ]
+                values = np.asarray(
+                    trajectory_rows["delta_ll_bits_per_spike"],
+                    dtype=float,
+                )
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    continue
+                plotted_values.append(values)
+                plotted_positions.append(trajectory_positions[trajectory_type])
+                plotted_colors.append(PANEL_TRAJECTORY_COLORS[trajectory_type])
+                plotted_positive_fractions.append(float(np.mean(values > 0.0)))
+
+        if plotted_values:
+            any_plotted = True
+            boxplot = child_ax.boxplot(
+                plotted_values,
+                positions=plotted_positions,
+                widths=FIGURE_4B_DELTA_BOX_WIDTH,
+                orientation="horizontal",
+                patch_artist=True,
+                showfliers=False,
+                whis=1.5,
+                medianprops={"color": "black", "linewidth": 0.75},
+                whiskerprops={"color": "0.30", "linewidth": 0.55},
+                capprops={"color": "0.30", "linewidth": 0.55},
+                boxprops={"linewidth": 0.55},
+            )
+            for patch, color in zip(boxplot["boxes"], plotted_colors, strict=True):
+                patch.set_facecolor(color)
+                patch.set_edgecolor("0.25")
+                patch.set_alpha(0.68)
+            for position, color, fraction in zip(
+                plotted_positions,
+                plotted_colors,
+                plotted_positive_fractions,
+                strict=True,
+            ):
+                child_ax.text(
+                    1.02,
+                    position,
+                    f"{fraction:.0%} >0",
+                    ha="left",
+                    va="center",
+                    fontsize=3.6,
+                    color=color,
+                    clip_on=False,
+                    transform=child_ax.get_yaxis_transform(),
+                )
+        else:
+            child_ax.text(
+                0.5,
+                0.5,
+                "No finite\nvalues",
+                ha="center",
+                va="center",
+                fontsize=4.8,
+                transform=child_ax.transAxes,
+            )
+
+        child_ax.set_xlim(*PANEL_H_DELTA_X_LIMITS)
+        child_ax.set_ylim(-0.55, max(len(trajectory_types) - 1, 0) + 0.55)
+        child_ax.set_yticks(list(trajectory_positions.values()))
+        if animal_index == 0:
+            child_ax.set_yticklabels(
+                [
+                    PANEL_TRAJECTORY_LABELS.get(trajectory_type, trajectory_type)
+                    for trajectory_type in trajectory_types
+                ]
+            )
+            child_ax.set_ylabel("Trajectory", fontsize=5.2)
+        else:
+            child_ax.set_yticklabels([])
+            child_ax.tick_params(axis="y", length=0)
+        child_ax.set_title(animal_name, fontsize=5.6, pad=1.2)
+        child_ax.spines["top"].set_visible(False)
+        child_ax.spines["right"].set_visible(False)
+        child_ax.tick_params(labelsize=4.5, length=1.2, pad=0.8)
+
+    if not any_plotted:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite Figure 4B\nDelta LL values",
+            ha="center",
+            va="center",
+            fontsize=5.0,
+            transform=ax.transAxes,
+        )
+
+    ax.text(
+        0.5,
+        0.055,
+        "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)",
+        ha="center",
+        va="top",
+        fontsize=5.2,
+        transform=ax.transAxes,
+    )
+
+
 def get_figure_height_mm(n_animal_rows: int) -> float:
     """Return the Supplementary Figure 4 height for the requested row count."""
     if int(n_animal_rows) <= 0:
         return DEFAULT_ANIMAL_ROW_HEIGHT_MM
     return (
         SCALAR_PANEL_HEIGHT_MM
-        + DEFAULT_ANIMAL_ROW_HEIGHT_MM * int(n_animal_rows)
-        + EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM
-        + GLM_SCALAR_PANEL_HEIGHT_MM
         + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-        + HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM
-        + MULTIPLIER_PANEL_HEIGHT_MM
-        + FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-        + COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM
-        + NESTED_MODULATION_PANEL_HEIGHT_MM
     )
 
 
@@ -349,21 +455,6 @@ def _flatten_pivot_columns(table: Any) -> Any:
         for metric, model_name in table.columns
     ]
     return table
-
-
-def _segment_mask_from_edges(
-    values: np.ndarray,
-    segment_edges: np.ndarray,
-    segment_index: int,
-) -> np.ndarray:
-    """Return a TP mask for one segment, including the final right edge."""
-    values = np.asarray(values, dtype=float).reshape(-1)
-    edges = np.asarray(segment_edges, dtype=float).reshape(-1)
-    start = float(edges[int(segment_index)])
-    end = float(edges[int(segment_index) + 1])
-    if int(segment_index) == edges.size - 2:
-        return (values >= start) & (values <= end)
-    return (values >= start) & (values < end)
 
 
 def _segment_overlap_weights(
@@ -685,6 +776,7 @@ def load_mixed_glm_empirical_delta_table(
     raw_ll_sum_var = "test_light_swapped_segment_swapped_raw_ll_sum"
     raw_ll_bits_var = "test_light_swapped_segment_swapped_raw_ll_bits_per_spike"
     n_bins_var = "test_light_swapped_segment_n_bins"
+    swap_segment_var = "swap_segment_index_1based"
     join_columns = [
         "animal_name",
         "date",
@@ -723,7 +815,12 @@ def load_mixed_glm_empirical_delta_table(
             continue
 
         with xr.open_dataset(glm_path) as glm_dataset:
-            for variable_name in (raw_ll_sum_var, raw_ll_bits_var, n_bins_var):
+            for variable_name in (
+                raw_ll_sum_var,
+                raw_ll_bits_var,
+                n_bins_var,
+                swap_segment_var,
+            ):
                 if variable_name not in glm_dataset:
                     raise KeyError(f"{glm_path} is missing {variable_name!r}.")
             available_models = {str(value) for value in glm_dataset.coords["model"].values}
@@ -756,6 +853,10 @@ def load_mixed_glm_empirical_delta_table(
                     "unit": unit_grid.ravel(),
                     "glm_test_light_bin_count": np.repeat(
                         np.asarray(glm_dataset[n_bins_var].values, dtype=float),
+                        units.size,
+                    ),
+                    "swap_segment_index_1based": np.repeat(
+                        np.asarray(glm_dataset[swap_segment_var].values, dtype=int),
                         units.size,
                     ),
                     "glm_source_path": str(glm_path),
@@ -874,6 +975,7 @@ def load_mixed_glm_empirical_delta_table(
 
     columns = [
         *join_columns,
+        "swap_segment_index_1based",
         "winner",
         "delta_V_minus_task_bits_per_spike",
         f"delta_V_minus_{empirical_label}_bits_per_spike",
@@ -2250,30 +2352,151 @@ def plot_scalar_multiplier_histograms(ax: Any, multiplier_table: Any) -> None:
     )
 
 
-def plot_full_segment_log_gain_histograms(
+def filter_swapped_segment_shared_scaffold_gain_table(
+    gain_table: Any,
+    comparison_table: Any,
+) -> Any:
+    """Return swapped-segment gains where shared-scaffold beats additive."""
+    import pandas as pd
+
+    gain_columns = list(FULL_SEGMENT_GAIN_TABLE_COLUMNS)
+    if gain_table is None or comparison_table is None:
+        return pd.DataFrame(columns=gain_columns)
+
+    gain_table = pd.DataFrame(gain_table).copy()
+    comparison_table = pd.DataFrame(comparison_table).copy()
+    if gain_table.empty or comparison_table.empty:
+        return pd.DataFrame(columns=gain_columns)
+
+    join_columns = [
+        "animal_name",
+        "date",
+        "region",
+        "dark_train_epoch",
+        "light_train_epoch",
+        "trajectory",
+        "unit",
+    ]
+    required_gain_columns = set(join_columns).union(
+        {
+            "segment_index_1based",
+            "segment_specific_log_gain",
+        }
+    )
+    required_comparison_columns = set(join_columns).union(
+        {
+            "swap_segment_index_1based",
+            f"{MIXED_GLM_TASK_LABEL}_bits_per_spike",
+            f"{MIXED_EMPIRICAL_AD_LABEL}_bits_per_spike",
+        }
+    )
+    missing_gain_columns = sorted(required_gain_columns.difference(gain_table.columns))
+    missing_comparison_columns = sorted(
+        required_comparison_columns.difference(comparison_table.columns)
+    )
+    if missing_gain_columns or missing_comparison_columns:
+        missing_text = []
+        if missing_gain_columns:
+            missing_text.append(f"gain table: {missing_gain_columns}")
+        if missing_comparison_columns:
+            missing_text.append(f"comparison table: {missing_comparison_columns}")
+        raise KeyError("; ".join(missing_text))
+
+    shared_scores = pd.to_numeric(
+        comparison_table[f"{MIXED_GLM_TASK_LABEL}_bits_per_spike"],
+        errors="coerce",
+    )
+    additive_scores = pd.to_numeric(
+        comparison_table[f"{MIXED_EMPIRICAL_AD_LABEL}_bits_per_spike"],
+        errors="coerce",
+    )
+    swap_segments = pd.to_numeric(
+        comparison_table["swap_segment_index_1based"],
+        errors="coerce",
+    )
+    better_rows = comparison_table[
+        np.isfinite(shared_scores.to_numpy(dtype=float))
+        & np.isfinite(additive_scores.to_numpy(dtype=float))
+        & np.isfinite(swap_segments.to_numpy(dtype=float))
+        & (shared_scores.to_numpy(dtype=float) > additive_scores.to_numpy(dtype=float))
+    ].copy()
+    if better_rows.empty:
+        return gain_table.iloc[0:0].copy()
+    better_rows["swap_segment_index_1based"] = (
+        swap_segments.loc[better_rows.index].astype(int)
+    )
+    better_rows = better_rows[
+        [*join_columns, "swap_segment_index_1based"]
+    ].drop_duplicates()
+
+    merged = pd.merge(
+        gain_table,
+        better_rows,
+        on=join_columns,
+        how="inner",
+        validate="many_to_one",
+    )
+    if merged.empty:
+        return gain_table.iloc[0:0].copy()
+    segment_indices = pd.to_numeric(
+        merged["segment_index_1based"],
+        errors="coerce",
+    )
+    swap_segment_indices = pd.to_numeric(
+        merged["swap_segment_index_1based"],
+        errors="coerce",
+    )
+    segment_values = segment_indices.to_numpy(dtype=float)
+    swap_segment_values = swap_segment_indices.to_numpy(dtype=float)
+    finite_segments = np.isfinite(segment_values) & np.isfinite(swap_segment_values)
+    return merged[
+        finite_segments & (segment_values == swap_segment_values)
+    ].copy()
+
+
+def plot_swapped_segment_shared_scaffold_gain_histograms(
     ax: Any,
     gain_table: Any,
+    comparison_table: Any,
     *,
     threshold: float = FULL_SEGMENT_LOG_GAIN_THRESHOLD,
 ) -> None:
-    """Plot full scalar segment log-gain distributions by segment."""
+    """Plot swapped-segment coefficients where shared-scaffold beats additive."""
+    trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
+    filtered_table = filter_swapped_segment_shared_scaffold_gain_table(
+        gain_table,
+        comparison_table,
+    )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
     inset_bounds = (
-        (0.08, 0.29, 0.25, 0.58),
-        (0.38, 0.29, 0.25, 0.58),
-        (0.68, 0.29, 0.25, 0.58),
+        (0.07, 0.34, 0.20, 0.51),
+        (0.305, 0.34, 0.20, 0.51),
+        (0.54, 0.34, 0.20, 0.51),
+        (0.775, 0.34, 0.20, 0.51),
     )
     histogram_axes = [ax.inset_axes(bounds) for bounds in inset_bounds]
-    if gain_table is None or len(gain_table) == 0:
-        ax.text(0.5, 0.5, "No reliable scalar\ngain values", ha="center", va="center")
+    if filtered_table.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "No swapped-segment\nShared-scaffold > Additive values",
+            ha="center",
+            va="center",
+        )
         return
 
-    all_values = np.asarray(gain_table["full_segment_log_gain"], dtype=float)
+    all_values = np.asarray(filtered_table["segment_specific_log_gain"], dtype=float)
     all_values = all_values[np.isfinite(all_values)]
     if all_values.size == 0:
-        ax.text(0.5, 0.5, "No finite scalar\ngain values", ha="center", va="center")
+        ax.text(
+            0.5,
+            0.5,
+            "No finite swapped-segment\ncoefficients",
+            ha="center",
+            va="center",
+        )
         return
 
     q_abs = float(np.nanpercentile(np.abs(all_values), 99.0))
@@ -2282,16 +2505,13 @@ def plot_full_segment_log_gain_histograms(
         axis_abs = 1.0
     bins = np.linspace(-axis_abs, axis_abs, 31)
 
-    for axis, segment_index, color in zip(
-        histogram_axes,
-        (1, 2, 3),
-        FULL_SEGMENT_GAIN_COLORS,
-        strict=True,
+    for trajectory_index, (axis, trajectory_type) in enumerate(
+        zip(histogram_axes, trajectory_types, strict=True)
     ):
-        rows = gain_table[
-            np.asarray(gain_table["segment_index_1based"], dtype=int) == segment_index
+        rows = filtered_table[
+            filtered_table["trajectory"].astype(str) == str(trajectory_type)
         ]
-        values = np.asarray(rows["full_segment_log_gain"], dtype=float)
+        values = np.asarray(rows["segment_specific_log_gain"], dtype=float)
         values = values[np.isfinite(values)]
         if values.size == 0:
             axis.text(0.5, 0.5, "No values", ha="center", va="center")
@@ -2302,7 +2522,7 @@ def plot_full_segment_log_gain_histograms(
             values,
             bins=bins,
             weights=weights,
-            color=color,
+            color=PANEL_TRAJECTORY_COLORS[trajectory_type],
             alpha=0.76,
             edgecolor="white",
             linewidth=0.25,
@@ -2324,31 +2544,46 @@ def plot_full_segment_log_gain_histograms(
             transform=axis.transAxes,
         )
         axis.set_xlim(-axis_abs, axis_abs)
-        axis.set_title(f"Segment {segment_index}", fontsize=5.5, pad=1.5)
-        axis.set_xlabel("Full log gain", labelpad=1.0)
-        axis.set_ylabel("Fraction", labelpad=1.0)
+        axis.set_title(
+            PANEL_TRAJECTORY_LABELS.get(trajectory_type, trajectory_type),
+            fontsize=5.5,
+            pad=1.5,
+        )
+        axis.set_xlabel("")
+        if trajectory_index == 0:
+            axis.set_ylabel("Fraction", labelpad=1.0)
+        else:
+            axis.set_ylabel("")
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
         axis.tick_params(labelsize=5.0, length=1.5, pad=1.0)
 
-    unique_cells = gain_table[
+    unique_cells = filtered_table[
         ["animal_name", "date", "region", "unit"]
     ].drop_duplicates()
-    unique_fits = gain_table[
+    unique_fits = filtered_table[
         ["animal_name", "date", "region", "trajectory", "unit"]
     ].drop_duplicates()
     ax.text(
         0.50,
-        0.025,
+        0.16,
+        "Swapped-segment coefficient",
+        ha="center",
+        va="bottom",
+        fontsize=5.6,
+        color="black",
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.50,
+        0.055,
         (
-            "Filtered by dark-run odd/even tuning r ≥ "
-            f"{FULL_SEGMENT_GAIN_MIN_TUNING_STABILITY_CORRELATION:.1f}; "
-            f"threshold = ±log(1.5); cells={len(unique_cells)}, "
-            f"trajectory-unit fits={len(unique_fits)}"
+            "Swapped segment only; Shared-scaffold > Additive; "
+            f"cells={len(unique_cells)}, trajectory-unit fits={len(unique_fits)}"
         ),
         ha="center",
         va="bottom",
-        fontsize=5.2,
+        fontsize=4.9,
         color="0.25",
         transform=ax.transAxes,
     )
@@ -2756,17 +2991,6 @@ def plot_empirical_pairwise_delta(ax: Any, delta_table: Any) -> None:
                         fontsize=4.5,
                         color="0.25",
                     )
-            ax.text(
-                0.98,
-                0.03,
-                "Outliers hidden",
-                ha="right",
-                va="bottom",
-                fontsize=4.3,
-                color="0.30",
-                transform=ax.transAxes,
-            )
-
     ax.set_ylim(-0.50, len(pair_labels) - 0.50)
     if not ax.get_xlim()[0] < 0.0 < ax.get_xlim()[1]:
         ax.set_xlim(min(ax.get_xlim()[0], -0.05), max(ax.get_xlim()[1], 0.05))
@@ -2925,16 +3149,6 @@ def plot_glm_scalar_pairwise_delta(
                     fontsize=4.5,
                     color="0.25",
                 )
-            ax.text(
-                0.98,
-                0.03,
-                "Outliers hidden",
-                ha="right",
-                va="bottom",
-                fontsize=4.3,
-                color="0.30",
-                transform=ax.transAxes,
-            )
 
     ax.set_ylim(-0.50, 0.50)
     if not ax.get_xlim()[0] < 0.0 < ax.get_xlim()[1]:
@@ -3106,16 +3320,6 @@ def plot_mixed_glm_empirical_pairwise_delta(
                         fontsize=4.5,
                         color="0.25",
                     )
-            ax.text(
-                0.98,
-                0.03,
-                "Outliers hidden",
-                ha="right",
-                va="bottom",
-                fontsize=4.3,
-                color="0.30",
-                transform=ax.transAxes,
-            )
 
     ax.set_ylim(-0.50, len(pair_labels) - 0.50)
     if not ax.get_xlim()[0] < 0.0 < ax.get_xlim()[1]:
@@ -3171,6 +3375,7 @@ def plot_best_fraction_bar(
     *,
     labels: Sequence[str],
     colors: dict[str, str],
+    display_labels: dict[str, str] | None = None,
 ) -> None:
     """Plot pooled winner fractions for a model set."""
     if delta_table is None or len(delta_table) == 0 or "winner" not in delta_table:
@@ -3187,6 +3392,7 @@ def plot_best_fraction_bar(
         return
 
     bottom = 0.0
+    display_labels = {} if display_labels is None else dict(display_labels)
     for label in labels:
         fraction = float(np.mean(winners == label))
         if fraction <= 0.0:
@@ -3201,13 +3407,16 @@ def plot_best_fraction_bar(
             linewidth=0.35,
         )
         if label != "tie" and fraction >= 0.08:
+            display_label = display_labels.get(label, str(label))
+            if "\n" not in display_label and len(display_label) > 12:
+                display_label = display_label.replace("-", "-\n", 1)
             ax.text(
                 0.0,
                 bottom + fraction / 2.0,
-                f"{label}\n{fraction:.0%}",
+                f"{display_label}\n{fraction:.0%}",
                 ha="center",
                 va="center",
-                fontsize=4.5,
+                fontsize=3.6 if len(display_label.replace("\n", "")) > 8 else 4.5,
                 color="white",
             )
         bottom += fraction
@@ -3253,22 +3462,263 @@ def plot_mixed_glm_full_additive_pairwise_delta(
     show_legend: bool = True,
 ) -> None:
     """Plot matched GLM/empirical full-additive delta LL boxes."""
-    plot_mixed_glm_empirical_pairwise_delta(
-        ax,
-        delta_table,
-        empirical_label=MIXED_EMPIRICAL_AD_LABEL,
-        show_legend=show_legend,
+    from matplotlib.patches import Patch
+
+    trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
+    model_columns = {
+        FULL_ADDITIVE_INDEPENDENT_LABEL: "V_bits_per_spike",
+        FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL: (
+            f"{MIXED_GLM_TASK_LABEL}_bits_per_spike"
+        ),
+        FULL_ADDITIVE_ADDITIVE_LABEL: (
+            f"{MIXED_EMPIRICAL_AD_LABEL}_bits_per_spike"
+        ),
+    }
+    delta_pairs = (
+        (
+            (
+                f"{FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL} - "
+                f"{FULL_ADDITIVE_INDEPENDENT_LABEL}"
+            ),
+            FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+            FULL_ADDITIVE_INDEPENDENT_LABEL,
+        ),
+        (
+            (
+                f"{FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL} - "
+                f"{FULL_ADDITIVE_ADDITIVE_LABEL}"
+            ),
+            FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+            FULL_ADDITIVE_ADDITIVE_LABEL,
+        ),
+        (
+            (
+                f"{FULL_ADDITIVE_INDEPENDENT_LABEL} - "
+                f"{FULL_ADDITIVE_ADDITIVE_LABEL}"
+            ),
+            FULL_ADDITIVE_INDEPENDENT_LABEL,
+            FULL_ADDITIVE_ADDITIVE_LABEL,
+        ),
     )
+    pair_labels = tuple(label for label, _left_label, _right_label in delta_pairs)
+    pair_centers = np.asarray(
+        [len(pair_labels) - pair_index - 1 for pair_index in range(len(pair_labels))],
+        dtype=float,
+    )
+    ax.axvline(0.0, color="0.35", linestyle="--", linewidth=0.6, zorder=1)
+    required_columns = {"trajectory", *model_columns.values()}
+    if delta_table is None or len(delta_table) == 0:
+        ax.text(0.5, 0.5, "No matched\nswap values", ha="center", va="center")
+    elif not required_columns.issubset(delta_table.columns):
+        missing_columns = sorted(required_columns.difference(delta_table.columns))
+        ax.text(
+            0.5,
+            0.5,
+            "Missing columns:\n" + "\n".join(missing_columns[:3]),
+            ha="center",
+            va="center",
+            fontsize=5.0,
+        )
+    else:
+        plotted_values = []
+        plotted_positions = []
+        plotted_colors = []
+        comparison_fractions: dict[str, tuple[float, float]] = {}
+        for pair_index, (pair_label, left_label, right_label) in enumerate(delta_pairs):
+            left_column = model_columns[left_label]
+            right_column = model_columns[right_label]
+            all_values = (
+                np.asarray(delta_table[left_column], dtype=float)
+                - np.asarray(delta_table[right_column], dtype=float)
+            )
+            all_values = all_values[np.isfinite(all_values)]
+            if all_values.size:
+                comparison_fractions[pair_label] = (
+                    float(np.mean(all_values < 0.0)),
+                    float(np.mean(all_values > 0.0)),
+                )
+            for trajectory_index, trajectory_type in enumerate(trajectory_types):
+                rows = delta_table[
+                    delta_table["trajectory"].astype(str) == str(trajectory_type)
+                ]
+                values = (
+                    np.asarray(rows[left_column], dtype=float)
+                    - np.asarray(rows[right_column], dtype=float)
+                )
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    continue
+                plotted_values.append(values)
+                plotted_positions.append(
+                    pair_centers[pair_index]
+                    + EMPIRICAL_PAIRWISE_BOX_OFFSETS[trajectory_index]
+                )
+                plotted_colors.append(PANEL_TRAJECTORY_COLORS[trajectory_type])
+
+        if not plotted_values:
+            ax.text(0.5, 0.5, "No finite matched\nswap values", ha="center", va="center")
+        else:
+            boxplot = ax.boxplot(
+                plotted_values,
+                positions=plotted_positions,
+                widths=EMPIRICAL_PAIRWISE_BOX_WIDTH,
+                vert=False,
+                patch_artist=True,
+                showfliers=False,
+                whis=1.5,
+                medianprops={"color": "black", "linewidth": 0.75},
+                whiskerprops={"color": "0.30", "linewidth": 0.55},
+                capprops={"color": "0.30", "linewidth": 0.55},
+                boxprops={"linewidth": 0.55},
+            )
+            for patch, color in zip(boxplot["boxes"], plotted_colors, strict=True):
+                patch.set_facecolor(color)
+                patch.set_edgecolor("0.25")
+                patch.set_alpha(0.62)
+
+            legend_handles = [
+                Patch(
+                    facecolor=PANEL_TRAJECTORY_COLORS[trajectory_type],
+                    edgecolor="0.25",
+                    alpha=0.62,
+                    label=PANEL_TRAJECTORY_LABELS.get(
+                        trajectory_type,
+                        trajectory_type,
+                    ),
+                )
+                for trajectory_type in trajectory_types
+            ]
+            if show_legend:
+                ax.legend(
+                    handles=legend_handles,
+                    frameon=False,
+                    fontsize=4.6,
+                    handlelength=0.9,
+                    ncols=2,
+                    borderaxespad=0.0,
+                    loc="lower right",
+                )
+
+            whisker_values = [
+                value
+                for whisker in boxplot["whiskers"]
+                for value in whisker.get_xdata()
+                if np.isfinite(value)
+            ]
+            if whisker_values:
+                x_min = min(whisker_values)
+                x_max = max(whisker_values)
+                x_pad = max(0.05, 0.08 * (x_max - x_min))
+                ax.set_xlim(x_min - x_pad, x_max + x_pad)
+            x_left, x_right = ax.get_xlim()
+            x_span = x_right - x_left
+            for pair_index, (pair_label, left_label, right_label) in enumerate(
+                delta_pairs
+            ):
+                right_fraction, left_fraction = comparison_fractions.get(
+                    pair_label,
+                    (float("nan"), float("nan")),
+                )
+                y_text = pair_centers[pair_index] + 0.40
+                if np.isfinite(right_fraction):
+                    ax.text(
+                        x_left + 0.02 * x_span,
+                        y_text,
+                        f"{right_label} {right_fraction:.0%}",
+                        ha="left",
+                        va="center",
+                        fontsize=4.5,
+                        color="0.25",
+                    )
+                    ax.text(
+                        x_right - 0.02 * x_span,
+                        y_text,
+                        f"{left_label} {left_fraction:.0%}",
+                        ha="right",
+                        va="center",
+                        fontsize=4.5,
+                        color="0.25",
+                    )
+
+    ax.set_ylim(-0.50, len(pair_labels) - 0.50)
+    if not ax.get_xlim()[0] < 0.0 < ax.get_xlim()[1]:
+        ax.set_xlim(min(ax.get_xlim()[0], -0.05), max(ax.get_xlim()[1], 0.05))
+    ax.set_yticks(pair_centers)
+    ax.set_yticklabels(pair_labels)
+    ax.set_xlabel("ΔLL (bits/spike)", labelpad=1.2)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=5.2, length=1.5, pad=1.0)
 
 
 def plot_mixed_glm_full_additive_best_fraction_bar(ax: Any, delta_table: Any) -> None:
     """Plot pooled winner fractions for matched GLM/additive models."""
-    plot_best_fraction_bar(
-        ax,
-        delta_table,
-        labels=("V", MIXED_GLM_TASK_LABEL, MIXED_EMPIRICAL_AD_LABEL, "tie"),
-        colors=MIXED_GLM_FULL_ADDITIVE_BEST_MODEL_COLORS,
-    )
+    labels = ("V", MIXED_GLM_TASK_LABEL, MIXED_EMPIRICAL_AD_LABEL, "tie")
+    if delta_table is None or len(delta_table) == 0 or "winner" not in delta_table:
+        ax.text(0.5, 0.5, "No best-model\nvalues", ha="center", va="center")
+        ax.axis("off")
+        return
+
+    winners = np.asarray(delta_table["winner"], dtype=object)
+    valid = np.isin(winners, labels)
+    winners = winners[valid]
+    if winners.size == 0:
+        ax.text(0.5, 0.5, "No finite\nwinners", ha="center", va="center")
+        ax.axis("off")
+        return
+
+    fractions = [float(np.mean(winners == label)) for label in labels]
+    display_labels = [
+        FULL_ADDITIVE_BEST_MODEL_DISPLAY_LABELS.get(label, str(label)).replace(
+            "-",
+            "-\n",
+            1,
+        )
+        for label in labels
+    ]
+    left = 0.0
+    for label, display_label, fraction in zip(
+        labels,
+        display_labels,
+        fractions,
+        strict=True,
+    ):
+        if fraction <= 0.0:
+            continue
+        ax.barh(
+            [0.0],
+            [fraction],
+            left=[left],
+            height=0.32,
+            color=MIXED_GLM_FULL_ADDITIVE_BEST_MODEL_COLORS[label],
+            edgecolor="white",
+            linewidth=0.35,
+        )
+        if fraction >= 0.08:
+            ax.text(
+                left + fraction / 2.0,
+                0.28,
+                f"{display_label}\n{fraction:.0%}",
+                ha="center",
+                va="bottom",
+                fontsize=3.7,
+                color="0.20",
+                linespacing=0.90,
+            )
+        left += fraction
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(-0.28, 0.80)
+    ax.set_yticks([])
+    ax.set_xticks([0.0, 0.5, 1.0])
+    ax.set_xticklabels(["0", "0.5", "1"])
+    ax.set_xlabel("Frac. cells", fontsize=4.8, labelpad=0.8)
+    ax.set_title("Best model", fontsize=5.2, pad=1.0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    ax.tick_params(axis="x", labelsize=4.5, length=1.2, pad=0.8)
 
 
 def plot_empirical_multiplicative_pairwise_delta(ax: Any, delta_table: Any) -> None:
@@ -3423,19 +3873,11 @@ def make_supplementary_figure_4(
         return output_path
 
     outer_grid = fig.add_gridspec(
-        nrows=len(animal_groups) + 9,
+        nrows=2,
         ncols=1,
         height_ratios=(
             [SCALAR_PANEL_HEIGHT_MM]
-            + [DEFAULT_ANIMAL_ROW_HEIGHT_MM] * len(animal_groups)
-            + [EMPIRICAL_PAIRWISE_PANEL_HEIGHT_MM]
-            + [GLM_SCALAR_PANEL_HEIGHT_MM]
             + [MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM]
-            + [HYBRID_GLM_EMPIRICAL_PANEL_HEIGHT_MM]
-            + [MULTIPLIER_PANEL_HEIGHT_MM]
-            + [FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM]
-            + [COMBINED_FULL_SEGMENT_GAIN_PANEL_HEIGHT_MM]
-            + [NESTED_MODULATION_PANEL_HEIGHT_MM]
         ),
         hspace=PER_ANIMAL_GRID_HSPACE,
         left=0.125,
@@ -3454,133 +3896,19 @@ def make_supplementary_figure_4(
         ),
         model_name=SCALAR_MODEL_NAME,
     )
-    scalar_swap_examples = load_panel_h_swap_examples(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-        model_name=SCALAR_MODEL_NAME,
-        example_count=len(SCALAR_PANEL_EXAMPLES),
-        requested_examples=SCALAR_PANEL_EXAMPLES,
-    )
-    plot_panel_h_swap_delta(
+    plot_figure_4b_delta_ll_boxplots(
         scalar_axis,
         scalar_swap_delta_table,
-        scalar_swap_examples,
-        model_name=SCALAR_MODEL_NAME,
-        model_colors=SCALAR_PANEL_MODEL_COLORS,
-        schematic_axis_bounds=PANEL_C_SCHEMATIC_AXIS_BOUNDS,
-        delta_axis_bounds=PANEL_C_DELTA_AXIS_BOUNDS,
-        example_axis_bounds=SCALAR_PANEL_EXAMPLE_AXIS_BOUNDS,
-        schematic_track_size=PANEL_C_SCHEMATIC_TRACK_SIZE,
-        show_dark_track_labels=True,
-        show_model_labels=False,
-        prediction_label_fontsize=PANEL_C_PREDICTION_LABEL_FONTSIZE,
-        independent_track_center_y=PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
-        independent_prediction_label_y=PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
-        segment_modulation_track_center_y=PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
-        shared_dark_track_center_y=PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
-        shared_light_track_center_y=PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
-        shared_prediction_label_y=PANEL_C_SHARED_PREDICTION_LABEL_Y,
-        delta_grid_bounds=PANEL_C_DELTA_GRID_BOUNDS,
-        delta_xlabel_y=PANEL_C_DELTA_XLABEL_Y,
-        example_delta_label_positions=SCALAR_PANEL_EXAMPLE_DELTA_LABEL_POSITIONS,
-        example_delta_label_vertical_alignments=(
-            SCALAR_PANEL_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
-        ),
-        example_icon_bounds=PANEL_C_EXAMPLE_ICON_BOUNDS,
+        animal_names=tuple(animal_groups),
     )
     scalar_axis.set_title(
-        "Segment scalar model predicting held-out light epoch",
+        "Shared scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )
     label_axis(scalar_axis, "A", x=-0.115, y=1.02)
 
-    for row_index, (animal_name, animal_datasets) in enumerate(animal_groups.items()):
-        axis = fig.add_subplot(outer_grid[row_index + 1, 0])
-        swap_delta_table = load_panel_h_swap_delta_table(
-            data_root=data_root,
-            datasets=animal_datasets,
-            region=region,
-            dark_epoch=dark_epoch,
-        )
-        plot_figure_4c_histogram_grid(axis, swap_delta_table)
-        axis.text(
-            -0.075,
-            0.50,
-            format_animal_row_label(animal_name, animal_datasets),
-            ha="right",
-            va="center",
-            fontsize=ANIMAL_ROW_LABEL_FONTSIZE,
-            transform=axis.transAxes,
-            color="0.25",
-        )
-
-        if row_index == 0:
-            axis.set_title(
-                "Figure 4B delta LL histograms by animal",
-                fontsize=PANEL_TITLE_FONTSIZE,
-                pad=2,
-            )
-            label_axis(axis, "B", x=-0.115, y=1.02)
-
-    empirical_pairwise_axis = fig.add_subplot(outer_grid[len(animal_groups) + 1, 0])
-    empirical_pairwise_table = load_empirical_pairwise_delta_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-    )
-    empirical_pairwise_axis.set_xlim(0.0, 1.0)
-    empirical_pairwise_axis.set_ylim(0.0, 1.0)
-    empirical_pairwise_axis.axis("off")
-    empirical_scatter_axis = empirical_pairwise_axis.inset_axes(
-        (0.31, 0.17, 0.46, 0.66)
-    )
-    plot_empirical_pairwise_delta(empirical_scatter_axis, empirical_pairwise_table)
-    empirical_best_axis = empirical_pairwise_axis.inset_axes(
-        (0.81, 0.34, 0.16, 0.30)
-    )
-    plot_empirical_best_fraction_bar(empirical_best_axis, empirical_pairwise_table)
-    empirical_pairwise_axis.set_title(
-        (
-            "Empirical visual, multiplicative segment, "
-            "and additive segment comparison"
-        ),
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(empirical_pairwise_axis, "C", x=-0.115, y=1.02)
-
-    glm_scalar_axis = fig.add_subplot(outer_grid[len(animal_groups) + 2, 0])
-    glm_scalar_table = load_glm_scalar_delta_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-    )
-    glm_scalar_axis.set_xlim(0.0, 1.0)
-    glm_scalar_axis.set_ylim(0.0, 1.0)
-    glm_scalar_axis.axis("off")
-    glm_scalar_delta_axis = glm_scalar_axis.inset_axes((0.31, 0.20, 0.46, 0.60))
-    plot_glm_scalar_pairwise_delta(glm_scalar_delta_axis, glm_scalar_table)
-    glm_scalar_best_axis = glm_scalar_axis.inset_axes((0.81, 0.35, 0.16, 0.30))
-    plot_glm_scalar_best_fraction_bar(glm_scalar_best_axis, glm_scalar_table)
-    glm_scalar_axis.set_title(
-        f"GLM visual and {MULTIPLICATIVE_SEGMENT_LABEL} model comparison",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(glm_scalar_axis, "D", x=-0.115, y=1.02)
-
-    mixed_axis = fig.add_subplot(outer_grid[len(animal_groups) + 3, 0])
-    mixed_table = load_mixed_glm_empirical_delta_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-    )
+    mixed_axis = fig.add_subplot(outer_grid[1, 0])
     mixed_full_additive_table = load_mixed_glm_full_additive_delta_table(
         data_root=data_root,
         datasets=datasets,
@@ -3590,214 +3918,23 @@ def make_supplementary_figure_4(
     mixed_axis.set_xlim(0.0, 1.0)
     mixed_axis.set_ylim(0.0, 1.0)
     mixed_axis.axis("off")
-    mixed_delta_axis = mixed_axis.inset_axes((0.07, 0.17, 0.30, 0.66))
-    plot_mixed_glm_empirical_pairwise_delta(
-        mixed_delta_axis,
-        mixed_table,
-        show_legend=False,
-    )
-    mixed_best_axis = mixed_axis.inset_axes((0.39, 0.34, 0.10, 0.30))
-    plot_mixed_glm_empirical_best_fraction_bar(mixed_best_axis, mixed_table)
-    mixed_full_delta_axis = mixed_axis.inset_axes((0.56, 0.17, 0.30, 0.66))
+    mixed_full_delta_axis = mixed_axis.inset_axes(MIXED_GLM_FULL_DELTA_AXIS_BOUNDS)
     plot_mixed_glm_full_additive_pairwise_delta(
         mixed_full_delta_axis,
         mixed_full_additive_table,
         show_legend=False,
     )
-    mixed_full_best_axis = mixed_axis.inset_axes((0.88, 0.34, 0.10, 0.30))
+    mixed_full_best_axis = mixed_axis.inset_axes(MIXED_GLM_FULL_BEST_AXIS_BOUNDS)
     plot_mixed_glm_full_additive_best_fraction_bar(
         mixed_full_best_axis,
         mixed_full_additive_table,
     )
-    mixed_axis.text(
-        0.22,
-        0.91,
-        ADDITIVE_SEGMENT_LABEL,
-        ha="center",
-        va="center",
-        fontsize=5.2,
-        color="0.25",
-        transform=mixed_axis.transAxes,
-    )
-    mixed_axis.text(
-        0.71,
-        0.91,
-        ADDITIVE_LABEL,
-        ha="center",
-        va="center",
-        fontsize=5.2,
-        color="0.25",
-        transform=mixed_axis.transAxes,
-    )
     mixed_axis.set_title(
-        "Matched GLM and empirical additive model comparisons",
+        "Comparison between shared-scaffold, independent, and additive model",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )
-    label_axis(mixed_axis, "E", x=-0.115, y=1.02)
-
-    hybrid_axis = fig.add_subplot(outer_grid[len(animal_groups) + 4, 0])
-    hybrid_table = load_hybrid_glm_empirical_delta_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-    )
-    hybrid_axis.set_xlim(0.0, 1.0)
-    hybrid_axis.set_ylim(0.0, 1.0)
-    hybrid_axis.axis("off")
-    empirical_multiplicative_delta_axis = hybrid_axis.inset_axes(
-        (0.04, 0.17, 0.20, 0.66)
-    )
-    plot_empirical_multiplicative_pairwise_delta(
-        empirical_multiplicative_delta_axis,
-        empirical_pairwise_table,
-    )
-    empirical_multiplicative_best_axis = hybrid_axis.inset_axes(
-        (0.255, 0.34, 0.065, 0.30)
-    )
-    plot_empirical_multiplicative_best_fraction_bar(
-        empirical_multiplicative_best_axis,
-        empirical_pairwise_table,
-    )
-    hybrid_delta_axis = hybrid_axis.inset_axes((0.36, 0.17, 0.20, 0.66))
-    plot_hybrid_glm_empirical_pairwise_delta(hybrid_delta_axis, hybrid_table)
-    hybrid_best_axis = hybrid_axis.inset_axes((0.575, 0.34, 0.065, 0.30))
-    plot_hybrid_glm_empirical_best_fraction_bar(hybrid_best_axis, hybrid_table)
-    reverse_hybrid_delta_axis = hybrid_axis.inset_axes((0.68, 0.17, 0.20, 0.66))
-    plot_reverse_hybrid_glm_empirical_pairwise_delta(
-        reverse_hybrid_delta_axis,
-        hybrid_table,
-    )
-    reverse_hybrid_best_axis = hybrid_axis.inset_axes((0.895, 0.34, 0.065, 0.30))
-    plot_reverse_hybrid_glm_empirical_best_fraction_bar(
-        reverse_hybrid_best_axis,
-        hybrid_table,
-    )
-    hybrid_axis.text(
-        0.16,
-        0.91,
-        "Empirical dark x empirical multiplier",
-        ha="center",
-        va="center",
-        fontsize=5.2,
-        color="0.25",
-        transform=hybrid_axis.transAxes,
-    )
-    hybrid_axis.text(
-        0.48,
-        0.91,
-        "Empirical dark x GLM multiplier",
-        ha="center",
-        va="center",
-        fontsize=5.2,
-        color="0.25",
-        transform=hybrid_axis.transAxes,
-    )
-    hybrid_axis.text(
-        0.80,
-        0.91,
-        "GLM dark x empirical multiplier",
-        ha="center",
-        va="center",
-        fontsize=5.2,
-        color="0.25",
-        transform=hybrid_axis.transAxes,
-    )
-    hybrid_axis.set_title(
-        "Visual and multiplicative segment model comparisons",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(hybrid_axis, "F", x=-0.115, y=1.02)
-
-    multiplier_axis = fig.add_subplot(outer_grid[len(animal_groups) + 5, 0])
-    multiplier_table = load_scalar_multiplier_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-    )
-    plot_scalar_multiplier_histograms(multiplier_axis, multiplier_table)
-    multiplier_axis.set_title(
-        "Empirical and GLM multiplicative scalar distributions",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(multiplier_axis, "G", x=-0.115, y=1.02)
-
-    full_gain_axis = fig.add_subplot(outer_grid[len(animal_groups) + 6, 0])
-    full_gain_table = load_full_segment_log_gain_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-        min_tuning_stability_correlation=(
-            FULL_SEGMENT_GAIN_MIN_TUNING_STABILITY_CORRELATION
-        ),
-    )
-    plot_full_segment_log_gain_histograms(full_gain_axis, full_gain_table)
-    full_gain_axis.set_title(
-        f"GLM full segment log-gain distributions in reliable {region.upper()} cells",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(full_gain_axis, "H", x=-0.115, y=1.02)
-
-    combined_gain_axis = fig.add_subplot(outer_grid[len(animal_groups) + 7, 0])
-    plot_combined_full_segment_log_gain_histogram(combined_gain_axis, full_gain_table)
-    combined_gain_axis.set_title(
-        "Pooled GLM full segment log-gain distribution",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(combined_gain_axis, "I", x=-0.115, y=1.02)
-
-    nested_modulation_axis = fig.add_subplot(outer_grid[len(animal_groups) + 8, 0])
-    nested_modulation_table = load_nested_vision_modulation_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        dark_epoch=dark_epoch,
-        full_gain_table=full_gain_table,
-    )
-    nested_modulation_axis.set_xlim(0.0, 1.0)
-    nested_modulation_axis.set_ylim(0.0, 1.0)
-    nested_modulation_axis.axis("off")
-    nested_bar_axis = nested_modulation_axis.inset_axes(
-        NESTED_MODULATION_BAR_AXIS_BOUNDS
-    )
-    nested_legend_axis = nested_modulation_axis.inset_axes(
-        NESTED_MODULATION_LEGEND_AXIS_BOUNDS
-    )
-    plot_nested_vision_modulation_bar(
-        nested_bar_axis,
-        nested_modulation_table,
-        legend_axis=nested_legend_axis,
-        show_note=False,
-    )
-    nested_modulation_axis.text(
-        0.09,
-        -0.12,
-        (
-            f"Dark active: FR >= {NESTED_DARK_ACTIVE_FR_THRESHOLD_HZ:.1f} Hz; "
-            f"stable: odd/even r >= {NESTED_TUNING_STABILITY_CORRELATION_THRESHOLD:.1f}; "
-            "usable scalar: CV gain >= 0 bits/spike; "
-            "modulated: any segment |g| >= log(1.5)"
-        ),
-        ha="left",
-        va="top",
-        fontsize=5.0,
-        color="0.25",
-        transform=nested_modulation_axis.transAxes,
-        clip_on=False,
-    )
-    nested_modulation_axis.set_title(
-        "Nested dark activity, tuning stability, and visual modulation fractions",
-        fontsize=PANEL_TITLE_FONTSIZE,
-        pad=2,
-    )
-    label_axis(nested_modulation_axis, "J", x=-0.115, y=1.02)
+    label_axis(mixed_axis, "B", x=-0.115, y=1.02)
 
     save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
@@ -3809,7 +3946,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Supplementary Figure 4 generation."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate Supplementary Figure 4 scalar examples and per-animal histograms."
+            "Generate Supplementary Figure 4 scalar controls and model summaries."
         )
     )
     parser.add_argument(

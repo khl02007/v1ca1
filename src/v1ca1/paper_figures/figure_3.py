@@ -65,16 +65,15 @@ from v1ca1.paper_figures.style import (
     MODEL_CLASS_COLORS,
     NEUTRAL_COLORS,
     OUTLINED_HISTOGRAM_KWARGS,
+    PANEL_LABEL_KWARGS,
     RASTER_TICK_KWARGS,
     SCHEMATIC_COLORS,
     TRAJECTORY_COLORS,
-    VISUAL_CONDITION_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
     save_figure,
 )
-from v1ca1.helper.plot_wtrack_schematic import get_w_track_geometry
 from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures.w_track_schematic import (
     draw_w_track_basis_schematic,
@@ -103,20 +102,44 @@ DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_REGIONS = ("v1",)
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_PANEL_AB_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
-DEFAULT_PANEL_DEF_HEIGHT_MM = 30.0
+DEFAULT_PANEL_DEF_HEIGHT_MM = 34.0
 DEFAULT_FIGURE_HEIGHT_MM = (
     DEFAULT_PANEL_AB_HEIGHT_MM
     + DEFAULT_PANEL_DEF_HEIGHT_MM
 )
 DEFAULT_PANEL_B_WIDTH_FRACTION = DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION
 DEFAULT_PANEL_A_WIDTH_FRACTION = DEFAULT_PANEL_E_WIDTH_FRACTION
-PANEL_DEF_WIDTH_RATIOS = (0.86, 1.30, 1.58)
-PANEL_DEF_WSPACE = 0.22
-PANEL_DEF_AXIS_BOTTOM = 0.13
-PANEL_DEF_AXIS_HEIGHT = 0.70
+PANEL_DEF_WIDTH_RATIOS = (1.0, 1.0)
+PANEL_DEF_WSPACE = 0.14
+PANEL_DEF_AXIS_BOTTOM = 0.10
+PANEL_DEF_AXIS_HEIGHT = 0.60
 PANEL_GH_WIDTH_RATIOS = (0.4, 0.6)
-PANEL_C_SCATTER_AXIS_BOUNDS = (0.73, PANEL_DEF_AXIS_BOTTOM, 0.82, PANEL_DEF_AXIS_HEIGHT)
-PANEL_D_HISTOGRAM_AXIS_BOUNDS = (0.06, PANEL_DEF_AXIS_BOTTOM, 0.92, PANEL_DEF_AXIS_HEIGHT)
+PANEL_CD_GROUP_TITLE_Y = 1.05
+PANEL_CD_GROUP_TITLE_FONTSIZE = 7.2
+PANEL_C_SCATTER_AXIS_BOUNDS = (
+    0.07,
+    PANEL_DEF_AXIS_BOTTOM,
+    0.44,
+    PANEL_DEF_AXIS_HEIGHT,
+)
+PANEL_C_CROSS_ROUTE_AXIS_BOUNDS = (
+    0.62,
+    PANEL_DEF_AXIS_BOTTOM,
+    0.32,
+    PANEL_DEF_AXIS_HEIGHT,
+)
+PANEL_D_HISTOGRAM_AXIS_BOUNDS = (
+    0.06,
+    PANEL_DEF_AXIS_BOTTOM,
+    0.54,
+    PANEL_DEF_AXIS_HEIGHT,
+)
+PANEL_D_PLACE_DECODING_AXIS_BOUNDS = (
+    0.70,
+    PANEL_DEF_AXIS_BOTTOM,
+    0.26,
+    PANEL_DEF_AXIS_HEIGHT,
+)
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 PANEL_B_COLORBAR_PAD = HEATMAP_COLORBAR_PAD
 PANEL_B_NEURON_SCALE_BAR_X = 1.02
@@ -170,11 +193,11 @@ PANEL_A_EXAMPLE_BLOCK_HEIGHT = 0.66
 PANEL_A_EXAMPLE_TOP = 1.16
 PANEL_A_EXAMPLE_BOTTOM = -0.044
 PANEL_A_FIRST_EXAMPLE_Y_SHIFT = 0.09
-PANEL_A_TITLE_Y = 1.30
 PANEL_A_EXAMPLE_RASTER_Y = 0.48
 PANEL_A_EXAMPLE_RASTER_HEIGHT = 0.34
 PANEL_A_EXAMPLE_RATE_Y = 0.16
 PANEL_A_EXAMPLE_RATE_HEIGHT = 0.31
+PANEL_AB_HEADER_Y_OFFSET = 0.012
 PANEL_QUANT_EPOCH_ORDER = ("light", "dark")
 PANEL_QUANT_EPOCH_LABELS = {
     "light": "Light",
@@ -1633,6 +1656,65 @@ def shift_axes_horizontally(axes: Sequence["Axes"], dx: float) -> None:
         ax.set_position([box.x0 + dx, box.y0, box.width, box.height])
 
 
+def _axis_to_figure_coordinates(
+    fig: Any,
+    ax: "Axes",
+    x: float,
+    y: float,
+) -> tuple[float, float]:
+    """Convert one axes-relative coordinate to figure coordinates."""
+    figure_x, figure_y = fig.transFigure.inverted().transform(
+        ax.transAxes.transform((x, y))
+    )
+    return float(figure_x), float(figure_y)
+
+
+def _axis_group_center_x(axes: Sequence["Axes"]) -> float:
+    """Return the center x-coordinate of an axes group in figure coordinates."""
+    boxes = [ax.get_position() for ax in axes]
+    return float((min(box.x0 for box in boxes) + max(box.x1 for box in boxes)) / 2.0)
+
+
+def _axis_group_top_y(axes: Sequence["Axes"]) -> float:
+    """Return the top y-coordinate of an axes group in figure coordinates."""
+    boxes = [ax.get_position() for ax in axes]
+    return float(max(box.y1 for box in boxes))
+
+
+def _add_panel_label_at_figure_y(
+    fig: Any,
+    ax: "Axes",
+    label: str,
+    *,
+    x: float,
+    y: float,
+) -> "Text":
+    """Add a panel label using an axes-relative x and figure-level y."""
+    figure_x, _figure_y = _axis_to_figure_coordinates(fig, ax, x, 0.0)
+    text_kwargs = PANEL_LABEL_KWARGS.copy()
+    text_kwargs["va"] = "center"
+    return fig.text(figure_x, y, label, **text_kwargs)
+
+
+def _add_centered_axis_group_text_at_y(
+    fig: Any,
+    axes: Sequence["Axes"],
+    text: str,
+    *,
+    y: float,
+    fontsize: float,
+) -> "Text":
+    """Add text centered over an axes group at a fixed figure-level y."""
+    return fig.text(
+        _axis_group_center_x(axes),
+        y,
+        text,
+        ha="center",
+        va="center",
+        fontsize=fontsize,
+    )
+
+
 def add_panel_b_path_progression_label(fig: Any, heatmap_axes: np.ndarray) -> "Text":
     """Add the shared Panel B normalized path-progression x-axis label."""
     return add_centered_below_axis_text(
@@ -2041,89 +2123,6 @@ def load_panel_d_encoding_delta_table(
     return pd.concat(tables, axis=0, ignore_index=True)
 
 
-def load_panel_e_decoding_summary_table(
-    *,
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-) -> Any:
-    """Load per-session TP and place decoding-error summaries."""
-    import pandas as pd
-
-    tables = []
-    for dataset in datasets:
-        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
-        for epoch_type, epoch in build_panel_quant_epoch_specs(
-            animal_name,
-            date,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        ):
-            path = get_decoding_summary_path(
-                data_root,
-                animal_name=animal_name,
-                date=date,
-                region=region,
-                epoch=epoch,
-            )
-            table = read_parquet_table(path)
-            _require_columns(
-                table,
-                path,
-                ("model", "n_units", PANEL_E_DECODING_METRIC),
-            )
-            filtered = table[
-                table["model"].astype(str).isin(PANEL_E_DECODING_MODELS)
-            ].copy()
-            filtered[PANEL_E_DECODING_METRIC] = pd.to_numeric(
-                filtered[PANEL_E_DECODING_METRIC],
-                errors="coerce",
-            )
-            filtered = filtered[
-                np.isfinite(filtered[PANEL_E_DECODING_METRIC].to_numpy(dtype=float))
-            ].copy()
-            if filtered.empty:
-                continue
-            filtered = filtered.assign(
-                animal_name=animal_name,
-                date=date,
-                epoch_type=epoch_type,
-                epoch=epoch,
-                source_path=str(path),
-            )
-            tables.append(
-                filtered[
-                    [
-                        "animal_name",
-                        "date",
-                        "epoch_type",
-                        "epoch",
-                        "model",
-                        "n_units",
-                        PANEL_E_DECODING_METRIC,
-                        "source_path",
-                    ]
-                ]
-            )
-
-    if not tables:
-        return pd.DataFrame(
-            columns=[
-                "animal_name",
-                "date",
-                "epoch_type",
-                "epoch",
-                "model",
-                "n_units",
-                PANEL_E_DECODING_METRIC,
-                "source_path",
-            ]
-        )
-    return pd.concat(tables, axis=0, ignore_index=True)
-
-
 def _load_decoding_tsd(path: Path) -> Any:
     """Load one pynapple-backed decoding `.npz` artifact."""
     if not Path(path).exists():
@@ -2342,8 +2341,13 @@ def load_panel_quantification_data(
     }
 
 
-def _panel_model_label(model_name: str) -> str:
+def _panel_model_label(
+    model_name: str,
+    model_labels: Mapping[str, str] | None = None,
+) -> str:
     """Return the displayed label for one GLM comparison model."""
+    if model_labels is not None and str(model_name) in model_labels:
+        return str(model_labels[str(model_name)])
     return GLM_MODEL_LABELS.get(str(model_name), str(model_name))
 
 
@@ -2984,34 +2988,6 @@ def _panel_h_swap_example_from_indices(
     }
 
 
-def _panel_h_swap_example_from_dataset(
-    dataset_obj: Any,
-    *,
-    animal_name: str,
-    date: str,
-    region: str,
-    dark_epoch: str,
-    light_train_epoch: str,
-    light_test_epoch: str,
-    source_path: Path,
-    model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
-) -> dict[str, Any] | None:
-    """Return the strongest model-advantage switched-segment example from one dataset."""
-    examples = _panel_h_swap_examples_from_dataset(
-        dataset_obj,
-        animal_name=animal_name,
-        date=date,
-        region=region,
-        dark_epoch=dark_epoch,
-        light_train_epoch=light_train_epoch,
-        light_test_epoch=light_test_epoch,
-        source_path=source_path,
-        model_name=model_name,
-        example_count=1,
-    )
-    return examples[0] if examples else None
-
-
 def load_panel_h_swap_example(
     *,
     data_root: Path,
@@ -3203,6 +3179,9 @@ def load_panel_glm_data(
     light_epoch: str | None,
     dark_epoch: str | None,
     swap_delta_min_tuning_stability_correlation: float | None = None,
+    swap_model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
+    swap_example_count: int = 2,
+    swap_requested_examples: Sequence[tuple[str, str, str, int, str]] | None = None,
 ) -> dict[str, Any]:
     """Load saved GLM artifacts for the Figure 4 GLM panels."""
     swap_examples = load_panel_h_swap_examples(
@@ -3210,6 +3189,9 @@ def load_panel_glm_data(
         datasets=datasets,
         region=region,
         dark_epoch=dark_epoch,
+        model_name=swap_model_name,
+        example_count=swap_example_count,
+        requested_examples=swap_requested_examples,
     )
     return {
         "dark_light_examples": load_panel_g_dark_light_glm_examples(
@@ -3227,6 +3209,7 @@ def load_panel_glm_data(
             min_tuning_stability_correlation=(
                 swap_delta_min_tuning_stability_correlation
             ),
+            model_name=swap_model_name,
         ),
         "swap_examples": swap_examples,
         "swap_example": swap_examples[0] if swap_examples else None,
@@ -3258,17 +3241,6 @@ def _finite_column_values(table: Any, column: str) -> np.ndarray:
         return np.asarray([], dtype=float)
     values = np.asarray(table[column], dtype=float)
     return values[np.isfinite(values)]
-
-
-def _symmetric_limits(values: np.ndarray, *, minimum: float) -> tuple[float, float]:
-    """Return symmetric finite limits for one distribution."""
-    values = np.asarray(values, dtype=float)
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return -minimum, minimum
-    limit = max(minimum, float(np.nanmax(np.abs(finite))))
-    limit = float(np.ceil(limit * 10.0) / 10.0)
-    return -limit, limit
 
 
 def build_panel_c_similarity_pairs(similarity_table: Any) -> Any:
@@ -3712,7 +3684,7 @@ def _plot_panel_e_cross_axis(
         [PANEL_QUANT_EPOCH_LABELS[epoch_type] for epoch_type in PANEL_QUANT_EPOCH_ORDER]
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
-    ax.set_title("Cross route\ndecoding", fontsize=5.8, pad=1.5)
+    ax.set_title("Cross-route\ndecoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No cross-route\ndecoding", ha="center", va="center")
         _set_panel_e_error_ylim(ax, table)
@@ -3743,6 +3715,63 @@ def _plot_panel_e_cross_axis(
     _add_panel_e_error_summary_text(ax, table)
     _set_panel_e_error_ylim(ax, table)
     _style_panel_e_error_axis(ax, ylabel=ylabel)
+
+
+def _add_panel_cd_group_title(ax: "Axes", title: str) -> None:
+    """Add the conceptual title for one grouped bottom-row panel."""
+    ax.text(
+        0.5,
+        PANEL_CD_GROUP_TITLE_Y,
+        title,
+        ha="center",
+        va="top",
+        fontsize=PANEL_CD_GROUP_TITLE_FONTSIZE,
+        transform=ax.transAxes,
+        clip_on=False,
+    )
+
+
+def _add_panel_cd_label(ax: "Axes", label: str) -> None:
+    """Add a bottom-row panel label aligned with its group title."""
+    label_axis(ax, label, x=0.00, y=PANEL_CD_GROUP_TITLE_Y, va="top")
+
+
+def plot_panel_c_vision_tuning_panel(
+    ax: "Axes",
+    similarity_table: Any,
+    decoding_error_table: Any,
+) -> None:
+    """Plot vision-related DPP tuning changes and cross-route decoding."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    _add_panel_cd_group_title(ax, "Vision changes DPP tuning")
+    similarity_ax = ax.inset_axes(PANEL_C_SCATTER_AXIS_BOUNDS)
+    cross_route_ax = ax.inset_axes(PANEL_C_CROSS_ROUTE_AXIS_BOUNDS)
+    plot_panel_c_similarity(similarity_ax, similarity_table)
+    _plot_panel_e_cross_axis(cross_route_ax, decoding_error_table)
+    similarity_ax.set_title(
+        "Same-turn route\ntuning similarity",
+        fontsize=5.8,
+        pad=1.5,
+    )
+
+
+def plot_panel_d_route_place_panel(
+    ax: "Axes",
+    delta_table: Any,
+    decoding_error_table: Any,
+) -> None:
+    """Plot the shift from DPP coding toward route-specific place coding."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    _add_panel_cd_group_title(ax, "Shift toward route-specific place coding")
+    encoding_ax = ax.inset_axes(PANEL_D_HISTOGRAM_AXIS_BOUNDS)
+    place_ax = ax.inset_axes(PANEL_D_PLACE_DECODING_AXIS_BOUNDS)
+    plot_panel_d_encoding_delta_histogram(encoding_ax, delta_table)
+    _plot_panel_e_place_axis(place_ax, decoding_error_table)
+    encoding_ax.set_title("Encoding comparison", fontsize=5.8, pad=1.5)
 
 
 def plot_panel_e_decoding_error(ax: "Axes", decoding_error_table: Any) -> None:
@@ -3852,12 +3881,130 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     )
 
 
+def _draw_panel_g_track(
+    ax: "Axes",
+    *,
+    track_kind: str,
+    show_labels: bool = False,
+    trajectory_name: str = "center_to_left",
+    stimulus_layout: str = "stim1",
+    highlighted_segments: Sequence[int] | None = None,
+    oval_regions: Sequence[str] | None = None,
+    label_fontsize: float = 4.8,
+) -> None:
+    """Draw one W-track field component for the Panel G model schematic."""
+    trajectory_color = PANEL_G_ARROW_COLOR
+    if track_kind == "dark":
+        draw_w_track_basis_schematic(
+            ax,
+            trajectory_name=trajectory_name,
+            fill_track_black=True,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_color="white",
+            label_fontsize=label_fontsize,
+            show_basis=True,
+            basis_segment_styles=_panel_g_basis_styles(
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
+                fill_alpha=0.7,
+                linewidth=0.25,
+            ),
+            arrow_color=trajectory_color,
+            track_linewidth=0.55,
+            trajectory_linewidth=0.85,
+            arrow_mutation_scale=6.5,
+        )
+        _remove_w_track_center_label(ax)
+        return
+
+    if track_kind == "independent_light":
+        basis_segment_styles = (
+            _panel_basis_styles_with_highlighted_segments(highlighted_segments)
+            if highlighted_segments is not None
+            else _panel_g_basis_styles(
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_LIGHT_COLOR,
+                fill_alpha=0.76,
+                linewidth=0.145,
+            )
+        )
+        draw_w_track_basis_schematic(
+            ax,
+            trajectory_name=trajectory_name,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_fontsize=label_fontsize,
+            show_basis=True,
+            basis_segment_styles=basis_segment_styles,
+            arrow_color=trajectory_color,
+            track_linewidth=0.55,
+            trajectory_linewidth=0.85,
+            arrow_mutation_scale=6.5,
+        )
+        _remove_w_track_center_label(ax)
+        return
+
+    if track_kind == "segment_modulation":
+        selected_oval_regions = list(
+            oval_regions or ["left_arm", "center_arm", "left_center_connector"]
+        )
+        draw_w_track_basis_schematic(
+            ax,
+            trajectory_name=trajectory_name,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_fontsize=label_fontsize,
+            show_large_ovals=True,
+            oval_regions=selected_oval_regions,
+            oval_styles=_panel_g_oval_styles(len(selected_oval_regions)),
+            arrow_color=trajectory_color,
+            track_linewidth=0.55,
+            trajectory_linewidth=0.78,
+            arrow_mutation_scale=6.0,
+        )
+        _remove_w_track_center_label(ax)
+        return
+
+    if track_kind == "shared_light":
+        selected_oval_regions = list(
+            oval_regions or ["left_arm", "center_arm", "left_center_connector"]
+        )
+        draw_w_track_basis_schematic(
+            ax,
+            trajectory_name=trajectory_name,
+            show_labels=show_labels,
+            stimulus_layout=stimulus_layout,
+            label_fontsize=label_fontsize,
+            show_basis=True,
+            basis_segment_styles=_panel_g_basis_styles(
+                edge_color="black",
+                fill_color=PANEL_G_BASIS_DARK_COLOR,
+                fill_alpha=0.7,
+                linewidth=0.25,
+            ),
+            show_large_ovals=True,
+            oval_regions=selected_oval_regions,
+            oval_styles=_panel_g_oval_styles(len(selected_oval_regions)),
+            arrow_color=trajectory_color,
+            track_linewidth=0.55,
+            trajectory_linewidth=0.85,
+            arrow_mutation_scale=6.5,
+        )
+        _remove_w_track_center_label(ax)
+        return
+
+    raise ValueError(f"Unknown Panel G track_kind {track_kind!r}.")
+
+
 def _plot_panel_g_architecture_schematic(
     ax: "Axes",
     *,
     independent_track_center_y: float = PANEL_G_INDEPENDENT_TRACK_CENTER_Y,
     shared_track_center_y: float = PANEL_G_SHARED_TRACK_CENTER_Y,
     track_size: tuple[float, float] | None = None,
+    independent_basis_icon_scale: float = 1.0,
+    independent_basis_label: str = "Independent\nbasis functions",
     show_dark_track_labels: bool = False,
     field_label_y: float = PANEL_G_FIELD_LABEL_Y,
     model_label_x: float = 0.08,
@@ -3906,9 +4053,15 @@ def _plot_panel_g_architecture_schematic(
         PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM
         + PANEL_G_INDEPENDENT_BASIS_ICON_TOP
     )
+    basis_icon_width = PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH * float(
+        independent_basis_icon_scale
+    )
+    basis_icon_height = PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT * float(
+        independent_basis_icon_scale
+    )
     basis_icon_y = (
         independent_track_center_y
-        - PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT * basis_icon_visual_center_y
+        - basis_icon_height * basis_icon_visual_center_y
     )
     selected_segment_modulation_label_y = segment_modulation_label_y or min(
         basis_icon_y - 0.035,
@@ -3961,7 +4114,7 @@ def _plot_panel_g_architecture_schematic(
     ax.text(
         independent_basis_center_x,
         PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
-        "Independent\nbasis functions",
+        independent_basis_label,
         ha="center",
         va="center",
         fontsize=component_label_fontsize,
@@ -3991,10 +4144,10 @@ def _plot_panel_g_architecture_schematic(
     )
     basis_ax = ax.inset_axes(
         [
-            independent_basis_center_x - PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH / 2.0,
+            independent_basis_center_x - basis_icon_width / 2.0,
             basis_icon_y,
-            PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH,
-            PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT,
+            basis_icon_width,
+            basis_icon_height,
         ]
     )
     basis_ax.set_zorder(PANEL_G_SCHEMATIC_INSET_ZORDER)
@@ -4108,6 +4261,8 @@ def _plot_panel_g_example_field_axis(
     show_legend: bool = False,
     legend_loc: str = "upper right",
     legend_bbox_to_anchor: tuple[float, float] | None = None,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
 ) -> None:
     """Plot empirical and fitted fields for one Panel G example epoch."""
     empirical_position, empirical_rate = example["empirical"][epoch_key]
@@ -4124,9 +4279,9 @@ def _plot_panel_g_example_field_axis(
         ax.plot(
             example["tp_grid"],
             example["models"][model_name][field_key],
-            color=PANEL_G_EXAMPLE_MODEL_COLORS[model_name],
+            color=_panel_model_color(model_name, model_colors),
             linewidth=0.75,
-            label=PANEL_G_MODEL_LABELS[model_name],
+            label=_panel_model_label(model_name, model_labels),
             zorder=3,
         )
     for boundary in np.asarray(example["segment_edges"], dtype=float)[1:-1]:
@@ -4173,6 +4328,8 @@ def _plot_panel_g_example_columns(
     layout: str = "columns",
     row_height: float = 0.46,
     row_gap: float = 0.05,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
 ) -> None:
     """Plot two example cells below the Panel G schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4239,6 +4396,8 @@ def _plot_panel_g_example_columns(
             y_max=y_max,
             show_ylabel=True,
             show_title=True,
+            model_colors=model_colors,
+            model_labels=model_labels,
         )
         _plot_panel_g_example_field_axis(
             light_ax,
@@ -4249,6 +4408,8 @@ def _plot_panel_g_example_columns(
             show_legend=show_legend,
             legend_loc="center left",
             legend_bbox_to_anchor=(1.02, 0.5),
+            model_colors=model_colors,
+            model_labels=model_labels,
         )
         block_ax.text(
             plot_center,
@@ -4296,6 +4457,8 @@ def plot_panel_g_model_architecture(
     shared_track_center_y: float = PANEL_G_SHARED_TRACK_CENTER_Y,
     schematic_height_fraction: float = PANEL_G_SCHEMATIC_HEIGHT_FRACTION,
     schematic_track_size: tuple[float, float] | None = None,
+    independent_basis_icon_scale: float = 1.0,
+    independent_basis_label: str = "Independent\nbasis functions",
     show_dark_track_labels: bool = False,
     field_label_y: float = PANEL_G_FIELD_LABEL_Y,
     model_label_x: float = 0.08,
@@ -4327,6 +4490,8 @@ def plot_panel_g_model_architecture(
     example_layout: str = "columns",
     example_row_height: float = 0.46,
     example_row_gap: float = 0.05,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
 ) -> None:
     """Plot Panel G example GLM fits and the model schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4345,6 +4510,8 @@ def plot_panel_g_model_architecture(
         independent_track_center_y=independent_track_center_y,
         shared_track_center_y=shared_track_center_y,
         track_size=schematic_track_size,
+        independent_basis_icon_scale=independent_basis_icon_scale,
+        independent_basis_label=independent_basis_label,
         show_dark_track_labels=show_dark_track_labels,
         field_label_y=field_label_y,
         model_label_x=model_label_x,
@@ -4370,6 +4537,8 @@ def plot_panel_g_model_architecture(
         layout=example_layout,
         row_height=example_row_height,
         row_gap=example_row_gap,
+        model_colors=model_colors,
+        model_labels=model_labels,
     )
 
 
@@ -4584,6 +4753,7 @@ def _draw_panel_h_swap_schematic(
     show_dark_track_labels: bool = False,
     show_model_labels: bool = True,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
+    model_labels: Mapping[str, str] | None = None,
     prediction_label_fontsize: float = 3.0,
     independent_track_center_y: float = PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
     independent_prediction_label_y: float = 0.61,
@@ -4599,7 +4769,7 @@ def _draw_panel_h_swap_schematic(
     shared_model_label = (
         "Shared-scaffold\nmodel"
         if str(model_name) == "task_segment_bump"
-        else f"{_panel_model_label(str(model_name))}\nmodel"
+        else f"{_panel_model_label(str(model_name), model_labels)}\nmodel"
     )
     shared_prediction_label = (
         "\"Light activity is like the same arm\n"
@@ -4781,13 +4951,14 @@ def _plot_panel_h_delta_axis(
     *,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
     trajectory_type: str | None = None,
     show_xticklabels: bool = True,
     show_yticklabels: bool = True,
 ) -> None:
     """Plot held-out 06_r3 model-minus-independent delta LL values."""
     model_name = str(model_name)
-    model_label = _panel_model_label(model_name)
+    model_label = _panel_model_label(model_name, model_labels)
     visual_color = _panel_model_color("visual", model_colors)
     model_color = _panel_model_color(model_name, model_colors)
     heldout_table = _filter_panel_h_heldout_delta(swap_delta_table)
@@ -4863,6 +5034,7 @@ def _plot_panel_h_delta_grid(
     *,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
     grid_bounds: Sequence[tuple[float, float, float, float]] | None = None,
     xlabel_y: float = -0.055,
 ) -> None:
@@ -4908,6 +5080,7 @@ def _plot_panel_h_delta_grid(
             swap_delta_table,
             model_name=model_name,
             model_colors=model_colors,
+            model_labels=model_labels,
             trajectory_type=trajectory_type,
             show_xticklabels=trajectory_index >= 2,
             show_yticklabels=trajectory_index in (0, 2),
@@ -4942,6 +5115,7 @@ def _plot_panel_h_switched_segment_example(
     *,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
     example_label: str | None = None,
     show_xlabel: bool = True,
     show_ylabel: bool = True,
@@ -4994,7 +5168,7 @@ def _plot_panel_h_switched_segment_example(
             np.asarray(swap_example["models"][plotted_model_name], dtype=float)[grid_mask],
             color=_panel_model_color(plotted_model_name, model_colors),
             linewidth=0.8,
-            label=_panel_model_label(plotted_model_name),
+            label=_panel_model_label(plotted_model_name, model_labels),
             zorder=3,
         )
     ax.axvspan(start, end, color=GLM_BASIS_LIGHT_COLOR, alpha=0.10, linewidth=0)
@@ -5067,6 +5241,7 @@ def plot_panel_h_swap_delta(
     *,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
     schematic_axis_bounds: tuple[float, float, float, float] = PANEL_H_SCHEMATIC_AXIS_BOUNDS,
     delta_axis_bounds: tuple[float, float, float, float] = PANEL_H_DELTA_AXIS_BOUNDS,
     example_axis_bounds: Sequence[tuple[float, float, float, float]] = (
@@ -5106,6 +5281,7 @@ def plot_panel_h_swap_delta(
         show_dark_track_labels=show_dark_track_labels,
         show_model_labels=show_model_labels,
         model_name=model_name,
+        model_labels=model_labels,
         prediction_label_fontsize=prediction_label_fontsize,
         independent_track_center_y=independent_track_center_y,
         independent_prediction_label_y=independent_prediction_label_y,
@@ -5119,6 +5295,7 @@ def plot_panel_h_swap_delta(
         swap_delta_table,
         model_name=model_name,
         model_colors=model_colors,
+        model_labels=model_labels,
         grid_bounds=delta_grid_bounds,
         xlabel_y=delta_xlabel_y,
     )
@@ -5149,6 +5326,7 @@ def plot_panel_h_swap_delta(
             example,
             model_name=model_name,
             model_colors=model_colors,
+            model_labels=model_labels,
             example_label=f"Example {example_index + 1}",
             show_xlabel=True,
             show_ylabel=True,
@@ -5234,21 +5412,12 @@ def make_figure_3(
     )
     bottom_grid = outer_grid[1, 0].subgridspec(
         nrows=1,
-        ncols=3,
+        ncols=2,
         width_ratios=PANEL_DEF_WIDTH_RATIOS,
         wspace=PANEL_DEF_WSPACE,
     )
     panel_c_container_axis = fig.add_subplot(bottom_grid[0, 0])
     panel_d_container_axis = fig.add_subplot(bottom_grid[0, 1])
-    panel_e_axis = fig.add_subplot(bottom_grid[0, 2])
-    panel_c_container_axis.axis("off")
-    panel_d_container_axis.axis("off")
-    panel_c_similarity_axis = panel_c_container_axis.inset_axes(
-        PANEL_C_SCATTER_AXIS_BOUNDS
-    )
-    panel_d_histogram_axis = panel_d_container_axis.inset_axes(
-        PANEL_D_HISTOGRAM_AXIS_BOUNDS
-    )
 
     colorbar = None
     color_image = plot_light_heatmap_regions(
@@ -5306,13 +5475,14 @@ def make_figure_3(
         for animal_name, date, region, unit_id, trajectories in PANEL_A_EXAMPLES
     ]
     plot_panel_a_examples(panel_a_axis, examples)
-    plot_panel_c_similarity(panel_c_similarity_axis, panel_quant_payload["similarity"])
-    plot_panel_d_encoding_delta_histogram(
-        panel_d_histogram_axis,
-        panel_quant_payload["encoding_delta"],
+    plot_panel_c_vision_tuning_panel(
+        panel_c_container_axis,
+        panel_quant_payload["similarity"],
+        panel_quant_payload["decoding_error"],
     )
-    plot_panel_e_decoding_error(
-        panel_e_axis,
+    plot_panel_d_route_place_panel(
+        panel_d_container_axis,
+        panel_quant_payload["encoding_delta"],
         panel_quant_payload["decoding_error"],
     )
 
@@ -5326,11 +5496,15 @@ def make_figure_3(
     if colorbar is not None:
         panel_b_axes.append(colorbar.ax)
     shift_axes_horizontally(panel_b_axes, PANEL_B_HORIZONTAL_SHIFT)
-    add_centered_axis_text(
+    panel_ab_header_y = (
+        _axis_group_top_y(panel_b["tuning_schematic_axes"].ravel())
+        + PANEL_AB_HEADER_Y_OFFSET
+    )
+    _add_centered_axis_group_text_at_y(
         fig,
-        panel_b["tuning_schematic_axes"],
+        panel_b["tuning_schematic_axes"].ravel(),
         "Tuning",
-        y_offset=-0.026,
+        y=panel_ab_header_y,
         fontsize=8.0,
     )
     add_centered_axis_text(
@@ -5341,29 +5515,37 @@ def make_figure_3(
         rotation=90,
     )
     add_panel_b_path_progression_label(fig, panel_b["heatmap_axes"])
-    label_axis(panel_a_axis, "A", x=-0.07, y=1.267)
-    label_axis(panel_b["corner_axis"], "B", x=-0.12, y=0.52)
-    label_axis(panel_c_container_axis, "C", x=0.00, y=0.98)
-    label_axis(panel_d_container_axis, "D", x=0.00, y=0.98)
-    label_axis(panel_e_axis, "E", x=0.00, y=0.98)
-    panel_a_axis.text(
+    _add_panel_label_at_figure_y(
+        fig,
+        panel_a_axis,
+        "A",
+        x=-0.07,
+        y=panel_ab_header_y,
+    )
+    _add_panel_label_at_figure_y(
+        fig,
+        panel_b["corner_axis"],
+        "B",
+        x=-0.12,
+        y=panel_ab_header_y,
+    )
+    _add_panel_cd_label(panel_c_container_axis, "C")
+    _add_panel_cd_label(panel_d_container_axis, "D")
+    panel_a_title_x, _panel_a_title_y = _axis_to_figure_coordinates(
+        fig,
+        panel_a_axis,
         0.5,
-        PANEL_A_TITLE_Y,
+        0.0,
+    )
+    fig.text(
+        panel_a_title_x,
+        panel_ab_header_y,
         "Example DPP cells in dark and light",
         ha="center",
-        va="top",
+        va="center",
         fontsize=7.2,
         linespacing=1.0,
-        transform=panel_a_axis.transAxes,
-        clip_on=False,
     )
-    panel_c_similarity_axis.set_title(
-        "Same-turn route tuning similarity",
-        fontsize=8,
-        pad=5,
-    )
-    panel_d_histogram_axis.set_title("Encoding comparison", fontsize=8, pad=2)
-
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 3 to {output_path}")

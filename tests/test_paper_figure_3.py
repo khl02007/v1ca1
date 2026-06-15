@@ -77,6 +77,8 @@ from v1ca1.paper_figures.figure_3 import (
     plot_epoch_path_rate_axis,
     plot_light_heatmap_regions,
     plot_panel_a_examples,
+    plot_panel_c_vision_tuning_panel,
+    plot_panel_d_route_place_panel,
     save_panel_b_cache,
     save_panel_example_cache,
     load_panel_b_cache,
@@ -1060,6 +1062,92 @@ def test_add_panel_b_path_progression_label_matches_figure_1d_label() -> None:
     plt.close(fig)
 
 
+def test_panel_ab_header_text_uses_one_figure_y_coordinate() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure()
+    panel_a_axis = fig.add_axes([0.10, 0.20, 0.25, 0.55])
+    corner_axis = fig.add_axes([0.42, 0.70, 0.10, 0.10])
+    tuning_axes = [
+        fig.add_axes([0.55, 0.72, 0.12, 0.10]),
+        fig.add_axes([0.72, 0.72, 0.12, 0.10]),
+    ]
+    header_y = (
+        figure_3_module._axis_group_top_y(tuning_axes)
+        + figure_3_module.PANEL_AB_HEADER_Y_OFFSET
+    )
+
+    label_a = figure_3_module._add_panel_label_at_figure_y(
+        fig,
+        panel_a_axis,
+        "A",
+        x=-0.07,
+        y=header_y,
+    )
+    label_b = figure_3_module._add_panel_label_at_figure_y(
+        fig,
+        corner_axis,
+        "B",
+        x=-0.12,
+        y=header_y,
+    )
+    title_a = fig.text(
+        0.20,
+        header_y,
+        "Example DPP cells in dark and light",
+        va="center",
+    )
+    tuning = figure_3_module._add_centered_axis_group_text_at_y(
+        fig,
+        tuning_axes,
+        "Tuning",
+        y=header_y,
+        fontsize=8.0,
+    )
+
+    assert [
+        label_a.get_position()[1],
+        title_a.get_position()[1],
+        label_b.get_position()[1],
+        tuning.get_position()[1],
+    ] == pytest.approx([header_y] * 4)
+    assert {
+        text.get_verticalalignment()
+        for text in (label_a, title_a, label_b, tuning)
+    } == {"center"}
+    assert tuning.get_position()[0] == pytest.approx(
+        figure_3_module._axis_group_center_x(tuning_axes)
+    )
+    plt.close(fig)
+
+
+def test_panel_cd_label_and_group_title_share_vertical_position() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+
+    figure_3_module._add_panel_cd_group_title(ax, "Vision changes DPP tuning")
+    figure_3_module._add_panel_cd_label(ax, "C")
+
+    title_text = next(
+        text for text in ax.texts if text.get_text().startswith("Vision")
+    )
+    label_text = next(text for text in ax.texts if text.get_text() == "C")
+    assert title_text.get_position()[1] == pytest.approx(
+        figure_3_module.PANEL_CD_GROUP_TITLE_Y
+    )
+    assert label_text.get_position()[1] == pytest.approx(
+        figure_3_module.PANEL_CD_GROUP_TITLE_Y
+    )
+    assert title_text.get_verticalalignment() == "top"
+    assert label_text.get_verticalalignment() == "top"
+    plt.close(fig)
+
+
 def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     pandas = pytest.importorskip("pandas")
@@ -1242,7 +1330,7 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert len(axes[2].child_axes) == 2
     cross_ax, place_ax = axes[2].child_axes
     assert [child_ax.get_title() for child_ax in axes[2].child_axes] == [
-        "Cross route\ndecoding",
+        "Cross-route\ndecoding",
         "Route-specific\nplace decoding",
     ]
     assert cross_ax.get_ylabel() == "Abs. norm. error"
@@ -1273,6 +1361,30 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
     assert len(cross_ax.get_xticklabels()) == 2
     assert len(place_ax.collections) == 4
     assert len(cross_ax.collections) >= 4
+    plt.close(fig)
+
+    fig, axes = plt.subplots(nrows=1, ncols=2)
+    plot_panel_c_vision_tuning_panel(axes[0], similarity_table, decoding_table)
+    plot_panel_d_route_place_panel(axes[1], delta_table, decoding_table)
+
+    assert [text.get_text() for text in axes[0].texts] == [
+        "Vision changes DPP tuning"
+    ]
+    assert [text.get_text() for text in axes[1].texts] == [
+        "Shift toward route-specific place coding"
+    ]
+    assert len(axes[0].child_axes) == 2
+    assert len(axes[1].child_axes) == 2
+    assert [child_ax.get_title() for child_ax in axes[0].child_axes] == [
+        "Same-turn route\ntuning similarity",
+        "Cross-route\ndecoding",
+    ]
+    assert [child_ax.get_title() for child_ax in axes[1].child_axes] == [
+        "Encoding comparison",
+        "Route-specific\nplace decoding",
+    ]
+    assert axes[0].child_axes[1].get_ylabel() == "Abs. norm. error"
+    assert axes[1].child_axes[1].get_ylabel() == "Abs. norm. error"
     plt.close(fig)
 
 
@@ -1767,7 +1879,7 @@ def test_default_cli_matches_manuscript_figure_format() -> None:
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_PANEL_AB_HEIGHT_MM + DEFAULT_PANEL_DEF_HEIGHT_MM
     )
-    assert DEFAULT_PANEL_DEF_HEIGHT_MM == pytest.approx(30.0)
+    assert DEFAULT_PANEL_DEF_HEIGHT_MM == pytest.approx(34.0)
     assert DEFAULT_PANEL_B_WIDTH_FRACTION == pytest.approx(0.7)
     assert DEFAULT_PANEL_A_WIDTH_FRACTION == pytest.approx(0.3)
     assert PANEL_B_HEATMAP_CMAP == "viridis"

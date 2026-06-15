@@ -63,7 +63,9 @@ FIGURE_4_CONSTRAINED_LAYOUT_PADS = {
 PANEL_BC_LABEL_Y = 1.03
 PANEL_BC_TITLE_PAD = 0.5
 PANEL_B_SCHEMATIC_HEIGHT_FRACTION = 0.72
-PANEL_B_SCHEMATIC_TRACK_SIZE = (0.2512, 0.316)
+PANEL_B_SCHEMATIC_TRACK_SIZE = (0.2025, 0.2547)
+PANEL_B_INDEPENDENT_BASIS_ICON_SCALE = 0.70
+PANEL_B_INDEPENDENT_BASIS_LABEL = "Independent"
 PANEL_B_EXAMPLE_AXIS_BOUNDS = (0.0, 0.01, 1.0, 0.44)
 PANEL_B_EXAMPLE_FIELD_Y = 0.13
 PANEL_B_EXAMPLE_FIELD_HEIGHT = 0.62
@@ -81,7 +83,17 @@ PANEL_B_MODEL_LABEL_X = 0.03
 PANEL_B_MODEL_LABEL_FONTSIZE = 5.8
 PANEL_B_COMPONENT_LABEL_FONTSIZE = 5.8
 PANEL_B_SEGMENT_MODULATION_LABEL = "Segment-specific\nmodulation"
-PANEL_B_SEGMENT_MODULATION_LABEL_Y = 0.595
+PANEL_B_SEGMENT_MODULATION_LABEL_Y = 0.545
+PANEL_INDEPENDENT_MODEL_COLOR = "#0072B2"
+PANEL_SHARED_SCAFFOLD_MODEL_COLOR = "#CC79A7"
+PANEL_B_EXAMPLE_MODEL_COLORS = {
+    "visual": PANEL_INDEPENDENT_MODEL_COLOR,
+    "task_segment_bump": PANEL_SHARED_SCAFFOLD_MODEL_COLOR,
+}
+PANEL_B_EXAMPLE_MODEL_LABELS = {
+    "visual": "Independent",
+    "task_segment_bump": "Shared-scaffold",
+}
 PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
 PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)
 PANEL_C_DELTA_AXIS_BOUNDS = (0.39, 0.35, 0.60, 0.59)
@@ -93,14 +105,32 @@ PANEL_C_DELTA_GRID_BOUNDS = (
     (0.535, -0.22, 0.445, 0.50),
 )
 PANEL_C_DELTA_XLABEL_Y = -0.40
-PANEL_C_EXAMPLE_AXIS_BOUNDS = (
-    (0.201, -0.18, 0.248, 0.19),
-    (0.591, -0.18, 0.248, 0.19),
+PANEL_C_SWAP_EXAMPLES = (
+    ("L15", "20241121", "v1", 27, "center_to_right"),
+    ("L19", "20250930", "v1", 4, "center_to_left"),
+    ("L15", "20241121", "v1", 146, "center_to_right"),
 )
-PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS = ((0.96, 0.94), (0.96, 0.06))
-PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS = ("top", "bottom")
+PANEL_C_EXAMPLE_AXIS_BOUNDS = (
+    (0.095, -0.18, 0.20, 0.19),
+    (0.405, -0.18, 0.20, 0.19),
+    (0.715, -0.18, 0.20, 0.19),
+)
+PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS = (
+    (0.96, 0.94),
+    (0.96, 0.06),
+    (0.96, 0.94),
+)
+PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS = ("top", "bottom", "top")
 PANEL_C_EXAMPLE_ICON_BOUNDS = (-0.46, 0.28, 0.26, 0.38)
 PANEL_C_PREDICTION_LABEL_FONTSIZE = 5.8
+PANEL_C_SWAP_MODEL_NAME = "task_segment_scalar"
+PANEL_C_SWAP_MODEL_COLORS = {
+    "visual": PANEL_INDEPENDENT_MODEL_COLOR,
+    PANEL_C_SWAP_MODEL_NAME: PANEL_SHARED_SCAFFOLD_MODEL_COLOR,
+}
+PANEL_C_SWAP_MODEL_LABELS = {
+    PANEL_C_SWAP_MODEL_NAME: "Shared-scaffold",
+}
 PANEL_C_INDEPENDENT_TRACK_CENTER_Y = 0.742
 PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y = 0.60
 PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y = 0.34
@@ -157,6 +187,24 @@ def _shift_axis_horizontally(ax: Any, dx_figure_fraction: float) -> None:
     )
 
 
+def _align_texts_to_reference_display_y(texts: Sequence[Any]) -> None:
+    """Align text artists to the first text's rendered vertical position."""
+    if len(texts) < 2:
+        return
+    for text in texts:
+        axes = getattr(text, "axes", None)
+        if axes is not None and text is axes.title:
+            axes._autotitlepos = False
+    reference_display = texts[0].get_transform().transform(texts[0].get_position())
+    for text in texts[1:]:
+        x_position, _y_position = text.get_position()
+        display_position = text.get_transform().transform(text.get_position())
+        adjusted_position = text.get_transform().inverted().transform(
+            (display_position[0], reference_display[1])
+        )
+        text.set_position((x_position, float(adjusted_position[1])))
+
+
 def make_figure_4(
     *,
     data_root: Path,
@@ -180,6 +228,9 @@ def make_figure_4(
         swap_delta_min_tuning_stability_correlation=(
             PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),
+        swap_model_name=PANEL_C_SWAP_MODEL_NAME,
+        swap_example_count=len(PANEL_C_SWAP_EXAMPLES),
+        swap_requested_examples=PANEL_C_SWAP_EXAMPLES,
     )
 
     apply_paper_style()
@@ -203,6 +254,8 @@ def make_figure_4(
         shared_track_center_y=PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
         schematic_height_fraction=PANEL_B_SCHEMATIC_HEIGHT_FRACTION,
         schematic_track_size=PANEL_B_SCHEMATIC_TRACK_SIZE,
+        independent_basis_icon_scale=PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
+        independent_basis_label=PANEL_B_INDEPENDENT_BASIS_LABEL,
         show_dark_track_labels=True,
         field_label_y=PANEL_B_FIELD_LABEL_Y,
         model_label_x=PANEL_B_MODEL_LABEL_X,
@@ -223,11 +276,16 @@ def make_figure_4(
         example_layout=PANEL_B_EXAMPLE_LAYOUT,
         example_row_height=PANEL_B_EXAMPLE_ROW_HEIGHT,
         example_row_gap=PANEL_B_EXAMPLE_ROW_GAP,
+        model_colors=PANEL_B_EXAMPLE_MODEL_COLORS,
+        model_labels=PANEL_B_EXAMPLE_MODEL_LABELS,
     )
     plot_panel_h_swap_delta(
         panel_c_axis,
         panel_glm_payload["swap_delta"],
         panel_glm_payload["swap_examples"],
+        model_name=PANEL_C_SWAP_MODEL_NAME,
+        model_colors=PANEL_C_SWAP_MODEL_COLORS,
+        model_labels=PANEL_C_SWAP_MODEL_LABELS,
         schematic_axis_bounds=PANEL_C_SCHEMATIC_AXIS_BOUNDS,
         delta_axis_bounds=PANEL_C_DELTA_AXIS_BOUNDS,
         example_axis_bounds=PANEL_C_EXAMPLE_AXIS_BOUNDS,
@@ -251,13 +309,15 @@ def make_figure_4(
     )
 
     label_axis(panel_b_axis, "A", x=-0.035, y=PANEL_BC_LABEL_Y)
+    panel_b_label = panel_b_axis.texts[-1]
     label_axis(panel_c_axis, "B", x=-0.035, y=PANEL_BC_LABEL_Y)
-    panel_b_axis.set_title(
+    panel_c_label = panel_c_axis.texts[-1]
+    panel_b_title = panel_b_axis.set_title(
         "Two models that relate dark and light activity",
         fontsize=8,
         pad=PANEL_BC_TITLE_PAD,
     )
-    panel_c_axis.set_title(
+    panel_c_title = panel_c_axis.set_title(
         "Predicting activity in held-out light epoch",
         fontsize=8,
         pad=PANEL_BC_TITLE_PAD,
@@ -265,6 +325,10 @@ def make_figure_4(
 
     fig.canvas.draw()
     _shift_axis_horizontally(panel_c_axis, PANEL_C_HORIZONTAL_SHIFT)
+    fig.canvas.draw()
+    _align_texts_to_reference_display_y((panel_b_label, panel_c_label))
+    _align_texts_to_reference_display_y((panel_b_title, panel_c_title))
+    fig.set_layout_engine(None)
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)

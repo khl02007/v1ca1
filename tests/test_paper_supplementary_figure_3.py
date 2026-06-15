@@ -19,6 +19,7 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ,
     MOTOR_PANEL_ANIMAL_NAME,
     MOTOR_PANEL_LIGHT_EPOCH,
+    MOTOR_SUMMARY_ANIMAL_COLORS,
     MOTOR_VARIABLES,
     PANEL_A_CACHE_VERSION,
     PANEL_A_CV_PCA_LIGHT_EPOCH,
@@ -170,7 +171,7 @@ def test_panel_a_cv_pca_loader_reads_hardcoded_v1_light_summary(
         datasets=[("L14", "20240611", "08_r4")],
     )
 
-    assert summary_path.name == "v1_06_r3_vs_08_r4_cv_pca_summary.parquet"
+    assert summary_path.name == "v1_02_r1_vs_08_r4_cv_pca_summary.parquet"
     assert table["condition"].tolist() == ["dark", "light"]
     assert table["participation_ratio"].tolist() == [5.0, 8.0]
     assert table["n_units"].tolist() == [37, 37]
@@ -192,6 +193,7 @@ def test_plot_panel_a_cv_pca_participation_ratios_shows_paired_sessions() -> Non
     pandas = pytest.importorskip("pandas")
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
     import matplotlib.pyplot as plt
 
     table = pandas.DataFrame(
@@ -210,6 +212,19 @@ def test_plot_panel_a_cv_pca_participation_ratios_shows_paired_sessions() -> Non
     assert ax.get_ylabel() == "Participation ratio"
     assert [tick.get_text() for tick in ax.get_xticklabels()] == ["Dark", "Light"]
     assert len(ax.lines) == 2
+    assert len(ax.collections) == 2
+    assert np.allclose(
+        ax.collections[0].get_facecolors(),
+        np.asarray([to_rgba(MOTOR_SUMMARY_ANIMAL_COLORS["L14"])] * 2),
+    )
+    assert np.allclose(
+        ax.collections[1].get_facecolors(),
+        np.asarray([to_rgba(MOTOR_SUMMARY_ANIMAL_COLORS["L15"])] * 2),
+    )
+    legend = ax.get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["L14", "L15"]
+    assert legend._loc == 6
     y_min, y_max = ax.get_ylim()
     assert 0.0 < y_min < 4.0
     assert y_max > 7.0
