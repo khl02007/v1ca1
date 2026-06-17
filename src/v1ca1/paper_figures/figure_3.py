@@ -41,6 +41,7 @@ from v1ca1.paper_figures.figure_1 import (
     HEATMAP_COLORBAR_LABELPAD,
     HEATMAP_PATH_LABEL_OFFSET,
     PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+    PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
     PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_D_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_E_AXIS_LABEL_FONTSIZE,
@@ -154,6 +155,7 @@ PANEL_B_LINEAR_POSITION_ORIENTATION = "task_progression"
 PANEL_B_HEATMAP_CMAP = "viridis"
 PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ
 PANEL_B_MIN_TUNING_STABILITY_CORRELATION = PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+PANEL_B_FIRING_RATE_NORMALIZATION = PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION
 PANEL_B_CACHE_VERSION = 3
 PANEL_B_CACHE_PREFIX = "figure_3_panel_b"
 PANEL_B_CACHE_METADATA_KEY = "__metadata__"
@@ -636,6 +638,7 @@ def build_panel_b_cache_metadata(
     min_tuning_stability_correlation: float | None = (
         PANEL_B_MIN_TUNING_STABILITY_CORRELATION
     ),
+    firing_rate_normalization: str = PANEL_B_FIRING_RATE_NORMALIZATION,
 ) -> dict[str, Any]:
     """Return metadata that identifies one Panel B heatmap cache."""
     if min_movement_firing_rate_hz is not None and min_movement_firing_rate_hz < 0:
@@ -679,6 +682,8 @@ def build_panel_b_cache_metadata(
         metadata["min_tuning_stability_correlation"] = float(
             min_tuning_stability_correlation
         )
+    if firing_rate_normalization != PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION:
+        metadata["firing_rate_normalization"] = str(firing_rate_normalization)
     return metadata
 
 
@@ -711,6 +716,11 @@ def build_panel_b_cache_path(cache_dir: Path, metadata: dict[str, Any]) -> Path:
         filename += (
             "_minstab"
             f"{_format_panel_b_cache_number(metadata['min_tuning_stability_correlation'])}"
+        )
+    if "firing_rate_normalization" in metadata:
+        filename += (
+            "_norm"
+            f"{_format_panel_b_cache_token(metadata['firing_rate_normalization'])}"
         )
     filename += (
         f"_posbins{int(metadata['position_bin_count'])}"
@@ -796,6 +806,7 @@ def load_or_compute_panel_b_heatmap_panels(
     min_tuning_stability_correlation: float | None = (
         PANEL_B_MIN_TUNING_STABILITY_CORRELATION
     ),
+    firing_rate_normalization: str = PANEL_B_FIRING_RATE_NORMALIZATION,
 ) -> dict[tuple[str, str], np.ndarray]:
     """Load cached Panel B panels or compute and cache them."""
     metadata = build_panel_b_cache_metadata(
@@ -809,6 +820,7 @@ def load_or_compute_panel_b_heatmap_panels(
         sigma_bins=sigma_bins,
         min_movement_firing_rate_hz=min_movement_firing_rate_hz,
         min_tuning_stability_correlation=min_tuning_stability_correlation,
+        firing_rate_normalization=firing_rate_normalization,
     )
     cache_path = (
         build_panel_b_cache_path(panel_b_cache_dir, metadata)
@@ -848,7 +860,7 @@ def load_or_compute_panel_b_heatmap_panels(
         curve_sets,
         position_bin_count=position_bin_count,
         trajectory_types=PANEL_B_TRAJECTORY_TYPES,
-        firing_rate_normalization=PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+        firing_rate_normalization=firing_rate_normalization,
     )
     if cache_path is not None:
         save_panel_b_cache(cache_path, panels, metadata)

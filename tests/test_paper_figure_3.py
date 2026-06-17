@@ -18,6 +18,7 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_PANEL_DEF_HEIGHT_MM,
     DEFAULT_REGIONS,
     PANEL_B_CACHE_VERSION,
+    PANEL_B_FIRING_RATE_NORMALIZATION,
     PANEL_A_EXAMPLE_TOP,
     PANEL_A_FIRST_EXAMPLE_Y_SHIFT,
     PANEL_B_HEATMAP_CMAP,
@@ -429,6 +430,7 @@ def test_panel_b_cache_path_is_descriptive() -> None:
     assert metadata["min_tuning_stability_correlation"] == pytest.approx(
         PANEL_B_MIN_TUNING_STABILITY_CORRELATION
     )
+    assert metadata["firing_rate_normalization"] == PANEL_B_FIRING_RATE_NORMALIZATION
     assert metadata["datasets"] == [
         {
             "animal_name": "L14",
@@ -441,6 +443,7 @@ def test_panel_b_cache_path_is_descriptive() -> None:
         "paper_figures/output/cache/"
         "figure_3_panel_b_v1_light02_r1_datasets-L14-20240611-02_r1"
         "_orienttask_progression_minmovefr0p5_minstab0p5"
+        "_normunit_max_per_trajectory"
         "_posbins100_offset5_speed4_sigma1p5_cachev3.npz"
     )
 
@@ -911,7 +914,7 @@ def test_plot_light_heatmap_regions_adds_segment_boundaries(monkeypatch: pytest.
     assert pooled_calls[0]["trajectory_types"] == PANEL_B_TRAJECTORY_TYPES
     assert (
         pooled_calls[0]["firing_rate_normalization"]
-        == "unit_max_across_trajectories"
+        == PANEL_B_FIRING_RATE_NORMALIZATION
     )
     assert plot_calls[0]["trajectory_types"] == PANEL_B_TRAJECTORY_TYPES
     assert plot_calls[0]["axis_orientation"] == PANEL_B_LINEAR_POSITION_ORIENTATION
