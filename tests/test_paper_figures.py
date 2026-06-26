@@ -38,7 +38,7 @@ def test_get_processed_datasets_uses_paper_figure_registry() -> None:
     ]
 
 
-def test_figure_2_epoch_registry_uses_light_dark_sleep_epochs() -> None:
+def test_figure_4_epoch_registry_uses_light_dark_sleep_epochs() -> None:
     assert datasets_module.get_dataset_light_epoch("L14") == "02_r1"
     assert datasets_module.get_dataset_dark_epoch("L15") == "10_r5"
     assert datasets_module.get_dataset_sleep_epoch("L14") == "07_s4"
@@ -48,7 +48,7 @@ def test_figure_2_epoch_registry_uses_light_dark_sleep_epochs() -> None:
         ("L15", "20241121", "02_r1", "10_r5", "07_s4"),
         ("L19", "20250930", "02_r1", "08_r4", "07_s4"),
     ]
-    assert datasets_module.make_figure_2_epoch_ids("L15", "20241121") == {
+    assert datasets_module.make_figure_4_epoch_ids("L15", "20241121") == {
         "light": ("L15", "20241121", "02_r1"),
         "dark": ("L15", "20241121", "10_r5"),
         "sleep": ("L15", "20241121", "07_s4"),

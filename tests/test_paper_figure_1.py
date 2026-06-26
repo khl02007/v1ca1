@@ -112,6 +112,7 @@ from v1ca1.paper_figures.figure_1 import (
     draw_behavior_task_design_panel,
     draw_panel_a_anatomy_assets,
     draw_neuron_scale_bar,
+    draw_task_design_progression_bar,
     draw_visual_stimuli_schematic,
     draw_w_track_cycle_panel,
     find_encoding_summary_path,
@@ -1004,6 +1005,8 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
 ) -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Rectangle
     import matplotlib.pyplot as plt
     import v1ca1.paper_figures.figure_3 as figure_3_module
 
@@ -1062,6 +1065,27 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
         )
     }
     assert len(ax.child_axes) == 15
+    top_epoch_icon_axis = ax.child_axes[0]
+    second_epoch_icon_axis = ax.child_axes[1]
+    dark_epoch_icon_axis = ax.child_axes[2]
+    top_epoch_region_patches = [
+        patch
+        for patch in top_epoch_icon_axis.patches
+        if isinstance(patch, Rectangle)
+    ]
+    assert len(top_epoch_region_patches) == 2
+    assert top_epoch_region_patches[0].get_facecolor() == pytest.approx(
+        to_rgba(PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["A"], 0.22)
+    )
+    assert top_epoch_region_patches[1].get_facecolor() == pytest.approx(
+        to_rgba(PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["B"], 0.22)
+    )
+    assert not any(
+        isinstance(patch, Rectangle) for patch in second_epoch_icon_axis.patches
+    )
+    assert not any(
+        isinstance(patch, Rectangle) for patch in dark_epoch_icon_axis.patches
+    )
     rate_axes = [
         child_axis
         for child_axis in ax.child_axes
@@ -1131,19 +1155,19 @@ def test_default_figure_height_is_shorter_than_previous_layout() -> None:
 
 def test_cycle_panel_uses_square_task_trajectory_layout() -> None:
     assert CYCLE_TRAJECTORY_LAYOUT == (
-        ("left_to_center", (0.58, 0.70, 0.26, 0.27)),
-        ("center_to_right", (0.58, 0.28, 0.26, 0.27)),
-        ("right_to_center", (0.16, 0.28, 0.26, 0.27)),
-        ("center_to_left", (0.16, 0.70, 0.26, 0.27)),
+        ("left_to_center", (0.59, 0.60, 0.39, 0.39)),
+        ("center_to_right", (0.59, 0.04, 0.39, 0.39)),
+        ("right_to_center", (0.02, 0.04, 0.39, 0.39)),
+        ("center_to_left", (0.02, 0.60, 0.39, 0.39)),
     )
 
 
 def test_cycle_panel_arrows_close_square_sides() -> None:
     assert CYCLE_ARROW_SPECS == (
-        ((0.71, 0.70), (0.71, 0.55), 0.0),
-        ((0.58, 0.415), (0.42, 0.415), 0.0),
-        ((0.29, 0.55), (0.29, 0.70), 0.0),
-        ((0.42, 0.835), (0.58, 0.835), 0.0),
+        ((0.785, 0.60), (0.785, 0.45), 0.0),
+        ((0.59, 0.235), (0.41, 0.235), 0.0),
+        ((0.215, 0.45), (0.215, 0.60), 0.0),
+        ((0.41, 0.795), (0.59, 0.795), 0.0),
     )
     assert CYCLE_ARROW_LINEWIDTH == pytest.approx(1.08)
     assert CYCLE_ARROW_MUTATION_SCALE == pytest.approx(12.6)
@@ -1534,64 +1558,120 @@ def test_draw_panel_a_anatomy_assets_places_probe_left_of_histology(
     plt.close(fig)
 
 
-def test_draw_behavior_task_design_panel_places_behavior_left_of_cycle(
-    tmp_path: Path,
-) -> None:
+def test_draw_behavior_task_design_panel_places_schematics_without_behavior_photo() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
-    import matplotlib.image as mpimg
     import matplotlib.pyplot as plt
-
-    behavior_path = tmp_path / "behavior.png"
-    mpimg.imsave(behavior_path, np.ones((5, 4, 3)))
 
     fig, ax = plt.subplots()
     draw_behavior_task_design_panel(
         ax,
-        asset_dir=tmp_path,
-        behavior_asset_name="behavior.png",
-    )
-
-    assert len(ax.child_axes) == 2
-    behavior_ax, cycle_ax = ax.child_axes
-    assert behavior_ax.get_position().x0 < cycle_ax.get_position().x0
-    assert behavior_ax.images
-    assert len(cycle_ax.child_axes) == 4
-    plt.close(fig)
-
-
-def test_draw_behavior_task_design_panel_can_rotate_behavior_180(
-    tmp_path: Path,
-) -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.image as mpimg
-    import matplotlib.pyplot as plt
-
-    behavior_red = np.array(
-        [
-            [0.1, 0.2, 0.3],
-            [0.4, 0.5, 0.6],
-        ]
-    )
-    behavior_image = np.zeros((*behavior_red.shape, 3))
-    behavior_image[..., 0] = behavior_red
-    behavior_path = tmp_path / "behavior.png"
-    mpimg.imsave(behavior_path, behavior_image)
-
-    fig, ax = plt.subplots()
-    draw_behavior_task_design_panel(
-        ax,
-        asset_dir=tmp_path,
-        behavior_asset_name="behavior.png",
+        asset_dir=Path("/missing-assets"),
+        behavior_asset_name="missing.png",
         rotate_behavior_180=True,
     )
 
-    displayed_red = ax.child_axes[0].images[0].get_array()[..., 0]
-    np.testing.assert_allclose(
-        displayed_red,
-        np.rot90(behavior_red, 2),
-        atol=1.0 / 255.0,
+    assert len(ax.child_axes) == 3
+    trajectory_ax, visual_ax, progression_ax = ax.child_axes
+    assert trajectory_ax.get_position().x0 < visual_ax.get_position().x0
+    assert progression_ax.get_position().y1 < trajectory_ax.get_position().y0
+    assert progression_ax.get_position().y1 < visual_ax.get_position().y0
+    assert not any(child.images for child in ax.child_axes)
+    assert len(trajectory_ax.child_axes) == 4
+    assert "Visual stimuli" in [text.get_text() for text in visual_ax.texts]
+    assert [text.get_text() for text in progression_ax.texts] == [
+        figure_1_module.TASK_DESIGN_PROGRESSION_DURATION_LABEL,
+        "A",
+        "B",
+        "sleep",
+        "gray",
+        "sleep",
+        "B",
+        "A",
+        "sleep",
+        "dark",
+        "...",
+    ]
+    plt.close(fig)
+
+
+def test_draw_task_design_progression_bar_shows_visual_sequence() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import FancyArrowPatch, Rectangle
+
+    fig, ax = plt.subplots()
+    draw_task_design_progression_bar(ax)
+
+    labels = [text.get_text() for text in ax.texts]
+    assert labels == [
+        figure_1_module.TASK_DESIGN_PROGRESSION_DURATION_LABEL,
+        "A",
+        "B",
+        "sleep",
+        "gray",
+        "sleep",
+        "B",
+        "A",
+        "sleep",
+        "dark",
+        "...",
+    ]
+    rectangles = [patch for patch in ax.patches if isinstance(patch, Rectangle)]
+    arrows = [patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)]
+    assert len(rectangles) == 7
+    assert len(arrows) == 1
+    sleep_rectangles = [
+        rectangle
+        for rectangle in rectangles
+        if rectangle.get_linewidth()
+        == pytest.approx(figure_1_module.TASK_DESIGN_SLEEP_EPOCH_LINEWIDTH)
+    ]
+    run_rectangles = [
+        rectangle for rectangle in rectangles if rectangle not in sleep_rectangles
+    ]
+    assert len(sleep_rectangles) == 3
+    assert all(rectangle.get_hatch() is None for rectangle in sleep_rectangles)
+    assert [
+        rectangle.get_facecolor()[:3] for rectangle in sleep_rectangles
+    ] == pytest.approx([to_rgba("white")[:3]] * 3)
+    assert [rectangle.get_linewidth() for rectangle in sleep_rectangles] == pytest.approx(
+        [figure_1_module.TASK_DESIGN_SLEEP_EPOCH_LINEWIDTH] * 3
+    )
+    assert [rectangle.get_linewidth() for rectangle in run_rectangles] == pytest.approx(
+        [figure_1_module.TASK_DESIGN_RUN_EPOCH_LINEWIDTH] * 4
+    )
+    epoch_width = sleep_rectangles[0].get_width()
+    assert [rectangle.get_width() for rectangle in rectangles] == pytest.approx(
+        [epoch_width] * len(rectangles)
+    )
+    assert ax.texts[-1].get_position()[0] > max(
+        rectangle.get_x() + rectangle.get_width() for rectangle in rectangles
+    )
+    assert rectangles[0].get_facecolor()[:3] == pytest.approx(
+        to_rgba("white")[:3]
+    )
+    assert rectangles[4].get_facecolor()[:3] == pytest.approx(
+        to_rgba("white")[:3]
+    )
+    assert rectangles[2].get_facecolor()[:3] == pytest.approx(to_rgba("0.70")[:3])
+    assert rectangles[6].get_facecolor()[:3] == pytest.approx(to_rgba("black")[:3])
+    assert to_rgba(ax.texts[1].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.VISUAL_CONDITION_COLORS["02_r1"])[:3]
+    )
+    assert to_rgba(ax.texts[2].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.VISUAL_CONDITION_COLORS["06_r3"])[:3]
+    )
+    assert to_rgba(ax.texts[6].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.VISUAL_CONDITION_COLORS["06_r3"])[:3]
+    )
+    assert to_rgba(ax.texts[7].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.VISUAL_CONDITION_COLORS["02_r1"])[:3]
+    )
+    assert to_rgba(ax.texts[9].get_color())[:3] == pytest.approx(
+        to_rgba("white")[:3]
     )
     plt.close(fig)
 
@@ -1605,6 +1685,17 @@ def test_draw_w_track_cycle_panel_adds_four_inset_schematics() -> None:
     draw_w_track_cycle_panel(ax)
 
     assert len(ax.child_axes) == 4
+    assert [
+        bounds[2] for _trajectory, bounds in CYCLE_TRAJECTORY_LAYOUT
+    ] == pytest.approx([0.39] * 4)
+    assert [
+        bounds[3] for _trajectory, bounds in CYCLE_TRAJECTORY_LAYOUT
+    ] == pytest.approx([0.39] * 4)
+    arrow_spans = [
+        abs(end[0] - start[0]) + abs(end[1] - start[1])
+        for start, end, _rad in CYCLE_ARROW_SPECS
+    ]
+    assert arrow_spans == pytest.approx([0.15, 0.18, 0.15, 0.18])
     arrow_patches = [
         text.arrow_patch
         for text in ax.texts
@@ -1644,8 +1735,7 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     screen_rectangles = [
         patch
         for patch in rectangles
-        if patch.get_y() == pytest.approx(0.015)
-        and patch.get_height() == pytest.approx(0.105)
+        if patch.get_height() == pytest.approx(0.140)
         and patch.get_edgecolor()[3] > 0.0
     ]
     black_screen_rectangles = [
@@ -1668,7 +1758,7 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     axes_aspect = (ax.get_position().width * fig.get_figwidth()) / (
         ax.get_position().height * fig.get_figheight()
     )
-    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.188)
+    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.3224)
     assert (
         np.ptp(track_vertices[:, 0]) / np.ptp(track_vertices[:, 1]) * axes_aspect
     ) == pytest.approx(4.1 / 4.0)
@@ -1690,8 +1780,13 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     assert len(dot_ellipses) == 11
     assert all(patch.width < patch.height for patch in dot_ellipses)
     assert [text.get_text() for text in ax.texts] == ["L", "C", "R", "Visual stimuli"]
-    assert ax.texts[-1].get_fontsize() == pytest.approx(8.5)
-    assert ax.texts[-1].get_position()[1] == pytest.approx(0.135)
+    assert ax.texts[-1].get_fontsize() == pytest.approx(4.9)
+    assert ax.texts[-1].get_position()[1] == pytest.approx(0.300)
+    assert np.min(track_vertices[:, 1]) > ax.texts[-1].get_position()[1]
+    assert max(
+        patch.get_y() + patch.get_height() for patch in screen_rectangles
+    ) < ax.texts[-1].get_position()[1]
+    assert not ax.axison
     center_wall_lines = [
         line
         for line in ax.lines
@@ -1861,7 +1956,7 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
         ]
         rate_axes = example_ax.child_axes[8:]
         assert all(
-            rate_axis.get_xlabel() == "Norm. path progression"
+            rate_axis.get_xlabel() == "Norm. goal progression"
             for rate_axis in rate_axes
         )
         assert all(
@@ -1976,7 +2071,7 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
-    assert "Motor+DPP better" in text_labels
+    assert "Motor+DGP better" in text_labels
     assert "50% >0, med. 0.10" in text_labels
     assert "n = 4 cells\n2 animals" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
@@ -2017,11 +2112,11 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
                 "dpp_vs_absolute_place",
             ],
             "comparison_label": [
-                "DPP - absolute place",
-                "DPP - absolute place",
-                "DPP - distance-to-reward",
-                "DPP - distance-to-reward",
-                "DPP - absolute place",
+                "DGP - absolute place",
+                "DGP - absolute place",
+                "DGP - distance-to-reward",
+                "DGP - distance-to-reward",
+                "DGP - absolute place",
             ],
             "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
@@ -2037,9 +2132,9 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     text_labels = [text.get_text() for text in ax.texts]
     assert "Abs place better" in text_labels
     assert "Distance-to-reward\nbetter" in text_labels
-    assert text_labels.count("DPP better") == 1
-    assert "DPP > abs place\n50% >0, med. 0.05" in text_labels
-    assert "DPP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
+    assert text_labels.count("DGP better") == 1
+    assert "DGP > abs place\n50% >0, med. 0.05" in text_labels
+    assert "DGP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
     assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"

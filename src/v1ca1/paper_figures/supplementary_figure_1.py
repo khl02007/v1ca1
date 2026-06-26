@@ -24,7 +24,7 @@ from v1ca1.paper_figures.figure_1 import (
     parse_dataset_id,
     plot_stability_panel,
 )
-from v1ca1.paper_figures.figure_2 import load_dark_movement_firing_rate_table
+from v1ca1.paper_figures.figure_4 import load_dark_movement_firing_rate_table
 from v1ca1.paper_figures.style import (
     EMPHASIS_HISTOGRAM_KWARGS,
     REGION_COLORS,

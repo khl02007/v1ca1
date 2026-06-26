@@ -223,7 +223,7 @@ PANEL_E_PLACE_MODEL_NAME = "place"
 PANEL_E_POOLED_LABEL = "pooled"
 PANEL_E_CROSS_COMPARISONS = DECODING_CROSS_TRAJECTORY_COMPARISONS[:1]
 PANEL_E_NORM_ERROR_YLIM = (0.0, 0.5)
-PANEL_E_PLACE_ERROR_YLIM = (0.0, 0.12)
+PANEL_E_PLACE_ERROR_YLIM = (0.0, 0.2)
 PANEL_E_YLABEL_FONTSIZE = 5.8
 PANEL_E_CROSS_AXIS_BOUNDS = (0.04, PANEL_DEF_AXIS_BOTTOM, 0.42, PANEL_DEF_AXIS_HEIGHT)
 PANEL_E_PLACE_AXIS_BOUNDS = (0.56, PANEL_DEF_AXIS_BOTTOM, 0.42, PANEL_DEF_AXIS_HEIGHT)
@@ -253,10 +253,11 @@ GLM_BASIS_DARK_COLOR = SCHEMATIC_COLORS["dark_basis"]
 GLM_BASIS_LIGHT_COLOR = SCHEMATIC_COLORS["light_basis"]
 GLM_TRAJECTORY_ARROW_COLOR = SCHEMATIC_COLORS["trajectory_arrow"]
 GLM_EMPIRICAL_COLOR = NEUTRAL_COLORS["empirical"]
-PANEL_G_MODELS = ("visual", "task_segment_bump")
+PANEL_G_COMPARISON_MODEL_NAME = "task_segment_scalar"
+PANEL_G_MODELS = ("visual", PANEL_G_COMPARISON_MODEL_NAME)
 PANEL_G_MODEL_LABELS = {
     "visual": "Independent",
-    "task_segment_bump": "Shared scaffold",
+    PANEL_G_COMPARISON_MODEL_NAME: GLM_MODEL_LABELS[PANEL_G_COMPARISON_MODEL_NAME],
 }
 PANEL_G_MODEL_COLORS = MODEL_CLASS_COLORS
 PANEL_G_SCHEMATIC_WIDTH_FRACTION = 1.00
@@ -1345,6 +1346,49 @@ def _compute_panel_a_rate_correlation(
     return float(np.corrcoef(first, second)[0, 1])
 
 
+def _compute_panel_a_rate_overlap_index(
+    example: dict[str, Any],
+    epoch_key: str,
+    trajectories: Sequence[str],
+) -> float:
+    """Return the sum(min) / sum(max) index between two rate curves."""
+    if len(trajectories) != 2:
+        return float("nan")
+    rates = []
+    for trajectory_type in trajectories:
+        _position, rate = example["epoch_rates"][epoch_key]["firing_rates"][
+            trajectory_type
+        ]
+        rates.append(np.asarray(rate, dtype=float))
+    if rates[0].shape != rates[1].shape:
+        return float("nan")
+    valid = np.isfinite(rates[0]) & np.isfinite(rates[1])
+    if np.sum(valid) < 2:
+        return float("nan")
+    first = np.clip(rates[0][valid], 0.0, None)
+    second = np.clip(rates[1][valid], 0.0, None)
+    denominator = float(np.sum(np.maximum(first, second)))
+    if denominator <= 0.0:
+        return float("nan")
+    return float(np.sum(np.minimum(first, second)) / denominator)
+
+
+def _format_panel_a_similarity_annotation(
+    example: dict[str, Any],
+    epoch_key: str,
+    trajectories: Sequence[str],
+    annotation: str,
+) -> str:
+    """Return the requested compact similarity annotation for one epoch."""
+    if annotation == "correlation":
+        value = _compute_panel_a_rate_correlation(example, epoch_key, trajectories)
+        return f"r={value:.2f}" if np.isfinite(value) else "r=n/a"
+    if annotation == "dppi":
+        value = _compute_panel_a_rate_overlap_index(example, epoch_key, trajectories)
+        return f"DPPI={value:.2f}" if np.isfinite(value) else "DPPI=n/a"
+    raise ValueError("annotation must be 'correlation' or 'dppi'.")
+
+
 def plot_epoch_path_rate_axis(
     ax: "Axes",
     example: dict[str, Any],
@@ -1356,6 +1400,9 @@ def plot_epoch_path_rate_axis(
     show_legend: bool = False,
     show_title: bool = True,
     show_correlation: bool = True,
+    similarity_annotation: str = "correlation",
+    correlation_text_position: tuple[float, float] = (0.96, 0.92),
+    correlation_text_ha: str = "right",
 ) -> None:
     """Plot selected path-type tuning curves for one epoch."""
     trajectories = (
@@ -1388,13 +1435,17 @@ def plot_epoch_path_rate_axis(
     if show_legend:
         ax.legend(frameon=False, fontsize=4.2, handlelength=1.1, borderpad=0.1)
     if show_correlation:
-        correlation = _compute_panel_a_rate_correlation(example, epoch_key, trajectories)
-        label = f"r={correlation:.2f}" if np.isfinite(correlation) else "r=n/a"
+        label = _format_panel_a_similarity_annotation(
+            example,
+            epoch_key,
+            trajectories,
+            similarity_annotation,
+        )
         ax.text(
-            0.96,
-            0.92,
+            correlation_text_position[0],
+            correlation_text_position[1],
             label,
-            ha="right",
+            ha=correlation_text_ha,
             va="top",
             fontsize=4.6,
             transform=ax.transAxes,
@@ -1485,6 +1536,11 @@ def plot_panel_a_example(
     *,
     title: str | None = None,
     y_shift: float = 0.0,
+    y_max: float | None = None,
+    show_correlation: bool = False,
+    similarity_annotation: str = "correlation",
+    correlation_text_position: tuple[float, float] = (0.96, 0.92),
+    correlation_text_ha: str = "right",
 ) -> None:
     """Plot one Panel A example cell with dark and light rate curves."""
     ax.set_xlim(0.0, 1.0)
@@ -1502,7 +1558,7 @@ def plot_panel_a_example(
         )
 
     trajectories = validate_panel_a_trajectories(example["trajectories"])
-    y_max = _get_panel_a_y_max(example)
+    y_max = _get_panel_a_y_max(example) if y_max is None else float(y_max)
     raster_y = PANEL_A_EXAMPLE_RASTER_Y + y_shift
     raster_height = PANEL_A_EXAMPLE_RASTER_HEIGHT
     schematic_height = 0.075
@@ -1557,7 +1613,10 @@ def plot_panel_a_example(
         y_max=y_max,
         show_ylabel=True,
         show_title=False,
-        show_correlation=False,
+        show_correlation=show_correlation,
+        similarity_annotation=similarity_annotation,
+        correlation_text_position=correlation_text_position,
+        correlation_text_ha=correlation_text_ha,
     )
     plot_epoch_path_rate_axis(
         light_ax,
@@ -1566,7 +1625,10 @@ def plot_panel_a_example(
         trajectories=trajectories,
         y_max=y_max,
         show_title=False,
-        show_correlation=False,
+        show_correlation=show_correlation,
+        similarity_annotation=similarity_annotation,
+        correlation_text_position=correlation_text_position,
+        correlation_text_ha=correlation_text_ha,
     )
 
 
@@ -2471,11 +2533,13 @@ def _panel_g_candidate_examples_from_pair(
     light_epoch: str,
     dark_epoch: str,
     visual_dataset: Any,
-    bump_dataset: Any,
+    comparison_dataset: Any,
     visual_path: Path,
-    bump_path: Path,
+    comparison_path: Path,
+    comparison_model_name: str = PANEL_G_COMPARISON_MODEL_NAME,
 ) -> list[dict[str, Any]]:
-    """Return scored example candidates from one visual/bump selected pair."""
+    """Return scored example candidates from one visual/comparison selected pair."""
+    comparison_model_name = str(comparison_model_name)
     trajectories = [str(value) for value in visual_dataset.coords["trajectory"].values]
     units = np.asarray(visual_dataset.coords["unit"].values)
     tp_grid = np.asarray(visual_dataset.coords["tp_grid"].values, dtype=float)
@@ -2484,11 +2548,11 @@ def _panel_g_candidate_examples_from_pair(
         visual_dataset["ll_bits_per_spike_cv_light"].values,
         dtype=float,
     )
-    bump_score = np.asarray(
-        bump_dataset["ll_bits_per_spike_cv_light"].values,
+    comparison_score = np.asarray(
+        comparison_dataset["ll_bits_per_spike_cv_light"].values,
         dtype=float,
     )
-    combined_score = np.minimum(visual_score, bump_score)
+    combined_score = np.minimum(visual_score, comparison_score)
 
     candidates: list[dict[str, Any]] = []
     for trajectory_index, trajectory_type in enumerate(trajectories):
@@ -2527,23 +2591,25 @@ def _panel_g_candidate_examples_from_pair(
                             "score": float(visual_score[trajectory_index, unit_index]),
                             "source_path": str(visual_path),
                         },
-                        "task_segment_bump": {
+                        comparison_model_name: {
                             "dark_hz": np.asarray(
-                                bump_dataset["dark_hz_grid"].isel(
+                                comparison_dataset["dark_hz_grid"].isel(
                                     trajectory=trajectory_index,
                                     unit=unit_index,
                                 ).values,
                                 dtype=float,
                             ),
                             "light_hz": np.asarray(
-                                bump_dataset["light_hz_grid"].isel(
+                                comparison_dataset["light_hz_grid"].isel(
                                     trajectory=trajectory_index,
                                     unit=unit_index,
                                 ).values,
                                 dtype=float,
                             ),
-                            "score": float(bump_score[trajectory_index, unit_index]),
-                            "source_path": str(bump_path),
+                            "score": float(
+                                comparison_score[trajectory_index, unit_index]
+                            ),
+                            "source_path": str(comparison_path),
                         },
                     },
                 }
@@ -2558,15 +2624,19 @@ def _select_requested_panel_g_examples(
     datasets: Sequence[DatasetId],
     region: str,
     example_count: int,
+    requested_examples: Sequence[tuple[str, str, str, int, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return configured Panel G examples when they belong to the requested inputs."""
     dataset_keys = {
         normalize_dataset_id(dataset)[:2]
         for dataset in datasets
     }
+    example_specs = (
+        PANEL_G_EXAMPLES if requested_examples is None else requested_examples
+    )
     requested = [
         (animal_name, date, requested_region, int(unit_id), trajectory)
-        for animal_name, date, requested_region, unit_id, trajectory in PANEL_G_EXAMPLES
+        for animal_name, date, requested_region, unit_id, trajectory in example_specs
         if (animal_name, date) in dataset_keys and requested_region == region
     ][: max(int(example_count), 0)]
     if not requested:
@@ -2615,10 +2685,13 @@ def load_panel_g_dark_light_glm_examples(
     light_epoch: str | None,
     dark_epoch: str | None,
     example_count: int = PANEL_G_EXAMPLE_COUNT,
+    requested_examples: Sequence[tuple[str, str, str, int, str]] | None = None,
+    comparison_model_name: str = PANEL_G_COMPARISON_MODEL_NAME,
 ) -> list[dict[str, Any]]:
-    """Load high-scoring visual and segment-bump GLM example fits."""
+    """Load high-scoring visual and comparison GLM example fits."""
     candidates: list[dict[str, Any]] = []
     missing_paths: list[Path] = []
+    comparison_model_name = str(comparison_model_name)
     for dataset in datasets:
         animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
         dataset_light_epoch = get_light_epoch(animal_name, date, light_epoch)
@@ -2632,21 +2705,23 @@ def load_panel_g_dark_light_glm_examples(
             dark_epoch=dataset_dark_epoch,
             model_name="visual",
         )
-        bump_path = get_dark_light_glm_selected_path(
+        comparison_path = get_dark_light_glm_selected_path(
             data_root,
             animal_name=animal_name,
             date=date,
             region=region,
             light_epoch=dataset_light_epoch,
             dark_epoch=dataset_dark_epoch,
-            model_name="task_segment_bump",
+            model_name=comparison_model_name,
         )
-        if not visual_path.exists() or not bump_path.exists():
-            missing_paths.extend(path for path in (visual_path, bump_path) if not path.exists())
+        if not visual_path.exists() or not comparison_path.exists():
+            missing_paths.extend(
+                path for path in (visual_path, comparison_path) if not path.exists()
+            )
             continue
 
         visual_dataset = _load_panel_g_selected_dataset(visual_path)
-        bump_dataset = _load_panel_g_selected_dataset(bump_path)
+        comparison_dataset = _load_panel_g_selected_dataset(comparison_path)
         candidates.extend(
             _panel_g_candidate_examples_from_pair(
                 animal_name=animal_name,
@@ -2655,9 +2730,10 @@ def load_panel_g_dark_light_glm_examples(
                 light_epoch=dataset_light_epoch,
                 dark_epoch=dataset_dark_epoch,
                 visual_dataset=visual_dataset,
-                bump_dataset=bump_dataset,
+                comparison_dataset=comparison_dataset,
                 visual_path=visual_path,
-                bump_path=bump_path,
+                comparison_path=comparison_path,
+                comparison_model_name=comparison_model_name,
             )
         )
 
@@ -2668,6 +2744,7 @@ def load_panel_g_dark_light_glm_examples(
         datasets=datasets,
         region=region,
         example_count=example_count,
+        requested_examples=requested_examples,
     )
     if requested_examples:
         return requested_examples
@@ -3194,8 +3271,11 @@ def load_panel_glm_data(
     swap_model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     swap_example_count: int = 2,
     swap_requested_examples: Sequence[tuple[str, str, str, int, str]] | None = None,
+    dark_light_requested_examples: Sequence[
+        tuple[str, str, str, int, str]
+    ] | None = None,
 ) -> dict[str, Any]:
-    """Load saved GLM artifacts for the Figure 4 GLM panels."""
+    """Load saved GLM artifacts for the Figure 2 GLM panels."""
     swap_examples = load_panel_h_swap_examples(
         data_root=data_root,
         datasets=datasets,
@@ -3212,6 +3292,7 @@ def load_panel_glm_data(
             region=region,
             light_epoch=light_epoch,
             dark_epoch=dark_epoch,
+            requested_examples=dark_light_requested_examples,
         ),
         "swap_delta": load_panel_h_swap_delta_table(
             data_root=data_root,
@@ -3850,14 +3931,15 @@ def _panel_basis_styles_with_highlighted_segments(
     return styles
 
 
-def _panel_g_oval_styles(count: int) -> list[dict[str, Any]]:
+def _panel_g_oval_styles(count: int, *, fill: bool = True) -> list[dict[str, Any]]:
     """Return orange segment-modulation styles for Panel G track overlays."""
+    linewidth = PANEL_G_SHARED_SCAFFOLD_OVAL_LINEWIDTH if fill else 0.90
     return [
         {
             "edge_color": PANEL_G_BASIS_LIGHT_COLOR,
-            "fill_color": PANEL_G_BASIS_LIGHT_COLOR,
-            "fill_alpha": 0.38,
-            "linewidth": PANEL_G_SHARED_SCAFFOLD_OVAL_LINEWIDTH,
+            "fill_color": PANEL_G_BASIS_LIGHT_COLOR if fill else "none",
+            "fill_alpha": 0.38 if fill else 1.0,
+            "linewidth": linewidth,
         }
         for _index in range(count)
     ]
@@ -3902,6 +3984,7 @@ def _draw_panel_g_track(
     stimulus_layout: str = "stim1",
     highlighted_segments: Sequence[int] | None = None,
     oval_regions: Sequence[str] | None = None,
+    fill_oval_regions: bool = True,
     label_fontsize: float = 4.8,
 ) -> None:
     """Draw one W-track field component for the Panel G model schematic."""
@@ -3969,7 +4052,10 @@ def _draw_panel_g_track(
             label_fontsize=label_fontsize,
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
-            oval_styles=_panel_g_oval_styles(len(selected_oval_regions)),
+            oval_styles=_panel_g_oval_styles(
+                len(selected_oval_regions),
+                fill=fill_oval_regions,
+            ),
             arrow_color=trajectory_color,
             track_linewidth=0.55,
             trajectory_linewidth=0.78,
@@ -3997,7 +4083,10 @@ def _draw_panel_g_track(
             ),
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
-            oval_styles=_panel_g_oval_styles(len(selected_oval_regions)),
+            oval_styles=_panel_g_oval_styles(
+                len(selected_oval_regions),
+                fill=fill_oval_regions,
+            ),
             arrow_color=trajectory_color,
             track_linewidth=0.55,
             trajectory_linewidth=0.85,
@@ -4021,10 +4110,12 @@ def _plot_panel_g_architecture_schematic(
     field_label_y: float = PANEL_G_FIELD_LABEL_Y,
     model_label_x: float = 0.08,
     model_label_fontsize: float | None = None,
+    shared_model_label: str = "Shared-scaffold\nmodel",
     component_label_fontsize: float = PANEL_G_COMPONENT_LABEL_FONTSIZE,
     segment_modulation_label_y: float | None = None,
     segment_modulation_label: str = "Segment-specific modulation",
     segment_modulation_label_gap: float = PANEL_G_SEGMENT_MODULATION_LABEL_GAP,
+    fill_oval_regions: bool = True,
 ) -> None:
     """Draw the compact dark/light GLM architecture schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4116,7 +4207,7 @@ def _plot_panel_g_architecture_schematic(
     ax.text(
         model_label_x,
         shared_track_center_y,
-        "Shared-scaffold\nmodel",
+        shared_model_label,
         ha="center",
         va="center",
         fontsize=shared_model_fontsize,
@@ -4210,6 +4301,7 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="segment_modulation",
         show_labels=True,
+        fill_oval_regions=fill_oval_regions,
     )
     ax.annotate(
         "",
@@ -4238,6 +4330,7 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="shared_light",
         show_labels=True,
+        fill_oval_regions=fill_oval_regions,
     )
 
 
@@ -4475,6 +4568,7 @@ def plot_panel_g_model_architecture(
     field_label_y: float = PANEL_G_FIELD_LABEL_Y,
     model_label_x: float = 0.08,
     model_label_fontsize: float | None = None,
+    shared_model_label: str = "Shared-scaffold\nmodel",
     component_label_fontsize: float = PANEL_G_COMPONENT_LABEL_FONTSIZE,
     segment_modulation_label_y: float | None = None,
     segment_modulation_label: str = "Segment-specific modulation",
@@ -4528,6 +4622,7 @@ def plot_panel_g_model_architecture(
         field_label_y=field_label_y,
         model_label_x=model_label_x,
         model_label_fontsize=model_label_fontsize,
+        shared_model_label=shared_model_label,
         component_label_fontsize=component_label_fontsize,
         segment_modulation_label_y=segment_modulation_label_y,
         segment_modulation_label=segment_modulation_label,
@@ -4636,14 +4731,15 @@ def _panel_h_shared_basis_styles_with_filled_segments(
     return styles
 
 
-def _panel_h_oval_styles(count: int) -> list[dict[str, Any]]:
+def _panel_h_oval_styles(count: int, *, fill: bool = True) -> list[dict[str, Any]]:
     """Return thin orange modulation ovals for the scaled Panel H schematic."""
+    linewidth = PANEL_H_SCHEMATIC_OVAL_LINEWIDTH if fill else 0.90
     return [
         {
             "edge_color": GLM_BASIS_LIGHT_COLOR,
-            "fill_color": GLM_BASIS_LIGHT_COLOR,
-            "fill_alpha": 0.38,
-            "linewidth": PANEL_H_SCHEMATIC_OVAL_LINEWIDTH,
+            "fill_color": GLM_BASIS_LIGHT_COLOR if fill else "none",
+            "fill_alpha": 0.38 if fill else 1.0,
+            "linewidth": linewidth,
         }
         for _index in range(count)
     ]
@@ -4658,6 +4754,7 @@ def _draw_panel_h_track(
     stimulus_layout: str = "stim1",
     highlighted_segments: Sequence[int] | None = None,
     oval_regions: Sequence[str] | None = None,
+    fill_oval_regions: bool = True,
     label_fontsize: float = 3.1,
 ) -> None:
     """Draw one thin W-track component for the scaled Panel H swap schematic."""
@@ -4723,7 +4820,10 @@ def _draw_panel_h_track(
             label_fontsize=label_fontsize,
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
-            oval_styles=_panel_h_oval_styles(len(selected_oval_regions)),
+            oval_styles=_panel_h_oval_styles(
+                len(selected_oval_regions),
+                fill=fill_oval_regions,
+            ),
             arrow_color=trajectory_color,
             track_linewidth=PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
@@ -4746,7 +4846,10 @@ def _draw_panel_h_track(
             ),
             show_large_ovals=True,
             oval_regions=selected_oval_regions,
-            oval_styles=_panel_h_oval_styles(len(selected_oval_regions)),
+            oval_styles=_panel_h_oval_styles(
+                len(selected_oval_regions),
+                fill=fill_oval_regions,
+            ),
             arrow_color=trajectory_color,
             track_linewidth=PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
@@ -5367,8 +5470,6 @@ def make_figure_3(
     dpi: int,
     panel_b_cache_dir: Path | None = None,
     refresh_panel_b_cache: bool = False,
-    panel_example_cache_dir: Path | None = None,
-    refresh_panel_example_cache: bool = False,
 ) -> Path:
     """Build and save Figure 3."""
     import matplotlib.pyplot as plt
@@ -5377,11 +5478,6 @@ def make_figure_3(
         Path(output_path).parent / "cache"
         if panel_b_cache_dir is None
         else Path(panel_b_cache_dir)
-    )
-    panel_example_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_example_cache_dir is None
-        else Path(panel_example_cache_dir)
     )
     quant_region = str(regions[0]) if regions else DEFAULT_REGIONS[0]
     panel_quant_payload = load_panel_quantification_data(
@@ -5408,18 +5504,9 @@ def make_figure_3(
             DEFAULT_PANEL_DEF_HEIGHT_MM,
         ],
     )
-    middle_grid = outer_grid[0, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=[
-            DEFAULT_PANEL_A_WIDTH_FRACTION,
-            DEFAULT_PANEL_B_WIDTH_FRACTION,
-        ],
-    )
-    panel_a_axis = fig.add_subplot(middle_grid[0, 0])
     panel_b = setup_light_heatmap_panel(
         fig,
-        middle_grid[0, 1],
+        outer_grid[0, 0],
         regions=regions,
     )
     bottom_grid = outer_grid[1, 0].subgridspec(
@@ -5467,26 +5554,6 @@ def make_figure_3(
         x=PANEL_B_NEURON_SCALE_BAR_X,
     )
 
-    examples = [
-        load_panel_a_example_data(
-            data_root=data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            unit_id=unit_id,
-            trajectories=trajectories,
-            dark_epoch=dark_epoch,
-            light_epoch=light_epoch,
-            position_bin_count=position_bin_count,
-            position_offset=position_offset,
-            speed_threshold_cm_s=speed_threshold_cm_s,
-            sigma_bins=sigma_bins,
-            panel_example_cache_dir=panel_example_cache_dir,
-            refresh_panel_example_cache=refresh_panel_example_cache,
-        )
-        for animal_name, date, region, unit_id, trajectories in PANEL_A_EXAMPLES
-    ]
-    plot_panel_a_examples(panel_a_axis, examples)
     plot_panel_c_vision_tuning_panel(
         panel_c_container_axis,
         panel_quant_payload["similarity"],
@@ -5529,35 +5596,13 @@ def make_figure_3(
     add_panel_b_path_progression_label(fig, panel_b["heatmap_axes"])
     _add_panel_label_at_figure_y(
         fig,
-        panel_a_axis,
-        "A",
-        x=-0.07,
-        y=panel_ab_header_y,
-    )
-    _add_panel_label_at_figure_y(
-        fig,
         panel_b["corner_axis"],
-        "B",
+        "A",
         x=-0.12,
         y=panel_ab_header_y,
     )
-    _add_panel_cd_label(panel_c_container_axis, "C")
-    _add_panel_cd_label(panel_d_container_axis, "D")
-    panel_a_title_x, _panel_a_title_y = _axis_to_figure_coordinates(
-        fig,
-        panel_a_axis,
-        0.5,
-        0.0,
-    )
-    fig.text(
-        panel_a_title_x,
-        panel_ab_header_y,
-        "Example DPP cells in dark and light",
-        ha="center",
-        va="center",
-        fontsize=7.2,
-        linespacing=1.0,
-    )
+    _add_panel_cd_label(panel_c_container_axis, "B")
+    _add_panel_cd_label(panel_d_container_axis, "C")
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
     print(f"Saved Figure 3 to {output_path}")
@@ -5601,20 +5646,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Recompute Panel B and overwrite its cache even when a matching cache exists.",
     )
     parser.add_argument(
-        "--panel-example-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for cached example-cell rasters and rate curves. "
-            "Default: <output-dir>/cache."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-example-cache",
-        action="store_true",
-        help="Recompute example-cell data and overwrite matching caches.",
-    )
-    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -5643,7 +5674,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--light-epoch",
         default=None,
         help=(
-            "Light run epoch for panel A and panel B. "
+            "Light run epoch for heatmaps and quantification panels. "
             f"Default: registry value, currently {DEFAULT_LIGHT_EPOCH} unless overridden."
         ),
     )
@@ -5651,7 +5682,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dark-epoch",
         default=None,
         help=(
-            "Dark run epoch for example and quantification panels. "
+            "Dark run epoch for quantification panels. "
             f"Default: registry value, currently {DEFAULT_DARK_EPOCH} unless overridden."
         ),
     )
@@ -5709,11 +5740,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.panel_b_cache_dir is not None
         else args.output_dir / "cache"
     )
-    panel_example_cache_dir = (
-        args.panel_example_cache_dir
-        if args.panel_example_cache_dir is not None
-        else args.output_dir / "cache"
-    )
     make_figure_3(
         data_root=args.data_root,
         output_path=output_path,
@@ -5728,8 +5754,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         dpi=args.dpi,
         panel_b_cache_dir=panel_b_cache_dir,
         refresh_panel_b_cache=args.refresh_panel_b_cache,
-        panel_example_cache_dir=panel_example_cache_dir,
-        refresh_panel_example_cache=args.refresh_panel_example_cache,
     )
 
 

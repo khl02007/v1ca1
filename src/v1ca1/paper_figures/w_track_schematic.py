@@ -3,7 +3,7 @@ from __future__ import annotations
 """Generate parametrically drawn W-track schematic panels."""
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +48,52 @@ DEFAULT_OVAL_STYLES: list[dict[str, Any]] = [
         "fill_alpha": 0.38,
     },
 ]
+W_TRACK_REGION_ALIASES = {
+    "left_arm": "left_arm",
+    "center_arm": "center_arm",
+    "right_arm": "right_arm",
+    "left_center_connector": "left_center_connector",
+    "center_right_connector": "center_right_connector",
+    "left_connector": "left_center_connector",
+    "right_connector": "center_right_connector",
+}
+
+
+def _get_w_track_region_rectangles(
+    dims: dict[str, float],
+) -> dict[str, tuple[float, float, float, float]]:
+    """Return rectangular schematic regions inside the W-track outline."""
+    x0, x1 = dims["x0"], dims["x1"]
+    x2, x3 = dims["x2"], dims["x3"]
+    x4, x5 = dims["x4"], dims["x5"]
+    y0, y1, y2 = dims["y0"], dims["y1"], dims["y2"]
+    return {
+        "left_arm": (x0, y1, x1 - x0, y2 - y1),
+        "center_arm": (x2, y1, x3 - x2, y2 - y1),
+        "right_arm": (x4, y1, x5 - x4, y2 - y1),
+        "left_center_connector": (x0, y0, x3 - x0, y1 - y0),
+        "center_right_connector": (x2, y0, x5 - x2, y1 - y0),
+    }
+
+
+def _normalize_w_track_region_fill_colors(
+    region_fill_colors: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return region fill colors keyed by canonical W-track region name."""
+    if region_fill_colors is None:
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for region_name, color in region_fill_colors.items():
+        canonical_name = W_TRACK_REGION_ALIASES.get(region_name)
+        if canonical_name is None:
+            valid_names = ", ".join(sorted(W_TRACK_REGION_ALIASES))
+            raise ValueError(
+                f"Unknown W-track region {region_name!r}. "
+                f"Expected one of: {valid_names}."
+            )
+        normalized[canonical_name] = color
+    return normalized
 
 
 def draw_w_track_schematic(
@@ -60,9 +106,12 @@ def draw_w_track_schematic(
     trajectory_linewidth: float = 1.2,
     arrow_mutation_scale: float = 10.0,
     fill_track: bool = False,
+    region_fill_colors: Mapping[str, Any] | None = None,
+    region_fill_alpha: float | None = None,
 ) -> "Axes":
     """Draw a compact W-track outline and trajectory arrow on an existing axis."""
-    from matplotlib.patches import Polygon
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Polygon, Rectangle
 
     if arrow_color is None:
         arrow_color = TRAJECTORY_COLORS.get(
@@ -72,15 +121,48 @@ def draw_w_track_schematic(
 
     outline, points, dims = get_w_track_geometry()
     path = trajectory_points(trajectory_name, points)
+    normalized_region_fill_colors = _normalize_w_track_region_fill_colors(
+        region_fill_colors
+    )
     ax.add_patch(
         Polygon(
             outline,
             closed=True,
             facecolor="black" if fill_track else "none",
+            edgecolor="none",
+            linewidth=0.0,
+            joinstyle="miter",
+            zorder=1,
+        )
+    )
+    region_rectangles = _get_w_track_region_rectangles(dims)
+    for region_name, color in normalized_region_fill_colors.items():
+        x, y, width, height = region_rectangles[region_name]
+        facecolor = (
+            color
+            if region_fill_alpha is None
+            else to_rgba(color, alpha=region_fill_alpha)
+        )
+        ax.add_patch(
+            Rectangle(
+                (x, y),
+                width,
+                height,
+                facecolor=facecolor,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=2,
+            )
+        )
+    ax.add_patch(
+        Polygon(
+            outline,
+            closed=True,
+            facecolor="none",
             edgecolor=track_edge_color,
             linewidth=track_linewidth,
             joinstyle="miter",
-            zorder=1,
+            zorder=3,
         )
     )
 
@@ -115,6 +197,7 @@ def draw_w_track_schematic(
     ax.set_aspect("equal")
     ax.set_xlim(-0.35, x5 + 0.35)
     ax.set_ylim(-0.25, y2 + 0.25)
+    ax.grid(False)
     ax.axis("off")
     return ax
 

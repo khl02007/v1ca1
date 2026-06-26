@@ -15,7 +15,11 @@ from v1ca1.helper.session import (
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
 )
-from v1ca1.paper_figures.datasets import DatasetId, get_processed_datasets
+from v1ca1.paper_figures.datasets import (
+    DatasetId,
+    get_processed_datasets,
+    normalize_dataset_id,
+)
 from v1ca1.paper_figures.figure_1 import (
     DEFAULT_POSITION_BIN_COUNT,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
@@ -56,6 +60,7 @@ from v1ca1.paper_figures.figure_3 import (
     PANEL_B_TRAJECTORY_TYPES,
     build_output_path,
     compute_light_epoch_tuning_curves,
+    get_tuning_similarity_path,
     load_or_compute_panel_b_heatmap_panels,
     parse_dataset_id,
 )
@@ -66,7 +71,7 @@ from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
 DEFAULT_OUTPUT_NAME = "heatmaps"
 DEFAULT_OUTPUT_FORMAT = "svg"
 DEFAULT_FIGURE_WIDTH_MM = 220.0
-DEFAULT_FIGURE_HEIGHT_MM = 340.0
+DEFAULT_FIGURE_HEIGHT_MM = 510.0
 HEATMAP_GRID_MARGINS = {
     "left": 0.085,
     "right": 0.920,
@@ -78,26 +83,46 @@ HEATMAP_GRID_MARGINS = {
 HEATMAP_COLORBAR_AXIS_BOUNDS = (0.945, 0.34, 0.012, 0.32)
 LIGHT_ORDER_ORIGINAL = "light_order"
 LIGHT_ORDER_DARK = "dark_order"
+DARK_DPP_FILTER_THRESHOLD = 0.5
+DARK_DPP_CORRELATION_FILTER = "correlation"
+DARK_DPP_OVERLAP_FILTER = "absolute_overlap"
+DARK_DPP_COMPARISON_LABELS = ("left_turn", "right_turn")
 HEATMAP_ROW_SPECS = (
     (
         "Light order; per unit, per trajectory",
         PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
         LIGHT_ORDER_ORIGINAL,
+        None,
     ),
     (
         "Light order; per unit, across four subpanels",
         PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
         LIGHT_ORDER_ORIGINAL,
+        None,
     ),
     (
         "Dark order; per unit, per trajectory",
         PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
         LIGHT_ORDER_DARK,
+        None,
     ),
     (
         "Dark order; per unit, across four subpanels",
         PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
         LIGHT_ORDER_DARK,
+        None,
+    ),
+    (
+        "Dark DPP corr. > 0.5; dark order",
+        PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+        LIGHT_ORDER_DARK,
+        DARK_DPP_CORRELATION_FILTER,
+    ),
+    (
+        "Dark DPP overlap > 0.5; dark order",
+        PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
+        LIGHT_ORDER_DARK,
+        DARK_DPP_OVERLAP_FILTER,
     ),
 )
 HEATMAP_COLUMN_TITLES = (
@@ -296,6 +321,131 @@ def build_light_panels_in_dark_order(
     return panels
 
 
+def load_dark_dpp_filtered_unit_keys(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    similarity_metric: str,
+    threshold: float = DARK_DPP_FILTER_THRESHOLD,
+) -> set[str]:
+    """Return pooled unit keys whose max same-turn dark DPP exceeds threshold."""
+    import pandas as pd
+
+    unit_key_parts: list[np.ndarray] = []
+    for dataset in datasets:
+        animal_name, date, dark_epoch = normalize_dataset_id(dataset)
+        path = get_tuning_similarity_path(
+            data_root,
+            animal_name=animal_name,
+            date=date,
+            region=region,
+            epoch=dark_epoch,
+            similarity_metric=similarity_metric,
+        )
+        if path.exists():
+            table = pd.read_parquet(path)
+        else:
+            from v1ca1.paper_figures.figure_4 import (
+                _compute_similarity_from_saved_curves,
+            )
+
+            table = _compute_similarity_from_saved_curves(
+                data_root,
+                animal_name=animal_name,
+                date=date,
+                dark_epoch=dark_epoch,
+                region=region,
+                tuning_similarity_metric=similarity_metric,
+            )
+        missing_columns = [
+            column
+            for column in ("unit", "region", "epoch", "comparison_label", "similarity")
+            if column not in table.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f"DPP similarity table {path} is missing columns {missing_columns!r}."
+            )
+        rows = table[
+            (table["region"].astype(str) == str(region))
+            & (table["epoch"].astype(str) == str(dark_epoch))
+            & (
+                table["comparison_label"]
+                .astype(str)
+                .isin(DARK_DPP_COMPARISON_LABELS)
+            )
+        ].copy()
+        rows["unit"] = pd.to_numeric(rows["unit"], errors="coerce")
+        rows["similarity"] = pd.to_numeric(rows["similarity"], errors="coerce")
+        rows = rows[
+            np.isfinite(rows["unit"].to_numpy(dtype=float))
+            & np.isfinite(rows["similarity"].to_numpy(dtype=float))
+        ].copy()
+        if rows.empty:
+            continue
+        rows["unit"] = rows["unit"].astype(int)
+        rows["comparison_label"] = rows["comparison_label"].astype(str)
+        selected_rows = (
+            rows.sort_values(
+                ["unit", "similarity", "comparison_label"],
+                ascending=[True, False, True],
+            )
+            .drop_duplicates("unit", keep="first")
+            .loc[lambda frame: frame["similarity"] > float(threshold)]
+        )
+        if selected_rows.empty:
+            continue
+        unit_key_parts.append(
+            build_unit_keys(
+                animal_name,
+                date,
+                region,
+                selected_rows["unit"].to_numpy(dtype=int),
+            )
+        )
+    return set(_concatenate_unit_parts(unit_key_parts).astype(str).tolist())
+
+
+def filter_heatmap_panels_to_unit_keys(
+    panels: dict[tuple[str, str], np.ndarray],
+    ordered_unit_keys_by_trajectory: dict[str, np.ndarray],
+    selected_unit_keys: set[str],
+    *,
+    trajectory_types: Sequence[str],
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+    """Keep only selected row-unit keys while preserving dark-order alignment."""
+    trajectory_types = tuple(trajectory_types)
+    selected_keys = {str(unit_key) for unit_key in selected_unit_keys}
+    filtered_panels: dict[tuple[str, str], np.ndarray] = {}
+    filtered_unit_keys_by_trajectory: dict[str, np.ndarray] = {}
+    for order_trajectory in trajectory_types:
+        reference_units = np.asarray(
+            ordered_unit_keys_by_trajectory.get(
+                order_trajectory,
+                np.asarray([], dtype=object),
+            ),
+            dtype=object,
+        )
+        keep_mask = np.asarray(
+            [str(unit_key) in selected_keys for unit_key in reference_units],
+            dtype=bool,
+        )
+        filtered_unit_keys_by_trajectory[order_trajectory] = reference_units[keep_mask]
+        for plot_trajectory in trajectory_types:
+            values = np.asarray(
+                panels[(order_trajectory, plot_trajectory)],
+                dtype=float,
+            )
+            if values.shape[0] != reference_units.size:
+                raise ValueError(
+                    "Heatmap panel row count does not match ordered unit keys for "
+                    f"{order_trajectory!r}."
+                )
+            filtered_panels[(order_trajectory, plot_trajectory)] = values[keep_mask, :]
+    return filtered_panels, filtered_unit_keys_by_trajectory
+
+
 def _annotate_heatmap_panel(
     fig: Any,
     panel: dict[str, Any],
@@ -397,11 +547,53 @@ def make_heatmaps_figure(
     color_image = None
     row_axes_by_index: list[np.ndarray] = []
     panel_records: list[tuple[dict[str, Any], str]] = []
-    dark_ordered_unit_keys_by_trajectory: dict[str, np.ndarray] | None = None
+    dark_payloads_by_normalization: dict[
+        str,
+        tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]],
+    ] = {}
     dark_order_light_curve_sets: list[dict[str, Any]] | None = None
-    for row_index, (_row_label, normalization, light_order) in enumerate(
-        HEATMAP_ROW_SPECS
-    ):
+    dpp_unit_keys_by_metric: dict[str, set[str]] = {}
+
+    def _get_dark_payload(
+        normalization: str,
+    ) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+        if normalization not in dark_payloads_by_normalization:
+            dark_payloads_by_normalization[normalization] = (
+                load_or_compute_panel_d_heatmap_payload(
+                    data_root=data_root,
+                    datasets=datasets,
+                    region=region,
+                    position_bin_count=position_bin_count,
+                    position_offset=position_offset,
+                    speed_threshold_cm_s=speed_threshold_cm_s,
+                    sigma_bins=sigma_bins,
+                    panel_d_cache_dir=panel_d_cache_dir,
+                    refresh_panel_d_cache=refresh_panel_cache,
+                    firing_rate_normalization=normalization,
+                    require_ordered_unit_keys=True,
+                )
+            )
+        return dark_payloads_by_normalization[normalization]
+
+    def _get_dpp_unit_keys(similarity_metric: str) -> set[str]:
+        if similarity_metric not in dpp_unit_keys_by_metric:
+            dpp_unit_keys_by_metric[similarity_metric] = (
+                load_dark_dpp_filtered_unit_keys(
+                    data_root=data_root,
+                    datasets=datasets,
+                    region=region,
+                    similarity_metric=similarity_metric,
+                    threshold=DARK_DPP_FILTER_THRESHOLD,
+                )
+            )
+        return dpp_unit_keys_by_metric[similarity_metric]
+
+    for row_index, (
+        _row_label,
+        normalization,
+        light_order,
+        dpp_filter_metric,
+    ) in enumerate(HEATMAP_ROW_SPECS):
         row_heatmap_axes = []
         dark_panel = setup_heatmap_comparison_panel(
             fig,
@@ -409,18 +601,30 @@ def make_heatmaps_figure(
             trajectory_types=PANEL_D_TRAJECTORY_TYPES,
             fill_track=True,
         )
-        dark_panels = load_or_compute_panel_d_heatmap_panels(
-            data_root=data_root,
-            datasets=datasets,
-            region=region,
-            position_bin_count=position_bin_count,
-            position_offset=position_offset,
-            speed_threshold_cm_s=speed_threshold_cm_s,
-            sigma_bins=sigma_bins,
-            panel_d_cache_dir=panel_d_cache_dir,
-            refresh_panel_d_cache=refresh_panel_cache,
-            firing_rate_normalization=normalization,
-        )
+        filtered_dark_unit_keys_by_trajectory = None
+        if dpp_filter_metric is None:
+            dark_panels = load_or_compute_panel_d_heatmap_panels(
+                data_root=data_root,
+                datasets=datasets,
+                region=region,
+                position_bin_count=position_bin_count,
+                position_offset=position_offset,
+                speed_threshold_cm_s=speed_threshold_cm_s,
+                sigma_bins=sigma_bins,
+                panel_d_cache_dir=panel_d_cache_dir,
+                refresh_panel_d_cache=refresh_panel_cache,
+                firing_rate_normalization=normalization,
+            )
+        else:
+            dark_panels, dark_unit_keys_by_trajectory = _get_dark_payload(normalization)
+            dark_panels, filtered_dark_unit_keys_by_trajectory = (
+                filter_heatmap_panels_to_unit_keys(
+                    dark_panels,
+                    dark_unit_keys_by_trajectory,
+                    _get_dpp_unit_keys(dpp_filter_metric),
+                    trajectory_types=PANEL_D_TRAJECTORY_TYPES,
+                )
+            )
         color_image = plot_pooled_heatmap_grid(
             dark_panel["heatmap_axes"],
             dark_panels,
@@ -440,22 +644,12 @@ def make_heatmaps_figure(
             fill_track=False,
         )
         if light_order == LIGHT_ORDER_DARK:
-            if dark_ordered_unit_keys_by_trajectory is None:
-                _dark_panels, dark_ordered_unit_keys_by_trajectory = (
-                    load_or_compute_panel_d_heatmap_payload(
-                        data_root=data_root,
-                        datasets=datasets,
-                        region=region,
-                        position_bin_count=position_bin_count,
-                        position_offset=position_offset,
-                        speed_threshold_cm_s=speed_threshold_cm_s,
-                        sigma_bins=sigma_bins,
-                        panel_d_cache_dir=panel_d_cache_dir,
-                        refresh_panel_d_cache=refresh_panel_cache,
-                        firing_rate_normalization=PANEL_D_FIRING_RATE_NORMALIZATION,
-                        require_ordered_unit_keys=True,
-                    )
+            if filtered_dark_unit_keys_by_trajectory is None:
+                _dark_panels, ordered_unit_keys_by_trajectory = _get_dark_payload(
+                    PANEL_D_FIRING_RATE_NORMALIZATION
                 )
+            else:
+                ordered_unit_keys_by_trajectory = filtered_dark_unit_keys_by_trajectory
             if dark_order_light_curve_sets is None:
                 dark_order_light_curve_sets = build_light_curve_sets(
                     data_root=data_root,
@@ -469,7 +663,7 @@ def make_heatmaps_figure(
                 )
             light_panels = build_light_panels_in_dark_order(
                 dark_order_light_curve_sets,
-                ordered_unit_keys_by_trajectory=dark_ordered_unit_keys_by_trajectory,
+                ordered_unit_keys_by_trajectory=ordered_unit_keys_by_trajectory,
                 position_bin_count=position_bin_count,
                 trajectory_types=PANEL_B_TRAJECTORY_TYPES,
                 firing_rate_normalization=normalization,
@@ -524,7 +718,7 @@ def make_heatmaps_figure(
     for panel, title in panel_records:
         _annotate_heatmap_panel(fig, panel, title=title)
 
-    for row_axes, (row_label, _normalization, _light_order) in zip(
+    for row_axes, (row_label, _normalization, _light_order, _dpp_filter_metric) in zip(
         row_axes_by_index,
         HEATMAP_ROW_SPECS,
         strict=True,

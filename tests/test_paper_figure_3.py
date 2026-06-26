@@ -1873,8 +1873,6 @@ def test_default_cli_matches_manuscript_figure_format() -> None:
     assert args.output_dir == DEFAULT_OUTPUT_DIR
     assert args.panel_b_cache_dir is None
     assert args.refresh_panel_b_cache is False
-    assert args.panel_example_cache_dir is None
-    assert args.refresh_panel_example_cache is False
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(165.0)
     assert DEFAULT_PANEL_AB_HEIGHT_MM == pytest.approx(
         figure_3_module.DEFAULT_HEATMAP_HEIGHT_MM

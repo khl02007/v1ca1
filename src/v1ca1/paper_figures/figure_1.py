@@ -175,7 +175,7 @@ PANEL_E_RASTER_TICK_MARKERSIZE = RASTER_TICK_KWARGS["markersize"]
 PANEL_E_RASTER_TICK_MARKEREDGEWIDTH = RASTER_TICK_KWARGS["markeredgewidth"]
 PANEL_E_AXIS_LABEL_FONTSIZE = 5.4
 PANEL_E_TICK_LABEL_FONTSIZE = 5.0
-TASK_PROGRESSION_XLABEL = "Norm. path progression"
+TASK_PROGRESSION_XLABEL = "Norm. goal progression"
 TASK_PROGRESSION_SEGMENT_BOUNDARIES = (0.4, 0.6)
 TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = NEUTRAL_COLORS["segment_boundary"]
 TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH = 0.45
@@ -226,12 +226,12 @@ STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
-        "DPP - absolute place",
+        "DGP - absolute place",
         "delta_bits_generalized_place_vs_tp",
     ),
     (
         "dpp_vs_absolute_task_progression",
-        "DPP - distance-to-reward",
+        "DGP - distance-to-reward",
         "delta_bits_gtp_vs_tp",
     ),
 )
@@ -341,19 +341,32 @@ DECODING_ABSOLUTE_ERROR_TABLE_COLUMNS = (
     "decoded_path",
 )
 CYCLE_TRAJECTORY_LAYOUT = (
-    ("left_to_center", (0.58, 0.70, 0.26, 0.27)),
-    ("center_to_right", (0.58, 0.28, 0.26, 0.27)),
-    ("right_to_center", (0.16, 0.28, 0.26, 0.27)),
-    ("center_to_left", (0.16, 0.70, 0.26, 0.27)),
+    ("left_to_center", (0.59, 0.60, 0.39, 0.39)),
+    ("center_to_right", (0.59, 0.04, 0.39, 0.39)),
+    ("right_to_center", (0.02, 0.04, 0.39, 0.39)),
+    ("center_to_left", (0.02, 0.60, 0.39, 0.39)),
 )
 CYCLE_ARROW_SPECS = (
-    ((0.71, 0.70), (0.71, 0.55), 0.0),
-    ((0.58, 0.415), (0.42, 0.415), 0.0),
-    ((0.29, 0.55), (0.29, 0.70), 0.0),
-    ((0.42, 0.835), (0.58, 0.835), 0.0),
+    ((0.785, 0.60), (0.785, 0.45), 0.0),
+    ((0.59, 0.235), (0.41, 0.235), 0.0),
+    ((0.215, 0.45), (0.215, 0.60), 0.0),
+    ((0.41, 0.795), (0.59, 0.795), 0.0),
 )
 CYCLE_ARROW_LINEWIDTH = 1.08
 CYCLE_ARROW_MUTATION_SCALE = 12.6
+TASK_DESIGN_TRAJECTORY_BOUNDS = (0.00, 0.29, 0.49, 0.71)
+TASK_DESIGN_VISUAL_STIMULUS_BOUNDS = (0.51, 0.32, 0.49, 0.68)
+TASK_DESIGN_PROGRESSION_BOUNDS = (0.02, 0.02, 0.96, 0.25)
+TASK_DESIGN_PROGRESSION_SEGMENTS = (
+    ("AB", ("A", "B")),
+    ("gray", ("gray",)),
+    ("BA", ("B", "A")),
+    ("dark", ("dark",)),
+)
+TASK_DESIGN_PROGRESSION_SLEEP_LABEL = "sleep"
+TASK_DESIGN_PROGRESSION_DURATION_LABEL = "Run/sleep epochs (~25 min each)"
+TASK_DESIGN_RUN_EPOCH_LINEWIDTH = 1.20
+TASK_DESIGN_SLEEP_EPOCH_LINEWIDTH = 0.45
 MOVEMENT_AXIS_Y = -0.13
 MOVEMENT_AXIS_ARROW_MARGIN = 0.12
 
@@ -991,7 +1004,7 @@ def load_motor_delta_table(
         MOTOR_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 motor+DPP versus motor deltas for stable dark-epoch units."""
+    """Load pooled V1 motor+DGP versus motor deltas for stable dark-epoch units."""
     import pandas as pd
     import xarray as xr
 
@@ -1068,7 +1081,7 @@ def load_encoding_delta_table(
         ENCODING_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 DPP-versus-absolute-model deltas for stable dark-epoch units."""
+    """Load pooled V1 DGP-versus-absolute-model deltas for stable dark-epoch units."""
     import pandas as pd
 
     rows: list[dict[str, Any]] = []
@@ -2568,20 +2581,19 @@ def draw_behavior_task_design_panel(
     behavior_asset_name: str = DEFAULT_BEHAVIOR_ASSET_NAME,
     rotate_behavior_180: bool = False,
 ) -> None:
-    """Draw behavior and task-design schematics in one Figure 1B panel."""
+    """Draw Figure 1A task-design schematics."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    behavior_path = get_figure_1_asset_path(asset_dir, behavior_asset_name)
-    behavior_image = load_panel_asset_image(behavior_path)
-    if rotate_behavior_180:
-        behavior_image = np.rot90(behavior_image, 2)
+    del asset_dir, behavior_asset_name, rotate_behavior_180
 
-    behavior_ax = ax.inset_axes([0.00, 0.11, 0.34, 0.76])
-    task_ax = ax.inset_axes([0.32, 0.00, 0.68, 1.00])
-    draw_image_asset(behavior_ax, behavior_image)
-    draw_w_track_cycle_panel(task_ax)
+    trajectory_ax = ax.inset_axes(TASK_DESIGN_TRAJECTORY_BOUNDS)
+    visual_ax = ax.inset_axes(TASK_DESIGN_VISUAL_STIMULUS_BOUNDS)
+    progression_ax = ax.inset_axes(TASK_DESIGN_PROGRESSION_BOUNDS)
+    draw_w_track_cycle_panel(trajectory_ax, include_visual_stimuli=False)
+    draw_visual_stimuli_schematic(visual_ax)
+    draw_task_design_progression_bar(progression_ax)
 
 
 def _scale_points_to_axes(
@@ -2636,18 +2648,23 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
     """Draw a compact W-track and visual-stimulus sequence in panel B."""
     from matplotlib.patches import Ellipse, Polygon, Rectangle
 
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(False)
+    ax.axis("off")
+
     transform = ax.transAxes
     outline, points, dims = get_w_track_geometry()
     source_xlim = (dims["x0"] - 0.35, dims["x5"] + 0.35)
     source_ylim = (dims["y0"] - 0.55, dims["y2"] + 0.45)
     axes_aspect = _get_axes_display_aspect(ax)
-    track_height = 0.235
+    track_height = 0.403
     track_width = track_height * (
         (source_xlim[1] - source_xlim[0])
         / (source_ylim[1] - source_ylim[0])
         / axes_aspect
     )
-    track_bounds = (0.045, 0.020, track_width, track_height)
+    track_bounds = ((1.0 - track_width) / 2.0, 0.470, track_width, track_height)
     scaled_outline = _scale_points_to_axes(
         outline,
         bounds=track_bounds,
@@ -2766,14 +2783,15 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             zorder=4,
         )
 
-    screen_y = 0.015
-    screen_h = 0.105
+    screen_y = 0.070
+    screen_h = 0.140
     screen_w = screen_h / axes_aspect * 1.10
     screen_gap = 0.055
+    screen_start = 0.5 - (3 * screen_w + 2 * screen_gap) / 2.0
     screen_specs = (
-        (0.405, "black"),
-        (0.405 + screen_w + screen_gap, "grating"),
-        (0.405 + 2 * (screen_w + screen_gap), "dots"),
+        (screen_start, "black"),
+        (screen_start + screen_w + screen_gap, "grating"),
+        (screen_start + 2 * (screen_w + screen_gap), "dots"),
     )
     stimulus_center = (screen_specs[0][0] + screen_specs[-1][0] + screen_w) / 2
 
@@ -2799,20 +2817,20 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
 
     ax.text(
         stimulus_center,
-        0.135,
+        0.300,
         "Visual stimuli",
         ha="center",
         va="bottom",
-        fontsize=8.5,
+        fontsize=4.9,
         transform=transform,
         zorder=4,
     )
 
     ax.add_patch(
         Rectangle(
-            (0.315, 0.025),
+            (screen_start - 0.090, screen_y + 0.010),
             0.014,
-            0.100,
+            screen_h - 0.020,
             facecolor=monitor_color,
             edgecolor="none",
             alpha=0.90,
@@ -2820,10 +2838,10 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             zorder=2,
         )
     )
-    for y in (0.060, 0.095):
+    for y in (screen_y + 0.045, screen_y + 0.090):
         ax.add_patch(
             Rectangle(
-                (0.350, y),
+                (screen_start - 0.055, y),
                 0.012,
                 0.012,
                 facecolor="black",
@@ -2890,10 +2908,195 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
         add_display_circle(x, screen_y + 0.52 * screen_h, 0.006, "black")
 
 
-def draw_w_track_cycle_panel(ax: "Axes") -> None:
+def _task_design_progression_color(label: str) -> str:
+    """Return the display color for one task-design progression token."""
+    if label in {"AB", "BA"}:
+        return "white"
+    if label == "A":
+        return VISUAL_CONDITION_COLORS["02_r1"]
+    if label == "B":
+        return VISUAL_CONDITION_COLORS["06_r3"]
+    if label == "gray":
+        return "0.70"
+    if label == "dark":
+        return "black"
+    if label == "sleep":
+        return "white"
+    raise ValueError(f"Unknown task-design progression token {label!r}.")
+
+
+def draw_task_design_progression_bar(ax: "Axes") -> None:
+    """Draw the run/sleep epoch progression schematic."""
+    from matplotlib.patches import FancyArrowPatch, Rectangle
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(False)
+    ax.axis("off")
+
+    transform = ax.transAxes
+    left = 0.035
+    rectangle_right = 0.875
+    arrow_right = 0.955
+    y0 = 0.36
+    height = 0.24
+    gap = 0.008
+    progression_epochs = []
+    for index, run_epoch in enumerate(TASK_DESIGN_PROGRESSION_SEGMENTS):
+        progression_epochs.append(("run", *run_epoch))
+        if index < len(TASK_DESIGN_PROGRESSION_SEGMENTS) - 1:
+            progression_epochs.append(
+                (
+                    "sleep",
+                    TASK_DESIGN_PROGRESSION_SLEEP_LABEL,
+                    (TASK_DESIGN_PROGRESSION_SLEEP_LABEL,),
+                )
+            )
+    epoch_width = (
+        rectangle_right - left - gap * (len(progression_epochs) - 1)
+    ) / len(progression_epochs)
+
+    def add_epoch_rectangle(
+        x0: float,
+        width: float,
+        token: str,
+        *,
+        edgecolor: str = "black",
+        linewidth: float = TASK_DESIGN_SLEEP_EPOCH_LINEWIDTH,
+    ) -> None:
+        ax.add_patch(
+            Rectangle(
+                (x0, y0),
+                width,
+                height,
+                facecolor=_task_design_progression_color(token),
+                edgecolor=edgecolor,
+                linewidth=linewidth,
+                transform=transform,
+            )
+        )
+
+    def add_centered_label(
+        x: float,
+        y: float,
+        label: str,
+        *,
+        fontsize: float,
+        color: str = "black",
+        va: str = "center",
+    ) -> None:
+        ax.text(
+            x,
+            y,
+            label,
+            ha="center",
+            va=va,
+            fontsize=fontsize,
+            color=color,
+            transform=transform,
+        )
+
+    def add_colored_epoch_letters(
+        x: float,
+        y: float,
+        letters: Sequence[str],
+        *,
+        fontsize: float,
+    ) -> None:
+        alignment = ("right", "left")
+        for letter, ha in zip(letters, alignment, strict=True):
+            ax.text(
+                x,
+                y,
+                letter,
+                ha=ha,
+                va="center",
+                fontsize=fontsize,
+                color=_task_design_progression_color(letter),
+                transform=transform,
+            )
+
+    ax.text(
+        0.5,
+        0.82,
+        TASK_DESIGN_PROGRESSION_DURATION_LABEL,
+        ha="center",
+        va="center",
+        fontsize=5.8,
+        color="black",
+        transform=transform,
+    )
+    ax.add_patch(
+        FancyArrowPatch(
+            (left, 0.20),
+            (arrow_right, 0.20),
+            arrowstyle="-|>",
+            mutation_scale=7.0,
+            linewidth=0.6,
+            color="0.25",
+            transform=transform,
+            clip_on=False,
+        )
+    )
+    for index, (epoch_type, epoch_label, tokens) in enumerate(progression_epochs):
+        x0 = left + index * (epoch_width + gap)
+        if epoch_type == "sleep":
+            add_epoch_rectangle(
+                x0,
+                epoch_width,
+                TASK_DESIGN_PROGRESSION_SLEEP_LABEL,
+            )
+            add_centered_label(
+                x0 + epoch_width / 2.0,
+                y0 + height / 2.0,
+                TASK_DESIGN_PROGRESSION_SLEEP_LABEL,
+                fontsize=3.8,
+                color="0.25",
+            )
+            continue
+
+        add_epoch_rectangle(
+            x0,
+            epoch_width,
+            epoch_label,
+            linewidth=TASK_DESIGN_RUN_EPOCH_LINEWIDTH,
+        )
+        if all(token in {"A", "B"} for token in tokens):
+            add_colored_epoch_letters(
+                x0 + epoch_width / 2.0,
+                y0 + height / 2.0,
+                tokens,
+                fontsize=5.4,
+            )
+        else:
+            add_centered_label(
+                x0 + epoch_width / 2.0,
+                y0 + height / 2.0,
+                epoch_label,
+                fontsize=4.4,
+                color="white" if epoch_label == "dark" else "black",
+            )
+    ax.text(
+        rectangle_right + 0.048,
+        y0 + height / 2.0,
+        "...",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+        color="black",
+        transform=transform,
+    )
+
+
+def draw_w_track_cycle_panel(
+    ax: "Axes",
+    *,
+    include_visual_stimuli: bool = True,
+) -> None:
     """Draw the four-trajectory W-track task cycle schematic."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
+    ax.grid(False)
     ax.axis("off")
 
     for trajectory_type, bounds in CYCLE_TRAJECTORY_LAYOUT:
@@ -2926,7 +3129,8 @@ def draw_w_track_cycle_panel(ax: "Axes") -> None:
             },
             annotation_clip=False,
         )
-    draw_visual_stimuli_schematic(ax)
+    if include_visual_stimuli:
+        draw_visual_stimuli_schematic(ax)
 
 
 def _fraction_histogram_weights(values: np.ndarray) -> np.ndarray:
@@ -2942,7 +3146,7 @@ def _format_delta_advantage_summary(
     *,
     label: str | None = None,
 ) -> str:
-    """Return compact DPP-side summary text for delta log-likelihood values."""
+    """Return compact DGP-side summary text for delta log-likelihood values."""
     values = np.asarray(values, dtype=float).reshape(-1)
     values = values[np.isfinite(values)]
     prefix = "" if label is None else f"{label}\n"
@@ -3118,7 +3322,7 @@ def plot_stability_panel(
 
 
 def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
-    """Plot pooled V1 motor+DPP versus motor delta log-likelihood values."""
+    """Plot pooled V1 motor+DGP versus motor delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     values = np.asarray(
@@ -3167,7 +3371,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     ax.text(
         0.68,
         0.97,
-        "Motor+DPP better",
+        "Motor+DGP better",
         ha="left",
         va="top",
         fontsize=5.5,
@@ -3205,7 +3409,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
 
 
 def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
-    """Plot pooled V1 DPP-versus-absolute-model delta log-likelihood values."""
+    """Plot pooled V1 DGP-versus-absolute-model delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     all_values = np.asarray(
@@ -3287,7 +3491,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DPP better",
+        "DGP better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -3295,8 +3499,8 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     summary_label_by_comparison = {
-        "dpp_vs_absolute_place": "DPP > abs place",
-        "dpp_vs_absolute_task_progression": "DPP > dist.-to-reward",
+        "dpp_vs_absolute_place": "DGP > abs place",
+        "dpp_vs_absolute_task_progression": "DGP > dist.-to-reward",
     }
     for row_index, (comparison, summary, color) in enumerate(summary_rows):
         ax.text(
@@ -3791,9 +3995,12 @@ def draw_panel_b_visual_epoch_icon(
     right_label: str | None = None,
     fill_track: bool = False,
     label_colors: Mapping[str, str] | None = None,
+    region_fill_colors: Mapping[str, str] | None = None,
+    region_fill_alpha: float | None = None,
 ) -> None:
     """Draw one Figure 1B epoch-condition W-track icon."""
-    from matplotlib.patches import Polygon
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Polygon, Rectangle
 
     outline, _points, dims = get_w_track_geometry()
     ax.add_patch(
@@ -3801,9 +4008,53 @@ def draw_panel_b_visual_epoch_icon(
             outline,
             closed=True,
             facecolor="black" if fill_track else "none",
+            edgecolor="none",
+            linewidth=0.0,
+            joinstyle="miter",
+            zorder=1,
+        )
+    )
+    region_rectangles = {
+        "left_arm": (
+            dims["x0"],
+            dims["y1"],
+            dims["x1"] - dims["x0"],
+            dims["y2"] - dims["y1"],
+        ),
+        "right_arm": (
+            dims["x4"],
+            dims["y1"],
+            dims["x5"] - dims["x4"],
+            dims["y2"] - dims["y1"],
+        ),
+    }
+    for region_name, color in (region_fill_colors or {}).items():
+        x, y, width, height = region_rectangles[region_name]
+        facecolor = (
+            color
+            if region_fill_alpha is None
+            else to_rgba(color, alpha=region_fill_alpha)
+        )
+        ax.add_patch(
+            Rectangle(
+                (x, y),
+                width,
+                height,
+                facecolor=facecolor,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=2,
+            )
+        )
+    ax.add_patch(
+        Polygon(
+            outline,
+            closed=True,
+            facecolor="none",
             edgecolor="black",
             linewidth=0.45,
             joinstyle="miter",
+            zorder=3,
         )
     )
     if left_label is not None:
@@ -3998,7 +4249,16 @@ def plot_panel_b_visual_example(
     y_max = _get_panel_b_visual_y_max(example)
 
     icon_specs = (
-        {"left_label": "A", "right_label": "B", "fill_track": False},
+        {
+            "left_label": "A",
+            "right_label": "B",
+            "fill_track": False,
+            "region_fill_colors": {
+                "left_arm": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["A"],
+                "right_arm": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["B"],
+            },
+            "region_fill_alpha": 0.22,
+        },
         {"left_label": "B", "right_label": "A", "fill_track": False},
         {"left_label": None, "right_label": None, "fill_track": True},
     )
@@ -4217,7 +4477,7 @@ def make_figure_1(
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
     plot_panel_e_examples(panel_d_axis, panel_e_examples)
-    panel_d_axis.set_title("Example dark DPP coding cells", fontsize=8, pad=2)
+    panel_d_axis.set_title("Example dark DGP coding cells", fontsize=8, pad=2)
     label_axis(panel_d_axis, "C", x=-0.04, y=1.02)
 
     spacer_axis = fig.add_subplot(outer_grid[2])
@@ -4438,7 +4698,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Directory for cached moved Figure 4A example-cell data. "
+            "Directory for cached moved Figure 2A example-cell data. "
             "Default: <output-dir>/cache."
         ),
     )
@@ -4446,7 +4706,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--refresh-panel-dark-light-example-cache",
         action="store_true",
         help=(
-            "Recompute the moved Figure 4A example cell and overwrite its "
+            "Recompute the moved Figure 2A example cell and overwrite its "
             "cache even when a matching cache exists."
         ),
     )

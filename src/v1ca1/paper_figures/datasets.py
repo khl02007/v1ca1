@@ -80,7 +80,7 @@ def make_figure_epoch_dataset_id(
     )
 
 
-def make_figure_2_epoch_ids(
+def make_figure_4_epoch_ids(
     animal_name: str,
     date: str,
     *,
