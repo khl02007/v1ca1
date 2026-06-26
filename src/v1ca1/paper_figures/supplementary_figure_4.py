@@ -1230,7 +1230,7 @@ def plot_glm_scatter_box_panel(
     ax: "Axes",
     epoch_tables: Sequence[dict[str, Any]],
 ) -> None:
-    """Plot the Figure 4_2 Panel B scatter and box summaries without schematic."""
+    """Plot ripple-GLM scatter and box summaries without schematic."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")

@@ -367,7 +367,7 @@ def test_plot_per_animal_behavior_association_grid_splits_animal_rows(
             row_payload["devexp_table"]["animal_name"].astype(str).tolist()
         )
         for column_index, label in enumerate(
-            ("p<0.05 frac.", "Dev. explained", "Dark DPP corr.")
+            ("p<0.05 frac.", "Dev. explained", "Dark DPP overlap")
         ):
             child_ax = row_ax.inset_axes([0.05 + 0.3 * column_index, 0.2, 0.22, 0.6])
             child_ax.set_xlabel(label)
@@ -396,7 +396,7 @@ def test_plot_per_animal_behavior_association_grid_splits_animal_rows(
     assert [child_ax.get_xlabel() for child_ax in row_axes[1].child_axes] == [
         "p<0.05 frac.",
         "Dev. explained",
-        "Dark DPP corr.",
+        "Dark DPP overlap",
     ]
     plt.close(fig)
 

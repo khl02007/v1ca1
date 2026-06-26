@@ -1489,7 +1489,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert box_ax.get_ylabel() == ""
     assert box_ax.get_xlabel() == "Dev. explained"
     assert box_ax.get_title() == ""
-    assert similarity_ax.get_xlabel() == "Dark DPP corr."
+    assert similarity_ax.get_xlabel() == "Dark DPP overlap"
     assert similarity_ax.get_ylabel() == "Frac. units"
     assert similarity_ax.get_title() == ""
     assert ax.texts[-1].get_text() == (
@@ -1501,7 +1501,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(box_ax.lines) >= 3
     assert len(fraction_ax.collections) == 3
     assert len(fraction_ax.lines) >= 2
-    assert len(similarity_ax.patches) == 11
+    assert len(similarity_ax.patches) == 10
     assert len(similarity_ax.collections) == 0
     assert len(similarity_ax.lines) == 2
     similarity_bin_edges = np.asarray(
@@ -1547,7 +1547,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     ) == 3
     assert box_ax.get_xlim()[0] == pytest.approx(-0.1)
     assert box_ax.get_xlim()[1] == pytest.approx(0.5)
-    assert similarity_ax.get_xlim()[0] == pytest.approx(-0.1)
+    assert similarity_ax.get_xlim()[0] == pytest.approx(0.0)
     assert similarity_ax.get_xlim()[1] == pytest.approx(1.0)
     devexp_box_line_max = max(
         np.nanmax(np.asarray(line.get_xdata(), dtype=float))

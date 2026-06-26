@@ -1,866 +1,558 @@
+"""Generate Figure 2."""
+
 from __future__ import annotations
 
-"""Generate Figure 2 panels moved from the dark-light Figure 3 layout."""
-
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from matplotlib.transforms import Bbox
 import numpy as np
 
-from v1ca1.helper.session import (
-    DEFAULT_DATA_ROOT,
-    REGIONS,
-)
+from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
 from v1ca1.paper_figures.datasets import (
-    DEFAULT_DARK_EPOCH,
-    DEFAULT_LIGHT_EPOCH,
     DatasetId,
     get_processed_datasets,
     normalize_dataset_id,
 )
+from v1ca1.paper_figures import figure_2_common as _figure_2_common
 from v1ca1.paper_figures.figure_1 import get_stability_table_path
-from v1ca1.paper_figures.figure_4 import (
-    DARK_MOVEMENT_FR_CACHE_COLUMNS,
-    DARK_MOVEMENT_FR_CACHE_VERSION,
-    DEFAULT_FIGURE_HEIGHT_MM as FIGURE_4_HEIGHT_MM,
-    DEFAULT_FIGURE_WIDTH_MM as FIGURE_4_WIDTH_MM,
-    load_dark_movement_firing_rate_cache,
-    save_dark_movement_firing_rate_cache,
-)
-from v1ca1.paper_figures.figure_3 import (
-    DEFAULT_OUTPUT_DIR,
+from v1ca1.paper_figures.figure_2_common import *  # noqa: F403
+from v1ca1.paper_figures.figure_2_common import (
+    DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_REGIONS,
     DEFAULT_SIGMA_BINS,
     DEFAULT_SPEED_THRESHOLD_CM_S,
+    FIGURE_2_CONSTRAINED_LAYOUT_PADS,
+    FIGURE_2_PANEL_A_EXAMPLES,
     FIGURE_FORMATS,
-    PANEL_A_EXAMPLES,
-    PANEL_GH_WIDTH_RATIOS,
-    PANEL_H_INDEPENDENT_TRACK_CENTER_Y,
-    PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y,
-    PANEL_H_SHARED_DARK_TRACK_CENTER_Y,
-    PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y,
-    build_panel_c_similarity_pairs,
+    PANEL_AB_WIDTH_RATIOS,
+    PANEL_AB_WSPACE,
+    PANEL_A_EXAMPLE_ROW_HEIGHT_MM,
+    PANEL_A_LABEL_Y,
+    PANEL_A_TITLE_PAD,
+    PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y,
+    PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
+    PANEL_BC_LABEL_Y,
+    PANEL_BC_ROW_HEIGHT_MM,
+    PANEL_BC_TITLE_PAD,
+    PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
+    PANEL_B_EXAMPLE_FIELD_HEIGHT,
+    PANEL_B_EXAMPLE_FIELD_Y,
+    PANEL_B_EXAMPLE_MODEL_COLORS,
+    PANEL_B_EXAMPLE_MODEL_LABELS,
+    PANEL_B_FIELD_LABEL_Y,
+    PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
+    PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
+    PANEL_B_INDEPENDENT_BASIS_LABEL,
+    PANEL_B_LABEL_Y,
+    PANEL_B_MODEL_LABEL_FONTSIZE,
+    PANEL_B_MODEL_LABEL_X,
+    PANEL_B_SEGMENT_MODULATION_LABEL,
+    PANEL_B_SEGMENT_MODULATION_LABEL_Y,
+    PANEL_B_TUNING_CORRELATION_TRAJECTORIES,
+    PANEL_B_TITLE_PAD,
+    PANEL_B_COMPONENT_LABEL_FONTSIZE,
+    PANEL_C_DELTA_AXIS_BOUNDS,
+    PANEL_C_DARK_LIGHT_EXAMPLES,
+    PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS,
+    PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS,
+    PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
+    PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
+    PANEL_C_PREDICTION_LABEL_FONTSIZE,
+    PANEL_C_SCHEMATIC_AXIS_BOUNDS,
+    PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
+    PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
+    PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
+    PANEL_C_SHARED_PREDICTION_LABEL_Y,
+    PANEL_C_SWAP_EXAMPLES,
+    PANEL_C_SWAP_MODEL_COLORS,
+    PANEL_C_SWAP_MODEL_LABELS,
+    PANEL_C_SWAP_MODEL_NAME,
+    PANEL_A_EXAMPLE_Y_MAX_OVERRIDES,
     build_output_path,
-    get_compute_tuning_curve_path,
-    get_dark_epoch,
-    get_light_epoch,
-    get_tuning_similarity_path,
     load_panel_a_example_data,
-    load_panel_c_similarity_table,
+    load_panel_b_tuning_overlap_table,
     load_panel_glm_data,
     parse_dataset_id,
     plot_panel_a_example,
-    plot_panel_g_model_architecture,
-    plot_panel_h_swap_delta,
+    plot_panel_b_dpp_overlap_grouped,
+    plot_panel_b_dpp_overlap_scatter,
+    _align_text_to_reference_display_x,
+    _align_texts_to_reference_display_y,
+    _shift_axis_horizontally,
+)
+from v1ca1.paper_figures.figure_3 import (
+    DEFAULT_OUTPUT_DIR,
+    PANEL_TRAJECTORY_COLORS,
+    PANEL_H_DELTA_TRAJECTORIES,
+    PANEL_H_DELTA_X_LIMITS,
+    _draw_panel_h_track,
+    _filter_panel_h_heldout_delta,
+    _fraction_histogram_weights,
+    get_dark_epoch,
+    get_light_epoch,
+    _plot_panel_e_cross_axis,
+    _panel_model_color,
+    _panel_model_label,
+    _plot_panel_e_place_axis,
+    _plot_panel_g_architecture_schematic,
+    _plot_panel_g_example_columns,
+    _plot_panel_h_switched_segment_example,
+    load_panel_e_decoding_error_table,
 )
 from v1ca1.paper_figures.style import (
+    OUTLINED_HISTOGRAM_KWARGS,
     apply_paper_style,
     figure_size,
     label_axis,
     save_figure,
 )
+from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
 
 
 DEFAULT_OUTPUT_NAME = "figure_2"
-DEFAULT_FIGURE_WIDTH_MM = FIGURE_4_WIDTH_MM
-PANEL_A_TO_GH_HEIGHT_RATIOS = (0.637, 1.3)
-PANEL_A_EXAMPLE_ROW_HEIGHT_MM = 50.4
-PANEL_BC_ROW_HEIGHT_MM = (
-    FIGURE_4_HEIGHT_MM
-    * 1.3
-    * PANEL_A_TO_GH_HEIGHT_RATIOS[1]
-    / sum(PANEL_A_TO_GH_HEIGHT_RATIOS)
+PANEL_A_SINGLE_ROW_HEIGHT_MM = PANEL_A_EXAMPLE_ROW_HEIGHT_MM * 0.76
+PANEL_BC_QUANT_ROW_HEIGHT_MM = PANEL_A_EXAMPLE_ROW_HEIGHT_MM * 0.72
+PANEL_D_ROW_HEIGHT_MM = PANEL_BC_ROW_HEIGHT_MM * 0.82
+PANEL_E_ROW_HEIGHT_MM = PANEL_D_ROW_HEIGHT_MM
+PANEL_BC_ROW_WIDTH_RATIOS = (0.66, 0.34)
+PANEL_BC_ROW_WSPACE = 0.10
+PANEL_E_HORIZONTAL_SHIFT = 0.0
+FIGURE_2_BOTTOM_CROP_MM = 0.0
+DEFAULT_FIGURE_HEIGHT_MM = (
+    PANEL_A_SINGLE_ROW_HEIGHT_MM
+    + PANEL_BC_QUANT_ROW_HEIGHT_MM
+    + PANEL_D_ROW_HEIGHT_MM
+    + PANEL_E_ROW_HEIGHT_MM
 )
-DEFAULT_FIGURE_HEIGHT_MM = PANEL_A_EXAMPLE_ROW_HEIGHT_MM + PANEL_BC_ROW_HEIGHT_MM
-FIGURE_2_CONSTRAINED_LAYOUT_PADS = {
-    "h_pad": 0.01,
-    "w_pad": 0.01,
-    "hspace": 0.01,
-    "wspace": 0.02,
+CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS = {
+    **FIGURE_2_CONSTRAINED_LAYOUT_PADS,
+    "hspace": 0.08,
 }
-PANEL_AB_WIDTH_RATIOS = (0.64, 0.36)
-PANEL_AB_WSPACE = 0.10
-PANEL_A_EXAMPLE_COLUMN_GAP = 0.035
-PANEL_A_EXAMPLE_ROW_GAP = 0.055
-FIGURE_2_PANEL_A_EXAMPLES = (
-    *PANEL_A_EXAMPLES,
-    ("L12", "20240421", "v1", 37, ("center_to_right", "left_to_center")),
-    ("L14", "20240611", "v1", 30, ("center_to_left", "right_to_center")),
+PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS = (0.0, 0.04, 0.49, 0.92)
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS = (0.51, 0.262, 0.49, 0.644)
+PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE = (0.194, 0.241)
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_ICON_BOUNDS = (0.0535, 0.321, 0.063, 0.238)
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_XLABEL_Y = 0.02
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_WIDTH = 0.50
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_GAP = 0.0
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_PLOT_LEFT_OFFSET = 0.26
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_WIDTH = 0.21
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_GAP = 0.08
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP = 0.06
+PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_HEIGHT = (
+    1.0 - PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP
+) / 2.0
+PANEL_D_COMPACT_SLOT_BOUNDS = (
+    (0.060, 0.688, 0.285, 0.190),
+    (0.060, 0.418, 0.285, 0.190),
+    (0.060, 0.148, 0.285, 0.190),
+    (0.585, 0.155, 0.370, 0.585),
 )
-PANEL_A_EXAMPLE_Y_MAX_OVERRIDES = {
-    4: 85.0,
+PANEL_D_COMPACT_EXAMPLE_ICON_BOUNDS = (-0.38, 0.35, 0.18, 0.28)
+PANEL_D_SCHEMATIC_TRACK_SIZE = PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE
+PANEL_D_SCHEMATIC_AXIS_BOUNDS = PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS
+PANEL_D_DELTA_AXIS_BOUNDS = (0.48, 0.264, 0.52, 0.70)
+PANEL_A_SINGLE_ROW_COLUMN_GAP = 0.014
+PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS = (0.00, 0.06, 0.30, 0.84)
+PANEL_B_GROUPED_AXIS_BOUNDS = (0.35, 0.10, 0.26, 0.78)
+PANEL_B_SCATTER_AXIS_BOUNDS = (0.68, 0.01, 0.31, 0.90)
+PANEL_C_CROSS_DECODING_AXIS_BOUNDS = (0.06, 0.07, 0.40, 0.76)
+PANEL_C_PLACE_DECODING_AXIS_BOUNDS = (0.57, 0.07, 0.39, 0.76)
+PANEL_D_MODEL_LABEL_X = -0.055
+PANEL_D_SCHEMATIC_LABEL_FONTSIZE = 3.8
+PANEL_D_TRAIN_TRACK_CENTER_X = 0.174
+PANEL_D_PREDICT_TRACK_CENTER_X = 0.809
+PANEL_D_SHARED_DARK_TRACK_CENTER_X = PANEL_D_TRAIN_TRACK_CENTER_X
+PANEL_D_SHARED_PLUS_X = 0.366
+PANEL_D_SHARED_SEGMENT_TRACK_CENTER_X = 0.507
+PANEL_D_SHARED_ARROW_X = (0.625, 0.700)
+PANEL_D_SHARED_ARROW_Y_OFFSET = 0.0
+PANEL_D_SHARED_LIGHT_TRACK_CENTER_X = PANEL_D_PREDICT_TRACK_CENTER_X
+PANEL_D_INDEPENDENT_TRACK_CENTER_Y = 0.765
+PANEL_D_INDEPENDENT_PREDICTION_LABEL_Y = 0.830
+PANEL_D_SHARED_TRACK_CENTER_Y = 0.354
+PANEL_D_SHARED_PREDICTION_LABEL_Y = 0.124
+PANEL_E_VERTICAL_SHIFT = 0.040
+PANEL_2_3_INDEPENDENT_MODEL_COLOR = "#E69F00"
+PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR = "#0072B2"
+PANEL_DARK_SCAFFOLD_MODEL_LABEL = "Dark scaffold"
+PANEL_B_EXAMPLE_MODEL_COLORS_2_3 = {
+    **PANEL_B_EXAMPLE_MODEL_COLORS,
+    "visual": PANEL_2_3_INDEPENDENT_MODEL_COLOR,
+    PANEL_C_SWAP_MODEL_NAME: PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR,
 }
-PANEL_A_EXAMPLE_CORRELATION_TEXT_OVERRIDES = {
-    3: {
-        "correlation_text_position": (0.04, 0.92),
-        "correlation_text_ha": "left",
-    },
+PANEL_B_EXAMPLE_MODEL_LABELS_2_3 = {
+    **PANEL_B_EXAMPLE_MODEL_LABELS,
+    PANEL_C_SWAP_MODEL_NAME: PANEL_DARK_SCAFFOLD_MODEL_LABEL,
 }
-PANEL_A_LABEL_Y = 1.03
-PANEL_A_TITLE_PAD = 0.5
-PANEL_B_LABEL_Y = 1.03
-PANEL_B_TITLE_PAD = 0.5
-PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD = 0.5
-PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD = 0.75
-PANEL_B_DPP_OVERLAP_METRIC = "absolute_overlap"
-PANEL_B_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
-PANEL_B_TUNING_CORRELATION_TRAJECTORIES = (
-    "center_to_left",
-    "right_to_center",
-    "center_to_right",
-    "left_to_center",
-)
-PANEL_B_DPP_COMPARISON_LABELS = ("left_turn", "right_turn")
-PANEL_B_SINGLE_LIGHT_DPP_AXIS_BOUNDS = (0.12, 0.16, 0.76, 0.70)
-PANEL_B_ACTIVITY_DPP_AXIS_BOUNDS = (0.02, 0.16, 0.40, 0.70)
-PANEL_B_LIGHT_DPP_AXIS_BOUNDS = (0.54, 0.16, 0.44, 0.70)
-PANEL_B_OVERLAP_GROUP_AXIS_BOUNDS = (0.02, 0.17, 0.43, 0.70)
-PANEL_B_OVERLAP_SCATTER_AXIS_BOUNDS = (0.53, 0.10, 0.45, 0.80)
-PANEL_B_BOX_COLORS = {
-    "low_dpp": "#72B7B2",
-    "mid_dpp": "#9E9E9E",
-    "high_dpp": "#E45756",
+PANEL_C_SWAP_MODEL_COLORS_2_3 = {
+    **PANEL_C_SWAP_MODEL_COLORS,
+    "visual": PANEL_2_3_INDEPENDENT_MODEL_COLOR,
+    PANEL_C_SWAP_MODEL_NAME: PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR,
 }
-PANEL_B_ACTIVITY_COLORS = {
-    "inactive": "#E69F00",
-    "active": "#4D4D4D",
+PANEL_C_SWAP_MODEL_LABELS_2_3 = {
+    **PANEL_C_SWAP_MODEL_LABELS,
+    PANEL_C_SWAP_MODEL_NAME: PANEL_DARK_SCAFFOLD_MODEL_LABEL,
 }
-PANEL_BC_LABEL_Y = 1.03
-PANEL_BC_TITLE_PAD = 0.5
-PANEL_B_SCHEMATIC_HEIGHT_FRACTION = 0.72
-PANEL_B_SCHEMATIC_TRACK_SIZE = (0.2025, 0.2547)
-PANEL_B_INDEPENDENT_BASIS_ICON_SCALE = 0.70
-PANEL_B_INDEPENDENT_BASIS_LABEL = "Independent"
-PANEL_B_EXAMPLE_AXIS_BOUNDS = (0.0, 0.01, 1.0, 0.44)
-PANEL_B_EXAMPLE_FIELD_Y = 0.13
-PANEL_B_EXAMPLE_FIELD_HEIGHT = 0.62
-PANEL_B_EXAMPLE_ICON_BOUNDS = (0.04, 0.27, 0.09, 0.34)
-PANEL_B_EXAMPLE_XLABEL_Y = 0.02
-PANEL_B_EXAMPLE_COLUMN_WIDTH = 0.50
-PANEL_B_EXAMPLE_COLUMN_GAP = 0.0
-PANEL_B_EXAMPLE_PLOT_LEFT_OFFSET = 0.20
-PANEL_B_EXAMPLE_FIELD_WIDTH = 0.28
-PANEL_B_EXAMPLE_FIELD_GAP = 0.075
-PANEL_B_EXAMPLE_LAYOUT = "rows"
-PANEL_B_EXAMPLE_ROW_HEIGHT = 0.46
-PANEL_B_EXAMPLE_ROW_GAP = 0.05
-PANEL_B_MODEL_LABEL_X = 0.03
-PANEL_B_MODEL_LABEL_FONTSIZE = 5.8
-PANEL_B_COMPONENT_LABEL_FONTSIZE = 5.8
-PANEL_B_SEGMENT_MODULATION_LABEL = "Segment-specific\nmodulation"
-PANEL_B_SEGMENT_MODULATION_LABEL_Y = 0.545
-PANEL_INDEPENDENT_MODEL_COLOR = "#0072B2"
-PANEL_SHARED_SCAFFOLD_MODEL_COLOR = "#CC79A7"
-PANEL_B_EXAMPLE_SHARED_MODEL_NAME = "task_segment_scalar"
-PANEL_B_EXAMPLE_MODEL_COLORS = {
-    "visual": PANEL_INDEPENDENT_MODEL_COLOR,
-    PANEL_B_EXAMPLE_SHARED_MODEL_NAME: PANEL_SHARED_SCAFFOLD_MODEL_COLOR,
-}
-PANEL_B_EXAMPLE_MODEL_LABELS = {
-    "visual": "Independent",
-    PANEL_B_EXAMPLE_SHARED_MODEL_NAME: "Segment scalar",
-}
-PANEL_C_DARK_LIGHT_EXAMPLES = (
-    ("L14", "20240611", "v1", 30, "center_to_left"),
-    ("L12", "20240421", "v1", 37, "left_to_center"),
-)
-PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
-PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)
-PANEL_C_DELTA_AXIS_BOUNDS = (0.39, 0.35, 0.60, 0.59)
-PANEL_B_MIN_TUNING_STABILITY_CORRELATION = 0.5
-PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION = (
-    PANEL_B_MIN_TUNING_STABILITY_CORRELATION
-)
-PANEL_C_DELTA_GRID_BOUNDS = (
-    (0.035, 0.42, 0.445, 0.50),
-    (0.535, 0.42, 0.445, 0.50),
-    (0.035, -0.22, 0.445, 0.50),
-    (0.535, -0.22, 0.445, 0.50),
-)
-PANEL_C_DELTA_XLABEL_Y = -0.40
-PANEL_C_SWAP_EXAMPLES = (
-    ("L15", "20241121", "v1", 27, "center_to_right"),
-    ("L19", "20250930", "v1", 4, "center_to_left"),
-    ("L15", "20241121", "v1", 146, "center_to_right"),
-)
-PANEL_C_EXAMPLE_AXIS_BOUNDS = (
-    (0.095, -0.18, 0.20, 0.19),
-    (0.405, -0.18, 0.20, 0.19),
-    (0.715, -0.18, 0.20, 0.19),
-)
-PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS = (
-    (0.96, 0.94),
-    (0.96, 0.06),
-    (0.96, 0.94),
-)
-PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS = ("top", "bottom", "top")
-PANEL_C_EXAMPLE_ICON_BOUNDS = (-0.46, 0.28, 0.26, 0.38)
-PANEL_C_PREDICTION_LABEL_FONTSIZE = 5.8
-PANEL_C_SWAP_MODEL_NAME = "task_segment_scalar"
-PANEL_C_SWAP_MODEL_COLORS = {
-    "visual": PANEL_INDEPENDENT_MODEL_COLOR,
-    PANEL_C_SWAP_MODEL_NAME: PANEL_SHARED_SCAFFOLD_MODEL_COLOR,
-}
-PANEL_C_SWAP_MODEL_LABELS = {
-    PANEL_C_SWAP_MODEL_NAME: "Shared-scaffold",
-}
-PANEL_C_INDEPENDENT_TRACK_CENTER_Y = 0.742
-PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y = 0.60
-PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y = 0.34
-PANEL_C_SHARED_DARK_TRACK_CENTER_Y = 0.0
-PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y = 0.17
-PANEL_C_SHARED_PREDICTION_LABEL_Y = -0.24
-PANEL_C_SCHEMATIC_TRACK_SIZE = (0.628, 0.316)
-PANEL_C_HORIZONTAL_SHIFT = -0.025
+MIN_PUBLICATION_FONTSIZE_PT = 6.0
+MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT = frozenset({"A", "B"})
 
 
-def _panel_b_schematic_center_y_for_panel_c_center_y(panel_c_center_y: float) -> float:
-    """Return a Panel B schematic y-center aligned to one Panel C schematic row."""
-    panel_b_schematic_bottom = 1.0 - PANEL_B_SCHEMATIC_HEIGHT_FRACTION
-    panel_c_parent_center_y = (
-        PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS[1]
-        + PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS[3] * float(panel_c_center_y)
-    )
-    return (
-        panel_c_parent_center_y - panel_b_schematic_bottom
-    ) / PANEL_B_SCHEMATIC_HEIGHT_FRACTION
+def __getattr__(name: str) -> Any:
+    """Delegate legacy Figure 2 helper lookups to the shared implementation."""
+    return getattr(_figure_2_common, name)
 
 
-PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y = (
-    _panel_b_schematic_center_y_for_panel_c_center_y(
-        PANEL_H_INDEPENDENT_TRACK_CENTER_Y
-    )
-)
-PANEL_B_FIELD_LABEL_Y = 0.9619
-PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y = (
-    _panel_b_schematic_center_y_for_panel_c_center_y(
-        (
-            PANEL_H_SEGMENT_MODULATION_TRACK_CENTER_Y
-            + PANEL_H_SHARED_DARK_TRACK_CENTER_Y
-            + PANEL_H_SHARED_LIGHT_TRACK_CENTER_Y
-        )
-        / 3.0
-    )
-)
-
-
-def _shift_axis_horizontally(ax: Any, dx_figure_fraction: float) -> None:
-    """Shift one axis after constrained layout has selected its size."""
-    if dx_figure_fraction == 0.0:
+def _shift_axis_vertically(ax: Any, dy_figure_fraction: float) -> None:
+    """Shift one axis vertically after constrained layout selects its size."""
+    if dy_figure_fraction == 0.0:
         return
     box = ax.get_position()
     ax.set_axes_locator(None)
     ax.set_position(
         [
-            box.x0 + dx_figure_fraction,
-            box.y0,
+            box.x0,
+            box.y0 + dy_figure_fraction,
             box.width,
             box.height,
         ]
     )
 
 
-def _align_texts_to_reference_display_y(texts: Sequence[Any]) -> None:
-    """Align text artists to the first text's rendered vertical position."""
-    if len(texts) < 2:
+def _tight_bbox_with_bottom_crop(fig: Any, crop_mm: float) -> Bbox:
+    """Return a tight figure bbox with unused bottom whitespace removed."""
+    fig.canvas.draw()
+    tight_bbox = fig.get_tightbbox(fig.canvas.get_renderer()).padded(0.1)
+    crop_inches = max(float(crop_mm), 0.0) / 25.4
+    return Bbox.from_extents(
+        tight_bbox.x0,
+        tight_bbox.y0 + crop_inches,
+        tight_bbox.x1,
+        tight_bbox.y1,
+    )
+
+
+def _iter_nested_axes(ax: Any) -> Any:
+    """Yield all nested inset axes below one axes."""
+    for child_ax in getattr(ax, "child_axes", ()):
+        yield child_ax
+        yield from _iter_nested_axes(child_ax)
+
+
+def _set_nested_text_fontsize(ax: Any, text_value: str, fontsize: float) -> None:
+    """Set fontsize for matching text in one axes tree."""
+    for candidate_ax in (ax, *_iter_nested_axes(ax)):
+        for text in (
+            candidate_ax.xaxis.label,
+            candidate_ax.yaxis.label,
+            *candidate_ax.texts,
+        ):
+            if text.get_text() == text_value:
+                text.set_fontsize(fontsize)
+
+
+def _replace_nested_text(
+    ax: Any,
+    old_text: str,
+    new_text: str,
+    *,
+    fontsize: float | None = None,
+) -> None:
+    """Replace matching text in one axes tree."""
+    for candidate_ax in (ax, *_iter_nested_axes(ax)):
+        for text in (
+            candidate_ax.xaxis.label,
+            candidate_ax.yaxis.label,
+            *candidate_ax.texts,
+        ):
+            if text.get_text() == old_text:
+                text.set_text(new_text)
+                if fontsize is not None:
+                    text.set_fontsize(fontsize)
+
+
+def _keep_last_nested_text(
+    ax: Any,
+    text_value: str,
+    *,
+    replacement: str | None = None,
+    fontsize: float | None = None,
+) -> None:
+    """Keep only the final matching text in one axes tree."""
+    matches = []
+    for candidate_ax in (ax, *_iter_nested_axes(ax)):
+        for text in (
+            candidate_ax.xaxis.label,
+            candidate_ax.yaxis.label,
+            *candidate_ax.texts,
+        ):
+            if text.get_text() == text_value:
+                matches.append(text)
+    for text in matches[:-1]:
+        text.set_text("")
+    if not matches:
         return
-    for text in texts:
-        axes = getattr(text, "axes", None)
-        if axes is not None and text is axes.title:
-            axes._autotitlepos = False
-    reference_display = texts[0].get_transform().transform(texts[0].get_position())
-    for text in texts[1:]:
-        x_position, _y_position = text.get_position()
-        display_position = text.get_transform().transform(text.get_position())
-        adjusted_position = text.get_transform().inverted().transform(
-            (display_position[0], reference_display[1])
-        )
-        text.set_position((x_position, float(adjusted_position[1])))
+    if replacement is not None:
+        matches[-1].set_text(replacement)
+    if fontsize is not None:
+        matches[-1].set_fontsize(fontsize)
 
 
-def _align_text_to_reference_display_x(text: Any, reference_text: Any) -> None:
-    """Align one text artist to another text artist's rendered horizontal position."""
-    reference_display = reference_text.get_transform().transform(
-        reference_text.get_position()
-    )
-    x_position, _y_position = text.get_position()
-    display_position = text.get_transform().transform(text.get_position())
-    adjusted_position = text.get_transform().inverted().transform(
-        (reference_display[0], display_position[1])
-    )
-    text.set_position((float(adjusted_position[0]), _y_position))
-
-
-def _format_panel_b_cache_token(value: Any) -> str:
-    """Return a filesystem-safe token for one Panel B cache value."""
-    token = "".join(
-        character if character.isalnum() else "_"
-        for character in str(value).strip()
-    ).strip("_")
-    return token or "none"
-
-
-def _format_panel_b_cache_number(value: float) -> str:
-    """Return a compact Panel B numeric cache token."""
-    return f"{float(value):g}".replace("-", "m").replace(".", "p")
-
-
-def build_panel_b_dark_movement_firing_rate_cache_metadata(
-    *,
-    data_root: Path,
-    animal_name: str,
-    date: str,
-    dark_epoch: str,
-    region: str,
-    panel: str = "B",
-) -> dict[str, Any]:
-    """Return metadata for one Panel B dark movement firing-rate cache."""
-    return {
-        "cache_version": DARK_MOVEMENT_FR_CACHE_VERSION,
-        "figure": DEFAULT_OUTPUT_NAME,
-        "panel": str(panel),
-        "artifact": "dark_movement_firing_rate",
-        "data_root": str(Path(data_root)),
-        "animal_name": str(animal_name),
-        "date": str(date),
-        "dark_epoch": str(dark_epoch),
-        "region": str(region),
-        "speed_threshold_cm_s": float(DEFAULT_SPEED_THRESHOLD_CM_S),
-        "columns": list(DARK_MOVEMENT_FR_CACHE_COLUMNS),
-    }
-
-
-def build_panel_b_dark_movement_firing_rate_cache_path(
-    cache_dir: Path,
-    metadata: dict[str, Any],
-) -> Path:
-    """Return the descriptive cache path for one Panel B dark-rate table."""
-    region = _format_panel_b_cache_token(metadata["region"])
-    animal_name = _format_panel_b_cache_token(metadata["animal_name"])
-    date = _format_panel_b_cache_token(metadata["date"])
-    dark_epoch = _format_panel_b_cache_token(metadata["dark_epoch"])
-    speed = _format_panel_b_cache_number(float(metadata["speed_threshold_cm_s"]))
-    cache_version = int(metadata["cache_version"])
-    filename = (
-        f"{DEFAULT_OUTPUT_NAME}_dark_movement_firing_rate_"
-        f"{region}_{animal_name}_{date}_{dark_epoch}"
-        f"_speed{speed}_cachev{cache_version}.parquet"
-    )
-    return Path(cache_dir) / filename
-
-
-def load_panel_b_dark_movement_firing_rate_table(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    dark_epoch: str,
-    region: str,
-    cache_dir: Path | None,
-    refresh_cache: bool,
-) -> Any:
-    """Return dark movement firing rates for the Panel B activity split."""
-    import pandas as pd
-
-    from v1ca1.helper.session import compute_movement_firing_rates
-    from v1ca1.task_progression._session import prepare_task_progression_session
-
-    metadata = build_panel_b_dark_movement_firing_rate_cache_metadata(
-        data_root=data_root,
-        animal_name=animal_name,
-        date=date,
-        dark_epoch=dark_epoch,
-        region=region,
-    )
-    cache_path = (
-        build_panel_b_dark_movement_firing_rate_cache_path(cache_dir, metadata)
-        if cache_dir is not None
-        else None
-    )
-    if cache_path is not None and not refresh_cache:
-        cached_table = load_dark_movement_firing_rate_cache(cache_path, metadata)
-        if cached_table is not None:
-            print(f"Loaded Panel B dark movement firing-rate cache from {cache_path}.")
-            return cached_table
-        historical_metadata = build_panel_b_dark_movement_firing_rate_cache_metadata(
-            data_root=data_root,
-            animal_name=animal_name,
-            date=date,
-            dark_epoch=dark_epoch,
-            region=region,
-            panel="D",
-        )
-        cached_table = load_dark_movement_firing_rate_cache(
-            cache_path,
-            historical_metadata,
-        )
-        if cached_table is not None:
-            print(
-                "Loaded historical Panel D dark movement firing-rate cache "
-                f"from {cache_path}."
-            )
-            return cached_table
-
-    session = prepare_task_progression_session(
-        animal_name=animal_name,
-        date=date,
-        data_root=data_root,
-        regions=(region,),
-        selected_run_epochs=[dark_epoch],
-        load_body_position=False,
-        include_generalized_place=False,
-    )
-    movement_firing_rates = compute_movement_firing_rates(
-        session["spikes_by_region"],
-        session["movement_by_run"],
-        session["run_epochs"],
-    )
-    spikes = session["spikes_by_region"][region]
-    unit_ids = np.asarray(list(spikes.keys()), dtype=int)
-    firing_rates_hz = np.asarray(movement_firing_rates[region][dark_epoch], dtype=float)
-    if unit_ids.shape[0] != firing_rates_hz.shape[0]:
-        raise ValueError(
-            "Panel B dark movement firing-rate table is not aligned with spike unit IDs: "
-            f"{unit_ids.shape[0]} unit IDs and {firing_rates_hz.shape[0]} rates."
-        )
-    table = pd.DataFrame(
-        {
-            "unit": unit_ids,
-            "dark_firing_rate_hz": firing_rates_hz,
-        }
-    )
-    if cache_path is not None:
-        save_dark_movement_firing_rate_cache(cache_path, table, metadata)
-        print(f"Saved Panel B dark movement firing-rate cache to {cache_path}.")
-    return table
-
-
-def _compute_curve_correlation(first: np.ndarray, second: np.ndarray) -> float:
-    """Return the finite Pearson correlation between two tuning curves."""
-    first = np.asarray(first, dtype=float)
-    second = np.asarray(second, dtype=float)
-    if first.shape != second.shape:
-        return float("nan")
-    valid = np.isfinite(first) & np.isfinite(second)
-    if np.sum(valid) < 2:
-        return float("nan")
-    first_values = first[valid]
-    second_values = second[valid]
-    if np.nanstd(first_values) <= 0.0 or np.nanstd(second_values) <= 0.0:
-        return float("nan")
-    return float(np.corrcoef(first_values, second_values)[0, 1])
-
-
-def _compute_curve_peak(values: np.ndarray) -> float:
-    """Return the finite peak firing rate in one tuning curve."""
-    values = np.asarray(values, dtype=float)
-    finite_values = values[np.isfinite(values)]
-    if not finite_values.size:
-        return float("nan")
-    return float(np.nanmax(finite_values))
-
-
-def _select_dark_peak_tuning_correlation(
-    records: Sequence[tuple[str, float, float]],
-) -> tuple[str, float, float] | None:
-    """Return trajectory, correlation, and peak for the largest dark tuning peak."""
-    finite_peak_records = [
-        (str(trajectory), float(correlation), float(dark_peak))
-        for trajectory, correlation, dark_peak in records
-        if np.isfinite(dark_peak)
-    ]
-    if not finite_peak_records:
-        return None
-    return max(finite_peak_records, key=lambda item: item[2])
-
-
-def load_panel_b_light_dark_tuning_correlation_table(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    light_epoch: str,
-    dark_epoch: str,
-    region: str,
-) -> Any:
-    """Return per-unit light-vs-dark correlations for the dark peak trajectory."""
-    import pandas as pd
-    import xarray as xr
-
-    correlations: dict[int, list[tuple[str, float, float]]] = {}
-    for trajectory in PANEL_B_TUNING_CORRELATION_TRAJECTORIES:
-        light_path = get_compute_tuning_curve_path(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            epoch=light_epoch,
-            trajectory=trajectory,
-        )
-        dark_path = get_compute_tuning_curve_path(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            epoch=dark_epoch,
-            trajectory=trajectory,
-        )
-        if not light_path.exists():
-            raise FileNotFoundError(f"Missing light tuning-curve artifact: {light_path}")
-        if not dark_path.exists():
-            raise FileNotFoundError(f"Missing dark tuning-curve artifact: {dark_path}")
-        with xr.open_dataarray(light_path) as light_curves, xr.open_dataarray(
-            dark_path
-        ) as dark_curves:
-            units = np.intersect1d(
-                np.asarray(light_curves.coords["unit"].values, dtype=int),
-                np.asarray(dark_curves.coords["unit"].values, dtype=int),
-            )
-            for unit_id in units:
-                light_curve = light_curves.sel(unit=int(unit_id)).values
-                dark_curve = dark_curves.sel(unit=int(unit_id)).values
-                correlations.setdefault(int(unit_id), []).append(
-                    (
-                        trajectory,
-                        _compute_curve_correlation(light_curve, dark_curve),
-                        _compute_curve_peak(dark_curve),
-                    )
-                )
-
-    rows = []
-    for unit_id, unit_correlations in correlations.items():
-        selected_record = _select_dark_peak_tuning_correlation(unit_correlations)
-        if selected_record is None:
+def _set_nested_legend_fontsize(ax: Any, fontsize: float) -> None:
+    """Set legend text size throughout one axes tree."""
+    for candidate_ax in (ax, *_iter_nested_axes(ax)):
+        legend = candidate_ax.get_legend()
+        if legend is None:
             continue
-        best_trajectory, best_correlation, best_dark_peak = selected_record
-        if not np.isfinite(best_correlation):
-            continue
-        rows.append(
-            {
-                "animal_name": animal_name,
-                "date": date,
-                "unit": int(unit_id),
-                "light_epoch": light_epoch,
-                "dark_epoch": dark_epoch,
-                "best_trajectory": best_trajectory,
-                "best_dark_peak_firing_rate_hz": float(best_dark_peak),
-                "light_dark_tuning_correlation": float(best_correlation),
-            }
-        )
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "animal_name",
-            "date",
-            "unit",
-            "light_epoch",
-            "dark_epoch",
-            "best_trajectory",
-            "best_dark_peak_firing_rate_hz",
-            "light_dark_tuning_correlation",
-        ],
-    )
+        for text in legend.get_texts():
+            text.set_fontsize(fontsize)
 
 
-def _load_panel_b_saved_place_tuning_curves(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    region: str,
-    epoch: str,
-    trajectories: Sequence[str],
-) -> dict[str, Any]:
-    """Load cached trajectory tuning curves for DPP-overlap fallback."""
-    import xarray as xr
+def _raise_text_to_minimum_fontsize(fig: Any, min_fontsize: float) -> None:
+    """Raise final figure text to a minimum size, preserving icon A/B labels."""
+    seen_axes: set[int] = set()
 
-    curves: dict[str, Any] = {}
-    for trajectory in trajectories:
-        path = get_compute_tuning_curve_path(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            epoch=epoch,
-            trajectory=trajectory,
-        )
-        if not path.exists():
-            raise FileNotFoundError(f"Missing tuning-curve artifact: {path}")
-        with xr.open_dataarray(path) as data_array:
-            if "unit" not in data_array.dims:
-                raise ValueError(f"Tuning curve {path} is missing a unit dimension.")
-            data_array = data_array.transpose("unit", ...)
-            units = np.asarray(data_array.coords["unit"].values, dtype=int)
-            values = np.asarray(data_array.values, dtype=float)
-        curves[str(trajectory)] = {
-            "units": units,
-            "values": values.reshape(values.shape[0], -1),
-            "index_by_unit": {int(unit): index for index, unit in enumerate(units)},
-        }
-    return curves
+    def _maybe_raise(text: Any) -> None:
+        if text is None:
+            return
+        if text.get_text().strip() in MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT:
+            return
+        if text.get_fontsize() < min_fontsize:
+            text.set_fontsize(min_fontsize)
 
-
-def _compute_panel_b_similarity_from_saved_curves(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    epoch: str,
-    region: str,
-    similarity_metric: str,
-) -> Any:
-    """Compute one within-epoch similarity table from cached tuning curves."""
-    import pandas as pd
-
-    from v1ca1.task_progression.tuning_analysis import (
-        DIRECT_COMPARISON_SPECS,
-        compute_similarity_score,
-    )
-
-    reference_path = get_tuning_similarity_path(
-        data_root,
-        animal_name=animal_name,
-        date=date,
-        region=region,
-        epoch=epoch,
-    )
-    if not reference_path.exists():
-        raise FileNotFoundError(
-            f"Missing reference tuning-similarity artifact: {reference_path}"
-        )
-    reference_table = pd.read_parquet(reference_path)
-    required_columns = ("unit", "region", "epoch", "comparison_label")
-    missing_columns = [
-        column for column in required_columns if column not in reference_table.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"Tuning similarity table {reference_path} is missing columns "
-            f"{missing_columns!r}."
-        )
-
-    trajectories = sorted(
-        {str(spec["trajectory_a"]) for spec in DIRECT_COMPARISON_SPECS}
-        | {str(spec["trajectory_b"]) for spec in DIRECT_COMPARISON_SPECS}
-    )
-    curves = _load_panel_b_saved_place_tuning_curves(
-        data_root,
-        animal_name=animal_name,
-        date=date,
-        region=region,
-        epoch=epoch,
-        trajectories=trajectories,
-    )
-
-    rows: list[dict[str, Any]] = []
-    for spec in DIRECT_COMPARISON_SPECS:
-        comparison_label = str(spec["comparison_label"])
-        reference_rows = reference_table[
-            (reference_table["region"].astype(str) == str(region))
-            & (reference_table["epoch"].astype(str) == str(epoch))
-            & (reference_table["comparison_label"].astype(str) == comparison_label)
-        ].copy()
-        if reference_rows.empty:
-            continue
-        reference_rows["unit"] = pd.to_numeric(reference_rows["unit"], errors="coerce")
-        reference_rows = reference_rows[
-            np.isfinite(reference_rows["unit"].to_numpy(dtype=float))
-        ].copy()
-        reference_rows["unit"] = reference_rows["unit"].astype(int)
-
-        trajectory_a = str(spec["trajectory_a"])
-        trajectory_b = str(spec["trajectory_b"])
-        curve_a = curves[trajectory_a]
-        curve_b = curves[trajectory_b]
-        common_units = set(
-            np.intersect1d(curve_a["units"], curve_b["units"]).tolist()
-        )
-        for _row_index, reference_row in reference_rows.iterrows():
-            unit = int(reference_row["unit"])
-            if unit not in common_units:
+    for ax in fig.axes:
+        for candidate_ax in (ax, *_iter_nested_axes(ax)):
+            axis_id = id(candidate_ax)
+            if axis_id in seen_axes:
                 continue
-            values_a = curve_a["values"][curve_a["index_by_unit"][unit]]
-            values_b = curve_b["values"][curve_b["index_by_unit"][unit]]
-            if bool(spec["flip_trajectory_b"]):
-                values_b = values_b[::-1]
-            similarity = compute_similarity_score(
-                values_a,
-                values_b,
-                similarity_metric=similarity_metric,
-            )
-            if not np.isfinite(similarity):
-                continue
-            rows.append(
-                {
-                    "unit": unit,
-                    "region": str(region),
-                    "epoch": str(epoch),
-                    "comparison_label": comparison_label,
-                    "similarity": float(similarity),
-                }
-            )
+            seen_axes.add(axis_id)
+            _maybe_raise(candidate_ax.title)
+            _maybe_raise(candidate_ax.xaxis.label)
+            _maybe_raise(candidate_ax.yaxis.label)
+            for tick_label in candidate_ax.get_xticklabels():
+                _maybe_raise(tick_label)
+            for tick_label in candidate_ax.get_yticklabels():
+                _maybe_raise(tick_label)
+            for text in candidate_ax.texts:
+                _maybe_raise(text)
+            legend = candidate_ax.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    _maybe_raise(text)
 
-    if not rows:
-        return pd.DataFrame(
-            columns=["unit", "region", "epoch", "comparison_label", "similarity"]
+
+def _remove_axis_tick_label_lines(ax: Any, prefixes: Sequence[str]) -> None:
+    """Remove tick-label lines that begin with any prefix."""
+    cleaned_labels = []
+    for tick in ax.get_xticklabels():
+        lines = [
+            line
+            for line in tick.get_text().splitlines()
+            if not any(line.startswith(prefix) for prefix in prefixes)
+        ]
+        cleaned_labels.append("\n".join(lines))
+    ax.set_xticklabels(cleaned_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
+
+
+def plot_panel_a_examples_single_row(
+    ax: Any,
+    examples: Sequence[dict[str, Any]],
+) -> None:
+    """Plot all Figure 2 Panel A examples in one horizontal row."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    if not examples:
+        ax.text(0.5, 0.5, "No examples", ha="center", va="center")
+        return
+
+    column_count = len(examples)
+    column_width = (
+        1.0 - PANEL_A_SINGLE_ROW_COLUMN_GAP * (column_count - 1)
+    ) / column_count
+    for example_index, example in enumerate(examples, start=1):
+        left = (example_index - 1) * (
+            column_width + PANEL_A_SINGLE_ROW_COLUMN_GAP
         )
-    return pd.DataFrame(rows)
+        example_ax = ax.inset_axes([left, 0.0, column_width, 1.0])
+        plot_kwargs: dict[str, Any] = {
+            "title": None,
+            "show_correlation": False,
+            "similarity_annotation": "dppi",
+        }
+        y_max_override = PANEL_A_EXAMPLE_Y_MAX_OVERRIDES.get(example_index)
+        if y_max_override is not None:
+            plot_kwargs["y_max"] = y_max_override
+        plot_panel_a_example(example_ax, example, **plot_kwargs)
+        rate_axes = [
+            child_ax for child_ax in example_ax.child_axes if child_ax.get_xlabel()
+        ]
+        for rate_ax in rate_axes:
+            rate_ax.set_xlabel("")
+            rate_ax.tick_params(
+                axis="x",
+                labelsize=MIN_PUBLICATION_FONTSIZE_PT,
+                pad=0.4,
+            )
+        example_ax.text(
+            0.5,
+            0.985,
+            f"Example cell {example_index}",
+            ha="center",
+            va="top",
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            transform=example_ax.transAxes,
+        )
+        example_ax.text(
+            0.5,
+            -0.045,
+            "Norm. path progression",
+            ha="center",
+            va="top",
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            transform=example_ax.transAxes,
+            clip_on=False,
+        )
 
 
-def load_panel_b_dpp_similarity_table(
+def _draw_overlap_curve_schematic(
+    ax: Any,
+    *,
+    position: np.ndarray,
+    first_rate: np.ndarray,
+    second_rate: np.ndarray,
+    first_color: str,
+    second_color: str,
+) -> None:
+    """Draw one schematic same-turn overlap computation."""
+    x = np.asarray(position, dtype=float)
+    curve_a = np.clip(np.asarray(first_rate, dtype=float), 0.0, None)
+    curve_b = np.clip(np.asarray(second_rate, dtype=float), 0.0, None)
+    valid = np.isfinite(x) & np.isfinite(curve_a) & np.isfinite(curve_b)
+    x = x[valid]
+    curve_a = curve_a[valid]
+    curve_b = curve_b[valid]
+    if x.size < 2:
+        return
+    scale = max(float(np.nanmax(curve_a)), float(np.nanmax(curve_b)), 1.0)
+    display_scale = 1.35
+    curve_a = curve_a / scale * display_scale
+    curve_b = curve_b / scale * display_scale
+    overlap = np.minimum(curve_a, curve_b)
+    envelope = np.maximum(curve_a, curve_b)
+
+    ax.fill_between(x, 0.0, envelope, color="0.90", linewidth=0.0, zorder=1)
+    ax.fill_between(
+        x,
+        0.0,
+        overlap,
+        facecolor="0.78",
+        edgecolor="black",
+        linewidth=0.15,
+        hatch="//////",
+        zorder=2,
+    )
+    ax.plot(x, curve_a, color=first_color, linewidth=1.25, zorder=3)
+    ax.plot(x, curve_b, color=second_color, linewidth=1.25, zorder=4)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.42)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_linewidth(0.45)
+
+
+def plot_panel_b_dppi_schematic(
+    ax: Any,
+    example: dict[str, Any],
+) -> None:
+    """Draw a compact schematic defining DPPI as max same-turn overlap."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    trajectories = tuple(str(trajectory) for trajectory in example["trajectories"])
+    if len(trajectories) < 2:
+        ax.text(0.5, 0.5, "No example\ncurves", ha="center", va="center")
+        return
+    first_trajectory, second_trajectory = trajectories[:2]
+    curve_position = np.linspace(0.0, 1.0, 121)
+    first_rate = np.exp(-0.5 * ((curve_position - 0.44) / 0.075) ** 2)
+    second_rate = 0.92 * np.exp(-0.5 * ((curve_position - 0.57) / 0.075) ** 2)
+    ax.text(
+        0.0,
+        1.0,
+        "DPP index",
+        ha="left",
+        va="top",
+        fontsize=5.8,
+        fontweight="bold",
+    )
+    ax.text(
+        0.02,
+        0.84,
+        "same-turn pair",
+        ha="left",
+        va="top",
+        fontsize=4.7,
+    )
+    for icon_index, trajectory_name in enumerate((first_trajectory, second_trajectory)):
+        draw_w_track_schematic(
+            ax.inset_axes([0.02 + icon_index * 0.14, 0.61, 0.12, 0.18]),
+            trajectory_name=trajectory_name,
+            track_linewidth=0.42,
+            trajectory_linewidth=0.72,
+            arrow_mutation_scale=5.8,
+            fill_track=False,
+        )
+    ax.text(
+        0.02,
+        0.58,
+        "overlap = hatched / gray",
+        ha="left",
+        va="top",
+        fontsize=4.4,
+    )
+    curve_ax = ax.inset_axes([0.04, 0.20, 0.90, 0.31])
+    _draw_overlap_curve_schematic(
+        curve_ax,
+        position=curve_position,
+        first_rate=first_rate,
+        second_rate=second_rate,
+        first_color=PANEL_TRAJECTORY_COLORS[first_trajectory],
+        second_color=PANEL_TRAJECTORY_COLORS[second_trajectory],
+    )
+
+    ax.text(
+        0.02,
+        0.03,
+        "DPPI = max(left, right)",
+        ha="left",
+        va="bottom",
+        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+        linespacing=0.88,
+    )
+
+
+def _load_panel_b_stable_units_for_epoch(
     data_root: Path,
     *,
     animal_name: str,
     date: str,
     epoch: str,
+    epoch_type: str,
     region: str,
-    value_column: str,
-    similarity_metric: str = "correlation",
+    min_stability_correlation: float,
 ) -> Any:
-    """Return each unit's same-turn DPP similarities for one epoch."""
+    """Return units with stable even-odd tuning in at least one DPP trajectory."""
     import pandas as pd
-
-    if similarity_metric == "correlation":
-        path = get_tuning_similarity_path(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            epoch=epoch,
-        )
-    else:
-        path = get_tuning_similarity_path(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            epoch=epoch,
-            similarity_metric=similarity_metric,
-        )
-    if path.exists():
-        table = pd.read_parquet(path)
-    elif similarity_metric != "correlation":
-        table = _compute_panel_b_similarity_from_saved_curves(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            epoch=epoch,
-            region=region,
-            similarity_metric=similarity_metric,
-        )
-    else:
-        raise FileNotFoundError(f"Missing DPP similarity artifact: {path}")
-    missing_columns = [
-        column
-        for column in ("unit", "region", "epoch", "comparison_label", "similarity")
-        if column not in table.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"DPP similarity table {path} is missing columns {missing_columns!r}."
-        )
-    rows = table[
-        (table["region"].astype(str) == str(region))
-        & (table["epoch"].astype(str) == str(epoch))
-        & (
-            table["comparison_label"]
-            .astype(str)
-            .isin(PANEL_B_DPP_COMPARISON_LABELS)
-        )
-    ].copy()
-    rows["unit"] = pd.to_numeric(rows["unit"], errors="coerce")
-    rows["similarity"] = pd.to_numeric(rows["similarity"], errors="coerce")
-    rows = rows[
-        np.isfinite(rows["unit"].to_numpy(dtype=float))
-        & np.isfinite(rows["similarity"].to_numpy(dtype=float))
-    ].copy()
-    if rows.empty:
-        return pd.DataFrame(columns=["unit", "comparison_label", value_column])
-    rows["unit"] = rows["unit"].astype(int)
-    rows["comparison_label"] = rows["comparison_label"].astype(str)
-    return rows.loc[:, ["unit", "comparison_label", "similarity"]].rename(
-        columns={"similarity": value_column}
-    )
-
-
-def load_panel_b_dark_dpp_index_table(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    dark_epoch: str,
-    region: str,
-    similarity_metric: str = "correlation",
-) -> Any:
-    """Return each unit's dark-selected same-turn DPP index."""
-    import pandas as pd
-
-    rows = load_panel_b_dpp_similarity_table(
-        data_root,
-        animal_name=animal_name,
-        date=date,
-        epoch=dark_epoch,
-        region=region,
-        value_column="dark_dpp_index",
-        similarity_metric=similarity_metric,
-    )
-    if rows.empty:
-        return pd.DataFrame(
-            columns=["unit", "dpp_comparison_label", "dark_dpp_index"]
-        )
-    rows = rows.sort_values(
-        ["unit", "dark_dpp_index", "comparison_label"],
-        ascending=[True, False, True],
-    )
-    return (
-        rows.drop_duplicates("unit", keep="first")
-        .rename(columns={"comparison_label": "dpp_comparison_label"})
-        .reset_index(drop=True)
-    )
-
-
-def load_panel_b_light_dpp_index_table(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    light_epoch: str,
-    region: str,
-    similarity_metric: str = "correlation",
-) -> Any:
-    """Return each unit's light same-turn DPP similarities."""
-    return load_panel_b_dpp_similarity_table(
-        data_root,
-        animal_name=animal_name,
-        date=date,
-        epoch=light_epoch,
-        region=region,
-        value_column="light_dpp_index",
-        similarity_metric=similarity_metric,
-    )
-
-
-def load_panel_b_light_tuning_stability_table(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    light_epoch: str,
-    region: str,
-    min_tuning_stability_correlation: float = (
-        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
-    ),
-) -> Any:
-    """Return units stable in at least one light trajectory for Figure 2B."""
-    import pandas as pd
-
-    if min_tuning_stability_correlation < -1.0:
-        raise ValueError("min_tuning_stability_correlation must be at least -1.")
 
     path = get_stability_table_path(data_root, animal_name, date)
     if not path.exists():
@@ -870,24 +562,22 @@ def load_panel_b_light_tuning_stability_table(
             "for this session first."
         )
     table = pd.read_parquet(path)
-    missing_columns = [
-        column
-        for column in (
-            "unit",
-            "region",
-            "epoch",
-            "trajectory_type",
-            "stability_correlation",
-        )
-        if column not in table.columns
-    ]
+    required_columns = (
+        "unit",
+        "region",
+        "epoch",
+        "trajectory_type",
+        "stability_correlation",
+    )
+    missing_columns = [column for column in required_columns if column not in table]
     if missing_columns:
         raise ValueError(
             f"Tuning stability table {path} is missing columns {missing_columns!r}."
         )
+
     rows = table[
         (table["region"].astype(str) == str(region))
-        & (table["epoch"].astype(str) == str(light_epoch))
+        & (table["epoch"].astype(str) == str(epoch))
         & (
             table["trajectory_type"]
             .astype(str)
@@ -903,1084 +593,655 @@ def load_panel_b_light_tuning_stability_table(
         np.isfinite(rows["unit"].to_numpy(dtype=float))
         & np.isfinite(rows["stability_correlation"].to_numpy(dtype=float))
         & (
-            rows["stability_correlation"]
-            >= float(min_tuning_stability_correlation)
+            rows["stability_correlation"].to_numpy(dtype=float)
+            >= float(min_stability_correlation)
         )
     ].copy()
+    stability_column = f"max_{epoch_type}_tuning_stability_correlation"
     if rows.empty:
         return pd.DataFrame(
-            columns=["unit", "max_light_tuning_stability_correlation"]
+            columns=[
+                "animal_name",
+                "date",
+                "unit",
+                stability_column,
+            ]
         )
     rows["unit"] = rows["unit"].astype(int)
-    return (
+    stable_units = (
         rows.groupby("unit", as_index=False, observed=False)[
             "stability_correlation"
         ]
         .max()
-        .rename(
-            columns={
-                "stability_correlation": "max_light_tuning_stability_correlation"
-            }
-        )
+        .rename(columns={"stability_correlation": stability_column})
     )
+    return stable_units.assign(animal_name=animal_name, date=date)
 
 
-def load_panel_b_tuning_correlation_table(
-    *,
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-) -> Any:
-    """Return the Figure 3B scatter pairs used for the Figure 2B projection."""
-    similarity_table = load_panel_c_similarity_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-    )
-    return build_panel_c_similarity_pairs(similarity_table)
-
-
-def load_panel_b_tuning_overlap_table(
-    *,
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    similarity_metric: str = PANEL_B_DPP_OVERLAP_METRIC,
-) -> Any:
-    """Return paired dark/light DPP overlap values for panel B."""
-    import pandas as pd
-
-    tables = []
-    for dataset in datasets:
-        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
-        dataset_light_epoch = get_light_epoch(animal_name, date, light_epoch)
-        dataset_dark_epoch = get_dark_epoch(animal_name, date, dark_epoch)
-        for epoch_type, epoch in (
-            ("dark", dataset_dark_epoch),
-            ("light", dataset_light_epoch),
-        ):
-            rows = load_panel_b_dpp_similarity_table(
-                data_root,
-                animal_name=animal_name,
-                date=date,
-                epoch=epoch,
-                region=region,
-                value_column="similarity",
-                similarity_metric=similarity_metric,
-            )
-            if rows.empty:
-                continue
-            rows = rows.assign(
-                animal_name=animal_name,
-                date=date,
-                epoch_type=epoch_type,
-                epoch=epoch,
-            )
-            tables.append(
-                rows[
-                    [
-                        "animal_name",
-                        "date",
-                        "epoch_type",
-                        "epoch",
-                        "unit",
-                        "comparison_label",
-                        "similarity",
-                    ]
-                ]
-            )
-
-    if not tables:
-        return pd.DataFrame(
-            columns=[
-                "animal_name",
-                "date",
-                "unit",
-                "comparison_label",
-                "similarity_light",
-                "similarity_dark",
-            ]
-        )
-    return build_panel_c_similarity_pairs(pd.concat(tables, axis=0, ignore_index=True))
-
-
-def load_panel_b_dark_activity_light_dpp_table(
-    *,
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    dark_movement_fr_cache_dir: Path | None,
-    refresh_dark_movement_fr_cache: bool = False,
-    dark_activity_threshold_hz: float = PANEL_B_DARK_ACTIVITY_THRESHOLD_HZ,
-    min_tuning_stability_correlation: float = (
-        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
-    ),
-) -> Any:
-    """Return stable-light cells with light DPP and dark activity labels."""
-    import pandas as pd
-
-    tables = []
-    for dataset in datasets:
-        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
-        dataset_light_epoch = get_light_epoch(animal_name, date, light_epoch)
-        dataset_dark_epoch = get_dark_epoch(animal_name, date, dark_epoch)
-        light_dpp = load_panel_b_light_dpp_index_table(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            light_epoch=dataset_light_epoch,
-            region=region,
-        )
-        dark_activity = load_panel_b_dark_movement_firing_rate_table(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            dark_epoch=dataset_dark_epoch,
-            region=region,
-            cache_dir=dark_movement_fr_cache_dir,
-            refresh_cache=refresh_dark_movement_fr_cache,
-        )
-        light_stability = load_panel_b_light_tuning_stability_table(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            light_epoch=dataset_light_epoch,
-            region=region,
-            min_tuning_stability_correlation=min_tuning_stability_correlation,
-        )
-        if light_dpp.empty or dark_activity.empty or light_stability.empty:
-            continue
-        light_dpp = light_dpp.copy()
-        dark_activity = dark_activity.copy()
-        light_stability = light_stability.copy()
-        light_dpp["unit"] = pd.to_numeric(
-            light_dpp["unit"],
-            errors="coerce",
-        )
-        light_dpp["light_dpp_index"] = pd.to_numeric(
-            light_dpp["light_dpp_index"],
-            errors="coerce",
-        )
-        dark_activity["unit"] = pd.to_numeric(
-            dark_activity["unit"],
-            errors="coerce",
-        )
-        light_stability["unit"] = pd.to_numeric(
-            light_stability["unit"],
-            errors="coerce",
-        )
-        light_dpp = light_dpp[
-            np.isfinite(light_dpp["unit"].to_numpy(dtype=float))
-            & np.isfinite(light_dpp["light_dpp_index"].to_numpy(dtype=float))
-        ].copy()
-        dark_activity = dark_activity[
-            np.isfinite(dark_activity["unit"].to_numpy(dtype=float))
-        ].copy()
-        light_stability = light_stability[
-            np.isfinite(light_stability["unit"].to_numpy(dtype=float))
-        ].copy()
-        light_dpp["unit"] = light_dpp["unit"].astype(int)
-        dark_activity["unit"] = dark_activity["unit"].astype(int)
-        light_stability["unit"] = light_stability["unit"].astype(int)
-
-        light_dpp = (
-            light_dpp.sort_values(
-                ["unit", "light_dpp_index", "comparison_label"],
-                ascending=[True, False, True],
-            )
-            .drop_duplicates("unit", keep="first")
-            .rename(columns={"comparison_label": "dpp_comparison_label"})
-        )
-        joined = (
-            light_dpp.merge(dark_activity, on="unit", how="inner")
-            .merge(light_stability, on="unit", how="inner")
-        )
-        if joined.empty:
-            continue
-        tables.append(
-            joined.assign(
-                animal_name=animal_name,
-                date=date,
-                light_epoch=dataset_light_epoch,
-                dark_epoch=dataset_dark_epoch,
-                similarity_light=np.asarray(
-                    joined["light_dpp_index"],
-                    dtype=float,
-                ),
-            )
-        )
-
-    if not tables:
-        return pd.DataFrame(
-            columns=[
-                "animal_name",
-                "date",
-                "unit",
-                "light_epoch",
-                "dark_epoch",
-                "dpp_comparison_label",
-                "light_dpp_index",
-                "similarity_light",
-                "dark_firing_rate_hz",
-                "max_light_tuning_stability_correlation",
-                "dark_active",
-                "dark_activity_group",
-            ]
-        )
-
-    joined = pd.concat(tables, axis=0, ignore_index=True)
-    if joined.empty:
-        return joined.assign(
-            dark_firing_rate_hz=np.nan,
-            max_light_tuning_stability_correlation=np.nan,
-            dark_active=False,
-            dark_activity_group="Dark inactive",
-        )
-    dark_rates = pd.to_numeric(joined["dark_firing_rate_hz"], errors="coerce")
-    joined = joined[np.isfinite(dark_rates.to_numpy(dtype=float))].copy()
-    dark_rates = pd.to_numeric(joined["dark_firing_rate_hz"], errors="coerce")
-    dark_active = dark_rates.to_numpy(dtype=float) >= float(dark_activity_threshold_hz)
-    return joined.assign(
-        dark_active=dark_active,
-        dark_activity_group=np.where(dark_active, "Dark active", "Dark inactive"),
-    )
-
-
-def build_panel_b_stable_light_paired_dpp_table(
-    paired_table: Any,
-    dark_activity_table: Any,
-) -> Any:
-    """Join paired dark/light DPP rows to stable-light dark-activity metadata."""
-    import pandas as pd
-
-    if paired_table is None or dark_activity_table is None:
-        return paired_table
-    if not len(paired_table) or not len(dark_activity_table):
-        return paired_table.iloc[0:0].copy()
-
-    key_columns = ["animal_name", "date", "unit"]
-    metadata_columns = [
-        *key_columns,
-        "dark_firing_rate_hz",
-        "max_light_tuning_stability_correlation",
-        "dark_active",
-        "dark_activity_group",
-    ]
-    missing_columns = [
-        column for column in metadata_columns if column not in dark_activity_table
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"Panel B dark-activity table is missing columns {missing_columns!r}."
-        )
-
-    paired = paired_table.copy()
-    metadata = dark_activity_table.loc[:, metadata_columns].copy()
-    for table in (paired, metadata):
-        table["unit"] = pd.to_numeric(table["unit"], errors="coerce")
-        table.dropna(subset=["unit"], inplace=True)
-        table["unit"] = table["unit"].astype(int)
-    metadata = metadata.drop_duplicates(key_columns)
-    return paired.merge(metadata, on=key_columns, how="inner")
-
-
-def _plot_panel_b_boxplot(
-    ax: Any,
-    values_by_group: Sequence[np.ndarray],
-    *,
-    labels: Sequence[str],
-    colors: Sequence[str],
-    title: str,
-    ylabel: str | None = None,
-) -> None:
-    """Plot one compact box-and-whisker comparison with jittered cells."""
-    plot_data = [np.asarray(values, dtype=float) for values in values_by_group]
-    plot_data = [values[np.isfinite(values)] for values in plot_data]
-    box_positions = [
-        position
-        for position, values in enumerate(plot_data, start=1)
-        if values.size
-    ]
-    box_data = [values for values in plot_data if values.size]
-    if box_data:
-        boxplot = ax.boxplot(
-            box_data,
-            positions=box_positions,
-            widths=0.54,
-            patch_artist=True,
-            showfliers=False,
-            boxprops={
-                "edgecolor": "0.25",
-                "linewidth": 0.65,
-            },
-            medianprops={
-                "color": "black",
-                "linewidth": 0.8,
-            },
-            whiskerprops={
-                "color": "0.25",
-                "linewidth": 0.65,
-            },
-            capprops={
-                "color": "0.25",
-                "linewidth": 0.65,
-            },
-        )
-        for patch, position in zip(boxplot["boxes"], box_positions, strict=False):
-            patch.set_facecolor(colors[position - 1])
-            patch.set_alpha(0.36)
-            patch.set_zorder(2)
-        for artist_group in ("medians", "whiskers", "caps"):
-            for artist in boxplot[artist_group]:
-                artist.set_zorder(4)
-
-        for position in box_positions:
-            values = plot_data[position - 1]
-            rng = np.random.default_rng(22_000 + position)
-            x_values = position + rng.uniform(-0.13, 0.13, size=values.size)
-            ax.scatter(
-                x_values,
-                values,
-                s=3.5,
-                color=colors[position - 1],
-                alpha=0.34,
-                edgecolors="none",
-                zorder=3,
-            )
-            if values.size < 2 or np.nanstd(values) <= 0.0:
-                ax.hlines(
-                    float(np.nanmedian(values)),
-                    position - 0.22,
-                    position + 0.22,
-                    color="black",
-                    linewidth=0.7,
-                    zorder=4,
-                )
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No values",
-            ha="center",
-            va="center",
-            fontsize=6.0,
-            transform=ax.transAxes,
-        )
-
-    ax.axhline(0.0, color="0.55", linestyle="--", linewidth=0.55, zorder=0)
-    ax.axhline(0.5, color="0.25", linestyle=":", linewidth=0.55, zorder=0)
-    ax.set_xlim(0.4, len(labels) + 0.6)
-    ax.set_ylim(-1.0, 1.0)
-    ax.set_xticks(np.arange(1, len(labels) + 1))
-    tick_labels = [
-        f"{label}\nn={values.size}"
-        for label, values in zip(labels, plot_data, strict=True)
-    ]
-    ax.set_xticklabels(tick_labels, fontsize=4.6)
-    ax.set_title(title, fontsize=5.8, pad=1.5)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel, fontsize=5.4, labelpad=1.0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
-    ax.tick_params(axis="x", length=0.0, pad=1)
-
-
-def _fraction_weights(values: np.ndarray) -> np.ndarray:
-    """Return histogram weights that sum to one."""
-    values = np.asarray(values, dtype=float)
-    if values.size == 0:
-        return values
-    return np.full(values.shape, 1.0 / values.size, dtype=float)
-
-
-def _plot_panel_b_overlap_boxplot(
-    ax: Any,
-    values_by_group: Sequence[np.ndarray],
-    *,
-    labels: Sequence[str],
-    colors: Sequence[str],
-    title: str,
-    ylabel: str | None = None,
-) -> None:
-    """Plot compact light-overlap distributions grouped by dark overlap."""
-    plot_data = [np.asarray(values, dtype=float) for values in values_by_group]
-    plot_data = [values[np.isfinite(values)] for values in plot_data]
-    box_positions = [
-        position
-        for position, values in enumerate(plot_data, start=1)
-        if values.size
-    ]
-    box_data = [values for values in plot_data if values.size]
-    if box_data:
-        boxplot = ax.boxplot(
-            box_data,
-            positions=box_positions,
-            widths=0.54,
-            patch_artist=True,
-            showfliers=False,
-            boxprops={"edgecolor": "0.25", "linewidth": 0.65},
-            medianprops={"color": "black", "linewidth": 0.8},
-            whiskerprops={"color": "0.25", "linewidth": 0.65},
-            capprops={"color": "0.25", "linewidth": 0.65},
-        )
-        for patch, position in zip(boxplot["boxes"], box_positions, strict=False):
-            patch.set_facecolor(colors[position - 1])
-            patch.set_alpha(0.36)
-            patch.set_zorder(2)
-        for artist_group in ("medians", "whiskers", "caps"):
-            for artist in boxplot[artist_group]:
-                artist.set_zorder(4)
-
-        for position in box_positions:
-            values = plot_data[position - 1]
-            rng = np.random.default_rng(42_000 + position)
-            x_values = position + rng.uniform(-0.13, 0.13, size=values.size)
-            ax.scatter(
-                x_values,
-                values,
-                s=3.1,
-                color=colors[position - 1],
-                alpha=0.30,
-                edgecolors="none",
-                zorder=3,
-            )
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No values",
-            ha="center",
-            va="center",
-            fontsize=5.0,
-            transform=ax.transAxes,
-        )
-
-    ax.axhline(0.5, color="0.25", linestyle=":", linewidth=0.55, zorder=0)
-    ax.set_xlim(0.4, len(labels) + 0.6)
-    ax.set_ylim(0.0, 1.0)
-    ax.set_xticks(np.arange(1, len(labels) + 1))
-    tick_labels = [
-        f"{label}\nn={values.size}"
-        for label, values in zip(labels, plot_data, strict=True)
-    ]
-    ax.set_xticklabels(tick_labels, fontsize=4.1)
-    ax.set_title(title, fontsize=5.4, pad=1.2)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel, fontsize=5.0, labelpad=1.0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", labelsize=4.4, length=1.4, pad=1)
-    ax.tick_params(axis="x", length=0.0, pad=1)
-
-    summaries = []
-    for label, values in zip(("low", "mid", "high"), plot_data, strict=True):
-        summaries.append(
-            f"{label} {np.mean(values > 0.5):.0%} > 0.5" if values.size else f"{label} n/a"
-        )
-    ax.text(
-        0.98,
-        0.04,
-        "\n".join(summaries),
-        ha="right",
-        va="bottom",
-        fontsize=3.6,
-        transform=ax.transAxes,
-    )
-
-
-def _plot_panel_b_overlap_scatter_with_marginals(
-    ax: Any,
+def filter_panel_b_overlap_by_even_odd_stability(
     table: Any,
     *,
-    title: str | None = "Dark vs light DPP",
-) -> None:
-    """Plot dark-vs-light DPP overlap with marginal fraction histograms."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-    scatter_ax = ax.inset_axes((0.14, 0.13, 0.60, 0.62))
-    top_ax = ax.inset_axes((0.14, 0.79, 0.60, 0.15), sharex=scatter_ax)
-    right_ax = ax.inset_axes((0.78, 0.13, 0.18, 0.62), sharey=scatter_ax)
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    light_epoch: str | None,
+    dark_epoch: str | None,
+    min_stability_correlation: float,
+) -> Any:
+    """Keep Panel B units stable in at least one DPP trajectory in each epoch."""
+    import pandas as pd
 
     if table is None or not len(table):
-        scatter_ax.text(0.5, 0.5, "No paired\noverlap", ha="center", va="center")
-        return
+        return table
 
-    dark_values = np.asarray(table["similarity_dark"], dtype=float)
-    light_values = np.asarray(table["similarity_light"], dtype=float)
-    valid = np.isfinite(dark_values) & np.isfinite(light_values)
-    dark_values = np.clip(dark_values[valid], 0.0, 1.0)
-    light_values = np.clip(light_values[valid], 0.0, 1.0)
-    bins = np.linspace(0.0, 1.0, 24)
-
-    scatter_ax.plot(
-        [0.0, 1.0],
-        [0.0, 1.0],
-        color="0.45",
-        linestyle="--",
-        linewidth=0.55,
-        zorder=1,
-    )
-    scatter_ax.axvline(0.5, color="0.35", linestyle=":", linewidth=0.55, zorder=1)
-    scatter_ax.axhline(0.5, color="0.35", linestyle=":", linewidth=0.55, zorder=1)
-    scatter_ax.scatter(
-        dark_values,
-        light_values,
-        s=3.5,
-        color="0.25",
-        alpha=0.26,
-        edgecolors="none",
-        zorder=2,
-    )
-    if dark_values.size:
-        median_delta = float(np.nanmedian(light_values - dark_values))
-        scatter_ax.text(
-            0.04,
-            0.94,
-            f"median Δ={median_delta:.2f}",
-            ha="left",
-            va="top",
-            fontsize=4.0,
-            transform=scatter_ax.transAxes,
+    stable_tables = []
+    for dataset in datasets:
+        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
+        resolved_light_epoch = get_light_epoch(animal_name, date, light_epoch)
+        resolved_dark_epoch = get_dark_epoch(animal_name, date, dark_epoch)
+        dark_stable = _load_panel_b_stable_units_for_epoch(
+            data_root,
+            animal_name=animal_name,
+            date=date,
+            epoch=resolved_dark_epoch,
+            epoch_type="dark",
+            region=region,
+            min_stability_correlation=min_stability_correlation,
         )
-    scatter_ax.set_xlim(0.0, 1.0)
-    scatter_ax.set_ylim(0.0, 1.0)
-    scatter_ax.set_xlabel("Dark DPP\noverlap", fontsize=4.7, labelpad=1.0)
-    scatter_ax.set_ylabel("Light DPP\noverlap", fontsize=4.7, labelpad=1.0)
-    scatter_ax.tick_params(labelsize=3.8, length=1.3, pad=0.8)
-    scatter_ax.spines["top"].set_visible(False)
-    scatter_ax.spines["right"].set_visible(False)
-
-    top_ax.hist(
-        dark_values,
-        bins=bins,
-        weights=_fraction_weights(dark_values),
-        color="0.55",
-        edgecolor="none",
-        alpha=0.70,
-    )
-    top_ax.axvline(0.5, color="0.35", linestyle=":", linewidth=0.55)
-    top_ax.set_ylim(0.0, 0.13)
-    top_ax.set_ylabel("Frac.", fontsize=3.6, labelpad=0.6)
-    top_ax.tick_params(axis="x", labelbottom=False, length=0.0)
-    top_ax.tick_params(axis="y", labelsize=3.2, length=1.0, pad=0.5)
-    top_ax.spines["top"].set_visible(False)
-    top_ax.spines["right"].set_visible(False)
-
-    right_ax.hist(
-        light_values,
-        bins=bins,
-        weights=_fraction_weights(light_values),
-        color=PANEL_B_ACTIVITY_COLORS["inactive"],
-        edgecolor="none",
-        alpha=0.55,
-        orientation="horizontal",
-    )
-    right_ax.axhline(0.5, color="0.35", linestyle=":", linewidth=0.55)
-    right_ax.set_xlim(0.0, 0.13)
-    right_ax.set_xlabel("Frac.", fontsize=3.6, labelpad=0.6)
-    right_ax.tick_params(axis="y", labelleft=False, length=0.0)
-    right_ax.tick_params(axis="x", labelsize=3.2, length=1.0, pad=0.5)
-    right_ax.spines["top"].set_visible(False)
-    right_ax.spines["right"].set_visible(False)
-
-    if title is not None:
-        ax.text(
-            0.52,
-            0.99,
-            title,
-            ha="center",
-            va="top",
-            fontsize=5.4,
-            transform=ax.transAxes,
+        light_stable = _load_panel_b_stable_units_for_epoch(
+            data_root,
+            animal_name=animal_name,
+            date=date,
+            epoch=resolved_light_epoch,
+            epoch_type="light",
+            region=region,
+            min_stability_correlation=min_stability_correlation,
+        )
+        stable_tables.append(
+            dark_stable.merge(
+                light_stable,
+                on=["animal_name", "date", "unit"],
+                how="inner",
+            )
         )
 
+    if not stable_tables:
+        return table.iloc[0:0].copy()
 
-def _plot_panel_b_violin(
+    stable_units = pd.concat(stable_tables, axis=0, ignore_index=True)
+    if stable_units.empty:
+        return table.iloc[0:0].copy()
+
+    filtered = table.copy()
+    filtered["unit"] = pd.to_numeric(filtered["unit"], errors="coerce")
+    filtered = filtered[np.isfinite(filtered["unit"].to_numpy(dtype=float))].copy()
+    filtered["unit"] = filtered["unit"].astype(int)
+    return filtered.merge(
+        stable_units,
+        on=["animal_name", "date", "unit"],
+        how="inner",
+    )
+
+
+def plot_panel_b_dpp_overlap_with_schematic(
     ax: Any,
-    values_by_group: Sequence[np.ndarray],
+    overlap_table: Any,
     *,
-    labels: Sequence[str],
-    colors: Sequence[str],
-    title: str,
-    ylabel: str | None = None,
-) -> None:
-    """Plot one compact violin comparison with jittered cells and medians."""
-    plot_data = [np.asarray(values, dtype=float) for values in values_by_group]
-    plot_data = [values[np.isfinite(values)] for values in plot_data]
-    positions = np.arange(1, len(plot_data) + 1)
-    nonempty_positions = [
-        position
-        for position, values in zip(positions, plot_data, strict=True)
-        if values.size
-    ]
-    nonempty_data = [values for values in plot_data if values.size]
-    if nonempty_data:
-        parts = ax.violinplot(
-            nonempty_data,
-            positions=nonempty_positions,
-            widths=0.58,
-            showmeans=False,
-            showmedians=False,
-            showextrema=False,
-        )
-        for body, position in zip(parts["bodies"], nonempty_positions, strict=True):
-            body.set_facecolor(colors[position - 1])
-            body.set_edgecolor("none")
-            body.set_alpha(0.34)
-            body.set_zorder(1)
-        for position in nonempty_positions:
-            values = plot_data[position - 1]
-            q25, median, q75 = np.nanpercentile(values, [25, 50, 75])
-            ax.plot(
-                [position, position],
-                [q25, q75],
-                color="0.25",
-                linewidth=0.7,
-                zorder=3,
-            )
-            ax.plot(
-                [position - 0.17, position + 0.17],
-                [median, median],
-                color="black",
-                linewidth=0.85,
-                zorder=4,
-            )
-            rng = np.random.default_rng(32_000 + int(position))
-            x_values = position + rng.uniform(-0.12, 0.12, size=values.size)
-            ax.scatter(
-                x_values,
-                values,
-                s=3.2,
-                color=colors[position - 1],
-                alpha=0.30,
-                edgecolors="none",
-                zorder=2,
-            )
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No values",
-            ha="center",
-            va="center",
-            fontsize=6.0,
-            transform=ax.transAxes,
-        )
-
-    ax.axhline(0.0, color="0.55", linestyle="--", linewidth=0.55, zorder=0)
-    ax.axhline(0.5, color="0.25", linestyle=":", linewidth=0.55, zorder=0)
-    ax.set_xlim(0.4, len(labels) + 0.6)
-    ax.set_ylim(-1.0, 1.0)
-    ax.set_xticks(positions)
-    tick_labels = [
-        f"{label}\nn={values.size}"
-        for label, values in zip(labels, plot_data, strict=True)
-    ]
-    ax.set_xticklabels(tick_labels, fontsize=4.5)
-    ax.set_title(title, fontsize=5.8, pad=1.5)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel, fontsize=5.4, labelpad=1.0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
-    ax.tick_params(axis="x", length=0.0, pad=1)
-
-
-def _get_panel_b_light_similarity_by_dark_similarity_values(
-    table: Any,
-    *,
+    example: dict[str, Any],
     low_threshold: float,
-    high_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return Fig3B x-values split into low, middle, and high dark-corr bins."""
-    if high_threshold <= low_threshold:
-        raise ValueError("high_threshold must be greater than low_threshold.")
-    if table is None or not len(table):
-        empty = np.asarray([], dtype=float)
-        return empty, empty, empty
-    dark_values = np.asarray(table["similarity_dark"], dtype=float)
-    light_values = np.asarray(table["similarity_light"], dtype=float)
-    valid = np.isfinite(dark_values) & np.isfinite(light_values)
-    dark_values = dark_values[valid]
-    light_values = light_values[valid]
-    return (
-        light_values[dark_values < float(low_threshold)],
-        light_values[
-            (dark_values >= float(low_threshold))
-            & (dark_values < float(high_threshold))
-        ],
-        light_values[dark_values >= float(high_threshold)],
-    )
-
-
-def _get_panel_b_light_dpp_by_dark_activity_values(
-    table: Any,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return light DPP split by dark movement activity group."""
-    if table is None or not len(table):
-        empty = np.asarray([], dtype=float)
-        return empty, empty
-    light_values = np.asarray(table["similarity_light"], dtype=float)
-    dark_active = np.asarray(table["dark_active"], dtype=bool)
-    valid = np.isfinite(light_values)
-    return (
-        light_values[valid & ~dark_active],
-        light_values[valid & dark_active],
-    )
-
-
-def _get_panel_b_light_dpp_by_dark_dpp_threshold_values(
-    table: Any,
-    *,
-    threshold: float,
-    dark_active_only: bool = True,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return light DPP split by low/high dark DPP in dark-active cells."""
-    if table is None or not len(table):
-        empty = np.asarray([], dtype=float)
-        return empty, empty
-    dark_values = np.asarray(table["similarity_dark"], dtype=float)
-    light_values = np.asarray(table["similarity_light"], dtype=float)
-    valid = np.isfinite(dark_values) & np.isfinite(light_values)
-    if dark_active_only and "dark_active" in table:
-        valid &= np.asarray(table["dark_active"], dtype=bool)
-    return (
-        light_values[valid & (dark_values < float(threshold))],
-        light_values[valid & (dark_values > float(threshold))],
-    )
-
-
-def plot_panel_b_dpp_overlap_options(
-    ax: Any,
-    table: Any,
-    *,
-    low_threshold: float = PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-    high_threshold: float = PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
 ) -> None:
-    """Plot candidate Fig. 2B overlap options 1 and 3 in one panel."""
+    """Plot Figure 2 Panel B with DPPI schematic and overlap summaries."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-
-    group_ax = ax.inset_axes(PANEL_B_OVERLAP_GROUP_AXIS_BOUNDS)
-    scatter_ax = ax.inset_axes(PANEL_B_OVERLAP_SCATTER_AXIS_BOUNDS)
-    low_values, middle_values, high_values = (
-        _get_panel_b_light_similarity_by_dark_similarity_values(
-            table,
-            low_threshold=low_threshold,
-            high_threshold=high_threshold,
-        )
+    schematic_ax = ax.inset_axes(PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS)
+    grouped_ax = ax.inset_axes(PANEL_B_GROUPED_AXIS_BOUNDS)
+    scatter_ax = ax.inset_axes(PANEL_B_SCATTER_AXIS_BOUNDS)
+    plot_panel_b_dppi_schematic(schematic_ax, example)
+    plot_panel_b_dpp_overlap_grouped(
+        grouped_ax,
+        overlap_table,
+        low_threshold=low_threshold,
     )
-    low_threshold_label = f"{float(low_threshold):g}"
-    high_threshold_label = f"{float(high_threshold):g}"
-    _plot_panel_b_overlap_boxplot(
-        group_ax,
-        (low_values, middle_values, high_values),
-        labels=(
-            f"Dark DPP\n<{low_threshold_label}",
-            f"Dark DPP\n{low_threshold_label}-{high_threshold_label}",
-            f"Dark DPP\n>={high_threshold_label}",
-        ),
-        colors=(
-            PANEL_B_BOX_COLORS["low_dpp"],
-            PANEL_B_BOX_COLORS["mid_dpp"],
-            PANEL_B_BOX_COLORS["high_dpp"],
-        ),
-        title="Grouped by dark DPP",
-        ylabel="Light DPP\noverlap",
-    )
-    _plot_panel_b_overlap_scatter_with_marginals(scatter_ax, table)
+    for text in grouped_ax.texts:
+        if "> 0.5" in text.get_text():
+            text.set_text("")
+    plot_panel_b_dpp_overlap_scatter(scatter_ax, overlap_table, title=None)
+    grouped_ax.set_title("")
+    grouped_ax.set_xlabel("Dark DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.2)
+    grouped_ax.set_ylabel("Light DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.0)
+    grouped_labels = ("Low\n<0.5", "Mid\n0.5-0.75", "High\n>=0.75")
+    grouped_ax.set_xticklabels(grouped_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
+    _remove_axis_tick_label_lines(grouped_ax, prefixes=("n=",))
+    grouped_ax.xaxis.set_label_coords(0.5, -0.32)
+    grouped_ax.tick_params(axis="x", pad=1.0)
+    for child_ax in scatter_ax.child_axes:
+        if child_ax.get_xlabel() == "Dark DPP\noverlap":
+            child_ax.set_xlabel("Dark DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.0)
+            child_ax.xaxis.set_label_coords(0.42, -0.18)
+            child_ax.set_xticks([0.0, 0.5, 1.0])
+            child_ax.set_yticks([0.0, 0.5, 1.0])
+            child_ax.tick_params(labelsize=MIN_PUBLICATION_FONTSIZE_PT)
+            for text in child_ax.texts:
+                text.set_fontsize(max(text.get_fontsize(), MIN_PUBLICATION_FONTSIZE_PT))
+        elif child_ax.get_xlabel() == "Frac.":
+            child_ax.set_xlabel("Frac.", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=0.7)
+            child_ax.xaxis.set_label_coords(0.62, -0.26)
+            child_ax.tick_params(axis="x", labelsize=MIN_PUBLICATION_FONTSIZE_PT)
+        if child_ax.get_ylabel() == "Light DPP\noverlap":
+            child_ax.set_ylabel("Light DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.0)
+        elif child_ax.get_ylabel() == "Frac.":
+            child_ax.set_ylabel("Frac.", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=0.7)
+            child_ax.tick_params(axis="y", labelsize=MIN_PUBLICATION_FONTSIZE_PT)
 
 
-def plot_panel_b_dpp_overlap_grouped(
+def plot_panel_c_cross_and_place_decoding(
     ax: Any,
-    table: Any,
+    decoding_error_table: Any,
+) -> None:
+    """Plot Figure 2 Panel C as compact cross-path and place decoding."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    cross_ax = ax.inset_axes(PANEL_C_CROSS_DECODING_AXIS_BOUNDS)
+    place_ax = ax.inset_axes(PANEL_C_PLACE_DECODING_AXIS_BOUNDS)
+    _plot_panel_e_cross_axis(cross_ax, decoding_error_table)
+    cross_ax.set_title("Cross-path\ndecoding", fontsize=5.8, pad=1.5)
+    _plot_panel_e_place_axis(place_ax, decoding_error_table, ylabel=None)
+    place_ax.set_title("Path-specific\nplace decoding", fontsize=5.8, pad=1.0)
+
+
+def _draw_panel_d_swap_schematic(
+    ax: Any,
     *,
-    low_threshold: float = PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-    high_threshold: float = PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
+    track_size: tuple[float, float] | None = None,
+    show_dark_track_labels: bool = False,
+    model_name: str,
+    model_labels: Mapping[str, str] | None = None,
+    prediction_label_fontsize: float = PANEL_C_PREDICTION_LABEL_FONTSIZE,
 ) -> None:
-    """Plot light DPP overlap grouped by dark DPP overlap."""
-    low_values, middle_values, high_values = (
-        _get_panel_b_light_similarity_by_dark_similarity_values(
-            table,
-            low_threshold=low_threshold,
-            high_threshold=high_threshold,
-        )
+    """Draw Panel D swap schematic with a panel-C-like dark-scaffold row."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    shared_model_label = (
+        "Dark scaffold\nmodel"
+        if str(model_name) == "task_segment_bump"
+        else f"{_panel_model_label(str(model_name), model_labels)}\nmodel"
     )
-    low_threshold_label = f"{float(low_threshold):g}"
-    high_threshold_label = f"{float(high_threshold):g}"
-    _plot_panel_b_overlap_boxplot(
-        ax,
-        (low_values, middle_values, high_values),
-        labels=(
-            f"Dark DPP\n<{low_threshold_label}",
-            f"Dark DPP\n{low_threshold_label}-{high_threshold_label}",
-            f"Dark DPP\n>={high_threshold_label}",
-        ),
-        colors=(
-            PANEL_B_BOX_COLORS["low_dpp"],
-            PANEL_B_BOX_COLORS["mid_dpp"],
-            PANEL_B_BOX_COLORS["high_dpp"],
-        ),
-        title="Grouped by dark DPP",
-        ylabel="Light DPP\noverlap",
+    def _bounds_from_center(
+        center_x: float,
+        center_y: float,
+        width: float,
+        height: float,
+    ) -> list[float]:
+        return [center_x - width / 2.0, center_y - height / 2.0, width, height]
+
+    light_bounds = {
+        "width": track_size[0] if track_size is not None else 0.38,
+        "height": track_size[1] if track_size is not None else 0.23,
+    }
+    dark_bounds = {
+        "width": track_size[0] if track_size is not None else 0.34,
+        "height": track_size[1] if track_size is not None else 0.21,
+    }
+    train_predict_midpoint_x = 0.5 * (
+        PANEL_D_TRAIN_TRACK_CENTER_X + PANEL_D_PREDICT_TRACK_CENTER_X
     )
 
-
-def plot_panel_b_dpp_overlap_scatter(
-    ax: Any,
-    table: Any,
-    *,
-    title: str | None = "Dark vs light DPP",
-) -> None:
-    """Plot dark-vs-light DPP overlap with marginal distributions."""
-    _plot_panel_b_overlap_scatter_with_marginals(ax, table, title=title)
-
-
-def _add_panel_b_activity_light_dpp_annotation(
-    ax: Any,
-    inactive_values: np.ndarray,
-    active_values: np.ndarray,
-) -> None:
-    """Annotate Fig2B light-DPP fractions above the reference line."""
-    inactive = np.asarray(inactive_values, dtype=float)
-    active = np.asarray(active_values, dtype=float)
-    inactive = inactive[np.isfinite(inactive)]
-    active = active[np.isfinite(active)]
-    if not inactive.size and not active.size:
-        return
-    inactive_text = (
-        f"inactive {np.mean(inactive > 0.5):.0%} > 0.5"
-        if inactive.size
-        else "inactive n/a"
-    )
-    active_text = (
-        f"active {np.mean(active > 0.5):.0%} > 0.5"
-        if active.size
-        else "active n/a"
+    ax.text(
+        PANEL_D_TRAIN_TRACK_CENTER_X,
+        0.98,
+        "Train: AB",
+        ha="center",
+        va="top",
+        fontsize=5.8,
     )
     ax.text(
-        0.97,
-        0.04,
-        inactive_text + "\n" + active_text,
-        ha="right",
-        va="bottom",
-        fontsize=4.3,
-        transform=ax.transAxes,
-        bbox={
-            "facecolor": "white",
-            "edgecolor": "none",
-            "alpha": 0.72,
-            "pad": 0.6,
+        PANEL_D_PREDICT_TRACK_CENTER_X,
+        0.98,
+        "Predict: BA",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+    )
+    ax.text(
+        PANEL_D_MODEL_LABEL_X,
+        PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
+        "Independent\nmodel",
+        ha="center",
+        va="center",
+        fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
+        fontweight="bold",
+    )
+    ax.text(
+        PANEL_D_MODEL_LABEL_X,
+        PANEL_D_SHARED_TRACK_CENTER_Y,
+        shared_model_label,
+        ha="center",
+        va="center",
+        fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
+        fontweight="bold",
+    )
+
+    _draw_panel_h_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                PANEL_D_TRAIN_TRACK_CENTER_X,
+                PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
+        track_kind="independent_light",
+        show_labels=True,
+        trajectory_name="center_to_left",
+        stimulus_layout="stim1",
+        highlighted_segments=(3,),
+        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+    )
+    _draw_panel_h_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                PANEL_D_PREDICT_TRACK_CENTER_X,
+                PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
+        track_kind="independent_light",
+        show_labels=True,
+        trajectory_name="center_to_right",
+        stimulus_layout="stim2",
+        highlighted_segments=(3,),
+        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+    )
+    ax.text(
+        train_predict_midpoint_x,
+        PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
+        "Visual landmarks\ndrive neural activity",
+        ha="center",
+        va="center",
+        fontsize=prediction_label_fontsize,
+        linespacing=0.95,
+    )
+
+    _draw_panel_h_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                PANEL_D_SHARED_DARK_TRACK_CENTER_X,
+                PANEL_D_SHARED_TRACK_CENTER_Y,
+                dark_bounds["width"],
+                dark_bounds["height"],
+            )
+        ),
+        track_kind="dark",
+        show_labels=show_dark_track_labels,
+        trajectory_name="center_to_right",
+        stimulus_layout="stim2",
+    )
+    ax.text(
+        PANEL_D_SHARED_PLUS_X,
+        PANEL_D_SHARED_TRACK_CENTER_Y,
+        "+",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+    )
+    _draw_panel_h_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                PANEL_D_SHARED_SEGMENT_TRACK_CENTER_X,
+                PANEL_D_SHARED_TRACK_CENTER_Y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
+        track_kind="segment_modulation",
+        show_labels=True,
+        trajectory_name="center_to_left",
+        stimulus_layout="stim1",
+        oval_regions=["left_arm"],
+        fill_oval_regions=False,
+        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+    )
+    ax.annotate(
+        "",
+        xy=(
+            PANEL_D_SHARED_ARROW_X[1],
+            PANEL_D_SHARED_TRACK_CENTER_Y + PANEL_D_SHARED_ARROW_Y_OFFSET,
+        ),
+        xytext=(
+            PANEL_D_SHARED_ARROW_X[0],
+            PANEL_D_SHARED_TRACK_CENTER_Y + PANEL_D_SHARED_ARROW_Y_OFFSET,
+        ),
+        xycoords=ax.transAxes,
+        textcoords=ax.transAxes,
+        arrowprops={
+            "arrowstyle": "-|>",
+            "color": "black",
+            "lw": 0.8,
+            "mutation_scale": 8.0,
+            "shrinkA": 0,
+            "shrinkB": 0,
         },
     )
+    _draw_panel_h_track(
+        ax.inset_axes(
+            _bounds_from_center(
+                PANEL_D_SHARED_LIGHT_TRACK_CENTER_X,
+                PANEL_D_SHARED_TRACK_CENTER_Y,
+                light_bounds["width"],
+                light_bounds["height"],
+            )
+        ),
+        track_kind="shared_light",
+        show_labels=True,
+        trajectory_name="center_to_right",
+        stimulus_layout="stim2",
+        oval_regions=["right_arm"],
+        fill_oval_regions=False,
+        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+    )
+    ax.text(
+        train_predict_midpoint_x,
+        PANEL_D_SHARED_PREDICTION_LABEL_Y,
+        "Dark scaffold + visual gain\ndrive neural activity",
+        ha="center",
+        va="bottom",
+        fontsize=prediction_label_fontsize,
+        linespacing=0.95,
+    )
 
 
-def plot_panel_b_light_similarity_by_dark_similarity(
+def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
+    """Return one held-out mean swapped-segment delta LL per unit."""
+    import pandas as pd
+
+    table = _filter_panel_h_heldout_delta(swap_delta_table)
+    if table is None or "delta_ll_bits_per_spike" not in table or not len(table):
+        return np.asarray([], dtype=float)
+
+    table = table.copy()
+    table["delta_ll_bits_per_spike"] = pd.to_numeric(
+        table["delta_ll_bits_per_spike"],
+        errors="coerce",
+    )
+    finite_mask = np.isfinite(table["delta_ll_bits_per_spike"].to_numpy(dtype=float))
+    table = table[finite_mask].copy()
+    if table.empty:
+        return np.asarray([], dtype=float)
+
+    if "trajectory" in table:
+        table = table[
+            table["trajectory"].astype(str).isin(PANEL_H_DELTA_TRAJECTORIES)
+        ].copy()
+    key_columns = [
+        column
+        for column in (
+            "animal_name",
+            "date",
+            "region",
+            "dark_epoch",
+            "unit",
+            "model_name",
+        )
+        if column in table
+    ]
+    if not key_columns:
+        values = table["delta_ll_bits_per_spike"].to_numpy(dtype=float)
+        return values[np.isfinite(values)]
+
+    grouped = table.groupby(key_columns, dropna=False)
+    if "trajectory" in table:
+        summary = grouped.agg(
+            mean_delta=("delta_ll_bits_per_spike", "mean"),
+            trajectory_count=("trajectory", lambda values: values.astype(str).nunique()),
+        )
+        summary = summary[
+            summary["trajectory_count"] >= len(PANEL_H_DELTA_TRAJECTORIES)
+        ]
+    else:
+        summary = grouped.agg(mean_delta=("delta_ll_bits_per_spike", "mean"))
+    values = summary["mean_delta"].to_numpy(dtype=float)
+    return values[np.isfinite(values)]
+
+
+def plot_panel_d_mean_swap_delta_axis(
     ax: Any,
-    table: Any,
+    swap_delta_table: Any,
     *,
-    dark_activity_table: Any | None = None,
-    low_threshold: float = PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-    high_threshold: float = PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
+    model_name: str,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
 ) -> None:
-    """Plot Fig3B light correlations split by dark activity and dark DPP."""
+    """Plot mean held-out delta LL averaged over four trajectories."""
+    visual_color = _panel_model_color("visual", model_colors)
+    model_color = _panel_model_color(model_name, model_colors)
+    model_label = _panel_model_label(model_name, model_labels)
+    values = _mean_swap_delta_across_trajectories(swap_delta_table)
+
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.65, zorder=1)
+    if values.size:
+        bin_edges = np.linspace(PANEL_H_DELTA_X_LIMITS[0], PANEL_H_DELTA_X_LIMITS[1], 29)
+        hist_kwargs = OUTLINED_HISTOGRAM_KWARGS.copy()
+        hist_kwargs.update({"edgecolor": "none", "linewidth": 0.0})
+        ax.hist(
+            values,
+            bins=bin_edges,
+            weights=_fraction_histogram_weights(values),
+            color=model_color,
+            **hist_kwargs,
+            zorder=2,
+        )
+        ax.text(
+            0.00,
+            1.06,
+            "Indep. better",
+            ha="left",
+            va="bottom",
+            fontsize=4.1,
+            color=visual_color,
+            transform=ax.transAxes,
+            clip_on=False,
+        )
+        ax.text(
+            1.00,
+            1.06,
+            f"{model_label}\nbetter",
+            ha="right",
+            va="bottom",
+            fontsize=4.1,
+            color=model_color,
+            transform=ax.transAxes,
+            clip_on=False,
+        )
+        fraction_positive = np.mean(values > 0.0)
+        ax.text(
+            0.97,
+            0.88,
+            f"{fraction_positive:.0%} > 0",
+            ha="right",
+            va="top",
+            fontsize=4.5,
+            color=model_color,
+            transform=ax.transAxes,
+            bbox={
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.72,
+                "pad": 0.2,
+            },
+        )
+    else:
+        ax.text(0.5, 0.5, "No mean\nvalues", ha="center", va="center", fontsize=5.0)
+
+    ax.set_xlim(*PANEL_H_DELTA_X_LIMITS)
+    ax.text(
+        0.5,
+        1.30,
+        "Mean model advantage",
+        ha="center",
+        va="bottom",
+        fontsize=5.2,
+        transform=ax.transAxes,
+        clip_on=False,
+    )
+    ax.set_xlabel("Δ log likelihood (bits/spike)", fontsize=4.5, labelpad=0.8)
+    ax.set_ylabel("Frac.", fontsize=4.6, labelpad=0.8)
+    ax.set_xticks([-1.0, -0.5, 0.0, 0.5, 1.0])
+    ax.set_yticks([0.0, 0.1, 0.2])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=3.9, length=1.0, pad=0.6)
+
+
+def plot_panel_d_compact_swap_delta(
+    ax: Any,
+    swap_delta_table: Any,
+    swap_examples: dict[str, Any] | Sequence[dict[str, Any]] | None,
+    *,
+    model_name: str,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
+) -> None:
+    """Plot Figure 2 Panel E with three examples and one mean histogram."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    if dark_activity_table is None:
-        dpp_ax = ax.inset_axes(PANEL_B_SINGLE_LIGHT_DPP_AXIS_BOUNDS)
-    else:
-        activity_ax = ax.inset_axes(PANEL_B_ACTIVITY_DPP_AXIS_BOUNDS)
-        inactive_values, active_values = _get_panel_b_light_dpp_by_dark_activity_values(
-            dark_activity_table
-        )
-        _plot_panel_b_violin(
-            activity_ax,
-            (inactive_values, active_values),
-            labels=(
-                f"Dark-inactive\n<{PANEL_B_DARK_ACTIVITY_THRESHOLD_HZ:g} Hz",
-                f"Dark active\n>={PANEL_B_DARK_ACTIVITY_THRESHOLD_HZ:g} Hz",
-            ),
-            colors=(
-                PANEL_B_ACTIVITY_COLORS["inactive"],
-                PANEL_B_ACTIVITY_COLORS["active"],
-            ),
-            title="Stable light cells",
-            ylabel="Light DPP\ncorr.",
-        )
-        _add_panel_b_activity_light_dpp_annotation(
-            activity_ax,
-            inactive_values,
-            active_values,
-        )
-        dpp_ax = ax.inset_axes(PANEL_B_LIGHT_DPP_AXIS_BOUNDS)
 
-    low_threshold_label = f"{float(low_threshold):g}"
-    high_threshold_label = f"{float(high_threshold):g}"
-    if dark_activity_table is None:
-        (
-            low_values,
-            middle_values,
-            high_values,
-        ) = _get_panel_b_light_similarity_by_dark_similarity_values(
-            table,
-            low_threshold=low_threshold,
-            high_threshold=high_threshold,
-        )
-        dpp_labels = (
-            f"Dark DPP\n<{low_threshold_label}",
-            f"Dark DPP\n{low_threshold_label}-{high_threshold_label}",
-            f"Dark DPP\n>={high_threshold_label}",
-        )
-        dpp_title = "Grouped by dark DPP"
-        _plot_panel_b_boxplot(
-            dpp_ax,
-            (low_values, middle_values, high_values),
-            labels=dpp_labels,
-            colors=(
-                PANEL_B_BOX_COLORS["low_dpp"],
-                PANEL_B_BOX_COLORS["mid_dpp"],
-                PANEL_B_BOX_COLORS["high_dpp"],
+    schematic_ax = ax.inset_axes(PANEL_D_SCHEMATIC_AXIS_BOUNDS)
+    result_ax = ax.inset_axes(PANEL_D_DELTA_AXIS_BOUNDS)
+    result_ax.set_xlim(0.0, 1.0)
+    result_ax.set_ylim(0.0, 1.0)
+    result_ax.axis("off")
+
+    _draw_panel_d_swap_schematic(
+        schematic_ax,
+        track_size=PANEL_D_SCHEMATIC_TRACK_SIZE,
+        show_dark_track_labels=True,
+        model_name=model_name,
+        model_labels=model_labels,
+        prediction_label_fontsize=PANEL_C_PREDICTION_LABEL_FONTSIZE,
+    )
+
+    examples = list(swap_examples.values()) if isinstance(swap_examples, dict) else list(
+        swap_examples or []
+    )
+    example_delta_label_positions = PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS
+    example_delta_label_vertical_alignments = (
+        PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
+    )
+    for example_index, bounds in enumerate(PANEL_D_COMPACT_SLOT_BOUNDS[:3]):
+        example_ax = result_ax.inset_axes(bounds)
+        example = examples[example_index] if example_index < len(examples) else None
+        _plot_panel_h_switched_segment_example(
+            example_ax,
+            example,
+            model_name=model_name,
+            model_colors=model_colors,
+            model_labels=model_labels,
+            example_label=f"Example {example_index + 1}",
+            show_xlabel=example_index == 2,
+            show_ylabel=example_index in (0, 2),
+            show_legend=example_index == 1,
+            show_xticklabels=example_index == 2,
+            icon_bounds=PANEL_D_COMPACT_EXAMPLE_ICON_BOUNDS,
+            legend_loc="center left",
+            legend_bbox_to_anchor=(1.03, 0.50),
+            delta_label_position=(
+                example_delta_label_positions[example_index]
+                if example_index < len(example_delta_label_positions)
+                else None
             ),
-            title=dpp_title,
-            ylabel="Light DPP\ncorr.",
-        )
-        if low_values.size or middle_values.size or high_values.size:
-            low_summary = (
-                f"low {np.mean(low_values > 0.5):.0%} > 0.5"
-                if low_values.size
-                else "low n/a"
-            )
-            middle_summary = (
-                f"mid {np.mean(middle_values > 0.5):.0%} > 0.5"
-                if middle_values.size
-                else "mid n/a"
-            )
-            high_summary = (
-                f"high {np.mean(high_values > 0.5):.0%} > 0.5"
-                if high_values.size
-                else "high n/a"
-            )
-            dpp_ax.text(
-                0.98,
-                0.04,
-                low_summary + "\n" + middle_summary + "\n" + high_summary,
-                ha="right",
-                va="bottom",
-                fontsize=4.5,
-                transform=dpp_ax.transAxes,
-            )
-    else:
-        low_values, high_values = _get_panel_b_light_dpp_by_dark_dpp_threshold_values(
-            table,
-            threshold=low_threshold,
-            dark_active_only=True,
-        )
-        dpp_labels = (
-            f"Dark DPP\n<{low_threshold_label}",
-            f"Dark DPP\n>{low_threshold_label}",
-        )
-        _plot_panel_b_violin(
-            dpp_ax,
-            (low_values, high_values),
-            labels=dpp_labels,
-            colors=(
-                PANEL_B_BOX_COLORS["low_dpp"],
-                PANEL_B_BOX_COLORS["high_dpp"],
+            delta_label_va=(
+                example_delta_label_vertical_alignments[example_index]
+                if example_index < len(example_delta_label_vertical_alignments)
+                else None
             ),
-            title="Dark active cells",
-            ylabel=None,
         )
-        if low_values.size or high_values.size:
-            low_summary = (
-                f"low {np.mean(low_values > 0.5):.0%} > 0.5"
-                if low_values.size
-                else "low n/a"
-            )
-            high_summary = (
-                f"high {np.mean(high_values > 0.5):.0%} > 0.5"
-                if high_values.size
-                else "high n/a"
-            )
-            dpp_ax.text(
-                0.98,
-                0.04,
-                low_summary + "\n" + high_summary,
-                ha="right",
-                va="bottom",
-                fontsize=4.5,
-                transform=dpp_ax.transAxes,
-            )
+        example_ax.tick_params(labelsize=4.3)
+        for text in example_ax.texts:
+            if text.get_text().startswith("ΔLL="):
+                text.set_fontsize(4.1)
+        _set_nested_legend_fontsize(example_ax, 3.9)
+        _replace_nested_text(
+            example_ax,
+            "Norm. path progression",
+            "Norm.\npath progression",
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+        )
+
+    histogram_ax = result_ax.inset_axes(PANEL_D_COMPACT_SLOT_BOUNDS[3])
+    plot_panel_d_mean_swap_delta_axis(
+        histogram_ax,
+        swap_delta_table,
+        model_name=model_name,
+        model_colors=model_colors,
+        model_labels=model_labels,
+    )
 
 
-def plot_panel_a_examples_row(
+def plot_panel_c_model_architecture_row(
     ax: Any,
     examples: Sequence[dict[str, Any]],
-    *,
-    similarity_annotation: str = "correlation",
-    show_similarity_annotation: bool = True,
 ) -> None:
-    """Plot the moved Figure 3A examples and added Figure 2A examples."""
+    """Plot Figure 2 Panel D with schematics left and examples right."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    if not examples:
-        ax.text(
-            0.5,
-            0.5,
-            "No examples",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-        return
 
-    column_gap = PANEL_A_EXAMPLE_COLUMN_GAP
-    row_gap = PANEL_A_EXAMPLE_ROW_GAP
-    column_count = min(2, len(examples))
-    row_count = (len(examples) + column_count - 1) // column_count
-    column_width = (1.0 - column_gap * (column_count - 1)) / column_count
-    row_height = (1.0 - row_gap * (row_count - 1)) / row_count
-    for example_index, example in enumerate(examples, start=1):
-        row_index = (example_index - 1) // column_count
-        column_index = (example_index - 1) % column_count
-        left = column_index * (column_width + column_gap)
-        bottom = 1.0 - (row_index + 1) * row_height - row_index * row_gap
-        example_ax = ax.inset_axes([left, bottom, column_width, row_height])
-        correlation_text_options = (
-            PANEL_A_EXAMPLE_CORRELATION_TEXT_OVERRIDES.get(example_index, {})
-        )
-        plot_kwargs = dict(
-            title=None,
-            show_correlation=show_similarity_annotation,
-            **correlation_text_options,
-        )
-        y_max_override = PANEL_A_EXAMPLE_Y_MAX_OVERRIDES.get(example_index)
-        if y_max_override is not None:
-            plot_kwargs["y_max"] = y_max_override
-        if similarity_annotation != "correlation":
-            plot_kwargs["similarity_annotation"] = similarity_annotation
-        plot_panel_a_example(example_ax, example, **plot_kwargs)
-        example_ax.text(
-            0.5,
-            0.985,
-            f"Example cell {example_index}",
-            ha="center",
-            va="top",
-            fontsize=5.3,
-            transform=example_ax.transAxes,
-        )
+    schematic_ax = ax.inset_axes(PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS)
+    _plot_panel_g_architecture_schematic(
+        schematic_ax,
+        independent_track_center_y=PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y,
+        shared_track_center_y=PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
+        track_size=PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE,
+        independent_basis_icon_scale=PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
+        independent_basis_label=PANEL_B_INDEPENDENT_BASIS_LABEL,
+        show_dark_track_labels=True,
+        field_label_y=PANEL_B_FIELD_LABEL_Y,
+        model_label_x=PANEL_B_MODEL_LABEL_X,
+        model_label_fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
+        shared_model_label="Dark scaffold\nmodel",
+        component_label_fontsize=PANEL_B_COMPONENT_LABEL_FONTSIZE,
+        segment_modulation_label_y=PANEL_B_SEGMENT_MODULATION_LABEL_Y,
+        segment_modulation_label=PANEL_B_SEGMENT_MODULATION_LABEL,
+        fill_oval_regions=False,
+    )
+
+    example_ax = ax.inset_axes(PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS)
+    _plot_panel_g_example_columns(
+        example_ax,
+        examples,
+        field_y=PANEL_B_EXAMPLE_FIELD_Y,
+        field_height=PANEL_B_EXAMPLE_FIELD_HEIGHT,
+        icon_bounds=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ICON_BOUNDS,
+        xlabel_y=PANEL_C_SIDE_BY_SIDE_EXAMPLE_XLABEL_Y,
+        column_width=PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_WIDTH,
+        column_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_GAP,
+        plot_left_offset=PANEL_C_SIDE_BY_SIDE_EXAMPLE_PLOT_LEFT_OFFSET,
+        field_width=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_WIDTH,
+        field_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_GAP,
+        layout="rows",
+        row_height=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_HEIGHT,
+        row_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP,
+        model_colors=PANEL_B_EXAMPLE_MODEL_COLORS_2_3,
+        model_labels=PANEL_B_EXAMPLE_MODEL_LABELS_2_3,
+    )
+    _keep_last_nested_text(
+        example_ax,
+        "Norm. path progression",
+        replacement="Norm.\npath progression",
+        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+    )
+    _keep_last_nested_text(
+        example_ax,
+        "Norm. goal progression",
+        replacement="Norm.\npath progression",
+        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+    )
+    _set_nested_legend_fontsize(example_ax, 3.9)
 
 
 def make_figure_2(
@@ -2000,9 +1261,6 @@ def make_figure_2(
     refresh_panel_example_cache: bool = False,
     dark_tuning_correlation_threshold: float = (
         PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD
-    ),
-    high_dark_tuning_correlation_threshold: float = (
-        PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
     ),
 ) -> Path:
     """Build and save Figure 2."""
@@ -2049,24 +1307,30 @@ def make_figure_2(
             FIGURE_2_PANEL_A_EXAMPLES
         )
     ]
-    panel_b_table = load_panel_b_tuning_correlation_table(
+    panel_b_overlap_table = load_panel_b_tuning_overlap_table(
         data_root=data_root,
         datasets=datasets,
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
     )
-    panel_b_activity_table = load_panel_b_dark_activity_light_dpp_table(
+    panel_b_overlap_table = filter_panel_b_overlap_by_even_odd_stability(
+        panel_b_overlap_table,
         data_root=data_root,
         datasets=datasets,
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
-        dark_movement_fr_cache_dir=panel_example_cache_dir,
+        min_stability_correlation=(
+            PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
+        ),
     )
-    panel_b_stable_light_paired_table = build_panel_b_stable_light_paired_dpp_table(
-        panel_b_table,
-        panel_b_activity_table,
+    panel_e_decoding_error_table = load_panel_e_decoding_error_table(
+        data_root=data_root,
+        datasets=datasets,
+        region=quant_region,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
     )
 
     apply_paper_style()
@@ -2074,99 +1338,51 @@ def make_figure_2(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
     )
-    fig.get_layout_engine().set(**FIGURE_2_CONSTRAINED_LAYOUT_PADS)
+    fig.get_layout_engine().set(**CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS)
     outer_grid = fig.add_gridspec(
-        nrows=2,
+        nrows=4,
         ncols=1,
         height_ratios=[
-            PANEL_A_EXAMPLE_ROW_HEIGHT_MM,
-            PANEL_BC_ROW_HEIGHT_MM,
+            PANEL_A_SINGLE_ROW_HEIGHT_MM,
+            PANEL_BC_QUANT_ROW_HEIGHT_MM,
+            PANEL_D_ROW_HEIGHT_MM,
+            PANEL_E_ROW_HEIGHT_MM,
         ],
     )
-    top_grid = outer_grid[0, 0].subgridspec(
+    panel_a_axis = fig.add_subplot(outer_grid[0, 0])
+    quant_grid = outer_grid[1, 0].subgridspec(
         nrows=1,
         ncols=2,
-        width_ratios=PANEL_AB_WIDTH_RATIOS,
-        wspace=PANEL_AB_WSPACE,
+        width_ratios=PANEL_BC_ROW_WIDTH_RATIOS,
+        wspace=PANEL_BC_ROW_WSPACE,
     )
-    panel_a_axis = fig.add_subplot(top_grid[0, 0])
-    panel_b_axis = fig.add_subplot(top_grid[0, 1])
-    glm_grid = outer_grid[1, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_GH_WIDTH_RATIOS,
-    )
-    panel_c_axis = fig.add_subplot(glm_grid[0, 0])
-    panel_d_axis = fig.add_subplot(glm_grid[0, 1])
+    panel_b_axis = fig.add_subplot(quant_grid[0, 0])
+    panel_c_axis = fig.add_subplot(quant_grid[0, 1])
+    panel_d_axis = fig.add_subplot(outer_grid[2, 0])
+    panel_e_axis = fig.add_subplot(outer_grid[3, 0])
 
-    plot_panel_a_examples_row(panel_a_axis, panel_a_examples)
-    plot_panel_b_light_similarity_by_dark_similarity(
+    plot_panel_a_examples_single_row(
+        panel_a_axis,
+        panel_a_examples,
+    )
+    plot_panel_b_dpp_overlap_with_schematic(
         panel_b_axis,
-        panel_b_stable_light_paired_table,
-        dark_activity_table=panel_b_activity_table,
+        panel_b_overlap_table,
+        example=panel_a_examples[0],
         low_threshold=dark_tuning_correlation_threshold,
-        high_threshold=high_dark_tuning_correlation_threshold,
     )
-    plot_panel_g_model_architecture(
-        panel_c_axis,
-        panel_glm_payload["dark_light_examples"],
-        independent_track_center_y=PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y,
-        shared_track_center_y=PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
-        schematic_height_fraction=PANEL_B_SCHEMATIC_HEIGHT_FRACTION,
-        schematic_track_size=PANEL_B_SCHEMATIC_TRACK_SIZE,
-        independent_basis_icon_scale=PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
-        independent_basis_label=PANEL_B_INDEPENDENT_BASIS_LABEL,
-        show_dark_track_labels=True,
-        field_label_y=PANEL_B_FIELD_LABEL_Y,
-        model_label_x=PANEL_B_MODEL_LABEL_X,
-        model_label_fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
-        shared_model_label="Segment scalar\nmodel",
-        component_label_fontsize=PANEL_B_COMPONENT_LABEL_FONTSIZE,
-        segment_modulation_label_y=PANEL_B_SEGMENT_MODULATION_LABEL_Y,
-        segment_modulation_label=PANEL_B_SEGMENT_MODULATION_LABEL,
-        example_axis_bounds=PANEL_B_EXAMPLE_AXIS_BOUNDS,
-        example_field_y=PANEL_B_EXAMPLE_FIELD_Y,
-        example_field_height=PANEL_B_EXAMPLE_FIELD_HEIGHT,
-        example_icon_bounds=PANEL_B_EXAMPLE_ICON_BOUNDS,
-        example_xlabel_y=PANEL_B_EXAMPLE_XLABEL_Y,
-        example_column_width=PANEL_B_EXAMPLE_COLUMN_WIDTH,
-        example_column_gap=PANEL_B_EXAMPLE_COLUMN_GAP,
-        example_plot_left_offset=PANEL_B_EXAMPLE_PLOT_LEFT_OFFSET,
-        example_field_width=PANEL_B_EXAMPLE_FIELD_WIDTH,
-        example_field_gap=PANEL_B_EXAMPLE_FIELD_GAP,
-        example_layout=PANEL_B_EXAMPLE_LAYOUT,
-        example_row_height=PANEL_B_EXAMPLE_ROW_HEIGHT,
-        example_row_gap=PANEL_B_EXAMPLE_ROW_GAP,
-        model_colors=PANEL_B_EXAMPLE_MODEL_COLORS,
-        model_labels=PANEL_B_EXAMPLE_MODEL_LABELS,
-    )
-    plot_panel_h_swap_delta(
+    plot_panel_c_cross_and_place_decoding(panel_c_axis, panel_e_decoding_error_table)
+    plot_panel_c_model_architecture_row(
         panel_d_axis,
+        panel_glm_payload["dark_light_examples"],
+    )
+    plot_panel_d_compact_swap_delta(
+        panel_e_axis,
         panel_glm_payload["swap_delta"],
         panel_glm_payload["swap_examples"],
         model_name=PANEL_C_SWAP_MODEL_NAME,
-        model_colors=PANEL_C_SWAP_MODEL_COLORS,
-        model_labels=PANEL_C_SWAP_MODEL_LABELS,
-        schematic_axis_bounds=PANEL_C_SCHEMATIC_AXIS_BOUNDS,
-        delta_axis_bounds=PANEL_C_DELTA_AXIS_BOUNDS,
-        example_axis_bounds=PANEL_C_EXAMPLE_AXIS_BOUNDS,
-        schematic_track_size=PANEL_C_SCHEMATIC_TRACK_SIZE,
-        show_dark_track_labels=True,
-        show_model_labels=False,
-        prediction_label_fontsize=PANEL_C_PREDICTION_LABEL_FONTSIZE,
-        independent_track_center_y=PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
-        independent_prediction_label_y=PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
-        segment_modulation_track_center_y=PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
-        shared_dark_track_center_y=PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
-        shared_light_track_center_y=PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
-        shared_prediction_label_y=PANEL_C_SHARED_PREDICTION_LABEL_Y,
-        delta_grid_bounds=PANEL_C_DELTA_GRID_BOUNDS,
-        delta_xlabel_y=PANEL_C_DELTA_XLABEL_Y,
-        example_delta_label_positions=PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS,
-        example_delta_label_vertical_alignments=(
-            PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
-        ),
-        example_icon_bounds=PANEL_C_EXAMPLE_ICON_BOUNDS,
+        model_colors=PANEL_C_SWAP_MODEL_COLORS_2_3,
+        model_labels=PANEL_C_SWAP_MODEL_LABELS_2_3,
     )
 
     label_axis(panel_a_axis, "A", x=-0.02, y=PANEL_A_LABEL_Y)
@@ -2177,38 +1393,48 @@ def make_figure_2(
         pad=PANEL_A_TITLE_PAD,
     )
     label_axis(panel_b_axis, "B", x=-0.035, y=PANEL_B_LABEL_Y)
-    panel_b_label = panel_b_axis.texts[-1]
-    label_axis(panel_c_axis, "C", x=-0.035, y=PANEL_BC_LABEL_Y)
-    panel_c_label = panel_c_axis.texts[-1]
-    label_axis(panel_d_axis, "D", x=-0.035, y=PANEL_BC_LABEL_Y)
-    panel_d_label = panel_d_axis.texts[-1]
     panel_b_axis.set_title(
-        "Light DPP across dark-defined groups",
+        "Dark and light DPP coding",
         fontsize=8,
         pad=PANEL_B_TITLE_PAD,
     )
-    panel_c_title = panel_c_axis.set_title(
+    label_axis(panel_c_axis, "C", x=-0.035, y=PANEL_B_LABEL_Y)
+    panel_c_label = panel_c_axis.texts[-1]
+    label_axis(panel_d_axis, "D", x=-0.02, y=PANEL_BC_LABEL_Y)
+    panel_d_label = panel_d_axis.texts[-1]
+    label_axis(panel_e_axis, "E", x=-0.02, y=PANEL_BC_LABEL_Y)
+    panel_e_label = panel_e_axis.texts[-1]
+    panel_c_axis.set_title(
+        "Dark and light decoding comparison",
+        fontsize=8,
+        pad=PANEL_B_TITLE_PAD,
+    )
+    panel_d_title = panel_d_axis.set_title(
         "Two models that relate dark and light activity",
         fontsize=8,
         pad=PANEL_BC_TITLE_PAD,
     )
-    panel_d_title = panel_d_axis.set_title(
+    panel_e_title = panel_e_axis.set_title(
         "Predicting activity in held-out light epoch",
         fontsize=8,
         pad=PANEL_BC_TITLE_PAD,
     )
 
+    _raise_text_to_minimum_fontsize(fig, MIN_PUBLICATION_FONTSIZE_PT)
     fig.canvas.draw()
-    _shift_axis_horizontally(panel_d_axis, PANEL_C_HORIZONTAL_SHIFT)
+    _shift_axis_horizontally(panel_e_axis, PANEL_E_HORIZONTAL_SHIFT)
+    _shift_axis_vertically(panel_e_axis, PANEL_E_VERTICAL_SHIFT)
     fig.canvas.draw()
-    _align_texts_to_reference_display_y((panel_c_label, panel_d_label))
-    _align_texts_to_reference_display_y((panel_c_title, panel_d_title))
-    _align_text_to_reference_display_x(panel_c_label, panel_a_label)
-    _align_texts_to_reference_display_y((panel_c_title, panel_c_label))
-    _align_texts_to_reference_display_y((panel_c_label, panel_d_label))
+    _align_text_to_reference_display_x(panel_d_label, panel_a_label)
+    _align_text_to_reference_display_x(panel_e_label, panel_a_label)
+    panel_e_title.set_position((0.5, panel_e_title.get_position()[1]))
+    _align_texts_to_reference_display_y((panel_e_title, panel_e_label))
+    _align_texts_to_reference_display_y((panel_d_title, panel_d_label))
+    _align_texts_to_reference_display_y((panel_b_axis.title, panel_b_axis.texts[-1]))
     fig.set_layout_engine(None)
 
-    save_figure(fig, output_path, dpi=dpi)
+    save_bbox = _tight_bbox_with_bottom_crop(fig, FIGURE_2_BOTTOM_CROP_MM)
+    save_figure(fig, output_path, dpi=dpi, bbox_inches=save_bbox)
     plt.close(fig)
     print(f"Saved Figure 2 to {output_path}")
     return output_path
@@ -2217,7 +1443,7 @@ def make_figure_2(
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Figure 2 generation."""
     parser = argparse.ArgumentParser(
-        description="Generate Figure 2 dark-light example and GLM panels."
+        description="Generate Figure 2."
     )
     parser.add_argument(
         "--data-root",
@@ -2262,15 +1488,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--high-dark-tuning-correlation-threshold",
-        type=float,
-        default=PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
-        help=(
-            "Upper dark tuning-correlation threshold for Panel B high group. "
-            f"Default: {PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD}"
-        ),
-    )
-    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -2295,22 +1512,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             f"Default: {', '.join(DEFAULT_REGIONS)}."
         ),
     )
-    parser.add_argument(
-        "--light-epoch",
-        default=None,
-        help=(
-            "Light run epoch for GLM panels. "
-            f"Default: registry value, currently {DEFAULT_LIGHT_EPOCH} unless overridden."
-        ),
-    )
-    parser.add_argument(
-        "--dark-epoch",
-        default=None,
-        help=(
-            "Dark run epoch. "
-            f"Default: registry value, currently {DEFAULT_DARK_EPOCH} unless overridden."
-        ),
-    )
+    parser.add_argument("--light-epoch", default=None, help="Light run epoch.")
+    parser.add_argument("--dark-epoch", default=None, help="Dark run epoch.")
     parser.add_argument(
         "--position-bin-count",
         type=int,
@@ -2380,9 +1583,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         panel_example_cache_dir=panel_example_cache_dir,
         refresh_panel_example_cache=args.refresh_panel_example_cache,
         dark_tuning_correlation_threshold=args.dark_tuning_correlation_threshold,
-        high_dark_tuning_correlation_threshold=(
-            args.high_dark_tuning_correlation_threshold
-        ),
     )
 
 
