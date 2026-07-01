@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import v1ca1.paper_figures.old_fig3 as figure_3_module
+import v1ca1.paper_figures.old_fig3 as old_fig3_module
 import v1ca1.paper_figures.supplementary_figure_3 as supp_figure_3_module
 from v1ca1.paper_figures.supplementary_figure_3 import (
     DEFAULT_FIGURE_HEIGHT_MM,
@@ -42,7 +42,6 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     compute_tuning_curve_correlation,
     filter_panel_d_similarity_table_by_tuning_stability,
     filter_ordered_unit_keys_by_unit_set,
-    group_datasets_by_animal,
     load_dark_light_tuning_correlation_table,
     load_light_tuning_stability_table,
     load_panel_a_cache,
@@ -67,7 +66,7 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
 
     assert DEFAULT_OUTPUT_NAME == "supplementary_figure_3"
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(
-        figure_3_module.DEFAULT_FIGURE_WIDTH_MM
+        old_fig3_module.DEFAULT_FIGURE_WIDTH_MM
     )
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
@@ -76,12 +75,12 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
         + DEFAULT_BOTTOM_SECTION_SPACER_MM
         + DEFAULT_MOTOR_SUMMARY_HEIGHT_MM
     )
-    assert DEFAULT_FIGURE_HEIGHT_MM > figure_3_module.DEFAULT_FIGURE_HEIGHT_MM
-    assert args.region == figure_3_module.DEFAULT_REGIONS[0]
+    assert DEFAULT_FIGURE_HEIGHT_MM > old_fig3_module.DEFAULT_FIGURE_HEIGHT_MM
+    assert args.region == old_fig3_module.DEFAULT_REGIONS[0]
     assert args.light_epoch is None
     assert args.dark_epoch is None
-    assert args.position_bin_count == figure_3_module.DEFAULT_POSITION_BIN_COUNT
-    assert args.sigma_bins == figure_3_module.DEFAULT_SIGMA_BINS
+    assert args.position_bin_count == old_fig3_module.DEFAULT_POSITION_BIN_COUNT
+    assert args.sigma_bins == old_fig3_module.DEFAULT_SIGMA_BINS
     assert args.panel_a_cache_dir is None
     assert args.refresh_panel_a_cache is False
     assert REORDERED_HEATMAP_CMAP == supp_figure_3_module.PANEL_D_HEATMAP_CMAP
@@ -89,7 +88,7 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
     assert REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION == pytest.approx(0.5)
     assert PANEL_A_CV_PCA_SIZE_FRACTION == pytest.approx(0.40)
     assert DEFAULT_REORDERED_HEATMAP_HEIGHT_MM == pytest.approx(
-        figure_3_module.DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
+        old_fig3_module.DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
     )
 
 
@@ -108,9 +107,9 @@ def test_panel_a_cache_path_and_roundtrip(tmp_path: Path) -> None:
     )
     panels = {}
     ordered_unit_keys = {}
-    for index, order_trajectory in enumerate(figure_3_module.PANEL_B_TRAJECTORY_TYPES):
+    for index, order_trajectory in enumerate(old_fig3_module.PANEL_B_TRAJECTORY_TYPES):
         ordered_unit_keys[order_trajectory] = np.asarray([f"unit-{index}"], dtype=str)
-        for plot_trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES:
+        for plot_trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES:
             panels[(order_trajectory, plot_trajectory)] = np.full(
                 (index + 1, 3),
                 index,
@@ -241,7 +240,7 @@ def _make_motor_progression_rows(
     rows = []
     for epoch_index, epoch in enumerate((dark_epoch, light_epoch)):
         for trajectory_index, trajectory_type in enumerate(
-            figure_3_module.PANEL_B_TRAJECTORY_TYPES
+            old_fig3_module.PANEL_B_TRAJECTORY_TYPES
         ):
             for variable_index, variable_name in enumerate(MOTOR_VARIABLES):
                 for bin_index, bin_center in enumerate((0.25, 0.75)):
@@ -315,7 +314,7 @@ def test_plot_panel_b_motor_progression_grid_uses_example_epoch_medians_and_iqr(
     table = pandas.DataFrame(rows)
     fig, axes = plt.subplots(
         nrows=len(MOTOR_VARIABLES),
-        ncols=len(figure_3_module.PANEL_B_TRAJECTORY_TYPES),
+        ncols=len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES),
     )
 
     plot_panel_b_motor_progression_grid(
@@ -367,7 +366,7 @@ def test_build_panel_c_motor_profile_correlation_table_uses_paired_bins() -> Non
     assert len(table) == (
         len(datasets)
         * len(MOTOR_VARIABLES)
-        * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+        * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     )
     assert set(table["animal_name"]) == {"L14", "L15"}
     assert table["n_bins"].unique().tolist() == [2]
@@ -390,7 +389,7 @@ def test_plot_panel_c_motor_profile_correlations_draws_animal_dots() -> None:
     ]
     rows = []
     for animal_index, (animal_name, date, dark_epoch) in enumerate(datasets):
-        for trajectory_type in figure_3_module.PANEL_B_TRAJECTORY_TYPES:
+        for trajectory_type in old_fig3_module.PANEL_B_TRAJECTORY_TYPES:
             for variable_index, variable_name in enumerate(MOTOR_VARIABLES):
                 rows.append(
                     {
@@ -404,7 +403,7 @@ def test_plot_panel_c_motor_profile_correlations_draws_animal_dots() -> None:
                         "n_bins": 20,
                     }
                 )
-    fig, axes = plt.subplots(ncols=len(figure_3_module.PANEL_B_TRAJECTORY_TYPES))
+    fig, axes = plt.subplots(ncols=len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES))
 
     plot_panel_c_motor_profile_correlations(
         axes,
@@ -419,23 +418,6 @@ def test_plot_panel_c_motor_profile_correlations_draws_animal_dots() -> None:
     assert axes[-1].get_legend() is not None
     assert any(axis.collections for axis in axes)
     plt.close(fig)
-
-
-def test_group_datasets_by_animal_preserves_input_order() -> None:
-    datasets = [
-        ("L14", "20240611", "08_r4"),
-        ("L15", "20241121", "10_r5"),
-        ("L14", "20240612", "08_r4"),
-    ]
-
-    grouped = group_datasets_by_animal(datasets)
-
-    assert list(grouped) == ["L14", "L15"]
-    assert grouped["L14"] == [
-        ("L14", "20240611", "08_r4"),
-        ("L14", "20240612", "08_r4"),
-    ]
-    assert grouped["L15"] == [("L15", "20241121", "10_r5")]
 
 
 def test_filter_panel_d_similarity_table_by_tuning_stability_requires_both_epochs(
@@ -515,7 +497,7 @@ def test_dark_ordered_light_heatmap_uses_figure_1d_unit_order() -> None:
             ["L14:20240611:v1:2", "L14:20240611:v1:1"],
             dtype=object,
         )
-        for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     }
     light_curve_sets = [
         {
@@ -524,7 +506,7 @@ def test_dark_ordered_light_heatmap_uses_figure_1d_unit_order() -> None:
             "region": "v1",
             "all_curves": {
                 trajectory: _curve(light_values)
-                for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+                for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
             },
         }
     ]
@@ -536,10 +518,10 @@ def test_dark_ordered_light_heatmap_uses_figure_1d_unit_order() -> None:
     )
 
     assert list(dict.fromkeys(key[0] for key in panels)) == list(
-        figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     )
     assert list(dict.fromkeys(key[1] for key in panels)) == list(
-        figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     )
     panel = panels[("center_to_left", "center_to_left")]
     assert np.allclose(
@@ -564,7 +546,7 @@ def test_filter_ordered_unit_keys_preserves_trajectory_order() -> None:
             ],
             dtype=object,
         )
-        for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     }
 
     filtered = filter_ordered_unit_keys_by_unit_set(
@@ -572,7 +554,7 @@ def test_filter_ordered_unit_keys_preserves_trajectory_order() -> None:
         {"L14:20240611:v1:1", "L14:20240611:v1:2"},
     )
 
-    for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES:
+    for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES:
         assert np.array_equal(
             filtered[trajectory],
             np.asarray(["L14:20240611:v1:1", "L14:20240611:v1:2"], dtype=object),
@@ -595,7 +577,7 @@ def test_dark_ordered_light_heatmap_loads_task_progression_curves(
                 ["L14:20240611:v1:1", "L14:20240611:v1:2"],
                 dtype=object,
             )
-            for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+            for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
         }
 
     def fake_compute_light_epoch_all_trial_tuning_curves(**kwargs: object):
@@ -610,8 +592,8 @@ def test_dark_ordered_light_heatmap_loads_task_progression_curves(
         build_calls.append(kwargs)
         panels = {
             (order_trajectory, plot_trajectory): np.ones((1, 2), dtype=float)
-            for order_trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
-            for plot_trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+            for order_trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
+            for plot_trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
         }
         ordered_unit_keys = kwargs["figure_1d_ordered_unit_keys_by_trajectory"]
         return {
@@ -707,10 +689,10 @@ def test_plot_dark_ordered_light_heatmap_uses_panel_b_orientation(
         sigma_bins=1.5,
     )
 
-    assert plot_calls[0]["trajectory_types"] == figure_3_module.PANEL_B_TRAJECTORY_TYPES
+    assert plot_calls[0]["trajectory_types"] == old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     assert (
         plot_calls[0]["axis_orientation"]
-        == figure_3_module.PANEL_B_LINEAR_POSITION_ORIENTATION
+        == old_fig3_module.PANEL_B_LINEAR_POSITION_ORIENTATION
     )
     assert plot_calls[0]["cmap"] == REORDERED_HEATMAP_CMAP
     plt.close(fig)
@@ -765,7 +747,7 @@ def test_dark_light_tuning_correlation_filters_by_movement_rate() -> None:
                         [2.0, 1.0, 0.0],
                     ]
                 )
-                for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+                for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
             },
         }
     ]
@@ -784,7 +766,7 @@ def test_dark_light_tuning_correlation_filters_by_movement_rate() -> None:
                         [2.0, 1.0, 0.0],
                     ]
                 )
-                for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES
+                for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES
             },
         }
     ]
@@ -795,18 +777,18 @@ def test_dark_light_tuning_correlation_filters_by_movement_rate() -> None:
     )
 
     assert DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ == pytest.approx(0.5)
-    assert table["unit"].tolist() == [1] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+    assert table["unit"].tolist() == [1] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     assert table["trajectory_type"].tolist() == list(
-        figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     )
     assert table["correlation"].tolist() == pytest.approx(
-        [1.0] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+        [1.0] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     )
     assert table["dark_movement_firing_rate_hz"].tolist() == pytest.approx(
-        [0.5] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+        [0.5] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     )
     assert table["light_movement_firing_rate_hz"].tolist() == pytest.approx(
-        [0.5] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+        [0.5] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     )
 
 
@@ -837,7 +819,7 @@ def test_load_dark_light_tuning_correlation_table_reads_saved_artifacts(
             coords={"unit": units, "linpos": position},
         ).to_netcdf(path)
 
-    for trajectory in figure_3_module.PANEL_B_TRAJECTORY_TYPES:
+    for trajectory in old_fig3_module.PANEL_B_TRAJECTORY_TYPES:
         _write_curve("08_r4", trajectory, [[0.0, 1.0, 2.0], [1.0, 2.0, 3.0]])
         _write_curve("02_r1", trajectory, [[0.0, 1.0, 2.0], [3.0, 2.0, 1.0]])
 
@@ -870,9 +852,9 @@ def test_load_dark_light_tuning_correlation_table_reads_saved_artifacts(
         sigma_bins=1.5,
     )
 
-    assert table["unit"].tolist() == [1] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+    assert table["unit"].tolist() == [1] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     assert table["correlation"].tolist() == pytest.approx(
-        [1.0] * len(figure_3_module.PANEL_B_TRAJECTORY_TYPES)
+        [1.0] * len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES)
     )
 
 
@@ -936,7 +918,7 @@ def test_plot_dark_light_tuning_correlation_histograms_draws_four_routes() -> No
     import matplotlib.pyplot as plt
 
     rows = []
-    for index, trajectory in enumerate(figure_3_module.PANEL_B_TRAJECTORY_TYPES):
+    for index, trajectory in enumerate(old_fig3_module.PANEL_B_TRAJECTORY_TYPES):
         rows.append(
             {
                 "animal_name": "L14",
@@ -973,7 +955,7 @@ def test_plot_dark_light_with_light_stability_histograms_overlays_step() -> None
 
     correlation_rows = []
     stability_rows = []
-    for index, trajectory in enumerate(figure_3_module.PANEL_B_TRAJECTORY_TYPES):
+    for index, trajectory in enumerate(old_fig3_module.PANEL_B_TRAJECTORY_TYPES):
         correlation_rows.append(
             {
                 "trajectory_type": trajectory,
@@ -1043,7 +1025,7 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
             {
                 "animal_name": ["L14", "L14"],
                 "date": ["20240611", "20240611"],
-                "trajectory_type": [figure_3_module.PANEL_B_TRAJECTORY_TYPES[0]] * 2,
+                "trajectory_type": [old_fig3_module.PANEL_B_TRAJECTORY_TYPES[0]] * 2,
                 "variable": [MOTOR_VARIABLES[0]] * 2,
                 "epoch": ["08_r4", MOTOR_PANEL_LIGHT_EPOCH],
                 "epoch_type": ["dark", "light"],
@@ -1156,13 +1138,13 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     ]
     assert motor_plot_calls[0]["axes"].shape == (
         len(MOTOR_VARIABLES),
-        len(figure_3_module.PANEL_B_TRAJECTORY_TYPES),
+        len(old_fig3_module.PANEL_B_TRAJECTORY_TYPES),
     )
     assert motor_plot_calls[0]["datasets"] == datasets
     assert motor_summary_build_calls[0]["datasets"] == datasets
     assert motor_summary_build_calls[0]["table"]["median"].tolist() == [1.0, 1.1]
     assert len(motor_summary_plot_calls[0]["axes"]) == len(
-        figure_3_module.PANEL_B_TRAJECTORY_TYPES
+        old_fig3_module.PANEL_B_TRAJECTORY_TYPES
     )
     assert motor_summary_plot_calls[0]["datasets"] == datasets
     assert motor_summary_plot_calls[0]["table"]["correlation"].tolist() == [0.95]

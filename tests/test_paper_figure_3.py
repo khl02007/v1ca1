@@ -146,7 +146,7 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
     plt.close(fig)
 
 
-def test_dark_movement_firing_rate_cache_path_is_descriptive() -> None:
+def test_dark_movement_firing_rate_cache_path_preserves_legacy_stem() -> None:
     metadata = build_dark_movement_firing_rate_cache_metadata(
         data_root=Path("/analysis"),
         animal_name="L14",
@@ -198,7 +198,9 @@ def test_dark_movement_firing_rate_cache_roundtrip_validates_metadata(
     assert load_dark_movement_firing_rate_cache(cache_path, stale_metadata) is None
 
 
-def test_panel_b_schematic_cache_path_and_roundtrip(tmp_path: Path) -> None:
+def test_panel_b_schematic_cache_roundtrip_preserves_legacy_stem(
+    tmp_path: Path,
+) -> None:
     metadata = build_panel_b_schematic_cache_metadata(
         data_root=Path("/analysis"),
         animal_name="L15",

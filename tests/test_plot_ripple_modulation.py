@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import v1ca1.ripple.legacy.plot_ripple_modulation as legacy_ripple_plot
 import v1ca1.ripple.plot_ripple_modulation as ripple_plot
 
 
@@ -90,13 +89,6 @@ def test_parse_arguments_uses_modern_defaults() -> None:
     assert args.heatmap_normalize == ripple_plot.DEFAULT_HEATMAP_NORMALIZE
     assert args.overwrite is False
     assert args.show is False
-
-
-def test_legacy_module_reexports_new_entrypoint() -> None:
-    assert (
-        legacy_ripple_plot.plot_ripple_modulation_for_session
-        is ripple_plot.plot_ripple_modulation_for_session
-    )
 
 
 def test_load_detect_ripple_tables_uses_detect_ripples_parquet(tmp_path: Path) -> None:

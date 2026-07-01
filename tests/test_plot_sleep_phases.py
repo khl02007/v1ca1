@@ -245,6 +245,7 @@ def test_plot_sleep_phases_for_session_saves_epoch_pdf(
         nwb_root=tmp_path,
         epochs=["02_r1"],
         position_offset=0,
+        ripple_channel=12,
         show=False,
     )
 

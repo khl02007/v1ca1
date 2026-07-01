@@ -19,32 +19,13 @@ def _reload_module(monkeypatch: pytest.MonkeyPatch, argv: list[str]):
 def _fake_result(module):
     unit_ids = np.asarray([11, 12], dtype=int)
     n_trajectories = len(module.TRAJECTORY_TYPES)
+    n_models = len(module.EMPIRICAL_MODEL_NAMES)
     n_bins = 3
     n_units = unit_ids.size
     metrics = {
-        "test_light_spike_sum": np.full((n_trajectories, n_units), 10.0),
-        "ll_task_empirical_sum": np.full((n_trajectories, n_units), -20.0),
-        "ll_visual_empirical_sum": np.full((n_trajectories, n_units), -22.0),
-        "ll_task_empirical_per_spike": np.full((n_trajectories, n_units), -2.0),
-        "ll_visual_empirical_per_spike": np.full((n_trajectories, n_units), -2.2),
-        "delta_ll_sum_task_vs_visual": np.full(
-            (n_trajectories, n_units),
-            2.0,
-        ),
-        "delta_ll_bits_task_vs_visual": np.full(
-            (n_trajectories, n_units),
-            2.0 / np.log(2.0),
-        ),
-        "delta_ll_bits_per_spike_task_vs_visual": np.full(
-            (n_trajectories, n_units),
-            0.2 / np.log(2.0),
-        ),
-        "corr_task_empirical": np.full((n_trajectories, n_units), 0.5),
-        "corr_visual_empirical": np.full((n_trajectories, n_units), 0.1),
-        "delta_corr_task_vs_visual": np.full(
-            (n_trajectories, n_units),
-            0.4,
-        ),
+        "ll_sum": np.full((n_models, n_trajectories, n_units), -20.0),
+        "ll_bits_per_spike": np.full((n_models, n_trajectories, n_units), -2.0),
+        "ll_bits_per_s": np.full((n_models, n_trajectories, n_units), -4.0),
     }
     segment_edges = np.asarray([0.0, 0.3, 0.7, 1.0], dtype=float)
     swap_segment_index = np.asarray(
@@ -53,6 +34,7 @@ def _fake_result(module):
     )
     return {
         "unit_ids": unit_ids,
+        "model_names": np.asarray(module.EMPIRICAL_MODEL_NAMES, dtype=str),
         "bin_edges": np.asarray([0.0, 0.33, 0.66, 1.0], dtype=float),
         "bin_centers": np.asarray([0.165, 0.495, 0.83], dtype=float),
         "segment_edges": segment_edges,
@@ -76,14 +58,9 @@ def _fake_result(module):
             2.0,
             dtype=float,
         ),
-        "task_empirical_tuning": np.full(
-            (n_trajectories, n_bins, n_units),
+        "model_tuning": np.full(
+            (n_models, n_trajectories, n_bins, n_units),
             4.0,
-            dtype=float,
-        ),
-        "visual_empirical_tuning": np.full(
-            (n_trajectories, n_bins, n_units),
-            2.0,
             dtype=float,
         ),
         "test_light_tuning": np.full(
@@ -95,6 +72,7 @@ def _fake_result(module):
         "train_dark_other_rate_hz": np.full((n_trajectories, n_units), 0.5),
         "train_light_other_rate_hz": np.full((n_trajectories, n_units), 2.0),
         "test_light_target_rate_hz": np.full((n_trajectories, n_units), 3.0),
+        "test_light_spike_sum": np.full((n_trajectories, n_units), 10.0),
         "test_light_bin_count": np.full((n_trajectories,), 5.0),
         "test_light_duration_s": np.full((n_trajectories,), 0.1),
         "metrics": metrics,
@@ -226,30 +204,49 @@ def test_smooth_interpolated_tuning_matrix_can_disable_smoothing(
     assert np.allclose(matrix[:, 1], [1.0, 2.0, 3.0])
 
 
-def test_build_empirical_task_tuning_uses_same_dark_times_other_light_over_other_dark(
+def test_build_empirical_swap_tunings_returns_current_model_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_module(monkeypatch, ["swap_tuning_curve_comparison.py"])
 
-    task_tuning = module.build_empirical_task_tuning(
-        same_dark_tuning=np.asarray([[4.0, 2.0]], dtype=float),
-        other_light_tuning=np.asarray([[6.0, 3.0]], dtype=float),
-        other_dark_tuning=np.asarray([[2.0, 1.5]], dtype=float),
+    tunings = module.build_empirical_swap_tunings(
+        same_dark_tuning=np.asarray([[4.0, 2.0], [1.0, 5.0]], dtype=float),
+        other_light_tuning=np.asarray([[6.0, 3.0], [3.0, 15.0]], dtype=float),
+        other_dark_tuning=np.asarray([[2.0, 1.5], [1.0, 5.0]], dtype=float),
+        bin_centers=np.asarray([0.25, 0.75], dtype=float),
+        segment_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
+        segment_index=0,
     )
 
-    assert np.allclose(task_tuning, [[12.0, 4.0]])
+    assert set(tunings) == set(module.EMPIRICAL_MODEL_NAMES)
+    assert np.allclose(tunings["empirical_visual"], [[6.0, 3.0], [3.0, 15.0]])
+    assert np.allclose(tunings["empirical_dark"], [[4.0, 2.0], [1.0, 5.0]])
+    assert np.allclose(
+        tunings["empirical_pointwise_multiplicative_ratio"],
+        [[12.0, 4.0], [3.0, 15.0]],
+    )
+    assert np.allclose(
+        tunings["empirical_segment_additive_delta"],
+        [[8.0, 3.5], [5.0, 6.5]],
+    )
 
 
-def test_score_segment_binned_counts_delta_is_task_minus_visual(
+def test_score_segment_binned_counts_scores_current_model_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_module(monkeypatch, ["swap_tuning_curve_comparison.py"])
+    visual_model = np.asarray([[1.0], [2.0]], dtype=float)
+    tuned_model = np.asarray([[1.0], [20.0]], dtype=float)
+    tunings_by_model = {
+        model_name: visual_model.copy()
+        for model_name in module.EMPIRICAL_MODEL_NAMES
+    }
+    tunings_by_model["empirical_segment_multiplicative_ratio"] = tuned_model
 
     score = module.score_segment_binned_counts(
         spike_counts=np.asarray([[20.0], [20.0], [0.0]], dtype=float),
         positions=np.asarray([0.75, 0.90, 0.25], dtype=float),
-        task_empirical_tuning=np.asarray([[1.0], [20.0]], dtype=float),
-        visual_empirical_tuning=np.asarray([[1.0], [2.0]], dtype=float),
+        tunings_by_model=tunings_by_model,
         bin_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
         segment_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
         segment_index=1,
@@ -257,28 +254,16 @@ def test_score_segment_binned_counts_delta_is_task_minus_visual(
     )
 
     assert score["test_light_spike_sum"][0] == pytest.approx(40.0)
-    assert score["ll_task_empirical_sum"][0] > score["ll_visual_empirical_sum"][0]
-    assert score["delta_ll_sum_task_vs_visual"][0] > 0.0
-    assert score["delta_ll_bits_per_spike_task_vs_visual"][0] > 0.0
-
-
-def test_compute_segment_correlations_uses_task_minus_visual(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _reload_module(monkeypatch, ["swap_tuning_curve_comparison.py"])
-
-    correlations = module.compute_segment_correlations(
-        test_light_tuning=np.asarray([[9.0], [8.0], [1.0], [2.0]], dtype=float),
-        task_empirical_tuning=np.asarray([[9.0], [8.0], [2.0], [4.0]], dtype=float),
-        visual_empirical_tuning=np.asarray([[9.0], [8.0], [4.0], [2.0]], dtype=float),
-        bin_centers=np.asarray([0.1, 0.4, 0.7, 0.9], dtype=float),
-        segment_edges=np.asarray([0.0, 0.5, 1.0], dtype=float),
-        segment_index=1,
+    assert score["ll_sum"].shape == (len(module.EMPIRICAL_MODEL_NAMES), 1)
+    tuned_index = module.EMPIRICAL_MODEL_NAMES.index(
+        "empirical_segment_multiplicative_ratio"
     )
-
-    assert correlations["corr_task_empirical"][0] == pytest.approx(1.0)
-    assert correlations["corr_visual_empirical"][0] == pytest.approx(-1.0)
-    assert correlations["delta_corr_task_vs_visual"][0] == pytest.approx(2.0)
+    visual_index = module.EMPIRICAL_MODEL_NAMES.index("empirical_visual")
+    assert score["ll_sum"][tuned_index, 0] > score["ll_sum"][visual_index, 0]
+    assert score["ll_bits_per_spike"][tuned_index, 0] > score["ll_bits_per_spike"][
+        visual_index,
+        0,
+    ]
 
 
 def test_build_results_table_and_dataset_preserve_metric_shapes(
@@ -320,9 +305,12 @@ def test_build_results_table_and_dataset_preserve_metric_shapes(
         sources={"position": "fake.parquet"},
     )
 
-    assert table.shape[0] == len(module.TRAJECTORY_TYPES) * 2
+    assert table.shape[0] == len(module.TRAJECTORY_TYPES) * 2 * len(
+        module.EMPIRICAL_MODEL_NAMES
+    )
     assert set(table["swap_segment_index_1based"]) == {1, 3}
     assert dataset.sizes["trajectory"] == len(module.TRAJECTORY_TYPES)
+    assert dataset.sizes["model"] == len(module.EMPIRICAL_MODEL_NAMES)
     assert dataset.sizes["unit"] == 2
     assert dataset.sizes["tp_bin"] == 3
     assert dataset["same_dark_train_tuning_hz"].shape == (
@@ -330,9 +318,6 @@ def test_build_results_table_and_dataset_preserve_metric_shapes(
         3,
         2,
     )
-    assert "task_empirical_tuning_hz" in dataset
-    assert "delta_ll_bits_per_spike_task_vs_visual" in dataset
-    assert (
-        dataset.attrs["primary_ll_delta"]
-        == "task_empirical_minus_visual_empirical_bits_per_spike"
-    )
+    assert "model_tuning_hz" in dataset
+    assert "ll_bits_per_spike" in dataset
+    assert dataset.attrs["schema_version"] == "2"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 import v1ca1.paper_figures.datasets as datasets_module
+import v1ca1.paper_figures.supplementary_figure_2 as supp_figure_2_module
+import v1ca1.paper_figures.supplementary_figure_3 as supp_figure_3_module
 from v1ca1.paper_figures import (
     DEFAULT_DPI,
     PAPER_RC_PARAMS,
@@ -53,6 +55,32 @@ def test_figure_3_epoch_registry_uses_light_dark_sleep_epochs() -> None:
         "dark": ("L15", "20241121", "10_r5"),
         "sleep": ("L15", "20241121", "07_s4"),
     }
+
+
+@pytest.mark.parametrize(
+    "group_datasets_by_animal",
+    [
+        supp_figure_2_module.group_datasets_by_animal,
+        supp_figure_3_module.group_datasets_by_animal,
+    ],
+)
+def test_group_datasets_by_animal_preserves_input_order(
+    group_datasets_by_animal,
+) -> None:
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+        ("L14", "20240612", "08_r4"),
+    ]
+
+    grouped = group_datasets_by_animal(datasets)
+
+    assert list(grouped) == ["L14", "L15"]
+    assert grouped["L14"] == [
+        ("L14", "20240611", "08_r4"),
+        ("L14", "20240612", "08_r4"),
+    ]
+    assert grouped["L15"] == [("L15", "20241121", "10_r5")]
 
 
 def test_format_processed_datasets_supports_shell_arguments_with_dark_epoch() -> None:

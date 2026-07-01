@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import v1ca1.paper_figures.old_fig3 as figure_3_module
+import v1ca1.paper_figures.old_fig3 as old_fig3_module
 from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_FIGURE_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
@@ -610,7 +610,7 @@ def test_load_or_compute_panel_example_data_uses_matching_cache(
         metadata,
     )
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "load_epoch_unit_rate_curves",
         lambda **_kwargs: pytest.fail("Panel example cache was not used."),
     )
@@ -721,7 +721,7 @@ def test_plot_epoch_path_rate_axis_overlays_path_type_curves() -> None:
         list(SEGMENT_BOUNDARIES)
     )
     assert ax.get_ylabel() == "FR (Hz)"
-    assert ax.get_xlabel() == figure_3_module.TASK_PROGRESSION_XLABEL
+    assert ax.get_xlabel() == old_fig3_module.TASK_PROGRESSION_XLABEL
     assert ax.get_title() == "Dark"
     assert ax.get_legend() is not None
     plt.close(fig)
@@ -830,7 +830,7 @@ def test_plot_panel_a_examples_stacks_two_curve_blocks() -> None:
         assert raster_axes[0].get_position().y0 > rate_axes[0].get_position().y0
         assert raster_axes[0].get_position().height > rate_axes[0].get_position().height
         assert all(
-            rate_ax.get_xlabel() == figure_3_module.TASK_PROGRESSION_XLABEL
+            rate_ax.get_xlabel() == old_fig3_module.TASK_PROGRESSION_XLABEL
             for rate_ax in rate_axes
         )
     plt.close(fig)
@@ -872,17 +872,17 @@ def test_plot_light_heatmap_regions_adds_segment_boundaries(monkeypatch: pytest.
         return None
 
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "compute_light_epoch_tuning_curves",
         fake_compute_light_epoch_tuning_curves,
     )
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "build_pooled_panel_values",
         fake_build_pooled_panel_values,
     )
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "plot_pooled_heatmap_grid",
         fake_plot_pooled_heatmap_grid,
     )
@@ -948,7 +948,7 @@ def test_plot_light_heatmap_regions_uses_matching_cache(
     save_panel_b_cache(build_panel_b_cache_path(tmp_path, metadata), panels, metadata)
 
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "compute_light_epoch_tuning_curves",
         lambda **_kwargs: pytest.fail("Panel B cache was not used."),
     )
@@ -960,7 +960,7 @@ def test_plot_light_heatmap_regions_uses_matching_cache(
         return None
 
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "plot_pooled_heatmap_grid",
         _fake_plot_pooled_heatmap_grid,
     )
@@ -1043,7 +1043,7 @@ def test_add_panel_b_path_progression_label_matches_figure_1d_label() -> None:
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(nrows=4, ncols=4)
-    text = figure_3_module.add_panel_b_path_progression_label(
+    text = old_fig3_module.add_panel_b_path_progression_label(
         fig,
         np.asarray(axes, dtype=object),
     )
@@ -1054,13 +1054,13 @@ def test_add_panel_b_path_progression_label_matches_figure_1d_label() -> None:
     ) / 2
     expected_y = (
         min(box.y0 for box in bottom_boxes)
-        - figure_3_module.HEATMAP_PATH_LABEL_OFFSET
+        - old_fig3_module.HEATMAP_PATH_LABEL_OFFSET
     )
 
-    assert text.get_text() == figure_3_module.TASK_PROGRESSION_XLABEL
+    assert text.get_text() == old_fig3_module.TASK_PROGRESSION_XLABEL
     assert text.get_position() == pytest.approx((expected_x, expected_y))
     assert text.get_fontsize() == pytest.approx(
-        figure_3_module.PANEL_E_AXIS_LABEL_FONTSIZE
+        old_fig3_module.PANEL_E_AXIS_LABEL_FONTSIZE
     )
     plt.close(fig)
 
@@ -1078,18 +1078,18 @@ def test_panel_ab_header_text_uses_one_figure_y_coordinate() -> None:
         fig.add_axes([0.72, 0.72, 0.12, 0.10]),
     ]
     header_y = (
-        figure_3_module._axis_group_top_y(tuning_axes)
-        + figure_3_module.PANEL_AB_HEADER_Y_OFFSET
+        old_fig3_module._axis_group_top_y(tuning_axes)
+        + old_fig3_module.PANEL_AB_HEADER_Y_OFFSET
     )
 
-    label_a = figure_3_module._add_panel_label_at_figure_y(
+    label_a = old_fig3_module._add_panel_label_at_figure_y(
         fig,
         panel_a_axis,
         "A",
         x=-0.07,
         y=header_y,
     )
-    label_b = figure_3_module._add_panel_label_at_figure_y(
+    label_b = old_fig3_module._add_panel_label_at_figure_y(
         fig,
         corner_axis,
         "B",
@@ -1102,7 +1102,7 @@ def test_panel_ab_header_text_uses_one_figure_y_coordinate() -> None:
         "Example DPP cells in dark and light",
         va="center",
     )
-    tuning = figure_3_module._add_centered_axis_group_text_at_y(
+    tuning = old_fig3_module._add_centered_axis_group_text_at_y(
         fig,
         tuning_axes,
         "Tuning",
@@ -1121,7 +1121,7 @@ def test_panel_ab_header_text_uses_one_figure_y_coordinate() -> None:
         for text in (label_a, title_a, label_b, tuning)
     } == {"center"}
     assert tuning.get_position()[0] == pytest.approx(
-        figure_3_module._axis_group_center_x(tuning_axes)
+        old_fig3_module._axis_group_center_x(tuning_axes)
     )
     plt.close(fig)
 
@@ -1133,18 +1133,18 @@ def test_panel_cd_label_and_group_title_share_vertical_position() -> None:
 
     fig, ax = plt.subplots()
 
-    figure_3_module._add_panel_cd_group_title(ax, "Vision changes DPP tuning")
-    figure_3_module._add_panel_cd_label(ax, "C")
+    old_fig3_module._add_panel_cd_group_title(ax, "Vision changes DPP tuning")
+    old_fig3_module._add_panel_cd_label(ax, "C")
 
     title_text = next(
         text for text in ax.texts if text.get_text().startswith("Vision")
     )
     label_text = next(text for text in ax.texts if text.get_text() == "C")
     assert title_text.get_position()[1] == pytest.approx(
-        figure_3_module.PANEL_CD_GROUP_TITLE_Y
+        old_fig3_module.PANEL_CD_GROUP_TITLE_Y
     )
     assert label_text.get_position()[1] == pytest.approx(
-        figure_3_module.PANEL_CD_GROUP_TITLE_Y
+        old_fig3_module.PANEL_CD_GROUP_TITLE_Y
     )
     assert title_text.get_verticalalignment() == "top"
     assert label_text.get_verticalalignment() == "top"
@@ -1348,7 +1348,7 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
         "Dark med. 0.25",
     ]
     assert [text.get_position()[0] for text in cross_ax.texts] == pytest.approx(
-        [figure_3_module.PANEL_E_SUMMARY_TEXT_X] * 2
+        [old_fig3_module.PANEL_E_SUMMARY_TEXT_X] * 2
     )
     assert all(text.get_horizontalalignment() == "right" for text in cross_ax.texts)
     assert [text.get_text() for text in place_ax.texts] == [
@@ -1356,7 +1356,7 @@ def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
         "Dark med. 0.02",
     ]
     assert [text.get_position()[0] for text in place_ax.texts] == pytest.approx(
-        [figure_3_module.PANEL_E_PLACE_SUMMARY_TEXT_X] * 2
+        [old_fig3_module.PANEL_E_PLACE_SUMMARY_TEXT_X] * 2
     )
     assert all(text.get_horizontalalignment() == "left" for text in place_ax.texts)
     assert place_ax.get_legend() is None
@@ -1415,12 +1415,12 @@ def test_load_panel_e_decoding_error_table_pools_registered_datasets(
         return np.asarray([0.1, 0.2])
 
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "_load_absolute_normalized_decoding_errors",
         _fake_error_values,
     )
     monkeypatch.setattr(
-        figure_3_module,
+        old_fig3_module,
         "get_wtrack_total_length",
         lambda _animal_name: 100.0,
     )
@@ -1875,7 +1875,7 @@ def test_default_cli_matches_manuscript_figure_format() -> None:
     assert args.refresh_panel_b_cache is False
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(165.0)
     assert DEFAULT_PANEL_AB_HEIGHT_MM == pytest.approx(
-        figure_3_module.DEFAULT_HEATMAP_HEIGHT_MM
+        old_fig3_module.DEFAULT_HEATMAP_HEIGHT_MM
     )
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_PANEL_AB_HEIGHT_MM + DEFAULT_PANEL_DEF_HEIGHT_MM

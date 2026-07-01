@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import v1ca1.paper_figures.old_fig3 as figure_3_module
+import v1ca1.paper_figures.old_fig3 as old_fig3_module
 import v1ca1.paper_figures.supplementary_figure_2 as supp_figure_2_module
 from v1ca1.paper_figures.supplementary_figure_2 import (
     DEFAULT_ANIMAL_ROW_HEIGHT_MM,
@@ -28,7 +28,6 @@ from v1ca1.paper_figures.supplementary_figure_2 import (
     get_figure_height_mm,
     get_swap_tuning_curve_comparison_path,
     get_swap_tuning_curve_comparison_dataset_path,
-    group_datasets_by_animal,
     load_empirical_pairwise_delta_table,
     load_full_segment_log_gain_table,
     load_hybrid_glm_empirical_delta_table,
@@ -47,10 +46,10 @@ def test_default_cli_matches_letter_width_with_one_inch_margins() -> None:
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(
         (LETTER_PAPER_WIDTH_IN - 2.0 * LETTER_HORIZONTAL_MARGIN_IN) * 25.4
     )
-    assert args.output_dir == figure_3_module.DEFAULT_OUTPUT_DIR
+    assert args.output_dir == old_fig3_module.DEFAULT_OUTPUT_DIR
     assert args.output_name == DEFAULT_OUTPUT_NAME
-    assert args.output_format == figure_3_module.DEFAULT_OUTPUT_FORMAT
-    assert args.region == figure_3_module.DEFAULT_REGIONS[0]
+    assert args.output_format == old_fig3_module.DEFAULT_OUTPUT_FORMAT
+    assert args.region == old_fig3_module.DEFAULT_REGIONS[0]
     assert args.dataset is None
     assert args.dark_epoch is None
     assert get_figure_height_mm(0) == pytest.approx(DEFAULT_ANIMAL_ROW_HEIGHT_MM)
@@ -67,23 +66,6 @@ def test_default_cli_matches_letter_width_with_one_inch_margins() -> None:
         MIXED_GLM_FULL_BEST_AXIS_BOUNDS[0] + MIXED_GLM_FULL_BEST_AXIS_BOUNDS[2],
     )
     assert 0.5 * (panel_b_left + panel_b_right) == pytest.approx(0.5)
-
-
-def test_group_datasets_by_animal_preserves_input_order() -> None:
-    datasets = [
-        ("L14", "20240611", "08_r4"),
-        ("L15", "20241121", "10_r5"),
-        ("L14", "20240612", "08_r4"),
-    ]
-
-    grouped = group_datasets_by_animal(datasets)
-
-    assert list(grouped) == ["L14", "L15"]
-    assert grouped["L14"] == [
-        ("L14", "20240611", "08_r4"),
-        ("L14", "20240612", "08_r4"),
-    ]
-    assert grouped["L15"] == [("L15", "20241121", "10_r5")]
 
 
 def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
@@ -132,10 +114,10 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
     ]
     assert len(boxes) == 3
     first_axis = axis.child_axes[0]
-    assert first_axis.get_xlim() == pytest.approx(figure_3_module.PANEL_H_DELTA_X_LIMITS)
+    assert first_axis.get_xlim() == pytest.approx(old_fig3_module.PANEL_H_DELTA_X_LIMITS)
     assert [tick.get_text() for tick in first_axis.get_yticklabels()] == [
-        figure_3_module.PANEL_TRAJECTORY_LABELS[trajectory]
-        for trajectory in figure_3_module.PANEL_H_DELTA_TRAJECTORIES
+        old_fig3_module.PANEL_TRAJECTORY_LABELS[trajectory]
+        for trajectory in old_fig3_module.PANEL_H_DELTA_TRAJECTORIES
     ]
     assert [
         line.get_xdata()[0]
@@ -148,13 +130,13 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
         for text in axis.texts
     )
     assert boxes[0].get_facecolor() == pytest.approx(
-        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
+        to_rgba(old_fig3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
     )
     assert boxes[1].get_facecolor() == pytest.approx(
-        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
+        to_rgba(old_fig3_module.PANEL_TRAJECTORY_COLORS["center_to_left"], 0.68)
     )
     assert boxes[2].get_facecolor() == pytest.approx(
-        to_rgba(figure_3_module.PANEL_TRAJECTORY_COLORS["right_to_center"], 0.68)
+        to_rgba(old_fig3_module.PANEL_TRAJECTORY_COLORS["right_to_center"], 0.68)
     )
     fraction_labels = [
         text.get_text()
@@ -170,8 +152,8 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
         if ">0" in text.get_text()
     ]
     assert fraction_text_colors[:2] == [
-        figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
-        figure_3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
+        old_fig3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
+        old_fig3_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
     ]
     fraction_text_artists = [
         text
@@ -301,7 +283,7 @@ def test_load_scalar_multiplier_table_builds_matched_log_gains(
     )
     empirical_dataset.to_netcdf(empirical_path)
 
-    glm_path = figure_3_module.get_dark_light_glm_selected_path(
+    glm_path = old_fig3_module.get_dark_light_glm_selected_path(
         tmp_path,
         animal_name="L00",
         date="20000101",
@@ -360,7 +342,7 @@ def test_load_full_segment_log_gain_table_filters_reliable_trajectory_units(
     pandas = pytest.importorskip("pandas")
     xarray = pytest.importorskip("xarray")
 
-    glm_path = figure_3_module.get_dark_light_glm_selected_path(
+    glm_path = old_fig3_module.get_dark_light_glm_selected_path(
         tmp_path,
         animal_name="L00",
         date="20000101",
@@ -407,7 +389,7 @@ def test_load_full_segment_log_gain_table_filters_reliable_trajectory_units(
         },
     ).to_netcdf(glm_path)
 
-    stability_path = figure_3_module.get_stability_table_path(
+    stability_path = old_fig3_module.get_stability_table_path(
         tmp_path,
         "L00",
         "20000101",
@@ -533,7 +515,7 @@ def test_load_nested_vision_modulation_table_builds_nested_counts(
         fake_load_dark_movement_firing_rate_table,
     )
 
-    stability_path = figure_3_module.get_stability_table_path(
+    stability_path = old_fig3_module.get_stability_table_path(
         tmp_path,
         "L00",
         "20000101",
@@ -614,7 +596,7 @@ def test_load_hybrid_glm_empirical_delta_table_scores_same_swap_bins(
 ) -> None:
     xarray = pytest.importorskip("xarray")
 
-    swap_path = figure_3_module.get_swap_glm_selected_comparison_path(
+    swap_path = old_fig3_module.get_swap_glm_selected_comparison_path(
         tmp_path,
         animal_name="L00",
         date="20000101",
@@ -716,7 +698,7 @@ def test_load_hybrid_glm_empirical_delta_table_scores_same_swap_bins(
     )
     empirical_dataset.to_netcdf(empirical_path)
 
-    glm_path = figure_3_module.get_dark_light_glm_selected_path(
+    glm_path = old_fig3_module.get_dark_light_glm_selected_path(
         tmp_path,
         animal_name="L00",
         date="20000101",
@@ -1520,7 +1502,7 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     assert all(call["region"] == "v1" for call in load_calls)
     assert load_calls[0]["model_name"] == SCALAR_MODEL_NAME
     assert load_calls[0]["min_tuning_stability_correlation"] == pytest.approx(
-        figure_3_module.PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+        old_fig3_module.PANEL_D_MIN_TUNING_STABILITY_CORRELATION
     )
     assert len(figure_2b_boxplot_calls) == 1
     assert figure_2b_boxplot_calls[0]["kwargs"] == {"animal_names": ("L14", "L15")}

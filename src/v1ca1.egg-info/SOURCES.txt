@@ -167,8 +167,6 @@ tests/test_predict_1d.py
 tests/test_ripple_decoding_comparison.py
 tests/test_ripple_decoding_glm.py
 tests/test_ripple_glm.py
-tests/test_ripple_glm2.py
-tests/test_ripple_glm3.py
 tests/test_ripple_glm_binned.py
 tests/test_ripple_glm_comparison.py
 tests/test_ripple_glm_select_ridge.py

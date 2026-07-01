@@ -28,6 +28,7 @@ series found in the NWB file.
 """
 
 import argparse
+import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
 

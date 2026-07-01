@@ -167,7 +167,7 @@ def test_build_channel_metadata_groups_channels_by_probe_and_shank() -> None:
     assert metadata["shank_idx"].tolist() == [0, 0, 1, 3, 0, 0]
 
 
-def test_order_shank_channels_prefers_y_then_probe_electrode() -> None:
+def test_order_shank_channels_prefers_rel_y_then_probe_electrode() -> None:
     metadata = _make_shank_metadata(
         recording_channel_ids=None,
         channel_ids=[2, 1, 3],
@@ -178,7 +178,7 @@ def test_order_shank_channels_prefers_y_then_probe_electrode() -> None:
 
     ordered = order_shank_channels(build_channel_metadata(metadata))
 
-    assert ordered["channel_id"].tolist() == [1, 3, 2]
+    assert ordered["channel_id"].tolist() == [2, 1, 3]
 
 
 def test_order_shank_channels_falls_back_to_rel_y() -> None:

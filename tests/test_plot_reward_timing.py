@@ -209,13 +209,12 @@ def test_build_unrewarded_attempts_table_detects_first_pokes_after_pause() -> No
     )
 
     assert unrewarded_attempts[["epoch", "well"]].to_dict("records") == [
-        {"epoch": "01_r1", "well": "left"},
         {"epoch": "01_r1", "well": "right"},
     ]
-    assert np.allclose(unrewarded_attempts["attempt_poke_s"], [10.0, 8.0])
-    assert np.allclose(unrewarded_attempts["same_well_interpoke_s"], [3.0, 5.0])
-    assert np.allclose(unrewarded_attempts["attempt_window_stop_s"], [12.0, 10.0])
-    assert np.allclose(unrewarded_attempts["time_from_run_start_s"], [10.0, 8.0])
+    assert np.allclose(unrewarded_attempts["attempt_poke_s"], [8.0])
+    assert np.allclose(unrewarded_attempts["same_well_interpoke_s"], [5.0])
+    assert np.allclose(unrewarded_attempts["attempt_window_stop_s"], [10.0])
+    assert np.allclose(unrewarded_attempts["time_from_run_start_s"], [8.0])
 
 
 def test_build_trial_performance_table_matches_rewards_and_ignores_invalid_transitions() -> None:
@@ -305,12 +304,15 @@ def test_build_trial_performance_table_uses_epoch_specific_rolling_average() -> 
     outbound = trial_performance.loc[trial_performance["direction"] == "outbound"]
     inbound = trial_performance.loc[trial_performance["direction"] == "inbound"]
 
-    assert outbound["trial_number"].tolist() == [1, 2, 3, 1, 2]
-    assert inbound["trial_number"].tolist() == [2, 4, 1, 3]
-    assert outbound["direction_trial_number"].tolist() == [1, 2, 3, 1, 2]
-    assert inbound["direction_trial_number"].tolist() == [1, 2, 1, 2]
-    assert np.allclose(outbound["performance_sliding_avg"], [1.0, 0.5, 2 / 3, 1.0, 0.5])
-    assert np.allclose(inbound["performance_sliding_avg"], [1.0, 1.0, 1.0, 0.5])
+    assert outbound["trial_number"].tolist() == [1, 3, 5, 7, 1, 3]
+    assert inbound["trial_number"].tolist() == [2, 4, 6, 2, 4]
+    assert outbound["direction_trial_number"].tolist() == [1, 2, 3, 4, 1, 2]
+    assert inbound["direction_trial_number"].tolist() == [1, 2, 3, 1, 2]
+    assert np.allclose(
+        outbound["performance_sliding_avg"],
+        [1.0, 0.5, 1 / 3, 0.25, 1.0, 0.5],
+    )
+    assert np.allclose(inbound["performance_sliding_avg"], [1.0, 0.5, 2 / 3, 1.0, 0.5])
 
 
 def test_plot_reward_timing_by_run_handles_empty_inputs(tmp_path) -> None:
