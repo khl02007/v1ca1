@@ -1008,7 +1008,7 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
     from matplotlib.colors import to_rgba
     from matplotlib.patches import Rectangle
     import matplotlib.pyplot as plt
-    import v1ca1.paper_figures.figure_3 as figure_3_module
+    import v1ca1.paper_figures.old_fig3 as figure_3_module
 
     load_calls: list[dict[str, object]] = []
 

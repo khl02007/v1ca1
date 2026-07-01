@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import v1ca1.paper_figures.figure_3 as figure_3_module
+import v1ca1.paper_figures.old_fig3 as figure_3_module
 import v1ca1.paper_figures.supplementary_figure_3 as supp_figure_3_module
 from v1ca1.paper_figures.supplementary_figure_3 import (
     DEFAULT_FIGURE_HEIGHT_MM,
@@ -1078,10 +1078,11 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
         motor_summary_plot_calls.append({"axes": axes, "table": table, **kwargs})
         axes[0].text(0.5, 0.5, "E")
 
-    def fake_save_figure(figure, output_path: Path, dpi: int):
+    def fake_save_figure(figure, output_path: Path, dpi: int, **kwargs: object):
         calls["figsize"] = figure.get_size_inches()
         calls["output_path"] = output_path
         calls["dpi"] = dpi
+        calls["save_kwargs"] = kwargs
         calls["panel_labels"] = [
             text.get_text()
             for ax in figure.axes
@@ -1139,6 +1140,7 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     assert calls["figsize"][1] == pytest.approx(DEFAULT_FIGURE_HEIGHT_MM / 25.4)
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
+    assert calls["save_kwargs"] == {"bbox_inches": None}
     assert calls["panel_labels"] == ["A", "B", "C"]
     assert panel_a_cv_pca_load_calls == [
         {"data_root": Path("/analysis"), "datasets": datasets}

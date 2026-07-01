@@ -21,7 +21,7 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import get_stability_table_path
-from v1ca1.paper_figures.figure_4 import (
+from v1ca1.paper_figures.figure_3 import (
     DARK_MOVEMENT_FR_CACHE_COLUMNS,
     DARK_MOVEMENT_FR_CACHE_VERSION,
     DEFAULT_FIGURE_HEIGHT_MM as FIGURE_4_HEIGHT_MM,
@@ -29,7 +29,7 @@ from v1ca1.paper_figures.figure_4 import (
     load_dark_movement_firing_rate_cache,
     save_dark_movement_firing_rate_cache,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_POSITION_BIN_COUNT,
@@ -119,8 +119,6 @@ PANEL_B_DPP_COMPARISON_LABELS = ("left_turn", "right_turn")
 PANEL_B_SINGLE_LIGHT_DPP_AXIS_BOUNDS = (0.12, 0.16, 0.76, 0.70)
 PANEL_B_ACTIVITY_DPP_AXIS_BOUNDS = (0.02, 0.16, 0.40, 0.70)
 PANEL_B_LIGHT_DPP_AXIS_BOUNDS = (0.54, 0.16, 0.44, 0.70)
-PANEL_B_OVERLAP_GROUP_AXIS_BOUNDS = (0.02, 0.17, 0.43, 0.70)
-PANEL_B_OVERLAP_SCATTER_AXIS_BOUNDS = (0.53, 0.10, 0.45, 0.80)
 PANEL_B_BOX_COLORS = {
     "low_dpp": "#72B7B2",
     "mid_dpp": "#9E9E9E",
@@ -1658,48 +1656,6 @@ def _get_panel_b_light_dpp_by_dark_dpp_threshold_values(
         light_values[valid & (dark_values < float(threshold))],
         light_values[valid & (dark_values > float(threshold))],
     )
-
-
-def plot_panel_b_dpp_overlap_options(
-    ax: Any,
-    table: Any,
-    *,
-    low_threshold: float = PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-    high_threshold: float = PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
-) -> None:
-    """Plot candidate Fig. 2B overlap options 1 and 3 in one panel."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-
-    group_ax = ax.inset_axes(PANEL_B_OVERLAP_GROUP_AXIS_BOUNDS)
-    scatter_ax = ax.inset_axes(PANEL_B_OVERLAP_SCATTER_AXIS_BOUNDS)
-    low_values, middle_values, high_values = (
-        _get_panel_b_light_similarity_by_dark_similarity_values(
-            table,
-            low_threshold=low_threshold,
-            high_threshold=high_threshold,
-        )
-    )
-    low_threshold_label = f"{float(low_threshold):g}"
-    high_threshold_label = f"{float(high_threshold):g}"
-    _plot_panel_b_overlap_boxplot(
-        group_ax,
-        (low_values, middle_values, high_values),
-        labels=(
-            f"Dark DPP\n<{low_threshold_label}",
-            f"Dark DPP\n{low_threshold_label}-{high_threshold_label}",
-            f"Dark DPP\n>={high_threshold_label}",
-        ),
-        colors=(
-            PANEL_B_BOX_COLORS["low_dpp"],
-            PANEL_B_BOX_COLORS["mid_dpp"],
-            PANEL_B_BOX_COLORS["high_dpp"],
-        ),
-        title="Grouped by dark DPP",
-        ylabel="Light DPP\noverlap",
-    )
-    _plot_panel_b_overlap_scatter_with_marginals(scatter_ax, table)
 
 
 def plot_panel_b_dpp_overlap_grouped(

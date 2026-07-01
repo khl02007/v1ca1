@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import v1ca1.paper_figures.figure_2 as figure_2_module
-from v1ca1.paper_figures.figure_4 import (
+from v1ca1.paper_figures.figure_3 import (
     DEFAULT_FIGURE_HEIGHT_MM as FIGURE_4_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_4_WIDTH_MM,
 )

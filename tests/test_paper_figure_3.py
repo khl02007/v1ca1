@@ -4,88 +4,82 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
+from matplotlib.colors import to_rgba
 
-import v1ca1.paper_figures.figure_3 as figure_3_module
 from v1ca1.paper_figures.figure_3 import (
-    DEFAULT_FIGURE_HEIGHT_MM,
-    DEFAULT_FIGURE_WIDTH_MM,
-    DEFAULT_LIGHT_EPOCH,
+    DEFAULT_EXAMPLE_DATASET,
+    DEFAULT_FIGURE_CACHE_DIR,
+    DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
     DEFAULT_OUTPUT_DIR,
-    DEFAULT_PANEL_AB_HEIGHT_MM,
-    DEFAULT_PANEL_A_WIDTH_FRACTION,
-    DEFAULT_PANEL_B_WIDTH_FRACTION,
-    DEFAULT_PANEL_DEF_HEIGHT_MM,
-    DEFAULT_REGIONS,
-    PANEL_B_CACHE_VERSION,
-    PANEL_B_FIRING_RATE_NORMALIZATION,
-    PANEL_A_EXAMPLE_TOP,
-    PANEL_A_FIRST_EXAMPLE_Y_SHIFT,
-    PANEL_B_HEATMAP_CMAP,
-    PANEL_B_LINEAR_POSITION_ORIENTATION,
-    PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ,
-    PANEL_B_MIN_TUNING_STABILITY_CORRELATION,
-    PANEL_B_TRAJECTORY_TYPES,
-    PANEL_A_DARK_EPOCH_BACKGROUND,
-    PANEL_A_EXAMPLES,
-    PANEL_TRAJECTORY_COLORS,
-    PANEL_C_SCATTER_ALPHA,
-    PANEL_C_SCATTER_SIZE,
-    PANEL_D_MIN_TUNING_STABILITY_CORRELATION,
-    PANEL_D_ENCODING_X_LIMITS,
-    PANEL_E_CROSS_COMPARISONS,
-    PANEL_E_NORM_ERROR_YLIM,
-    PANEL_E_PLACE_ERROR_YLIM,
-    PANEL_QUANT_SUMMARY_TEXT_FONTSIZE,
-    GLM_TRAJECTORY_ARROW_COLOR,
-    GLM_BASIS_DARK_COLOR,
-    GLM_MODEL_COLORS,
-    PANEL_H_DELTA_TRAJECTORIES,
-    PANEL_H_EXAMPLES,
-    PANEL_H_DELTA_AXIS_BOUNDS,
-    PANEL_H_SCHEMATIC_AXIS_BOUNDS,
-    PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
-    PANEL_H_SWAP_DELTA_VARIABLE,
-    PANEL_QUANT_EPOCH_COLORS,
-    PANEL_EXAMPLE_CACHE_VERSION,
-    SEGMENT_BOUNDARIES,
-    build_panel_b_cache_metadata,
-    build_panel_b_cache_path,
-    build_panel_example_cache_metadata,
-    build_panel_example_cache_path,
-    build_panel_c_similarity_pairs,
+    DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+    DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+    DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+    DEFAULT_RIDGE_STRENGTH,
+    DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    DEFAULT_RIPPLE_WINDOW_S,
+    DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    NEURON_SCALE_BAR_COUNT,
+    PANEL_ABC_HEADER_LABEL_X_OFFSETS,
+    PANEL_D_DARK_ACTIVITY_COLORS,
+    add_aligned_panel_headers,
     build_output_path,
-    get_decoding_summary_path,
-    get_dark_light_glm_selected_path,
-    get_encoding_summary_candidate_paths,
-    get_dark_epoch,
-    get_light_epoch,
-    get_swap_glm_selected_comparison_path,
-    get_stability_table_path,
+    build_glm_dark_activity_devexp_table,
+    build_dark_movement_firing_rate_cache_metadata,
+    build_dark_movement_firing_rate_cache_path,
+    build_peri_ripple_heatmap_payload,
+    build_panel_b_schematic_cache_metadata,
+    build_panel_b_schematic_cache_path,
+    build_ripple_modulation_output_stem,
+    compute_significance_distribution_comparison,
+    draw_neuron_scale_bar,
+    draw_ripple_glm_schematic,
+    format_glm_model_window_suffix,
+    format_ridge_strength_suffix,
+    format_ripple_window_suffix,
+    HEATMAP_EPOCH_LABELS,
+    HEATMAP_EPOCH_ORDER,
+    get_ripple_event_path,
+    get_ripple_glm_path,
+    get_ripple_glm_model_window_path,
+    get_ripple_lfp_path,
+    get_ripple_modulation_paths,
+    get_ripple_decoding_comparison_summary_path,
+    get_screen_xcorr_paths,
     get_tuning_similarity_path,
-    load_panel_h_swap_delta_table,
-    load_panel_d_encoding_delta_table,
-    load_panel_e_decoding_error_table,
-    load_panel_quantification_data,
-    load_or_compute_panel_example_data,
-    make_light_epoch_dataset_ids,
+    load_glm_behavior_association_tables,
+    load_glm_source_predictor_comparison_tables,
+    load_dark_movement_firing_rate_cache,
+    load_panel_b_schematic_cache,
+    load_glm_offset_panel_tables,
+    load_example_glm_prediction,
+    load_example_ripple_lfp_trace,
+    load_first_available_glm_prediction,
+    load_glm_epoch_summary_tables,
+    load_modulation_summary_table,
+    load_pooled_ripple_heatmap_epoch_tables,
+    load_ripple_decoding_comparison_panel_tables,
+    load_ripple_heatmap_epoch_tables,
+    load_ripple_count_table,
+    load_ripple_glm_summary_table,
+    load_top_ca1_xcorr_panel_data,
+    save_dark_movement_firing_rate_cache,
+    save_panel_b_schematic_cache,
     parse_arguments,
     parse_dataset_id,
-    plot_panel_c_similarity,
-    plot_panel_d_encoding_delta_histogram,
-    plot_panel_e_decoding_error,
-    plot_panel_h_swap_delta,
-    plot_epoch_path_rate_axis,
-    plot_light_heatmap_regions,
-    plot_panel_a_examples,
-    plot_panel_c_vision_tuning_panel,
-    plot_panel_d_route_place_panel,
-    save_panel_b_cache,
-    save_panel_example_cache,
-    load_panel_b_cache,
-    load_panel_example_cache,
-    setup_light_heatmap_panel,
-    validate_panel_a_trajectories,
+    plot_glm_summary_panel,
+    plot_epoch_ripple_heatmap_panel,
+    plot_glm_behavior_association_panel,
+    plot_glm_analysis_panel,
+    plot_glm_source_predictor_comparison_panel,
+    plot_glm_offset_panel,
+    plot_modulation_index_panel,
+    plot_observed_predicted_panel,
+    plot_peri_ripple_heatmap_panel,
+    plot_ripple_decoding_comparison_panel,
+    plot_ripple_lfp_panel,
+    plot_top_ca1_xcorr_panel,
 )
 
 
@@ -106,1781 +100,1545 @@ def test_build_output_path_uses_requested_format() -> None:
         build_output_path(Path("paper_figures"), "figure_3", "jpg")
 
 
-def test_quantification_artifact_paths_match_task_progression_scripts() -> None:
-    data_root = Path("/analysis")
-    assert get_tuning_similarity_path(
-        data_root,
-        animal_name="L15",
-        date="20241121",
-        region="v1",
-        epoch="10_r5",
-    ) == Path(
-        "/analysis/L15/20241121/task_progression/tuning_analysis/"
-        "v1_10_r5_correlation_within_epoch_similarity.parquet"
+def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(constrained_layout=True)
+    grid = fig.add_gridspec(nrows=2, ncols=8)
+    axes = [
+        fig.add_subplot(grid[:, :2]),
+        fig.add_subplot(grid[:, 2:5]),
+        fig.add_subplot(grid[0, 5:]),
+    ]
+    titles = (
+        "Ripple-triggered\nmean firing rates",
+        "Predicting V1 activity during ripples\nwith CA1 activity",
+        "CA1 spike vector vs. mean CA1 activity",
     )
-    assert get_encoding_summary_candidate_paths(
-        data_root,
-        animal_name="L15",
-        date="20241121",
-        region="v1",
-        epoch="10_r5",
-    )[0] == Path(
-        "/analysis/L15/20241121/task_progression/encoding_comparison/"
-        "v1_10_r5_cv5_placebin4cm_encoding_summary.parquet"
-    )
-    assert get_decoding_summary_path(
-        data_root,
-        animal_name="L15",
-        date="20241121",
-        region="v1",
-        epoch="10_r5",
-    ) == Path(
-        "/analysis/L15/20241121/task_progression/decoding_comparison/"
-        "v1_10_r5_decoding_summary.parquet"
-    )
-    assert get_dark_light_glm_selected_path(
-        data_root,
-        animal_name="L15",
-        date="20241121",
-        region="v1",
-        light_epoch="02_r1",
-        dark_epoch="10_r5",
-        model_name="visual",
-    ) == Path(
-        "/analysis/L15/20241121/task_progression/dark_light_glm/selected/"
-        "v1_02_r1_vs_10_r5_visual_selected.nc"
-    )
-    assert get_swap_glm_selected_comparison_path(
-        data_root,
-        animal_name="L15",
-        date="20241121",
-        region="v1",
-        dark_epoch="10_r5",
-        light_train_epoch="02_r1",
-        light_test_epoch="06_r3",
-    ) == Path(
-        "/analysis/L15/20241121/task_progression/swap_glm_comparison/"
-        "v1_10_r5_traindark_02_r1_trainlight_06_r3_testlight_"
-        "dark_light_selected_swap.nc"
+    for axis, title in zip(axes, titles, strict=True):
+        axis.set_title(title, fontsize=7.2, pad=2)
+    fig.canvas.draw()
+
+    add_aligned_panel_headers(
+        fig,
+        axes,
+        labels=("A", "B", "C"),
+        titles=titles,
+        label_x_offsets=PANEL_ABC_HEADER_LABEL_X_OFFSETS,
+        fontsize=7.2,
     )
 
+    assert [axis.get_title() for axis in axes] == ["", "", ""]
+    header_texts = fig.texts[-6:]
+    assert [text.get_text() for text in header_texts] == [
+        "A",
+        "Ripple-triggered\nmean firing rates",
+        "B",
+        "Predicting V1 activity during ripples\nwith CA1 activity",
+        "C",
+        "CA1 spike vector vs. mean CA1 activity",
+    ]
+    assert {text.get_position()[1] for text in header_texts} == {
+        header_texts[0].get_position()[1]
+    }
+    plt.close(fig)
 
-def test_load_panel_quantification_data_reports_missing_artifacts(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="tuning_analysis"):
-        load_panel_quantification_data(
-            data_root=tmp_path,
-            datasets=[("L15", "20241121", "10_r5")],
-            region="v1",
-            light_epoch=None,
-            dark_epoch=None,
-        )
 
-
-def test_load_panel_h_swap_delta_table_filters_by_dark_tuning_stability(
-    tmp_path: Path,
-) -> None:
-    pd = pytest.importorskip("pandas")
-    xr = pytest.importorskip("xarray")
-
-    swap_path = get_swap_glm_selected_comparison_path(
-        tmp_path,
+def test_dark_movement_firing_rate_cache_path_is_descriptive() -> None:
+    metadata = build_dark_movement_firing_rate_cache_metadata(
+        data_root=Path("/analysis"),
         animal_name="L14",
         date="20240611",
-        region="v1",
         dark_epoch="08_r4",
-        light_train_epoch="02_r1",
-        light_test_epoch="06_r3",
-    )
-    swap_path.parent.mkdir(parents=True, exist_ok=True)
-    delta = np.full((2, 2, 3), np.nan, dtype=float)
-    delta[1] = np.asarray(
-        [
-            [0.1, 0.2, 0.3],
-            [0.4, 0.5, 0.6],
-        ],
-        dtype=float,
-    )
-    xr.Dataset(
-        {
-            PANEL_H_SWAP_DELTA_VARIABLE: (
-                ("model", "trajectory", "unit"),
-                delta,
-            )
-        },
-        coords={
-            "model": ["visual", "task_segment_bump"],
-            "trajectory": ["center_to_left", "center_to_right"],
-            "unit": [11, 12, 13],
-        },
-    ).to_netcdf(swap_path)
-
-    stability_path = get_stability_table_path(tmp_path, "L14", "20240611")
-    stability_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "animal_name": ["L14"] * 6,
-            "date": ["20240611"] * 6,
-            "unit": [11, 12, 13, 13, 11, 11],
-            "region": ["v1", "v1", "v1", "v1", "v1", "ca1"],
-            "epoch": ["08_r4", "08_r4", "08_r4", "08_r4", "02_r1", "08_r4"],
-            "trajectory_type": [
-                "center_to_left",
-                "center_to_left",
-                "center_to_left",
-                "center_to_right",
-                "center_to_left",
-                "center_to_left",
-            ],
-            "stability_correlation": [0.51, 0.50, 0.2, 0.7, 0.9, 0.99],
-        }
-    ).to_parquet(stability_path)
-
-    table = load_panel_h_swap_delta_table(
-        data_root=tmp_path,
-        datasets=[("L14", "20240611", "08_r4")],
         region="v1",
-        dark_epoch=None,
-        light_epoch_pairs=(("02_r1", "06_r3"),),
-        min_tuning_stability_correlation=0.5,
     )
-
-    assert table["unit"].tolist() == [11, 13, 11, 13]
-    assert table["delta_ll_bits_per_spike"].tolist() == pytest.approx(
-        [0.1, 0.3, 0.4, 0.6]
-    )
-
-
-def test_load_panel_h_swap_delta_table_can_select_segment_scalar_model(
-    tmp_path: Path,
-) -> None:
-    xr = pytest.importorskip("xarray")
-
-    swap_path = get_swap_glm_selected_comparison_path(
-        tmp_path,
-        animal_name="L14",
-        date="20240611",
-        region="v1",
-        dark_epoch="08_r4",
-        light_train_epoch="02_r1",
-        light_test_epoch="06_r3",
-    )
-    swap_path.parent.mkdir(parents=True, exist_ok=True)
-    delta = np.asarray(
-        [
-            [[0.0, 0.0]],
-            [[0.1, 0.2]],
-            [[0.3, 0.4]],
-        ],
-        dtype=float,
-    )
-    xr.Dataset(
-        {
-            PANEL_H_SWAP_DELTA_VARIABLE: (
-                ("model", "trajectory", "unit"),
-                delta,
-            )
-        },
-        coords={
-            "model": ["visual", "task_segment_bump", "task_segment_scalar"],
-            "trajectory": ["center_to_left"],
-            "unit": [11, 12],
-        },
-    ).to_netcdf(swap_path)
-
-    table = load_panel_h_swap_delta_table(
-        data_root=tmp_path,
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        dark_epoch=None,
-        light_epoch_pairs=(("02_r1", "06_r3"),),
-        model_name="task_segment_scalar",
-    )
-
-    assert table["model_name"].tolist() == [
-        "task_segment_scalar",
-        "task_segment_scalar",
-    ]
-    assert table["delta_ll_bits_per_spike"].tolist() == pytest.approx([0.3, 0.4])
-
-
-def test_load_panel_d_encoding_delta_table_filters_by_tuning_stability(
-    tmp_path: Path,
-) -> None:
-    pd = pytest.importorskip("pandas")
-
-    for epoch, values in {
-        "02_r1": [-0.2, 0.3, -0.9],
-        "08_r4": [0.1, -0.4, -0.5],
-    }.items():
-        path = get_encoding_summary_candidate_paths(
-            tmp_path,
-            animal_name="L14",
-            date="20240611",
-            region="v1",
-            epoch=epoch,
-        )[0]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
-            {
-                "n_spikes": [100, 100, 100],
-                "delta_bits_place_vs_tp": values,
-            },
-            index=pd.Index([11, 12, 13], name="unit"),
-        ).to_parquet(path)
-
-    stability_path = get_stability_table_path(tmp_path, "L14", "20240611")
-    stability_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "animal_name": ["L14"] * 7,
-            "date": ["20240611"] * 7,
-            "unit": [11, 12, 13, 11, 12, 13, 13],
-            "region": ["v1", "v1", "v1", "v1", "v1", "v1", "ca1"],
-            "epoch": [
-                "02_r1",
-                "02_r1",
-                "02_r1",
-                "08_r4",
-                "08_r4",
-                "08_r4",
-                "08_r4",
-            ],
-            "trajectory_type": [
-                "center_to_left",
-                "center_to_right",
-                "not_a_trajectory",
-                "center_to_left",
-                "left_to_center",
-                "right_to_center",
-                "right_to_center",
-            ],
-            "stability_correlation": [0.51, 0.50, 0.99, np.nan, 0.7, 0.6, 0.95],
-        }
-    ).to_parquet(stability_path)
-
-    table = load_panel_d_encoding_delta_table(
-        data_root=tmp_path,
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        light_epoch="02_r1",
-        dark_epoch="08_r4",
-    )
-
-    assert PANEL_D_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
-    assert table[["epoch_type", "unit"]].to_dict("records") == [
-        {"epoch_type": "light", "unit": 11},
-        {"epoch_type": "dark", "unit": 12},
-        {"epoch_type": "dark", "unit": 13},
-    ]
-    assert table["delta_bits_tp_vs_place"].tolist() == pytest.approx(
-        [0.2, 0.4, 0.5]
-    )
-
-
-def test_light_and_dark_epoch_helpers_use_registered_defaults() -> None:
-    assert get_light_epoch("L14", "20240611") == DEFAULT_LIGHT_EPOCH
-    assert get_dark_epoch("L15", "20241121") == "10_r5"
-    assert get_light_epoch("L14", "20240611", "04_r2") == "04_r2"
-    assert get_dark_epoch("L14", "20240611", "12_r6") == "12_r6"
-
-
-def test_panel_b_trajectory_order_uses_task_progression_orientation() -> None:
-    assert PANEL_B_TRAJECTORY_TYPES == (
-        "right_to_center",
-        "center_to_left",
-        "left_to_center",
-        "center_to_right",
-    )
-    assert PANEL_B_LINEAR_POSITION_ORIENTATION == "task_progression"
-
-
-def test_make_light_epoch_dataset_ids_keeps_registered_sessions() -> None:
-    assert make_light_epoch_dataset_ids(
-        [("L14", "20240611", "08_r4"), ("L15", "20241121", "10_r5")]
-    ) == [
-        ("L14", "20240611", "02_r1"),
-        ("L15", "20241121", "02_r1"),
-    ]
-    assert make_light_epoch_dataset_ids(
-        [("L14", "20240611", "08_r4")],
-        light_epoch="04_r2",
-    ) == [("L14", "20240611", "04_r2")]
-
-
-def test_panel_b_cache_path_is_descriptive() -> None:
-    metadata = build_panel_b_cache_metadata(
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        light_epoch=None,
-        position_bin_count=100,
-        position_offset=5,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-    )
-    cache_path = build_panel_b_cache_path(Path("paper_figures/output/cache"), metadata)
-
-    assert metadata["cache_version"] == PANEL_B_CACHE_VERSION
-    assert metadata["data_root"] == "/analysis"
-    assert tuple(metadata["trajectory_types"]) == PANEL_B_TRAJECTORY_TYPES
-    assert metadata["linear_position_orientation"] == "task_progression"
-    assert metadata["min_movement_firing_rate_hz"] == pytest.approx(
-        PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ
-    )
-    assert metadata["min_tuning_stability_correlation"] == pytest.approx(
-        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
-    )
-    assert metadata["firing_rate_normalization"] == PANEL_B_FIRING_RATE_NORMALIZATION
-    assert metadata["datasets"] == [
-        {
-            "animal_name": "L14",
-            "date": "20240611",
-            "dark_epoch": "08_r4",
-            "light_epoch": "02_r1",
-        }
-    ]
-    assert cache_path == Path(
-        "paper_figures/output/cache/"
-        "figure_3_panel_b_v1_light02_r1_datasets-L14-20240611-02_r1"
-        "_orienttask_progression_minmovefr0p5_minstab0p5"
-        "_normunit_max_per_trajectory"
-        "_posbins100_offset5_speed4_sigma1p5_cachev3.npz"
-    )
-
-
-def test_panel_b_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
-    metadata = build_panel_b_cache_metadata(
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        light_epoch=None,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-    )
-    panels = {}
-    for index, order_trajectory in enumerate(PANEL_B_TRAJECTORY_TYPES):
-        for plot_trajectory in PANEL_B_TRAJECTORY_TYPES:
-            panels[(order_trajectory, plot_trajectory)] = np.full(
-                (index + 1, 3),
-                index,
-                dtype=float,
-            )
-    cache_path = build_panel_b_cache_path(tmp_path, metadata)
-
-    save_panel_b_cache(cache_path, panels, metadata)
-    loaded = load_panel_b_cache(cache_path, metadata)
-
-    assert loaded is not None
-    for key, expected in panels.items():
-        assert np.array_equal(loaded[key], expected)
-
-    stale_metadata = dict(metadata)
-    stale_metadata["position_bin_count"] = 4
-    assert load_panel_b_cache(cache_path, stale_metadata) is None
-
-
-def test_panel_example_cache_path_is_descriptive() -> None:
-    metadata = build_panel_example_cache_metadata(
-        data_root=Path("/analysis"),
-        panel_name="C",
-        animal_name="L15",
-        date="20241121",
-        epoch="10_r5",
-        region="v1",
-        unit_id=473,
-        trajectories=("center_to_right", "left_to_center"),
-        position_bin_count=50,
-        position_offset=10,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-    )
-    cache_path = build_panel_example_cache_path(
+    cache_path = build_dark_movement_firing_rate_cache_path(
         Path("paper_figures/output/cache"),
         metadata,
     )
 
-    assert metadata["cache_version"] == PANEL_EXAMPLE_CACHE_VERSION
-    assert metadata["payload"] == "raster_positions_and_firing_rates"
-    assert metadata["trajectory_types"] == ["center_to_right", "left_to_center"]
+    assert metadata["cache_version"] == 1
+    assert metadata["data_root"] == "/analysis"
+    assert metadata["animal_name"] == "L14"
+    assert metadata["dark_epoch"] == "08_r4"
     assert cache_path == Path(
         "paper_figures/output/cache/"
-        "figure_3_panel_example_c_L15-20241121-10_r5-v1-unit473"
-        "_traj-center_to_right-left_to_center"
-        "_posbins50_offset10_speed4_sigma1p5_cachev1.npz"
+        "figure_4_dark_movement_firing_rate_v1_L14_20240611_08_r4_speed4_cachev1.parquet"
     )
 
 
-def test_panel_example_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
-    trajectories = ("center_to_right", "left_to_center")
-    metadata = build_panel_example_cache_metadata(
+def test_dark_movement_firing_rate_cache_roundtrip_validates_metadata(
+    tmp_path: Path,
+) -> None:
+    metadata = build_dark_movement_firing_rate_cache_metadata(
         data_root=Path("/analysis"),
-        panel_name="C",
-        animal_name="L15",
-        date="20241121",
-        epoch="10_r5",
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
         region="v1",
-        unit_id=473,
-        trajectories=trajectories,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
     )
-    example = {
-        "animal_name": "L15",
-        "date": "20241121",
-        "epoch": "10_r5",
-        "region": "v1",
-        "unit_id": 473,
-        "raster_positions": {
-            "center_to_right": [np.asarray([0.1, 0.2]), np.asarray([0.4])],
-            "left_to_center": [np.asarray([], dtype=float), np.asarray([0.7])],
-        },
-        "firing_rates": {
-            "center_to_right": (np.asarray([0.0, 0.5, 1.0]), np.asarray([1.0, 2.0, 3.0])),
-            "left_to_center": (np.asarray([0.0, 0.5, 1.0]), np.asarray([4.0, 5.0, 6.0])),
-        },
-    }
-    cache_path = build_panel_example_cache_path(tmp_path, metadata)
+    table = pd.DataFrame(
+        {
+            "unit": [11, 12],
+            "dark_firing_rate_hz": [0.1, 0.6],
+        }
+    )
+    cache_path = build_dark_movement_firing_rate_cache_path(tmp_path, metadata)
 
-    save_panel_example_cache(cache_path, example, metadata)
-    loaded = load_panel_example_cache(cache_path, metadata)
+    pytest.importorskip("pyarrow")
+    save_dark_movement_firing_rate_cache(cache_path, table, metadata)
+    loaded = load_dark_movement_firing_rate_cache(cache_path, metadata)
 
     assert loaded is not None
-    assert loaded["animal_name"] == "L15"
-    assert loaded["unit_id"] == 473
-    for trajectory in trajectories:
-        assert len(loaded["raster_positions"][trajectory]) == len(
-            example["raster_positions"][trajectory]
-        )
-        for loaded_trial, expected_trial in zip(
-            loaded["raster_positions"][trajectory],
-            example["raster_positions"][trajectory],
-        ):
-            assert np.array_equal(loaded_trial, expected_trial)
-        loaded_position, loaded_rate = loaded["firing_rates"][trajectory]
-        expected_position, expected_rate = example["firing_rates"][trajectory]
-        assert np.array_equal(loaded_position, expected_position)
-        assert np.array_equal(loaded_rate, expected_rate)
-
+    pd.testing.assert_frame_equal(loaded, table)
     stale_metadata = dict(metadata)
-    stale_metadata["unit_id"] = 474
-    assert load_panel_example_cache(cache_path, stale_metadata) is None
+    stale_metadata["dark_epoch"] = "10_r5"
+    assert load_dark_movement_firing_rate_cache(cache_path, stale_metadata) is None
 
 
-def test_load_or_compute_panel_example_data_uses_matching_cache(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    trajectories = ("center_to_right", "left_to_center")
-    metadata = build_panel_example_cache_metadata(
+def test_panel_b_schematic_cache_path_and_roundtrip(tmp_path: Path) -> None:
+    metadata = build_panel_b_schematic_cache_metadata(
         data_root=Path("/analysis"),
-        panel_name="C",
         animal_name="L15",
         date="20241121",
-        epoch="10_r5",
-        region="v1",
-        unit_id=473,
-        trajectories=trajectories,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
+        epoch="02_r1",
     )
-    example = {
+    cache_path = build_panel_b_schematic_cache_path(tmp_path, metadata)
+    payload = {
         "animal_name": "L15",
         "date": "20241121",
-        "epoch": "10_r5",
-        "region": "v1",
-        "unit_id": 473,
-        "raster_positions": {
-            "center_to_right": [np.asarray([0.2])],
-            "left_to_center": [np.asarray([0.8])],
-        },
-        "firing_rates": {
-            "center_to_right": (np.asarray([0.5]), np.asarray([2.0])),
-            "left_to_center": (np.asarray([0.5]), np.asarray([3.0])),
-        },
-    }
-    save_panel_example_cache(
-        build_panel_example_cache_path(tmp_path, metadata),
-        example,
-        metadata,
-    )
-    monkeypatch.setattr(
-        figure_3_module,
-        "load_epoch_unit_rate_curves",
-        lambda **_kwargs: pytest.fail("Panel example cache was not used."),
-    )
-
-    loaded = load_or_compute_panel_example_data(
-        data_root=Path("/analysis"),
-        panel_name="C",
-        animal_name="L15",
-        date="20241121",
-        epoch="10_r5",
-        region="v1",
-        unit_id=473,
-        trajectories=trajectories,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-        panel_example_cache_dir=tmp_path,
-        refresh_panel_example_cache=False,
-    )
-
-    assert loaded["unit_id"] == 473
-    assert np.array_equal(loaded["firing_rates"]["left_to_center"][1], np.asarray([3.0]))
-
-
-
-def test_panel_a_example_configuration_uses_requested_trajectory_pairs() -> None:
-    assert PANEL_A_EXAMPLES == (
-        ("L14", "20240611", "v1", 34, ("center_to_left", "right_to_center")),
-        ("L15", "20241121", "v1", 473, ("center_to_right", "left_to_center")),
-    )
-
-
-def test_panel_h_example_configuration_uses_requested_cells() -> None:
-    assert PANEL_H_EXAMPLES == (
-        ("L15", "20241121", "v1", 27, "center_to_right"),
-        ("L14", "20240611", "v1", 368, "right_to_center"),
-    )
-
-
-def test_validate_panel_a_trajectories_rejects_unknown_names() -> None:
-    assert validate_panel_a_trajectories(["center_to_left", "right_to_center"]) == (
-        "center_to_left",
-        "right_to_center",
-    )
-    with pytest.raises(ValueError, match="Unknown panel A trajectory"):
-        validate_panel_a_trajectories(["center_to_left", "bad"])
-
-
-
-def _fake_panel_a_example(trajectories: tuple[str, ...]) -> dict[str, object]:
-    position = np.asarray([0.0, 0.5, 1.0], dtype=float)
-    return {
-        "animal_name": "L14",
-        "date": "20240611",
-        "region": "v1",
-        "unit_id": 34,
-        "trajectories": trajectories,
-        "epoch_rates": {
-            "dark": {
-                "epoch": "08_r4",
-                "raster_positions": {
-                    trajectory: [np.asarray([0.1, 0.4]), np.asarray([0.7])]
-                    for trajectory in trajectories
-                },
-                "firing_rates": {
-                    trajectory: (position, np.asarray([0.0, 1.0, 0.5], dtype=float))
-                    for trajectory in trajectories
-                },
-            },
-            "light": {
-                "epoch": "02_r1",
-                "raster_positions": {
-                    trajectory: [np.asarray([0.2]), np.asarray([0.6, 0.9])]
-                    for trajectory in trajectories
-                },
-                "firing_rates": {
-                    trajectory: (position, np.asarray([0.5, 0.2, 1.5], dtype=float))
-                    for trajectory in trajectories
-                },
-            },
-        },
+        "epoch": "02_r1",
+        "time_s": np.asarray([-0.08, 0.0, 0.22]),
+        "filtered_lfp": np.asarray([0.1, -0.2, 0.3]),
+        "ripple_start_s": 10.0,
+        "ripple_end_s": 10.06,
+        "ripple_duration_s": 0.06,
+        "mean_zscore": 4.5,
+        "channel": 12,
+        "n_ripples": 7,
+        "time_before_s": DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
+        "time_after_s": DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
+        "n_units_per_region": DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
+        "ca1_unit_ids": np.asarray([101, 102]),
+        "v1_unit_ids": np.asarray([201, 202]),
+        "ca1_spike_times_s": (np.asarray([-0.01, 0.03]), np.asarray([0.12])),
+        "v1_spike_times_s": (np.asarray([0.02]), np.asarray([0.09, 0.18])),
+        "selection_score": np.asarray([1.0, 2.0, 6.0, 4.5, 0.0]),
     }
 
+    save_panel_b_schematic_cache(cache_path, payload, metadata)
+    loaded = load_panel_b_schematic_cache(cache_path, metadata)
 
-def test_plot_epoch_path_rate_axis_overlays_path_type_curves() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    assert cache_path.name == (
+        "figure_4_panel_b_schematic_L15_20241121_02_r1"
+        "_thr2_tb0p08_ta0p22_n5_dur0p15_cachev4.npz"
+    )
+    assert loaded is not None
+    assert loaded["animal_name"] == "L15"
+    assert loaded["channel"] == 12
+    np.testing.assert_array_equal(loaded["ca1_unit_ids"], np.asarray([101, 102]))
+    np.testing.assert_allclose(loaded["ca1_spike_times_s"][0], np.asarray([-0.01, 0.03]))
+    np.testing.assert_allclose(loaded["v1_spike_times_s"][1], np.asarray([0.09, 0.18]))
 
-    example = _fake_panel_a_example(("center_to_left", "right_to_center"))
-    fig, ax = plt.subplots()
-    plot_epoch_path_rate_axis(
-        ax,
-        example,
-        "dark",
-        y_max=2.0,
-        show_ylabel=True,
-        show_legend=True,
+    stale_metadata = dict(metadata)
+    stale_metadata["time_after_s"] = 0.2
+    assert load_panel_b_schematic_cache(cache_path, stale_metadata) is None
+
+
+def test_ripple_modulation_paths_match_cached_output_stem(tmp_path: Path) -> None:
+    stem = build_ripple_modulation_output_stem(
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        region_label="all_regions",
+        ripple_threshold_zscore=2.0,
+        bin_size_s=0.02,
+        time_before_s=0.5,
+        time_after_s=0.5,
+        response_window=(0.0, 0.1),
+        baseline_window=(-0.5, -0.3),
+        heatmap_normalize="max",
     )
 
-    assert len(ax.lines) == 4
-    assert [line.get_color() for line in ax.lines[:2]] == [
-        PANEL_TRAJECTORY_COLORS["center_to_left"],
-        PANEL_TRAJECTORY_COLORS["right_to_center"],
-    ]
-    assert [line.get_xdata()[0] for line in ax.lines[2:]] == pytest.approx(
-        list(SEGMENT_BOUNDARIES)
-    )
-    assert ax.get_ylabel() == "FR (Hz)"
-    assert ax.get_xlabel() == figure_3_module.TASK_PROGRESSION_XLABEL
-    assert ax.get_title() == "Dark"
-    assert ax.get_legend() is not None
-    plt.close(fig)
-
-
-
-def test_plot_panel_a_examples_stacks_two_curve_blocks() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import to_rgba
-    from matplotlib.patches import Polygon
-
-    fig, ax = plt.subplots()
-    examples = [
-        _fake_panel_a_example(("center_to_left", "right_to_center")),
-        _fake_panel_a_example(("center_to_right", "left_to_center")),
-    ]
-    plot_panel_a_examples(
-        ax,
-        examples,
+    assert stem == (
+        "L14_20240611_08_r4_all_regions_thr_2_bin_0p02_tb_0p5_ta_0p5_"
+        "resp_0_0p1_base_neg0p5_neg0p3_norm_max"
     )
 
-    assert len(ax.child_axes) == 2
-    parent_position = ax.get_position()
-    assert ax.child_axes[0].get_position().y1 == pytest.approx(
-        parent_position.y0 + parent_position.height * PANEL_A_EXAMPLE_TOP
-    )
-    for example_index, (example_ax, example) in enumerate(zip(ax.child_axes, examples), start=1):
-        assert [text.get_text() for text in example_ax.texts] == [
-            f"Example cell {example_index}"
-        ]
-        assert example_ax.texts[0].get_position()[0] == pytest.approx(0.50)
-        expected_title_y = (
-            0.885 + PANEL_A_FIRST_EXAMPLE_Y_SHIFT
-            if example_index == 1
-            else 0.885
-        )
-        assert example_ax.texts[0].get_position()[1] == pytest.approx(expected_title_y)
-        assert example_ax.texts[0].get_horizontalalignment() == "center"
-        assert example_ax.texts[0].get_fontsize() == pytest.approx(5.8)
-        assert len(example_ax.child_axes) == 6
-        schematic_axes = example_ax.child_axes[:2]
-        schematic_patches = [
-            patch
-            for schematic_ax in schematic_axes
-            for patch in schematic_ax.patches
-            if isinstance(patch, Polygon)
-        ]
-        assert schematic_patches
-        assert all(patch.get_facecolor()[3] == pytest.approx(0.0) for patch in schematic_patches)
-        raster_axes = example_ax.child_axes[2:4]
-        rate_axes = example_ax.child_axes[4:]
-        assert [schematic_ax.lines[0].get_color() for schematic_ax in schematic_axes] == [
-            PANEL_TRAJECTORY_COLORS[example["trajectories"][1]],
-            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
-        ]
-        assert all(len(raster_ax.lines) == 6 for raster_ax in raster_axes)
-        raster_position = raster_axes[0].get_position()
-        schematic_centers = [
-            schematic_ax.get_position().y0 + schematic_ax.get_position().height / 2.0
-            for schematic_ax in schematic_axes
-        ]
-        assert schematic_centers == pytest.approx(
-            [
-                raster_position.y0 + raster_position.height * (4.5 / 7.0),
-                raster_position.y0 + raster_position.height * (1.5 / 7.0),
-            ]
-        )
-        assert all(
-            schematic_ax.get_position().x1 < raster_axes[0].get_position().x0
-            for schematic_ax in schematic_axes
-        )
-        assert raster_axes[0].yaxis.label.get_position() == pytest.approx((-0.32, 0.5))
-        assert raster_axes[0].get_position().width > rate_axes[0].get_position().height
-        assert raster_axes[0].get_position().width == pytest.approx(
-            rate_axes[0].get_position().width
-        )
-        assert [line.get_color() for line in raster_axes[0].lines[:2]] == [
-            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
-            PANEL_TRAJECTORY_COLORS[example["trajectories"][0]],
-        ]
-        assert raster_axes[0].lines[0].get_markersize() == pytest.approx(0.55)
-        assert raster_axes[0].lines[0].get_markeredgewidth() == pytest.approx(0.21)
-        assert [line.get_xdata()[0] for line in raster_axes[0].lines[-2:]] == pytest.approx(
-            list(SEGMENT_BOUNDARIES)
-        )
-        assert all(len(rate_ax.lines) == 4 for rate_ax in rate_axes)
-        assert all(rate_ax.get_legend() is None for rate_ax in rate_axes)
-        assert all(not rate_ax.texts for rate_ax in rate_axes)
-        assert [
-            rate_axes[0].lines[index].get_xdata()[0]
-            for index in (2, 3)
-        ] == pytest.approx(list(SEGMENT_BOUNDARIES))
-        assert [raster_ax.get_title() for raster_ax in raster_axes] == ["Dark", "Light"]
-        assert [rate_ax.get_title() for rate_ax in rate_axes] == ["", ""]
-        assert raster_axes[0].get_facecolor() == pytest.approx(
-            to_rgba(PANEL_A_DARK_EPOCH_BACKGROUND)
-        )
-        assert rate_axes[0].get_facecolor() == pytest.approx(
-            to_rgba(PANEL_A_DARK_EPOCH_BACKGROUND)
-        )
-        assert raster_axes[1].get_facecolor() == pytest.approx(to_rgba("white"))
-        assert rate_axes[1].get_facecolor() == pytest.approx(to_rgba("white"))
-        assert rate_axes[0].get_position().x0 < rate_axes[1].get_position().x0
-        assert raster_axes[0].get_position().y0 > rate_axes[0].get_position().y0
-        assert raster_axes[0].get_position().height > rate_axes[0].get_position().height
-        assert all(
-            rate_ax.get_xlabel() == figure_3_module.TASK_PROGRESSION_XLABEL
-            for rate_ax in rate_axes
-        )
-    plt.close(fig)
-
-
-def test_plot_light_heatmap_regions_adds_segment_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    compute_calls = []
-
-    def fake_compute_light_epoch_tuning_curves(**kwargs: object):
-        compute_calls.append(kwargs)
-        return {}
-
-    pooled_calls = []
-
-    def fake_build_pooled_panel_values(
-        _curve_sets,
-        *,
-        position_bin_count: int,
-        trajectory_types: tuple[str, ...],
-        firing_rate_normalization: str,
-    ):
-        pooled_calls.append(
-            {
-                "position_bin_count": position_bin_count,
-                "trajectory_types": trajectory_types,
-                "firing_rate_normalization": firing_rate_normalization,
-            }
-        )
-        return {}
-
-    plot_calls = []
-
-    def fake_plot_pooled_heatmap_grid(_axes, _panels, **kwargs: object):
-        plot_calls.append(kwargs)
-        return None
-
-    monkeypatch.setattr(
-        figure_3_module,
-        "compute_light_epoch_tuning_curves",
-        fake_compute_light_epoch_tuning_curves,
-    )
-    monkeypatch.setattr(
-        figure_3_module,
-        "build_pooled_panel_values",
-        fake_build_pooled_panel_values,
-    )
-    monkeypatch.setattr(
-        figure_3_module,
-        "plot_pooled_heatmap_grid",
-        fake_plot_pooled_heatmap_grid,
+    paths = get_ripple_modulation_paths(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
     )
 
-    fig, axes = plt.subplots(nrows=4, ncols=4)
-    plot_light_heatmap_regions(
-        np.asarray(axes, dtype=object),
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        regions=("v1",),
-        light_epoch=None,
-        position_bin_count=50,
-        position_offset=10,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
+    assert paths["summary"] == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple"
+        / "ripple_modulation"
+        / f"{stem}_summary.parquet"
+    )
+    assert paths["peri_ripple_firing_rate"].name == f"{stem}_peri_ripple_firing_rate.parquet"
+
+
+def test_ripple_glm_path_matches_samplewise_output_name(tmp_path: Path) -> None:
+    assert format_ripple_window_suffix(0.2) == "rw_0p2s"
+    assert format_ripple_window_suffix(0.2, ripple_window_offset_s=-0.2) == "rw_0p2s_off_m0p2s"
+    assert format_ridge_strength_suffix(1e-1) == "ridge_1e-1"
+
+    path = get_ripple_glm_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        ripple_window_s=0.2,
+        ripple_selection="allripples",
+        ridge_strength=1e-1,
     )
 
-    assert all(len(ax.lines) == 2 for ax in axes.ravel())
-    assert [line.get_xdata()[0] for line in axes[0, 0].lines] == pytest.approx(
-        list(SEGMENT_BOUNDARIES)
+    assert path == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple_glm"
+        / "08_r4_rw_0p2s_allripples_ridge_1e-1_samplewise_ripple_glm.nc"
     )
-    assert compute_calls[0]["use_trajectory_direction"] is True
-    assert compute_calls[0]["min_movement_firing_rate_hz"] == pytest.approx(
-        PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ
+    mean_path = get_ripple_glm_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        ripple_window_s=0.2,
+        ripple_selection="single",
+        ridge_strength=1e-1,
+        source_predictor_mode="mean_activity",
     )
-    assert compute_calls[0]["min_tuning_stability_correlation"] == pytest.approx(
-        PANEL_B_MIN_TUNING_STABILITY_CORRELATION
+
+    assert mean_path == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple_glm"
+        / "08_r4_rw_0p2s_single_mean_ca1_ridge_1e-1_samplewise_ripple_glm.nc"
     )
-    assert pooled_calls[0]["trajectory_types"] == PANEL_B_TRAJECTORY_TYPES
+
+
+def test_ripple_glm_model_window_path_matches_asymmetric_output_name(
+    tmp_path: Path,
+) -> None:
     assert (
-        pooled_calls[0]["firing_rate_normalization"]
-        == PANEL_B_FIRING_RATE_NORMALIZATION
-    )
-    assert plot_calls[0]["trajectory_types"] == PANEL_B_TRAJECTORY_TYPES
-    assert plot_calls[0]["axis_orientation"] == PANEL_B_LINEAR_POSITION_ORIENTATION
-    assert plot_calls[0]["cmap"] == PANEL_B_HEATMAP_CMAP
-    plt.close(fig)
-
-
-def test_plot_light_heatmap_regions_uses_matching_cache(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    metadata = build_panel_b_cache_metadata(
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        light_epoch=None,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-    )
-    panels = {
-        (order_trajectory, plot_trajectory): np.ones((2, 3), dtype=float)
-        for order_trajectory in PANEL_B_TRAJECTORY_TYPES
-        for plot_trajectory in PANEL_B_TRAJECTORY_TYPES
-    }
-    save_panel_b_cache(build_panel_b_cache_path(tmp_path, metadata), panels, metadata)
-
-    monkeypatch.setattr(
-        figure_3_module,
-        "compute_light_epoch_tuning_curves",
-        lambda **_kwargs: pytest.fail("Panel B cache was not used."),
-    )
-    observed = {}
-
-    def _fake_plot_pooled_heatmap_grid(_axes, cached_panels, **kwargs):
-        observed["panels"] = cached_panels
-        observed["kwargs"] = kwargs
-        return None
-
-    monkeypatch.setattr(
-        figure_3_module,
-        "plot_pooled_heatmap_grid",
-        _fake_plot_pooled_heatmap_grid,
-    )
-
-    fig, axes = plt.subplots(nrows=4, ncols=4)
-    plot_light_heatmap_regions(
-        np.asarray(axes, dtype=object),
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        regions=("v1",),
-        light_epoch=None,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-        panel_b_cache_dir=tmp_path,
-    )
-
-    assert observed["panels"] is not None
-    assert observed["kwargs"]["trajectory_types"] == PANEL_B_TRAJECTORY_TYPES
-    assert observed["kwargs"]["axis_orientation"] == PANEL_B_LINEAR_POSITION_ORIENTATION
-    assert observed["kwargs"]["cmap"] == PANEL_B_HEATMAP_CMAP
-    for key in panels:
-        assert np.array_equal(observed["panels"][key], panels[key])
-    plt.close(fig)
-
-
-def test_plot_light_heatmap_regions_matches_figure_1d_path_ticks(
-    tmp_path: Path,
-) -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    metadata = build_panel_b_cache_metadata(
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        region="v1",
-        light_epoch=None,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-    )
-    panels = {
-        (order_trajectory, plot_trajectory): np.ones((2, 3), dtype=float)
-        for order_trajectory in PANEL_B_TRAJECTORY_TYPES
-        for plot_trajectory in PANEL_B_TRAJECTORY_TYPES
-    }
-    save_panel_b_cache(build_panel_b_cache_path(tmp_path, metadata), panels, metadata)
-
-    fig, axes = plt.subplots(nrows=4, ncols=4)
-    plot_light_heatmap_regions(
-        np.asarray(axes, dtype=object),
-        data_root=Path("/analysis"),
-        datasets=[("L14", "20240611", "08_r4")],
-        regions=("v1",),
-        light_epoch=None,
-        position_bin_count=3,
-        position_offset=0,
-        speed_threshold_cm_s=4.0,
-        sigma_bins=1.5,
-        panel_b_cache_dir=tmp_path,
-    )
-
-    for ax in axes[-1, :]:
-        assert ax.get_xticks().tolist() == pytest.approx([0.0, 1.0])
-        assert [label.get_text() for label in ax.get_xticklabels()] == ["0", "1"]
-        assert ax.get_xlabel() == ""
-    for ax in axes[:-1, :].ravel():
-        assert ax.get_xticks().tolist() == []
-        assert [label.get_text() for label in ax.get_xticklabels()] == []
-        assert ax.get_xlabel() == ""
-    plt.close(fig)
-
-
-def test_add_panel_b_path_progression_label_matches_figure_1d_label() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(nrows=4, ncols=4)
-    text = figure_3_module.add_panel_b_path_progression_label(
-        fig,
-        np.asarray(axes, dtype=object),
-    )
-    bottom_boxes = [ax.get_position() for ax in axes[-1, :]]
-    expected_x = (
-        min(box.x0 for box in bottom_boxes)
-        + max(box.x1 for box in bottom_boxes)
-    ) / 2
-    expected_y = (
-        min(box.y0 for box in bottom_boxes)
-        - figure_3_module.HEATMAP_PATH_LABEL_OFFSET
-    )
-
-    assert text.get_text() == figure_3_module.TASK_PROGRESSION_XLABEL
-    assert text.get_position() == pytest.approx((expected_x, expected_y))
-    assert text.get_fontsize() == pytest.approx(
-        figure_3_module.PANEL_E_AXIS_LABEL_FONTSIZE
-    )
-    plt.close(fig)
-
-
-def test_panel_ab_header_text_uses_one_figure_y_coordinate() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig = plt.figure()
-    panel_a_axis = fig.add_axes([0.10, 0.20, 0.25, 0.55])
-    corner_axis = fig.add_axes([0.42, 0.70, 0.10, 0.10])
-    tuning_axes = [
-        fig.add_axes([0.55, 0.72, 0.12, 0.10]),
-        fig.add_axes([0.72, 0.72, 0.12, 0.10]),
-    ]
-    header_y = (
-        figure_3_module._axis_group_top_y(tuning_axes)
-        + figure_3_module.PANEL_AB_HEADER_Y_OFFSET
-    )
-
-    label_a = figure_3_module._add_panel_label_at_figure_y(
-        fig,
-        panel_a_axis,
-        "A",
-        x=-0.07,
-        y=header_y,
-    )
-    label_b = figure_3_module._add_panel_label_at_figure_y(
-        fig,
-        corner_axis,
-        "B",
-        x=-0.12,
-        y=header_y,
-    )
-    title_a = fig.text(
-        0.20,
-        header_y,
-        "Example DPP cells in dark and light",
-        va="center",
-    )
-    tuning = figure_3_module._add_centered_axis_group_text_at_y(
-        fig,
-        tuning_axes,
-        "Tuning",
-        y=header_y,
-        fontsize=8.0,
-    )
-
-    assert [
-        label_a.get_position()[1],
-        title_a.get_position()[1],
-        label_b.get_position()[1],
-        tuning.get_position()[1],
-    ] == pytest.approx([header_y] * 4)
-    assert {
-        text.get_verticalalignment()
-        for text in (label_a, title_a, label_b, tuning)
-    } == {"center"}
-    assert tuning.get_position()[0] == pytest.approx(
-        figure_3_module._axis_group_center_x(tuning_axes)
-    )
-    plt.close(fig)
-
-
-def test_panel_cd_label_and_group_title_share_vertical_position() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots()
-
-    figure_3_module._add_panel_cd_group_title(ax, "Vision changes DPP tuning")
-    figure_3_module._add_panel_cd_label(ax, "C")
-
-    title_text = next(
-        text for text in ax.texts if text.get_text().startswith("Vision")
-    )
-    label_text = next(text for text in ax.texts if text.get_text() == "C")
-    assert title_text.get_position()[1] == pytest.approx(
-        figure_3_module.PANEL_CD_GROUP_TITLE_Y
-    )
-    assert label_text.get_position()[1] == pytest.approx(
-        figure_3_module.PANEL_CD_GROUP_TITLE_Y
-    )
-    assert title_text.get_verticalalignment() == "top"
-    assert label_text.get_verticalalignment() == "top"
-    plt.close(fig)
-
-
-def test_plot_quantification_panels_use_light_and_dark_artifacts() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    pandas = pytest.importorskip("pandas")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import to_rgba
-
-    similarity_table = pandas.DataFrame(
-        {
-            "animal_name": ["L12"] * 8,
-            "date": ["20240421"] * 8,
-            "unit": [1, 1, 1, 1, 2, 2, 2, 2],
-            "comparison_label": [
-                "left_turn",
-                "right_turn",
-                "left_turn",
-                "right_turn",
-                "left_turn",
-                "right_turn",
-                "left_turn",
-                "right_turn",
-            ],
-            "epoch_type": [
-                "light",
-                "light",
-                "dark",
-                "dark",
-                "light",
-                "light",
-                "dark",
-                "dark",
-            ],
-            "similarity": [0.2, 0.6, -0.1, 0.3, 0.1, 0.05, 0.2, 0.4],
-        }
-    )
-    delta_table = pandas.DataFrame(
-        {
-            "animal_name": ["L12", "L12", "L12", "L12"],
-            "date": ["20240421", "20240421", "20240421", "20240421"],
-            "unit": [1, 2, 1, 2],
-            "epoch_type": ["light", "light", "dark", "dark"],
-            "delta_bits_tp_vs_place": [0.1, 0.2, -0.2, 0.05],
-        }
-    )
-    decoding_rows = []
-    for epoch_index, epoch_type in enumerate(("light", "dark"), start=0):
-        median_error = 0.015 + 0.008 * epoch_index
-        decoding_rows.append(
-            {
-                "animal_name": "pooled",
-                "date": "pooled",
-                "epoch_type": epoch_type,
-                "epoch": "02_r1" if epoch_type == "light" else "08_r4",
-                "analysis": "place",
-                "comparison": "place",
-                "comparison_label": "Place",
-                "q25_error": median_error - 0.004,
-                "median_error": median_error,
-                "q75_error": median_error + 0.006,
-                "n_samples": 30,
-            }
+        format_glm_model_window_suffix(
+            source_window_s=0.2,
+            source_window_offset_s=0.0,
+            target_window_s=0.2,
+            target_window_offset_s=0.2,
         )
-        for comparison, label, _family, _pairs in PANEL_E_CROSS_COMPARISONS:
-            decoding_rows.append(
+        == "src_rw_0p2s_tgt_rw_0p2s_off_0p2s"
+    )
+
+    path = get_ripple_glm_model_window_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="02_r1",
+        source_window_s=0.2,
+        source_window_offset_s=0.0,
+        target_window_s=0.2,
+        target_window_offset_s=0.2,
+        ripple_selection="allripples",
+        ridge_strength=1e-1,
+    )
+
+    assert path == (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "ripple_glm"
+        / "02_r1_src_rw_0p2s_tgt_rw_0p2s_off_0p2s_allripples_ridge_1e-1_samplewise_ripple_glm.nc"
+    )
+
+
+def _write_screen_xcorr_cache(tmp_path: Path) -> tuple[Path, np.ndarray]:
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("pyarrow")
+    output_dir = tmp_path / "RatA" / "20240101" / "xcorr" / "screen_pairs" / "ripple" / "02_r1"
+    output_dir.mkdir(parents=True)
+
+    ca1_units = np.array([10, 11, 12], dtype=int)
+    v1_units = np.array([101, 102, 103], dtype=int)
+    lag_s = np.array([-0.01, 0.0, 0.01], dtype=float)
+    xcorr = np.arange(ca1_units.size * v1_units.size * lag_s.size, dtype=float).reshape(
+        ca1_units.size,
+        v1_units.size,
+        lag_s.size,
+    )
+    xr.Dataset(
+        data_vars={"xcorr": (("ca1_unit", "v1_unit", "lag_s"), xcorr)},
+        coords={"ca1_unit": ca1_units, "v1_unit": v1_units, "lag_s": lag_s},
+    ).to_netcdf(output_dir / "xcorr.nc")
+
+    rows = []
+    peak_values = {
+        10: {101: 5.0, 102: 4.0, 103: 3.0},
+        11: {101: 6.0, 102: 7.0, 103: 2.0},
+        12: {101: 1.0, 102: 1.5, 103: 2.0},
+    }
+    peak_lags = {
+        10: {101: 0.0, 102: 0.01, 103: -0.01},
+        11: {101: -0.01, 102: 0.01, 103: 0.0},
+        12: {101: 0.0, 102: 0.01, 103: -0.01},
+    }
+    for ca1_unit in ca1_units:
+        for v1_unit in v1_units:
+            rows.append(
                 {
-                    "animal_name": "pooled",
-                    "date": "pooled",
-                    "epoch_type": epoch_type,
-                    "epoch": "02_r1" if epoch_type == "light" else "08_r4",
-                    "analysis": "cross_trajectory",
-                    "comparison": comparison,
-                    "comparison_label": label,
-                    "q25_error": 0.18 + 0.03 * epoch_index,
-                    "median_error": 0.22 + 0.03 * epoch_index,
-                    "q75_error": 0.27 + 0.03 * epoch_index,
-                    "n_samples": 60,
+                    "ca1_unit_id": ca1_unit,
+                    "v1_unit_id": v1_unit,
+                    "n_ca1_state_spikes": 50,
+                    "n_v1_state_spikes": 60,
+                    "peak_lag_s": peak_lags[int(ca1_unit)][int(v1_unit)],
+                    "peak_norm_xcorr": peak_values[int(ca1_unit)][int(v1_unit)],
+                    "status": "valid",
                 }
             )
-    decoding_table = pandas.DataFrame(decoding_rows)
-
-    fig, axes = plt.subplots(nrows=1, ncols=3)
-    plot_panel_c_similarity(axes[0], similarity_table)
-    plot_panel_d_encoding_delta_histogram(axes[1], delta_table)
-    plot_panel_e_decoding_error(axes[2], decoding_table)
-
-    paired = build_panel_c_similarity_pairs(similarity_table)
-    assert paired["comparison_label"].astype(str).tolist() == [
-        "right_turn",
-        "right_turn",
-    ]
-    assert paired[["similarity_light", "similarity_dark"]].to_numpy().ravel() == pytest.approx(
-        [0.6, 0.3, 0.05, 0.4]
-    )
-    assert axes[0].get_xlabel() == "Light tuning corr."
-    assert axes[0].get_ylabel() == "Dark tuning corr."
-    assert axes[0].get_aspect() == pytest.approx(1.0)
-    assert axes[0].lines[0].get_linestyle() == "--"
-    assert axes[0].lines[0].get_xdata().tolist() == [-1.0, 1.0]
-    assert axes[0].lines[0].get_ydata().tolist() == [-1.0, 1.0]
-    assert [text.get_text() for text in axes[0].texts] == ["n=2"]
-    assert axes[0].texts[0].get_position() == pytest.approx((0.96, 0.04))
-    assert axes[0].texts[0].get_horizontalalignment() == "right"
-    assert axes[0].texts[0].get_verticalalignment() == "bottom"
-    assert len(axes[0].collections) == 1
-    assert axes[0].collections[0].get_alpha() == pytest.approx(PANEL_C_SCATTER_ALPHA)
-    assert axes[0].collections[0].get_sizes().tolist() == pytest.approx(
-        [PANEL_C_SCATTER_SIZE]
-    )
-    assert axes[1].get_xlabel() == "Δ log likelihood (bits/spike)"
-    assert axes[1].get_ylabel() == "Frac."
-    assert "Route-specific\nplace better" in [
-        text.get_text() for text in axes[1].texts
-    ]
-    assert "DPP better" in [text.get_text() for text in axes[1].texts]
-    dpp_text = next(text for text in axes[1].texts if text.get_text() == "DPP better")
-    light_summary_text = next(
-        text for text in axes[1].texts if text.get_text() == "Light: 100% >0\nmed. 0.15"
-    )
-    dark_summary_text = next(
-        text for text in axes[1].texts if text.get_text() == "Dark: 50% >0\nmed. -0.08"
-    )
-    assert dpp_text.get_horizontalalignment() == "left"
-    assert light_summary_text.get_horizontalalignment() == "left"
-    assert dark_summary_text.get_horizontalalignment() == "left"
-    assert light_summary_text.get_fontsize() == pytest.approx(
-        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
-    )
-    assert dark_summary_text.get_fontsize() == pytest.approx(
-        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
-    )
-    assert light_summary_text.get_position()[0] == pytest.approx(
-        dpp_text.get_position()[0]
-    )
-    assert dark_summary_text.get_position()[0] == pytest.approx(
-        dpp_text.get_position()[0]
-    )
-    assert light_summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
-    assert dark_summary_text.get_color() == PANEL_QUANT_EPOCH_COLORS["dark"]
-    light_count_text = next(
-        text
-        for text in axes[1].texts
-        if text.get_text() == "Light: n = 2 cells"
-    )
-    dark_count_text = next(
-        text
-        for text in axes[1].texts
-        if text.get_text() == "Dark: n = 2 cells"
-    )
-    animal_count_text = next(
-        text for text in axes[1].texts if text.get_text() == "1 animal"
-    )
-    assert light_count_text.get_position() == pytest.approx((0.03, 0.40))
-    assert dark_count_text.get_position() == pytest.approx((0.03, 0.24))
-    assert animal_count_text.get_position() == pytest.approx((0.03, 0.08))
-    assert light_count_text.get_horizontalalignment() == "left"
-    assert dark_count_text.get_horizontalalignment() == "left"
-    assert animal_count_text.get_horizontalalignment() == "left"
-    assert light_count_text.get_verticalalignment() == "bottom"
-    assert dark_count_text.get_verticalalignment() == "bottom"
-    assert animal_count_text.get_verticalalignment() == "bottom"
-    assert light_count_text.get_fontsize() == pytest.approx(
-        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
-    )
-    assert dark_count_text.get_fontsize() == pytest.approx(
-        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
-    )
-    assert animal_count_text.get_fontsize() == pytest.approx(
-        PANEL_QUANT_SUMMARY_TEXT_FONTSIZE
-    )
-    assert light_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["light"]
-    assert dark_count_text.get_color() == PANEL_QUANT_EPOCH_COLORS["dark"]
-    assert animal_count_text.get_color() == "0.25"
-    assert axes[1].get_legend() is None
-    assert axes[1].get_xlim() == pytest.approx(PANEL_D_ENCODING_X_LIMITS)
-    assert len(axes[1].lines) == 1
-    assert axes[1].lines[0].get_color() == "black"
-    assert axes[1].lines[0].get_linestyle() == "--"
-    assert axes[1].patches[0].get_edgecolor()[3] == pytest.approx(0.0)
-    assert len(axes[1].patches) == 52
-    assert len(axes[2].child_axes) == 2
-    cross_ax, place_ax = axes[2].child_axes
-    assert [child_ax.get_title() for child_ax in axes[2].child_axes] == [
-        "Cross-route\ndecoding",
-        "Route-specific\nplace decoding",
-    ]
-    assert cross_ax.get_ylabel() == "Abs. norm. error"
-    assert cross_ax.yaxis.label.get_size() == pytest.approx(5.8)
-    assert place_ax.get_ylabel() == ""
-    assert place_ax.get_ylim() == pytest.approx(PANEL_E_PLACE_ERROR_YLIM)
-    assert cross_ax.get_ylim() == pytest.approx(PANEL_E_NORM_ERROR_YLIM)
-    assert [text.get_text() for text in place_ax.get_xticklabels()] == ["Light", "Dark"]
-    assert [text.get_text() for text in cross_ax.get_xticklabels()] == ["Light", "Dark"]
-    assert [text.get_text() for text in cross_ax.texts] == [
-        "Light med. 0.22",
-        "Dark med. 0.25",
-    ]
-    assert [text.get_position()[0] for text in cross_ax.texts] == pytest.approx(
-        [figure_3_module.PANEL_E_SUMMARY_TEXT_X] * 2
-    )
-    assert all(text.get_horizontalalignment() == "right" for text in cross_ax.texts)
-    assert [text.get_text() for text in place_ax.texts] == [
-        "Light med. 0.01",
-        "Dark med. 0.02",
-    ]
-    assert [text.get_position()[0] for text in place_ax.texts] == pytest.approx(
-        [figure_3_module.PANEL_E_PLACE_SUMMARY_TEXT_X] * 2
-    )
-    assert all(text.get_horizontalalignment() == "left" for text in place_ax.texts)
-    assert place_ax.get_legend() is None
-    assert cross_ax.get_legend() is None
-    assert len(cross_ax.get_xticklabels()) == 2
-    assert len(place_ax.collections) == 4
-    assert len(cross_ax.collections) >= 4
-    plt.close(fig)
-
-    fig, axes = plt.subplots(nrows=1, ncols=2)
-    plot_panel_c_vision_tuning_panel(axes[0], similarity_table, decoding_table)
-    plot_panel_d_route_place_panel(axes[1], delta_table, decoding_table)
-
-    assert [text.get_text() for text in axes[0].texts] == [
-        "Vision changes DPP tuning"
-    ]
-    assert [text.get_text() for text in axes[1].texts] == [
-        "Shift toward route-specific place coding"
-    ]
-    assert len(axes[0].child_axes) == 2
-    assert len(axes[1].child_axes) == 2
-    assert [child_ax.get_title() for child_ax in axes[0].child_axes] == [
-        "Same-turn route\ntuning similarity",
-        "Cross-route\ndecoding",
-    ]
-    assert [child_ax.get_title() for child_ax in axes[1].child_axes] == [
-        "Encoding comparison",
-        "Route-specific\nplace decoding",
-    ]
-    assert axes[0].child_axes[1].get_ylabel() == "Abs. norm. error"
-    assert axes[1].child_axes[1].get_ylabel() == "Abs. norm. error"
-    plt.close(fig)
+    pd.DataFrame(rows).to_parquet(output_dir / "xcorr_summary.parquet", index=False)
+    return output_dir, xcorr
 
 
-def test_load_panel_e_decoding_error_table_pools_registered_datasets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pandas = pytest.importorskip("pandas")
-    del pandas
+def test_load_top_ca1_xcorr_panel_data_uses_shared_v1_order(tmp_path: Path) -> None:
+    output_dir, xcorr = _write_screen_xcorr_cache(tmp_path)
 
-    calls = []
-
-    def _fake_error_values(
-        true_path: Path,
-        _decoded_path: Path,
-        *,
-        normalization: float,
-    ) -> np.ndarray:
-        assert normalization > 0.0
-        path_text = str(true_path)
-        calls.append(path_text)
-        if true_path.name.endswith("true_place.npz"):
-            assert normalization == pytest.approx(100.0)
-            return np.asarray([0.01, 0.03])
-        assert normalization == pytest.approx(1.0)
-        return np.asarray([0.1, 0.2])
-
-    monkeypatch.setattr(
-        figure_3_module,
-        "_load_absolute_normalized_decoding_errors",
-        _fake_error_values,
+    paths = get_screen_xcorr_paths(
+        tmp_path,
+        animal_name="RatA",
+        date="20240101",
+        epoch="02_r1",
     )
-    monkeypatch.setattr(
-        figure_3_module,
-        "get_wtrack_total_length",
-        lambda _animal_name: 100.0,
+    payload = load_top_ca1_xcorr_panel_data(
+        tmp_path,
+        animal_name="RatA",
+        date="20240101",
+        epoch="02_r1",
+        top_n_ca1_units=2,
     )
 
-    table = load_panel_e_decoding_error_table(
-        data_root=Path("/analysis"),
-        datasets=[
-            ("L12", "20240421", "08_r4"),
-            ("L14", "20240611", "08_r4"),
-            ("L15", "20241121", "10_r5"),
-            ("L19", "20250930", "08_r4"),
-        ],
-        region="v1",
-        light_epoch=None,
-        dark_epoch=None,
-    )
-
-    assert set(table["animal_name"]) == {"pooled"}
-    assert set(table["date"]) == {"pooled"}
-    assert len(table[table["analysis"] == "place"]) == 2
-    assert len(table[table["analysis"] == "cross_trajectory"]) == (
-        2 * len(PANEL_E_CROSS_COMPARISONS)
-    )
-    light_place = table[
-        (table["analysis"] == "place") & (table["epoch_type"] == "light")
-    ].iloc[0]
-    light_cross = table[
-        (table["analysis"] == "cross_trajectory")
-        & (table["epoch_type"] == "light")
-    ].iloc[0]
-    assert light_place["n_samples"] == 4 * 2
-    assert light_cross["n_samples"] == (
-        4 * len(PANEL_E_CROSS_COMPARISONS[0][3]) * 2
-    )
-    assert any("L19" in call for call in calls)
+    assert paths["dataset"] == output_dir / "xcorr.nc"
+    assert payload["ca1_unit_ids"].tolist() == [11, 10]
+    assert payload["v1_unit_ids"].tolist() == [102, 101, 103]
+    assert payload["v1_order_reference_ca1_unit"] == 11
+    assert payload["xcorr"].shape == (2, 3, 3)
+    assert np.allclose(payload["xcorr"][0, 0], xcorr[1, 1])
 
 
-def test_dark_glm_schematic_tracks_can_reserve_white_stimulus_labels() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    pandas = pytest.importorskip("pandas")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    swap_delta_table = pandas.DataFrame(
+def _write_ripple_events(tmp_path: Path) -> Path:
+    pytest.importorskip("pyarrow")
+    path = get_ripple_event_path(tmp_path, "L14", "20240611")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
         {
-            "delta_ll_bits_per_spike": [0.0] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "light_train_epoch": ["02_r1"] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "light_test_epoch": ["06_r3"] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "trajectory": list(PANEL_H_DELTA_TRAJECTORIES),
+            "epoch": ["08_r4", "08_r4", "06_r3"],
+            "start": [1.0, 1.3, 2.0],
+            "end": [1.05, 1.36, 2.04],
+            "mean_zscore": [2.1, 5.0, 6.0],
+        }
+    ).to_parquet(path, index=False)
+    return path
+
+
+def test_load_ripple_count_table_filters_epoch_and_threshold(tmp_path: Path) -> None:
+    _write_ripple_events(tmp_path)
+
+    table = load_ripple_count_table(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+        ripple_threshold_zscore=3.0,
+    )
+
+    assert table["animal_name"].tolist() == ["L14"]
+    assert table["epoch"].tolist() == ["08_r4"]
+    assert table["n_ripples"].tolist() == [1]
+
+
+def test_load_example_ripple_lfp_trace_uses_largest_thresholded_ripple(tmp_path: Path) -> None:
+    xr = pytest.importorskip("xarray")
+    _write_ripple_events(tmp_path)
+    lfp_path = get_ripple_lfp_path(tmp_path, "L14", "20240611", "08_r4")
+    lfp_path.parent.mkdir(parents=True)
+    time = np.linspace(1.1, 1.45, 36)
+    filtered_lfp = np.column_stack([np.sin(time * 30.0), np.cos(time * 30.0)])
+    xr.Dataset(
+        data_vars={"filtered_lfp": (("sample", "channel"), filtered_lfp)},
+        coords={"time": ("sample", time), "channel": ("channel", [101, 102])},
+    ).to_netcdf(lfp_path)
+
+    trace = load_example_ripple_lfp_trace(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        ripple_threshold_zscore=2.0,
+    )
+
+    assert trace["ripple_start_s"] == pytest.approx(1.3)
+    assert trace["mean_zscore"] == pytest.approx(5.0)
+    assert trace["channel"] == 101
+    assert np.min(trace["time_s"]) < 0.0
+    assert np.max(trace["time_s"]) > 0.0
+
+
+def test_load_modulation_summary_table_reads_cached_parquet(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    paths = get_ripple_modulation_paths(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+    )
+    paths["summary"].parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14"],
+            "date": ["20240611", "20240611"],
+            "epoch": ["08_r4", "08_r4"],
+            "region": ["v1", "ca1"],
+            "unit_id": [11, 101],
+            "ripple_modulation_index": [0.2, -0.1],
+            "response_zscore": [2.0, -0.5],
+        }
+    ).to_parquet(paths["summary"], index=False)
+
+    table = load_modulation_summary_table(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    assert table["region"].tolist() == ["v1", "ca1"]
+    assert table["source_path"].tolist() == [str(paths["summary"])] * 2
+
+
+def test_build_peri_ripple_heatmap_payload_preserves_time_matrix() -> None:
+    table = pd.DataFrame(
+        {
+            "region": ["v1", "v1", "v1", "v1", "ca1", "ca1"],
+            "unit_id": [11, 11, 12, 12, 101, 101],
+            "time_s": [-0.02, 0.0, -0.02, 0.0, -0.02, 0.0],
+            "mean_rate_hz": [1.0, 2.0, 4.0, 3.0, 5.0, 6.0],
         }
     )
 
-    fig, axis = plt.subplots()
-    plot_panel_h_swap_delta(
-        axis,
-        swap_delta_table,
-        [],
-        show_dark_track_labels=True,
-    )
+    payload = build_peri_ripple_heatmap_payload(table, region="v1")
 
-    panel_h_schematic_ax = axis.child_axes[0]
-    dark_track_axes = [panel_h_schematic_ax.child_axes[3]]
-    for track_ax in dark_track_axes:
-        visible_labels = [text for text in track_ax.texts if text.get_text() in {"A", "B"}]
-        assert sorted(text.get_text() for text in visible_labels) == ["A", "B"]
-        assert all(text.get_color() == "white" for text in visible_labels)
-        assert "C" not in [text.get_text() for text in track_ax.texts]
-    plt.close(fig)
+    assert payload["unit_ids"].tolist() == [11, 12]
+    assert np.allclose(payload["time_s"], [-0.02, 0.0])
+    assert np.allclose(payload["mean_rate_hz"], [[1.0, 2.0], [4.0, 3.0]])
 
 
-def test_plot_panel_h_swap_delta_can_use_segment_scalar_model() -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    pandas = pytest.importorskip("pandas")
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    model_colors = {"visual": "#D73027", "task_segment_scalar": "#1A9850"}
-    swap_delta_table = pandas.DataFrame(
+def test_build_peri_ripple_heatmap_payload_keeps_sessions_separate() -> None:
+    table = pd.DataFrame(
         {
-            "delta_ll_bits_per_spike": [0.2] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "light_train_epoch": ["02_r1"] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "light_test_epoch": ["06_r3"] * len(PANEL_H_DELTA_TRAJECTORIES),
-            "trajectory": list(PANEL_H_DELTA_TRAJECTORIES),
-            "model_name": ["task_segment_scalar"] * len(PANEL_H_DELTA_TRAJECTORIES),
+            "animal_name": ["L14", "L14", "L15", "L15"],
+            "date": ["20240611", "20240611", "20241121", "20241121"],
+            "epoch": ["06_r3", "06_r3", "06_r3", "06_r3"],
+            "region": ["v1", "v1", "v1", "v1"],
+            "unit_id": [11, 11, 11, 11],
+            "time_s": [-0.02, 0.0, -0.02, 0.0],
+            "mean_rate_hz": [1.0, 2.0, 4.0, 3.0],
         }
     )
-    swap_example = {
-        "animal_name": "L15",
-        "region": "v1",
-        "unit_id": 40,
-        "trajectory": "center_to_left",
-        "model_name": "task_segment_scalar",
-        "delta_ll_bits_per_spike": 0.25,
-        "segment_start": 0.4,
-        "segment_end": 0.6,
-        "tp_grid": np.asarray([0.4, 0.5, 0.6]),
-        "observed_position": np.asarray([0.4, 0.5, 0.6]),
-        "observed_rate_hz": np.asarray([0.2, 1.5, 0.4]),
-        "models": {
-            "visual": np.asarray([0.1, 0.8, 0.2]),
-            "task_segment_scalar": np.asarray([0.2, 1.2, 0.3]),
+
+    payload = build_peri_ripple_heatmap_payload(table, region="v1")
+
+    assert payload["mean_rate_hz"].shape == (2, 2)
+    assert np.allclose(payload["mean_rate_hz"], [[1.0, 2.0], [4.0, 3.0]])
+
+
+def _write_peri_ripple_table(
+    tmp_path: Path,
+    epoch: str,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+) -> Path:
+    pytest.importorskip("pyarrow")
+    paths = get_ripple_modulation_paths(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+    )
+    paths["peri_ripple_firing_rate"].parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "animal_name": [animal_name] * 4,
+            "date": [date] * 4,
+            "epoch": [epoch] * 4,
+            "region": ["v1", "v1", "ca1", "ca1"],
+            "unit_id": [11, 11, 101, 101],
+            "n_ripples": [3] * 4,
+            "bin_size_s": [0.02] * 4,
+            "time_before_s": [0.5] * 4,
+            "time_after_s": [0.5] * 4,
+            "time_s": [-0.02, 0.0, -0.02, 0.0],
+            "mean_rate_hz": [1.0, 2.0, 3.0, 4.0],
+        }
+    ).to_parquet(paths["peri_ripple_firing_rate"], index=False)
+    return paths["peri_ripple_firing_rate"]
+
+
+def _write_modulation_summary_table(
+    tmp_path: Path,
+    epoch: str,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+) -> Path:
+    pytest.importorskip("pyarrow")
+    paths = get_ripple_modulation_paths(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+    )
+    paths["summary"].parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "animal_name": [animal_name, animal_name],
+            "date": [date, date],
+            "epoch": [epoch, epoch],
+            "region": ["v1", "ca1"],
+            "unit_id": [11, 101],
+            "ripple_modulation_index": [0.2, -0.1],
+            "response_zscore": [2.0, -0.5],
+        }
+    ).to_parquet(paths["summary"], index=False)
+    return paths["summary"]
+
+
+def test_load_ripple_heatmap_epoch_tables_uses_registered_order(tmp_path: Path) -> None:
+    for epoch in ("02_r1", "08_r4", "07_s4"):
+        _write_peri_ripple_table(tmp_path, epoch)
+
+    epoch_tables = load_ripple_heatmap_epoch_tables(
+        tmp_path,
+        {
+            "light": ("L14", "20240611", "02_r1"),
+            "dark": ("L14", "20240611", "08_r4"),
+            "sleep": ("L14", "20240611", "07_s4"),
         },
-    }
-    second_swap_example = dict(swap_example)
-    second_swap_example["unit_id"] = 41
-    second_swap_example["observed_rate_hz"] = np.asarray([0.3, 1.1, 0.4])
-
-    fig, axis = plt.subplots()
-    plot_panel_h_swap_delta(
-        axis,
-        swap_delta_table,
-        [swap_example, second_swap_example],
-        model_name="task_segment_scalar",
-        model_colors=model_colors,
     )
 
-    schematic_ax, delta_ax, _first_example_ax, second_example_ax = axis.child_axes
-    assert any(
-        text.get_text() == "Segment scalar\nmodel" for text in schematic_ax.texts
-    )
-    hist_axes = delta_ax.child_axes[1::2]
-    assert all(
-        "Segment scalar\nbetter" in [text.get_text() for text in hist_ax.texts]
-        for hist_ax in hist_axes
-    )
-    first_hist_text_colors = {
-        text.get_text(): text.get_color() for text in hist_axes[0].texts
-    }
-    assert first_hist_text_colors["Independent\nbetter"] == model_colors["visual"]
-    assert first_hist_text_colors["Segment scalar\nbetter"] == model_colors[
-        "task_segment_scalar"
+    assert HEATMAP_EPOCH_ORDER == ("light", "dark", "sleep")
+    assert HEATMAP_EPOCH_LABELS["light"] == "Light run"
+    assert [payload["epoch"] for payload in epoch_tables] == ["02_r1", "08_r4", "07_s4"]
+    assert [payload["label"] for payload in epoch_tables] == ["Light run", "Dark run", "Sleep"]
+
+
+def test_load_pooled_ripple_heatmap_epoch_tables_uses_all_animals(tmp_path: Path) -> None:
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
     ]
-    assert [line.get_color() for line in second_example_ax.lines[1:]] == [
-        model_colors["visual"],
-        model_colors["task_segment_scalar"],
-    ]
-    assert second_example_ax.get_legend() is not None
-    assert [
-        text.get_text() for text in second_example_ax.get_legend().get_texts()
-    ] == [
-        "Empirical",
-        "Independent",
-        "Segment scalar",
-    ]
+    for animal_name, date, dark_epoch in datasets:
+        for epoch in ("02_r1", dark_epoch, "07_s4"):
+            _write_peri_ripple_table(
+                tmp_path,
+                epoch,
+                animal_name=animal_name,
+                date=date,
+            )
+            _write_modulation_summary_table(
+                tmp_path,
+                epoch,
+                animal_name=animal_name,
+                date=date,
+            )
+
+    epoch_tables = load_pooled_ripple_heatmap_epoch_tables(tmp_path, datasets)
+
+    assert [payload["epoch"] for payload in epoch_tables] == ["02_r1", "registered", "07_s4"]
+    assert [payload["n_datasets"] for payload in epoch_tables] == [2, 2, 2]
+    assert set(epoch_tables[1]["firing_rate_table"]["epoch"]) == {"08_r4", "10_r5"}
+    assert len(epoch_tables[2]["summary_table"]) == 4
+
+
+def test_draw_neuron_scale_bar_uses_data_height() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.set_ylim(250, 0)
+    draw_neuron_scale_bar(ax)
+
+    assert NEURON_SCALE_BAR_COUNT == 100
+    assert ax.lines[0].get_ydata().tolist() == [180.0, 80.0]
+    assert len(ax.lines) == 1
+    assert ax.texts[-1].get_text() == "100 neurons"
     plt.close(fig)
 
 
-def test_plot_panel_h_swap_delta_uses_schematic_histograms_and_examples() -> None:
+def test_plot_epoch_ripple_heatmap_panel_scales_region_height_by_unit_count() -> None:
     matplotlib = pytest.importorskip("matplotlib")
-    pandas = pytest.importorskip("pandas")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import to_rgba
-    from matplotlib.patches import Circle, Ellipse, Polygon
 
-    swap_delta_table = pandas.DataFrame(
+    table = pd.DataFrame(
         {
-            "delta_ll_bits_per_spike": [-0.1, 0.0, 0.2, 0.3],
-            "light_train_epoch": ["02_r1", "02_r1", "02_r1", "02_r1"],
-            "light_test_epoch": ["06_r3", "06_r3", "06_r3", "06_r3"],
-            "trajectory": list(PANEL_H_DELTA_TRAJECTORIES),
+            "region": ["v1"] * 6 + ["ca1"] * 2,
+            "unit_id": [1, 1, 2, 2, 3, 3, 101, 101],
+            "time_s": [-0.02, 0.0] * 4,
+            "mean_rate_hz": [1.0, 2.0, 2.0, 1.0, 3.0, 4.0, 1.5, 2.5],
         }
     )
-    swap_example = {
-        "animal_name": "L15",
-        "region": "v1",
-        "unit_id": 40,
-        "trajectory": "center_to_left",
-        "delta_ll_bits_per_spike": 0.25,
-        "segment_start": 0.4,
-        "segment_end": 0.6,
-        "tp_grid": np.asarray([0.4, 0.5, 0.6]),
-        "observed_position": np.asarray([0.4, 0.5, 0.6]),
-        "observed_rate_hz": np.asarray([0.2, 1.5, 0.4]),
-        "models": {
-            "visual": np.asarray([0.1, 0.8, 0.2]),
-            "task_segment_bump": np.asarray([0.2, 1.4, 0.3]),
-        },
-    }
-    second_swap_example = dict(swap_example)
-    second_swap_example["unit_id"] = 41
-    second_swap_example["delta_ll_bits_per_spike"] = -0.1
-    second_swap_example["observed_rate_hz"] = np.asarray([0.3, 1.2, 0.5])
-    second_swap_example["models"] = {
-        "visual": np.asarray([0.2, 0.6, 0.3]),
-        "task_segment_bump": np.asarray([0.3, 1.1, 0.4]),
-    }
-    fig, axis = plt.subplots()
-    plot_panel_h_swap_delta(axis, swap_delta_table, [swap_example, second_swap_example])
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "firing_rate_table": table,
+            "summary_table": None,
+        }
+    ]
+
+    fig, ax = plt.subplots()
+    plot_epoch_ripple_heatmap_panel(ax, epoch_tables, regions=("v1", "ca1"))
     fig.canvas.draw()
 
-    def _axis_center_y(axis):
-        position = axis.get_position()
-        return position.y0 + position.height / 2.0
-
-    assert len(axis.child_axes) == 4
-    schematic_h_ax, delta_h_ax, first_example_h_ax, second_example_h_ax = axis.child_axes
-    parent_h_position = axis.get_position()
-    schematic_h_position = schematic_h_ax.get_position()
-    delta_h_position = delta_h_ax.get_position()
-    assert schematic_h_position.width / parent_h_position.width == pytest.approx(
-        PANEL_H_SCHEMATIC_AXIS_BOUNDS[2]
-    )
-    assert schematic_h_position.height / parent_h_position.height == pytest.approx(
-        PANEL_H_SCHEMATIC_AXIS_BOUNDS[3]
-    )
-    assert delta_h_position.x0 == pytest.approx(
-        parent_h_position.x0 + parent_h_position.width * PANEL_H_DELTA_AXIS_BOUNDS[0]
-    )
-    assert schematic_h_ax.get_position().x1 < delta_h_ax.get_position().x0
-    assert first_example_h_ax.get_position().y1 < schematic_h_ax.get_position().y0
-    assert second_example_h_ax.get_position().y1 < delta_h_ax.get_position().y0
-    assert first_example_h_ax.get_position().y0 == pytest.approx(
-        second_example_h_ax.get_position().y0
-    )
-    assert first_example_h_ax.get_position().x1 < second_example_h_ax.get_position().x0
-    assert schematic_h_ax.texts[0].get_text() == "Train: AB"
-    assert schematic_h_ax.texts[0].get_fontsize() == pytest.approx(5.8)
-    assert schematic_h_ax.texts[1].get_fontsize() == pytest.approx(5.8)
-    assert schematic_h_ax.texts[2].get_fontsize() == pytest.approx(4.1)
-    assert schematic_h_ax.texts[3].get_fontsize() == pytest.approx(3.8)
-    assert schematic_h_ax.texts[2].get_position()[0] == pytest.approx(0.045)
-    assert schematic_h_ax.texts[3].get_position()[0] == pytest.approx(0.045)
-    train_predict_midpoint_x = 0.5 * (
-        schematic_h_ax.texts[0].get_position()[0]
-        + schematic_h_ax.texts[1].get_position()[0]
-    )
-    independent_prediction_text = next(
-        text
-        for text in schematic_h_ax.texts
-        if text.get_text().startswith('"Light activity is like the other arm')
-    )
-    shared_prediction_text = next(
-        text
-        for text in schematic_h_ax.texts
-        if text.get_text().startswith('"Light activity is like the same arm')
-    )
-    assert independent_prediction_text.get_position()[0] == pytest.approx(
-        train_predict_midpoint_x
-    )
-    assert independent_prediction_text.get_position()[1] == pytest.approx(0.61)
-    assert shared_prediction_text.get_position()[0] == pytest.approx(
-        train_predict_midpoint_x
-    )
-    assert shared_prediction_text.get_position()[1] == pytest.approx(0.02)
-    panel_h_track_patches = [
-        patch
-        for track_ax in schematic_h_ax.child_axes
-        for patch in track_ax.patches
-        if isinstance(patch, Polygon)
-    ]
-    assert len(panel_h_track_patches) == 5
-    assert [
-        patch.get_linewidth()
-        for patch in panel_h_track_patches
-    ] == pytest.approx([PANEL_H_SCHEMATIC_TRACK_LINEWIDTH] * 5)
-    assert all(
-        any(line.get_color() == GLM_TRAJECTORY_ARROW_COLOR for line in track_ax.lines)
-        for track_ax in schematic_h_ax.child_axes
-    )
-    panel_h_independent_train_ax = schematic_h_ax.child_axes[0]
-    panel_h_segment_modulation_ax = schematic_h_ax.child_axes[2]
-    panel_h_dark_ax = schematic_h_ax.child_axes[3]
-    panel_h_shared_light_ax = schematic_h_ax.child_axes[4]
-    assert all(
-        text.get_text() != "C"
-        for track_ax in schematic_h_ax.child_axes
-        for text in track_ax.texts
-    )
-    panel_h_dark_basis_patches = [
-        patch
-        for patch in panel_h_dark_ax.patches
-        if isinstance(patch, Circle)
-    ]
-    assert len(panel_h_dark_basis_patches) > 0
-    assert all(
-        patch.get_facecolor() == pytest.approx(to_rgba(GLM_BASIS_DARK_COLOR, 0.7))
-        for patch in panel_h_dark_basis_patches
-    )
-    panel_h_shared_light_basis_patches = [
-        patch
-        for patch in panel_h_shared_light_ax.patches
-        if isinstance(patch, Circle)
-    ]
-    assert len(panel_h_shared_light_basis_patches) > 0
-    shared_light_filled_basis_patches = [
-        patch
-        for patch in panel_h_shared_light_basis_patches
-        if patch.get_facecolor() == pytest.approx(
-            to_rgba(GLM_BASIS_DARK_COLOR, 0.7)
-        )
-    ]
-    shared_light_unfilled_basis_patches = [
-        patch
-        for patch in panel_h_shared_light_basis_patches
-        if patch.get_facecolor() == pytest.approx(to_rgba("none"))
-    ]
-    assert len(shared_light_filled_basis_patches) > 0
-    assert len(shared_light_unfilled_basis_patches) > 0
-    assert all(patch.center[0] > 3.0 for patch in shared_light_filled_basis_patches)
-    assert all(
-        patch.get_edgecolor() == pytest.approx(to_rgba("black"))
-        for patch in [*panel_h_dark_basis_patches, *panel_h_shared_light_basis_patches]
-    )
-    assert _axis_center_y(panel_h_segment_modulation_ax) < (
-        _axis_center_y(panel_h_independent_train_ax)
-        - schematic_h_position.height * 0.36
-    )
-    assert _axis_center_y(panel_h_dark_ax) < _axis_center_y(panel_h_segment_modulation_ax)
-    assert _axis_center_y(panel_h_shared_light_ax) < _axis_center_y(
-        panel_h_segment_modulation_ax
-    )
-    assert delta_h_ax.get_title() == ""
-    assert len(delta_h_ax.child_axes) == 8
-    icon_axes = delta_h_ax.child_axes[::2]
-    hist_axes = delta_h_ax.child_axes[1::2]
-    assert all(icon_ax.get_title() == "" for icon_ax in icon_axes)
-    assert all(hist_ax.get_title() == "" for hist_ax in hist_axes)
-    assert all(len(icon_ax.lines) > 0 for icon_ax in icon_axes)
-    panel_h_delta_xlabel = next(
-        text
-        for text in delta_h_ax.texts
-        if text.get_text() == "Δ log likelihood (bits/spike)"
-    )
-    panel_h_delta_ylabel = next(
-        text for text in delta_h_ax.texts if text.get_text() == "Frac."
-    )
-    assert panel_h_delta_xlabel.get_position() == pytest.approx((0.53, -0.055))
-    assert panel_h_delta_ylabel.get_position() == pytest.approx((-0.055, 0.49))
-    for child_delta_ax in hist_axes:
-        child_texts = child_delta_ax.texts
-        child_text_labels = [text.get_text() for text in child_texts]
-        assert child_delta_ax.lines[0].get_linestyle() == "--"
-        assert child_delta_ax.lines[0].get_color() == "black"
-        assert len(child_delta_ax.lines) == 1
-        assert "Independent\nbetter" in child_text_labels
-        assert "Shared scaffold\nbetter" in child_text_labels
-        independent_better_text = next(
-            text for text in child_texts if text.get_text() == "Independent\nbetter"
-        )
-        shared_better_text = next(
-            text for text in child_texts if text.get_text() == "Shared scaffold\nbetter"
-        )
-        assert independent_better_text.get_horizontalalignment() == "left"
-        assert shared_better_text.get_horizontalalignment() == "right"
-        assert independent_better_text.get_fontsize() == pytest.approx(4.0)
-        assert shared_better_text.get_fontsize() == pytest.approx(4.0)
-        assert independent_better_text.get_color() == GLM_MODEL_COLORS["visual"]
-        assert shared_better_text.get_color() == GLM_MODEL_COLORS[
-            "task_segment_bump"
-        ]
-        summary_text = next(text for text in child_texts if "% >0\nmed." in text.get_text())
-        assert summary_text.get_position() == pytest.approx((0.97, 0.56))
-        assert summary_text.get_horizontalalignment() == "right"
-        assert summary_text.get_fontsize() == pytest.approx(4.8)
-        assert all("n=" not in text.get_text() for text in child_texts)
-        assert all(">0=" not in text.get_text() for text in child_texts)
-        assert len(child_delta_ax.patches) > 0
-        assert child_delta_ax.patches[0].get_edgecolor()[3] == pytest.approx(0.0)
-        assert child_delta_ax.patches[0].get_linewidth() == pytest.approx(0.0)
-    assert first_example_h_ax.get_xlabel() == "Switched segment"
-    assert second_example_h_ax.get_xlabel() == "Switched segment"
-    assert first_example_h_ax.get_title() == "Example 1"
-    assert second_example_h_ax.get_title() == "Example 2"
-    assert first_example_h_ax.get_ylabel() == "FR (Hz)"
-    assert second_example_h_ax.get_ylabel() == "FR (Hz)"
-    first_delta_text = next(
-        text for text in first_example_h_ax.texts if text.get_text() == "ΔLL=0.25"
-    )
-    second_delta_text = next(
-        text for text in second_example_h_ax.texts if text.get_text() == "ΔLL=-0.10"
-    )
-    assert first_delta_text.get_position() == pytest.approx((0.96, 0.94))
-    assert second_delta_text.get_position() == pytest.approx((0.96, 0.94))
-    assert first_delta_text.get_horizontalalignment() == "right"
-    assert second_delta_text.get_horizontalalignment() == "right"
-    assert first_delta_text.get_verticalalignment() == "top"
-    assert second_delta_text.get_verticalalignment() == "top"
-    assert first_example_h_ax.get_legend() is None
-    assert second_example_h_ax.get_legend() is not None
-    assert [text.get_text() for text in second_example_h_ax.get_legend().get_texts()] == [
-        "Empirical",
-        "Independent",
-        "Shared scaffold",
-    ]
-    assert second_example_h_ax.get_legend()._loc == 6
-    assert len(first_example_h_ax.child_axes) == 1
-    assert len(second_example_h_ax.child_axes) == 1
-    assert first_example_h_ax.child_axes[0].get_position().x1 < first_example_h_ax.get_position().x0
-    assert second_example_h_ax.child_axes[0].get_position().x1 < second_example_h_ax.get_position().x0
-    assert first_example_h_ax.child_axes[0].get_position().y1 < (
-        first_example_h_ax.get_position().y0
-        + first_example_h_ax.get_position().height * 0.5
-    )
-    assert second_example_h_ax.child_axes[0].get_position().y1 < (
-        second_example_h_ax.get_position().y0
-        + second_example_h_ax.get_position().height * 0.5
-    )
-    assert all(
-        len(icon_ax.lines) > 0
-        for icon_ax in (
-            first_example_h_ax.child_axes[0],
-            second_example_h_ax.child_axes[0],
-        )
-    )
-    assert len(first_example_h_ax.lines) == 3
-    assert len(second_example_h_ax.lines) == 3
+    v1_height = ax.child_axes[0].get_position().height
+    ca1_height = ax.child_axes[1].get_position().height
+    assert v1_height / ca1_height == pytest.approx(3.0)
     plt.close(fig)
 
 
-def test_setup_light_heatmap_panel_uses_figure_1_heatmap_geometry() -> None:
+def _write_ripple_glm_dataset(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str = "08_r4",
+    ripple_selection: str = "allripples",
+    source_predictor_mode: str = "unit_vector",
+    devexp: np.ndarray | None = None,
+    p_values: np.ndarray | None = None,
+) -> Path:
+    xr = pytest.importorskip("xarray")
+    path = get_ripple_glm_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_selection=ripple_selection,
+        source_predictor_mode=source_predictor_mode,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if devexp is None:
+        devexp = np.array([0.1, 0.4])
+    if p_values is None:
+        p_values = np.array([0.2, 0.01])
+    dataset = xr.Dataset(
+        data_vars={
+            "ripple_devexp_mean": (("unit",), np.asarray(devexp, dtype=float)),
+            "ripple_devexp_p_value": (("unit",), np.asarray(p_values, dtype=float)),
+            "ripple_bits_per_spike_mean": (("unit",), np.array([0.03, 0.08])),
+            "ripple_observed_count_oof": (
+                ("sample", "unit"),
+                np.array([[1.0, 0.0], [2.0, 1.0], [0.0, 3.0]]),
+            ),
+            "ripple_predicted_count_oof": (
+                ("sample", "unit"),
+                np.array([[0.8, 0.2], [1.7, 1.3], [0.2, 2.5]]),
+            ),
+        },
+        coords={"sample": np.arange(3), "unit": np.array([11, 12])},
+        attrs={"n_ripples_after_selection": 3},
+    )
+    dataset.to_netcdf(path)
+    return path
+
+
+def _write_ripple_glm_offset_dataset(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str,
+    target_window_offset_s: float,
+) -> Path:
+    xr = pytest.importorskip("xarray")
+    path = get_ripple_glm_model_window_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        source_window_s=0.2,
+        source_window_offset_s=0.0,
+        target_window_s=0.2,
+        target_window_offset_s=target_window_offset_s,
+        ripple_selection="allripples",
+        ridge_strength=1e-1,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        data_vars={
+            "ripple_devexp_mean": (("unit",), np.array([0.1, 0.2, -0.1])),
+            "ripple_devexp_p_value": (("unit",), np.array([0.01, 0.2, 0.03])),
+        },
+        coords={"unit": np.array([11, 12, 13])},
+        attrs={"n_ripples_after_selection": 5},
+    ).to_netcdf(path)
+    return path
+
+
+def test_load_ripple_glm_summary_table_reads_per_unit_metrics(tmp_path: Path) -> None:
+    path = _write_ripple_glm_dataset(tmp_path)
+
+    table = load_ripple_glm_summary_table(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    assert table["unit_id"].tolist() == [11, 12]
+    assert np.allclose(table["ripple_devexp_mean"], [0.1, 0.4])
+    assert np.allclose(table["ripple_devexp_p_value"], [0.2, 0.01])
+    assert table["n_ripples"].tolist() == [3, 3]
+    assert table["source_path"].tolist() == [str(path), str(path)]
+
+
+def test_load_glm_source_predictor_comparison_tables_pairs_vector_and_mean(
+    tmp_path: Path,
+) -> None:
+    _write_ripple_glm_dataset(
+        tmp_path,
+        epoch="02_r1",
+        source_predictor_mode="unit_vector",
+        devexp=np.array([0.1, 0.4]),
+        p_values=np.array([0.2, 0.01]),
+    )
+    _write_ripple_glm_dataset(
+        tmp_path,
+        epoch="02_r1",
+        source_predictor_mode="mean_activity",
+        devexp=np.array([0.05, 0.2]),
+        p_values=np.array([0.3, 0.02]),
+    )
+
+    payload = load_glm_source_predictor_comparison_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    table = payload["comparison_table"]
+    assert payload["missing_artifacts"] == []
+    assert table["unit_id"].tolist() == [11, 12]
+    assert table["epoch_type"].tolist() == ["light", "light"]
+    assert np.allclose(table["vector_devexp_mean"], [0.1, 0.4])
+    assert np.allclose(table["mean_activity_devexp_mean"], [0.05, 0.2])
+    assert np.allclose(table["devexp_delta_vector_minus_mean"], [0.05, 0.2])
+
+
+def test_load_glm_offset_panel_tables_uses_complete_offset_sets(
+    tmp_path: Path,
+) -> None:
+    for epoch in ("02_r1", "08_r4", "07_s4"):
+        for target_offset_s in (-0.4, -0.2, 0.0, 0.2):
+            _write_ripple_glm_offset_dataset(
+                tmp_path,
+                epoch=epoch,
+                target_window_offset_s=target_offset_s,
+            )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    summary_table = payload["summary_table"]
+    unit_table = payload["unit_table"]
+    assert payload["missing_artifacts"] == []
+    assert payload["skipped_comparisons"] == []
+    assert len(summary_table) == 12
+    assert len(unit_table) == 36
+    assert set(summary_table["epoch_type"]) == {"light", "dark", "sleep"}
+    assert set(summary_table["target_window_offset_s"]) == {-0.4, -0.2, 0.0, 0.2}
+    assert np.allclose(summary_table["fraction_significant_positive"], 1.0 / 3.0)
+    assert np.allclose(summary_table["median_devexp_significant"], 0.1)
+
+
+def test_load_glm_offset_panel_tables_can_select_light_epoch_only(
+    tmp_path: Path,
+) -> None:
+    for target_offset_s in (-0.4, -0.2, 0.0, 0.2):
+        _write_ripple_glm_offset_dataset(
+            tmp_path,
+            epoch="02_r1",
+            target_window_offset_s=target_offset_s,
+        )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+        epoch_types=("light",),
+    )
+
+    summary_table = payload["summary_table"]
+    assert payload["missing_artifacts"] == []
+    assert payload["skipped_comparisons"] == []
+    assert len(summary_table) == 4
+    assert set(summary_table["epoch_type"]) == {"light"}
+
+
+def test_load_glm_offset_panel_tables_skips_incomplete_offset_sets(
+    tmp_path: Path,
+) -> None:
+    for target_offset_s in (-0.4, -0.2, 0.0):
+        _write_ripple_glm_offset_dataset(
+            tmp_path,
+            epoch="02_r1",
+            target_window_offset_s=target_offset_s,
+        )
+
+    payload = load_glm_offset_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    assert payload["summary_table"].empty
+    assert payload["unit_table"].empty
+    assert payload["missing_artifacts"]
+    assert payload["skipped_comparisons"][0]["epoch_type"] == "light"
+
+
+def test_load_glm_epoch_summary_tables_reads_light_dark_sleep(tmp_path: Path) -> None:
+    datasets = [
+        ("L14", "20240611", "08_r4"),
+        ("L15", "20241121", "10_r5"),
+    ]
+    for animal_name, date, dark_epoch in datasets:
+        for epoch in ("02_r1", dark_epoch, "07_s4"):
+            _write_ripple_glm_dataset(
+                tmp_path,
+                animal_name=animal_name,
+                date=date,
+                epoch=epoch,
+            )
+
+    epoch_tables = load_glm_epoch_summary_tables(tmp_path, datasets)
+
+    assert [payload["epoch"] for payload in epoch_tables] == ["02_r1", "registered", "07_s4"]
+    assert [payload["n_datasets"] for payload in epoch_tables] == [2, 2, 2]
+    assert set(epoch_tables[1]["summary_table"]["epoch"]) == {"08_r4", "10_r5"}
+    assert len(epoch_tables[2]["summary_table"]) == 4
+
+
+def _write_tuning_similarity_table(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str = "08_r4",
+) -> Path:
+    pytest.importorskip("pyarrow")
+    path = get_tuning_similarity_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        region="v1",
+        epoch=epoch,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "unit": [11, 12, 11],
+            "region": ["v1", "v1", "v1"],
+            "epoch": [epoch, epoch, epoch],
+            "comparison_label": ["pooled_same_turn", "pooled_same_turn", "pooled_same_arm"],
+            "similarity": [0.3, 0.6, 0.1],
+            "firing_rate_hz": [1.0, 2.0, 1.0],
+        }
+    ).to_parquet(path, index=False)
+    return path
+
+
+def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
+    tmp_path: Path,
+) -> None:
+    for epoch in ("02_r1", "08_r4", "07_s4"):
+        _write_ripple_glm_dataset(tmp_path, epoch=epoch)
+    _write_tuning_similarity_table(tmp_path)
+
+    payload = load_glm_behavior_association_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    similarity_table = payload["similarity_table"]
+    assert payload["missing_artifacts"] == []
+    assert len(similarity_table) == 6
+    assert set(similarity_table["epoch_type"]) == {"light", "dark", "sleep"}
+    assert set(similarity_table["tuning_epoch"]) == {"08_r4"}
+    assert sorted(similarity_table["unit"].unique().tolist()) == [11, 12]
+    assert sorted(similarity_table["same_turn_tuning_similarity"].unique().tolist()) == [0.3, 0.6]
+
+
+def test_load_glm_behavior_association_tables_reports_missing_tuning(
+    tmp_path: Path,
+) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+
+    payload = load_glm_behavior_association_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    assert payload["similarity_table"].empty
+    assert payload["missing_artifacts"][0]["artifact"] == "tuning_analysis"
+
+
+def test_build_glm_dark_activity_devexp_table_splits_dark_activity(
+    tmp_path: Path,
+) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+    glm_table = load_ripple_glm_summary_table(tmp_path, [("L14", "20240611", "08_r4")])
+    dark_activity_table = pd.DataFrame(
+        {
+            "unit": [11, 12],
+            "dark_firing_rate_hz": [0.2, 0.8],
+        }
+    )
+
+    table = build_glm_dark_activity_devexp_table(
+        glm_table,
+        dark_activity_table,
+        animal_name="L14",
+        date="20240611",
+        glm_epoch="08_r4",
+        epoch_type="light",
+        dark_epoch="08_r4",
+    )
+
+    assert table["dark_activity_group"].tolist() == ["Dark inactive", "Dark active"]
+    assert table["dark_active"].tolist() == [False, True]
+    assert np.allclose(table["dark_firing_rate_hz"], [0.2, 0.8])
+
+
+def _write_decoding_comparison_summary_table(
+    tmp_path: Path,
+    *,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    train_epoch: str = "08_r4",
+    decode_epoch: str = "08_r4",
+    representation: str = "place",
+    turn_group_match_rate: float = 0.6,
+    arm_identity_match_rate: float = 0.4,
+) -> Path:
+    pytest.importorskip("pyarrow")
+    path = get_ripple_decoding_comparison_summary_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        representation=representation,
+        train_epoch=train_epoch,
+        decode_epoch=decode_epoch,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "representation": [representation],
+            "train_epoch": [train_epoch],
+            "decode_epoch": [decode_epoch],
+            "n_ripples": [10],
+            "n_ripple_bins": [100],
+            "n_effective_shuffles": [100],
+            "turn_group_scheme_applicable": [True],
+            "turn_group_scheme_reason": ["ok"],
+            "turn_group_n_valid_ripples": [10],
+            "turn_group_match_rate": [turn_group_match_rate],
+            "turn_group_match_rate_shuffle_mean": [0.5],
+            "turn_group_match_rate_shuffle_sd": [0.03],
+            "turn_group_match_rate_p_value": [0.03],
+            "arm_identity_scheme_applicable": [True],
+            "arm_identity_scheme_reason": ["ok"],
+            "arm_identity_n_valid_ripples": [10],
+            "arm_identity_match_rate": [arm_identity_match_rate],
+            "arm_identity_match_rate_shuffle_mean": [1.0 / 3.0],
+            "arm_identity_match_rate_shuffle_sd": [0.02],
+            "arm_identity_match_rate_p_value": [0.04],
+        }
+    ).to_parquet(path, index=False)
+    return path
+
+
+def test_load_ripple_decoding_comparison_panel_tables_reads_light_dark_metrics(
+    tmp_path: Path,
+) -> None:
+    _write_decoding_comparison_summary_table(
+        tmp_path,
+        train_epoch="02_r1",
+        decode_epoch="02_r1",
+        turn_group_match_rate=0.4,
+        arm_identity_match_rate=0.5,
+    )
+    _write_decoding_comparison_summary_table(
+        tmp_path,
+        train_epoch="08_r4",
+        decode_epoch="08_r4",
+        turn_group_match_rate=0.7,
+        arm_identity_match_rate=0.8,
+    )
+
+    payload = load_ripple_decoding_comparison_panel_tables(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+
+    summary_table = payload["summary_table"]
+    assert payload["missing_artifacts"] == []
+    assert len(summary_table) == 4
+    assert set(summary_table["epoch_type"]) == {"light", "dark"}
+    assert set(summary_table["label_scheme"]) == {"turn_group", "arm_identity"}
+    assert sorted(summary_table["categorical_match_rate"].unique().tolist()) == [
+        0.4,
+        0.5,
+        0.7,
+        0.8,
+    ]
+
+
+def test_compute_significance_distribution_comparison_uses_session_strata() -> None:
+    table = pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14", "L15", "L15"],
+            "date": ["20240611", "20240611", "20241121", "20241121"],
+            "epoch": ["08_r4", "08_r4", "10_r5", "10_r5"],
+            "same_turn_tuning_similarity": [0.2, 0.8, 0.4, 0.9],
+            "ripple_devexp_p_value": [0.2, 0.01, 0.2, 0.01],
+        }
+    )
+
+    stats = compute_significance_distribution_comparison(
+        table,
+        metric_column="same_turn_tuning_similarity",
+        n_permutations=100,
+        random_seed=1,
+    )
+
+    assert stats["n_significant"] == 2
+    assert stats["n_nonsignificant"] == 2
+    assert stats["median_difference"] == pytest.approx(0.55)
+    assert 0.0 < float(stats["p_value"]) <= 1.0
+
+
+def test_load_example_glm_prediction_selects_top_devexp_unit(tmp_path: Path) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+
+    example = load_example_glm_prediction(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+    )
+
+    assert example["unit_id"] == 12
+    assert example["ripple_devexp_mean"] == pytest.approx(0.4)
+    assert np.allclose(example["observed"], [0.0, 1.0, 3.0])
+    assert np.allclose(example["predicted"], [0.2, 1.3, 2.5])
+
+
+def test_load_first_available_glm_prediction_skips_old_schema(tmp_path: Path) -> None:
+    xr = pytest.importorskip("xarray")
+    old_path = get_ripple_glm_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+    )
+    old_path.parent.mkdir(parents=True)
+    xr.Dataset(
+        data_vars={
+            "ripple_devexp_mean": (("unit",), np.array([0.1])),
+            "ripple_devexp_p_value": (("unit",), np.array([0.5])),
+            "ripple_bits_per_spike_mean": (("unit",), np.array([0.01])),
+        },
+        coords={"unit": np.array([11])},
+    ).to_netcdf(old_path)
+    _write_ripple_glm_dataset(
+        tmp_path,
+        animal_name="L19",
+        date="20250930",
+        epoch="08_r4",
+    )
+
+    example = load_first_available_glm_prediction(
+        tmp_path,
+        preferred_dataset=("L14", "20240611", "08_r4"),
+        candidate_datasets=[("L19", "20250930", "08_r4")],
+    )
+
+    assert example["unit_id"] == 12
+    assert example["ripple_devexp_mean"] == pytest.approx(0.4)
+
+
+def test_plot_helpers_draw_expected_axes() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
 
-    fig = plt.figure()
-    grid = fig.add_gridspec(1, 1)
-    panel = setup_light_heatmap_panel(fig, grid[0, 0], regions=("v1",))
+    peri_table = pd.DataFrame(
+        {
+            "region": ["v1", "v1", "ca1", "ca1"],
+            "unit_id": [11, 11, 101, 101],
+            "time_s": [-0.02, 0.0, -0.02, 0.0],
+            "mean_rate_hz": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    summary_table = pd.DataFrame(
+        {
+            "region": ["v1", "v1", "ca1", "ca1"],
+            "ripple_modulation_index": [0.2, -0.1, 0.3, 0.4],
+        }
+    )
+    glm_table = pd.DataFrame(
+        {
+            "ripple_devexp_mean": [0.1, 0.4],
+            "ripple_devexp_p_value": [0.2, 0.01],
+        }
+    )
+    glm_epoch_table = pd.DataFrame(
+        {
+            "ripple_devexp_mean": [-2.0, 0.4],
+            "ripple_devexp_p_value": [0.2, 0.001],
+        }
+    )
+    glm_epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "summary_table": glm_epoch_table,
+        },
+        {
+            "epoch_type": "dark",
+            "label": "Dark run",
+            "epoch": "registered",
+            "summary_table": glm_epoch_table,
+        },
+        {
+            "epoch_type": "sleep",
+            "label": "Sleep",
+            "epoch": "07_s4",
+            "summary_table": glm_epoch_table,
+        },
+    ]
+    prediction = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "epoch": "08_r4",
+        "unit_id": 12,
+        "observed": np.array([0.0, 1.0, 3.0]),
+        "predicted": np.array([0.2, 1.3, 2.5]),
+        "ripple_devexp_mean": 0.4,
+        "ripple_devexp_p_value": 0.01,
+    }
+    trace = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "epoch": "08_r4",
+        "channel": 101,
+        "time_s": np.array([-0.01, 0.0, 0.01]),
+        "filtered_lfp": np.array([0.0, 1.0, 0.0]),
+        "ripple_duration_s": 0.05,
+        "mean_zscore": 5.0,
+        "n_ripples": 2,
+    }
+    xcorr_payload = {
+        "animal_name": "L15",
+        "date": "20241121",
+        "epoch": "02_r1",
+        "v1_order_reference_ca1_unit": 11,
+        "display_vmax": 5.0,
+        "ca1_unit_ids": np.array([11, 10]),
+        "v1_unit_ids": np.array([101, 102, 103]),
+        "lag_s": np.array([-0.01, 0.0, 0.01]),
+        "xcorr": np.ones((2, 3, 3), dtype=float),
+    }
+    association_payload = {
+        "devexp_table": pd.DataFrame(
+            {
+                "epoch_type": [
+                    "light",
+                    "light",
+                    "light",
+                    "light",
+                    "dark",
+                    "dark",
+                    "sleep",
+                    "sleep",
+                ],
+                "dark_firing_rate_hz": [0.2, 0.4, 0.8, 9.0, 0.2, 8.0, 0.3, 12.0],
+                "same_turn_tuning_similarity": [
+                    0.2,
+                    0.4,
+                    0.7,
+                    0.9,
+                    0.6,
+                    0.8,
+                    0.3,
+                    0.85,
+                ],
+                "ripple_devexp_mean": [0.05, 0.2, 0.3, 0.4, 0.1, 0.3, 0.15, 0.25],
+                "ripple_devexp_p_value": [
+                    0.001,
+                    0.2,
+                    0.003,
+                    0.004,
+                    0.003,
+                    0.004,
+                    0.002,
+                    0.6,
+                ],
+                "animal_name": [
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                    "RatA",
+                    "RatB",
+                ],
+                "date": [
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                    "20240101",
+                    "20240102",
+                ],
+            }
+        ),
+        "missing_artifacts": [],
+        "dark_activity_threshold_hz": 0.5,
+    }
+    source_comparison_payload = {
+        "comparison_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA", "RatA", "RatB", "RatB"],
+                "date": ["20240101", "20240101", "20240102", "20240102"],
+                "epoch": ["02_r1", "02_r1", "02_r1", "02_r1"],
+                "epoch_type": ["light", "light", "light", "light"],
+                "unit_id": [1, 2, 3, 4],
+                "mean_activity_devexp_mean": [0.0, 0.1, 0.02, 0.05],
+                "vector_devexp_mean": [0.1, 0.2, 0.04, 0.15],
+                "vector_devexp_p_value": [0.2, 0.01, 0.03, 0.4],
+                "mean_activity_devexp_p_value": [0.3, 0.02, 0.2, 0.5],
+            }
+        ),
+        "missing_artifacts": [],
+        "ripple_selection": "single",
+    }
+    decoding_payload = {
+        "summary_table": pd.DataFrame(
+            {
+                "animal_name": ["L14", "L14", "L14", "L14"],
+                "date": ["20240611", "20240611", "20240611", "20240611"],
+                "representation": ["place", "place", "place", "place"],
+                "decode_epoch": ["02_r1", "08_r4", "02_r1", "08_r4"],
+                "epoch_type": ["light", "dark", "light", "dark"],
+                "label_scheme": [
+                    "turn_group",
+                    "turn_group",
+                    "arm_identity",
+                    "arm_identity",
+                ],
+                "categorical_match_rate": [0.6, 0.7, 0.4, 0.8],
+                "categorical_match_rate_shuffle_mean": [0.5, 0.52, 0.35, 0.36],
+                "categorical_match_rate_p_value": [0.04, 0.2, 0.03, 0.01],
+                "chance_level": [0.5, 0.5, 1.0 / 3.0, 1.0 / 3.0],
+            }
+        ),
+        "categorical_metrics": (("place", "turn_group"), ("place", "arm_identity")),
+        "missing_artifacts": [],
+    }
+    offset_payload = {
+        "summary_table": pd.DataFrame(
+            {
+                "animal_name": ["L14"] * 8,
+                "date": ["20240611"] * 8,
+                "epoch": ["02_r1"] * 4 + ["08_r4"] * 4,
+                "epoch_type": ["light"] * 4 + ["dark"] * 4,
+                "epoch_label": ["Light run"] * 4 + ["Dark run"] * 4,
+                "target_window_offset_s": [-0.4, -0.2, 0.0, 0.2] * 2,
+                "target_window_label": [
+                    "-400 to -200",
+                    "-200 to 0",
+                    "0 to 200",
+                    "200 to 400",
+                ]
+                * 2,
+                "fraction_significant_positive": [0.1, 0.2, 0.3, 0.25, 0.05, 0.1, 0.2, 0.15],
+                "median_devexp_significant": [0.03, 0.04, 0.06, 0.05, 0.02, 0.03, 0.04, 0.035],
+                "n_units": [10] * 8,
+                "n_significant_positive": [1, 2, 3, 2, 1, 1, 2, 2],
+            }
+        ),
+        "unit_table": pd.DataFrame(),
+        "missing_artifacts": [],
+        "skipped_comparisons": [],
+        "target_window_offsets_s": (-0.4, -0.2, 0.0, 0.2),
+        "source_window_s": 0.2,
+        "source_window_offset_s": 0.0,
+        "target_window_s": 0.2,
+    }
 
-    assert panel["heatmap_axes"].shape == (4, 4)
-    assert len(panel["tuning_schematic_axes"]) == 4
-    assert len(panel["order_schematic_axes"]) == 4
-    assert panel["corner_axis"].axison is False
-    tuning_patches = [
-        patch
-        for schematic_ax in panel["tuning_schematic_axes"]
-        for patch in schematic_ax.patches
-        if isinstance(patch, Polygon)
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "animal_name": "L14",
+            "date": "20240611",
+            "epoch": "02_r1",
+            "firing_rate_table": peri_table,
+            "summary_table": summary_table,
+        },
+        {
+            "epoch_type": "dark",
+            "label": "Dark run",
+            "animal_name": "L14",
+            "date": "20240611",
+            "epoch": "08_r4",
+            "firing_rate_table": peri_table,
+            "summary_table": summary_table,
+        },
+        {
+            "epoch_type": "sleep",
+            "label": "Sleep",
+            "animal_name": "L14",
+            "date": "20240611",
+            "epoch": "07_s4",
+            "firing_rate_table": peri_table,
+            "summary_table": summary_table,
+        },
     ]
-    order_patches = [
-        patch
-        for order_ax in panel["order_schematic_axes"]
-        for schematic_ax in order_ax.child_axes
-        for patch in schematic_ax.patches
-        if isinstance(patch, Polygon)
+
+    fig, axes = plt.subplots(3, 3)
+    plot_ripple_lfp_panel(axes[0, 0], trace)
+    plot_peri_ripple_heatmap_panel(axes[0, 1], peri_table, regions=("v1", "ca1"))
+    plot_modulation_index_panel(axes[0, 2], summary_table, regions=("v1", "ca1"))
+    draw_ripple_glm_schematic(axes[1, 0])
+    plot_glm_summary_panel(axes[1, 1], glm_table)
+    plot_observed_predicted_panel(axes[1, 2], prediction)
+    plot_epoch_ripple_heatmap_panel(axes[2, 0], epoch_tables, regions=("v1", "ca1"))
+    plot_top_ca1_xcorr_panel(axes[2, 1], xcorr_payload)
+    plot_glm_analysis_panel(axes[2, 2], glm_epoch_tables)
+
+    assert len(axes[0, 1].child_axes) == 3
+    assert len(axes[2, 0].child_axes) == 10
+    assert len(axes[2, 1].images) == 0
+    assert len(axes[2, 1].child_axes) == 3
+    assert all(len(child_axis.images) == 1 for child_axis in axes[2, 1].child_axes[:2])
+    assert all(child_axis.get_xlabel() == "" for child_axis in axes[2, 1].child_axes[:2])
+    assert "Lag (s)" in [text.get_text() for text in axes[2, 1].texts]
+    lag_label = next(text for text in axes[2, 1].texts if text.get_text() == "Lag (s)")
+    assert lag_label.get_position()[1] == pytest.approx(0.035)
+    assert len(axes[1, 0].patches) >= 3
+    assert len(axes[1, 1].collections) == 1
+    assert len(axes[1, 2].collections) == 1
+    assert len(axes[2, 2].child_axes) == 7
+    assert axes[2, 2].child_axes[1].get_xlim()[0] == pytest.approx(-0.1)
+    assert axes[2, 2].child_axes[1].get_xlim()[1] == pytest.approx(0.5)
+    assert len(axes[2, 2].child_axes[1].collections) == 2
+    assert axes[2, 2].child_axes[2].get_xlim()[0] == pytest.approx(-0.1)
+    assert axes[2, 2].child_axes[2].get_xlim()[1] == pytest.approx(0.5)
+    assert len(axes[2, 2].child_axes[2].patches) == 2
+    assert [tick.get_text() for tick in axes[2, 2].child_axes[2].get_yticklabels()] == [
+        "n.s.",
+        "",
     ]
-    assert tuning_patches
-    assert order_patches
-    assert all(patch.get_facecolor()[3] == pytest.approx(0.0) for patch in tuning_patches)
-    assert all(patch.get_facecolor()[3] == pytest.approx(0.0) for patch in order_patches)
+    assert (
+        axes[2, 2].child_axes[1].get_ylabel()
+        == "-log10 p from shuffle"
+    )
+    assert any(
+        "frac sig=" in text.get_text()
+        for text in axes[2, 2].child_axes[1].texts
+    )
+    assert len(axes[2, 2].child_axes[2].artists) == 1
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_behavior_association_panel(ax, association_payload)
+    assert len(ax.child_axes) == 3
+    fraction_ax, box_ax, similarity_ax = ax.child_axes
+    assert fraction_ax.get_xlabel() == ""
+    assert len(fraction_ax.artists) == 1
+    assert fraction_ax.get_ylabel() == ""
+    assert fraction_ax.get_title() == ""
+    assert box_ax.get_ylabel() == ""
+    assert box_ax.get_xlabel() == "Dev. explained"
+    assert box_ax.get_title() == ""
+    assert similarity_ax.get_xlabel() == "Dark DPP overlap"
+    assert similarity_ax.get_ylabel() == "Frac. units"
+    assert similarity_ax.get_title() == ""
+    assert ax.texts[-1].get_text() == (
+        "Plots show p<0.05 units; dark-active split uses 0.5 Hz"
+    )
+    assert len(fraction_ax.patches) == 2
+    assert len(box_ax.patches) == 2
+    assert len(box_ax.collections) == 2
+    assert len(box_ax.lines) >= 3
+    assert len(fraction_ax.collections) == 3
+    assert len(fraction_ax.lines) >= 2
+    assert len(similarity_ax.patches) == 10
+    assert len(similarity_ax.collections) == 0
+    assert len(similarity_ax.lines) == 2
+    similarity_bin_edges = np.asarray(
+        [patch.get_x() for patch in similarity_ax.patches]
+        + [
+            similarity_ax.patches[-1].get_x()
+            + similarity_ax.patches[-1].get_width()
+        ],
+        dtype=float,
+    )
+    np.testing.assert_allclose(np.diff(similarity_bin_edges), 0.1, atol=1e-9)
+    assert np.any(np.isclose(similarity_bin_edges, 0.0))
+    assert similarity_ax.patches[0].get_edgecolor()[3] == pytest.approx(0.0)
+    np.testing.assert_allclose(
+        fraction_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["inactive"])[:3],
+    )
+    np.testing.assert_allclose(
+        fraction_ax.patches[1].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
+    np.testing.assert_allclose(
+        box_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["inactive"])[:3],
+    )
+    np.testing.assert_allclose(
+        box_ax.patches[1].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
+    np.testing.assert_allclose(
+        similarity_ax.patches[0].get_facecolor()[:3],
+        to_rgba(PANEL_D_DARK_ACTIVITY_COLORS["active"])[:3],
+    )
+    assert fraction_ax.get_xlim()[0] == pytest.approx(0.0)
+    assert fraction_ax.get_xlim()[1] == pytest.approx(1.0)
+    assert [tick.get_text() for tick in fraction_ax.get_yticklabels()] == [
+        "Dark-inactive",
+        "Dark active",
+    ]
+    assert sum(
+        len(collection.get_offsets())
+        for collection in box_ax.collections
+    ) == 3
+    assert box_ax.get_xlim()[0] == pytest.approx(-0.1)
+    assert box_ax.get_xlim()[1] == pytest.approx(0.5)
+    assert similarity_ax.get_xlim()[0] == pytest.approx(0.0)
+    assert similarity_ax.get_xlim()[1] == pytest.approx(1.0)
+    devexp_box_line_max = max(
+        np.nanmax(np.asarray(line.get_xdata(), dtype=float))
+        for line in box_ax.lines
+        if len(line.get_xdata())
+    )
+    assert devexp_box_line_max == pytest.approx(0.4)
+    assert not box_ax.texts
+    assert [text.get_text() for text in similarity_ax.texts] == ["median=0.80"]
+    assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
+    assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
+    significance_markers = [
+        text for text in fraction_ax.texts if text.get_text() == "*"
+    ]
+    assert len(significance_markers) == 1
+    assert significance_markers[0].get_position()[0] == pytest.approx((2.0 / 3.0) + 0.07)
+    assert significance_markers[0].get_position()[1] == pytest.approx(2.0)
+    assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_source_predictor_comparison_panel(ax, source_comparison_payload)
+    assert len(ax.child_axes) == 3
+    assert [child.get_title() for child in ax.child_axes] == ["RatA", "RatB", "Pooled"]
+    assert ax.child_axes[0].get_xlim()[0] == pytest.approx(-0.2)
+    assert ax.child_axes[0].get_xlim()[1] == pytest.approx(0.5)
+    assert ax.child_axes[0].get_ylim()[0] == pytest.approx(-0.2)
+    assert ax.child_axes[0].get_ylim()[1] == pytest.approx(0.5)
+    assert len(ax.child_axes[0].collections) == 1
+    assert len(ax.child_axes[2].collections) == 2
+    assert len(ax.child_axes[0].lines) == 1
+    assert any(
+        text.get_text() == "Mean CA1 activity deviance explained"
+        for text in ax.texts
+    )
+    assert any(
+        text.get_text() == "CA1 spike vector deviance explained"
+        for text in ax.texts
+    )
+    assert any(
+        text.get_text() == "Showing vector p<0.05 units"
+        for text in ax.texts
+    )
+    assert any(
+        text.get_text() == "n=1\nfrac vector>mean=1.00"
+        for text in ax.child_axes[0].texts
+    )
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_source_predictor_comparison_panel(
+        ax,
+        source_comparison_payload,
+        include_per_animal=False,
+        include_pooled=True,
+        compact_labels=True,
+        show_color_note=False,
+    )
+    compact_summary_text = ax.child_axes[0].texts[-1]
+    assert compact_summary_text.get_text() == "n=2\nfrac vector>mean=1.00"
+    assert compact_summary_text.get_ha() == "right"
+    assert compact_summary_text.get_va() == "bottom"
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_ripple_decoding_comparison_panel(ax, decoding_payload)
+    assert len(ax.child_axes) == 2
+    assert [child_axis.get_title() for child_axis in ax.child_axes] == [
+        "Turn group",
+        "Arm",
+    ]
+    assert ax.child_axes[1].get_xlabel() == "Decode epoch"
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_offset_panel(ax, offset_payload)
+    assert len(ax.child_axes) == 2
+    assert ax.child_axes[0].get_title() == "CA1 0-200 ms -> V1 target window"
+    assert ax.child_axes[1].get_xlabel() == "V1 target window (ms)"
     plt.close(fig)
 
 
-def test_default_cli_matches_manuscript_figure_format() -> None:
+def test_parse_arguments_defaults_match_figure_3_cli() -> None:
     args = parse_arguments([])
 
-    assert DEFAULT_REGIONS == ("v1",)
-    assert args.region is None
     assert args.output_dir == DEFAULT_OUTPUT_DIR
-    assert args.panel_b_cache_dir is None
-    assert args.refresh_panel_b_cache is False
-    assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(165.0)
-    assert DEFAULT_PANEL_AB_HEIGHT_MM == pytest.approx(
-        figure_3_module.DEFAULT_HEATMAP_HEIGHT_MM
-    )
-    assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
-        DEFAULT_PANEL_AB_HEIGHT_MM + DEFAULT_PANEL_DEF_HEIGHT_MM
-    )
-    assert DEFAULT_PANEL_DEF_HEIGHT_MM == pytest.approx(34.0)
-    assert DEFAULT_PANEL_B_WIDTH_FRACTION == pytest.approx(0.7)
-    assert DEFAULT_PANEL_A_WIDTH_FRACTION == pytest.approx(0.3)
-    assert PANEL_B_HEATMAP_CMAP == "viridis"
+    assert args.output_name == "figure_3"
+    assert args.output_format == "pdf"
+    assert args.example_dataset == DEFAULT_EXAMPLE_DATASET
+    assert args.light_epoch is None
+    assert args.dark_epoch is None
+    assert args.sleep_epoch is None
+    assert args.dark_movement_fr_cache_dir == DEFAULT_FIGURE_CACHE_DIR
+    assert args.refresh_dark_movement_fr_cache is False
+    assert args.refresh_panel_b_schematic_cache is False
+    assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
+    assert args.ripple_window_s == DEFAULT_RIPPLE_WINDOW_S
+    assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S
+    assert args.ripple_selection == DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION
+    assert args.ridge_strength == DEFAULT_RIDGE_STRENGTH

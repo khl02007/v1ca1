@@ -36,7 +36,7 @@ from v1ca1.paper_figures.figure_1 import (
     normalize_linear_position_by_trajectory,
     normalize_panel_values_per_trajectory,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_FIGURE_HEIGHT_MM as FIGURE_3_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_3_WIDTH_MM,
     DEFAULT_OUTPUT_DIR,
@@ -169,8 +169,8 @@ LIGHT_TUNING_STABILITY_TABLE_COLUMNS = (
     "stability_correlation",
 )
 PANEL_A_SCATTER_ALPHA = 0.30
-PANEL_A_GRID_LEFT = 0.045
-PANEL_A_GRID_RIGHT = 0.965
+PANEL_A_GRID_LEFT = 0.140
+PANEL_A_GRID_RIGHT = 0.940
 PANEL_A_GRID_TOP = 0.965
 PANEL_A_GRID_BOTTOM = 0.055
 PANEL_A_FIGURE_1D_WIDTH_CORRECTION = 0.995515695
@@ -2298,7 +2298,7 @@ def make_supplementary_figure_3(
         ax = fig.add_subplot(1, 1, 1)
         ax.text(0.5, 0.5, "No datasets", ha="center", va="center", fontsize=6.0)
         ax.axis("off")
-        save_figure(fig, output_path, dpi=dpi)
+        save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
         plt.close(fig)
         print(f"Saved Supplementary Figure 3 to {output_path}")
         return output_path
@@ -2410,7 +2410,7 @@ def make_supplementary_figure_3(
         y=1.05,
     )
 
-    save_figure(fig, output_path, dpi=dpi)
+    save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
     print(f"Saved Supplementary Figure 3 to {output_path}")
     return output_path

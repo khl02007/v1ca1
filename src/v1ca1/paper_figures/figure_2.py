@@ -46,6 +46,7 @@ from v1ca1.paper_figures.figure_2_common import (
     PANEL_B_EXAMPLE_MODEL_COLORS,
     PANEL_B_EXAMPLE_MODEL_LABELS,
     PANEL_B_FIELD_LABEL_Y,
+    PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
     PANEL_B_INDEPENDENT_BASIS_LABEL,
@@ -86,7 +87,7 @@ from v1ca1.paper_figures.figure_2_common import (
     _align_texts_to_reference_display_y,
     _shift_axis_horizontally,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_OUTPUT_DIR,
     PANEL_TRAJECTORY_COLORS,
     PANEL_H_DELTA_TRAJECTORIES,
@@ -175,7 +176,6 @@ PANEL_D_SHARED_ARROW_X = (0.625, 0.700)
 PANEL_D_SHARED_ARROW_Y_OFFSET = 0.0
 PANEL_D_SHARED_LIGHT_TRACK_CENTER_X = PANEL_D_PREDICT_TRACK_CENTER_X
 PANEL_D_INDEPENDENT_TRACK_CENTER_Y = 0.765
-PANEL_D_INDEPENDENT_PREDICTION_LABEL_Y = 0.830
 PANEL_D_SHARED_TRACK_CENTER_Y = 0.354
 PANEL_D_SHARED_PREDICTION_LABEL_Y = 0.124
 PANEL_E_VERTICAL_SHIFT = 0.040
@@ -243,18 +243,6 @@ def _iter_nested_axes(ax: Any) -> Any:
     for child_ax in getattr(ax, "child_axes", ()):
         yield child_ax
         yield from _iter_nested_axes(child_ax)
-
-
-def _set_nested_text_fontsize(ax: Any, text_value: str, fontsize: float) -> None:
-    """Set fontsize for matching text in one axes tree."""
-    for candidate_ax in (ax, *_iter_nested_axes(ax)):
-        for text in (
-            candidate_ax.xaxis.label,
-            candidate_ax.yaxis.label,
-            *candidate_ax.texts,
-        ):
-            if text.get_text() == text_value:
-                text.set_fontsize(fontsize)
 
 
 def _replace_nested_text(
@@ -689,6 +677,7 @@ def plot_panel_b_dpp_overlap_with_schematic(
     *,
     example: dict[str, Any],
     low_threshold: float,
+    high_threshold: float,
 ) -> None:
     """Plot Figure 2 Panel B with DPPI schematic and overlap summaries."""
     ax.set_xlim(0.0, 1.0)
@@ -702,6 +691,7 @@ def plot_panel_b_dpp_overlap_with_schematic(
         grouped_ax,
         overlap_table,
         low_threshold=low_threshold,
+        high_threshold=high_threshold,
     )
     for text in grouped_ax.texts:
         if "> 0.5" in text.get_text():
@@ -710,7 +700,13 @@ def plot_panel_b_dpp_overlap_with_schematic(
     grouped_ax.set_title("")
     grouped_ax.set_xlabel("Dark DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.2)
     grouped_ax.set_ylabel("Light DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.0)
-    grouped_labels = ("Low\n<0.5", "Mid\n0.5-0.75", "High\n>=0.75")
+    low_threshold_label = f"{float(low_threshold):g}"
+    high_threshold_label = f"{float(high_threshold):g}"
+    grouped_labels = (
+        f"Low\n<{low_threshold_label}",
+        f"Mid\n{low_threshold_label}-{high_threshold_label}",
+        f"High\n>={high_threshold_label}",
+    )
     grouped_ax.set_xticklabels(grouped_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
     _remove_axis_tick_label_lines(grouped_ax, prefixes=("n=",))
     grouped_ax.xaxis.set_label_coords(0.5, -0.32)
@@ -1262,6 +1258,9 @@ def make_figure_2(
     dark_tuning_correlation_threshold: float = (
         PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD
     ),
+    high_dark_tuning_correlation_threshold: float = (
+        PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
+    ),
 ) -> Path:
     """Build and save Figure 2."""
     import matplotlib.pyplot as plt
@@ -1370,6 +1369,7 @@ def make_figure_2(
         panel_b_overlap_table,
         example=panel_a_examples[0],
         low_threshold=dark_tuning_correlation_threshold,
+        high_threshold=high_dark_tuning_correlation_threshold,
     )
     plot_panel_c_cross_and_place_decoding(panel_c_axis, panel_e_decoding_error_table)
     plot_panel_c_model_architecture_row(
@@ -1488,6 +1488,15 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--high-dark-tuning-correlation-threshold",
+        type=float,
+        default=PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
+        help=(
+            "Upper dark tuning-correlation threshold for Panel B high group. "
+            f"Default: {PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD}"
+        ),
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -1583,6 +1592,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         panel_example_cache_dir=panel_example_cache_dir,
         refresh_panel_example_cache=args.refresh_panel_example_cache,
         dark_tuning_correlation_threshold=args.dark_tuning_correlation_threshold,
+        high_dark_tuning_correlation_threshold=(
+            args.high_dark_tuning_correlation_threshold
+        ),
     )
 
 

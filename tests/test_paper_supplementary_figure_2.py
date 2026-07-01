@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import v1ca1.paper_figures.figure_3 as figure_3_module
+import v1ca1.paper_figures.old_fig3 as figure_3_module
 import v1ca1.paper_figures.supplementary_figure_2 as supp_figure_2_module
 from v1ca1.paper_figures.supplementary_figure_2 import (
     DEFAULT_ANIMAL_ROW_HEIGHT_MM,

@@ -80,7 +80,7 @@ def make_figure_epoch_dataset_id(
     )
 
 
-def make_figure_4_epoch_ids(
+def make_figure_3_epoch_ids(
     animal_name: str,
     date: str,
     *,
@@ -106,6 +106,7 @@ def make_figure_4_epoch_ids(
             get_dataset_sleep_epoch(animal_name) if sleep_epoch is None else sleep_epoch,
         ),
     }
+
 
 
 def get_processed_datasets() -> list[DatasetId]:

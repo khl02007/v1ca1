@@ -48,7 +48,7 @@ from v1ca1.paper_figures.figure_1 import (
     normalize_panel_values_per_trajectory,
     plot_pooled_heatmap_grid,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_REGIONS,
     DEFAULT_SIGMA_BINS,
@@ -346,7 +346,7 @@ def load_dark_dpp_filtered_unit_keys(
         if path.exists():
             table = pd.read_parquet(path)
         else:
-            from v1ca1.paper_figures.figure_4 import (
+            from v1ca1.paper_figures.figure_3 import (
                 _compute_similarity_from_saved_curves,
             )
 

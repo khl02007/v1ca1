@@ -37,7 +37,6 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.style import (
-    ANIMAL_COLORS,
     COMPACT_HISTOGRAM_KWARGS,
     EMPHASIS_HISTOGRAM_KWARGS,
     ENCODING_COMPARISON_COLORS,
@@ -271,7 +270,6 @@ DECODING_CROSS_TRAJECTORY_COMPARISONS = (
         ),
     ),
 )
-DECODING_ANIMAL_COLORS = ANIMAL_COLORS
 DECODING_EXAMPLE_TRAIN_TRAJECTORY = "center_to_left"
 DECODING_EXAMPLE_TEST_TRAJECTORIES = {
     "same_turn_cross_arm": "right_to_center",
@@ -3935,7 +3933,7 @@ def load_panel_b_visual_example_data(
     refresh_panel_example_cache: bool = False,
 ) -> dict[str, Any]:
     """Load the Figure 1B example cell rasters and rate curves across epochs."""
-    from v1ca1.paper_figures.figure_3 import load_or_compute_panel_example_data
+    from v1ca1.paper_figures.old_fig3 import load_or_compute_panel_example_data
 
     epoch_specs = build_panel_b_visual_epoch_specs(
         animal_name,

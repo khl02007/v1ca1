@@ -17,8 +17,8 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import get_stability_table_path
-from v1ca1.paper_figures.figure_4 import load_dark_movement_firing_rate_table
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.figure_3 import load_dark_movement_firing_rate_table
+from v1ca1.paper_figures.old_fig3 import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_REGIONS,
