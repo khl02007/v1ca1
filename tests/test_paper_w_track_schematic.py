@@ -10,6 +10,7 @@ from v1ca1.paper_figures.w_track_schematic import (
     DEFAULT_OVAL_REGIONS,
     DEFAULT_OVAL_STYLES,
     build_output_path,
+    draw_w_track_basis_schematic,
     draw_w_track_schematic,
     parse_arguments,
 )
@@ -110,6 +111,50 @@ def test_draw_w_track_schematic_can_set_region_fill_alpha() -> None:
     rectangles = [patch for patch in ax.patches if isinstance(patch, Rectangle)]
     assert len(rectangles) == 1
     assert rectangles[0].get_facecolor() == pytest.approx(to_rgba("pink", 0.35))
+    plt.close(fig)
+
+
+def test_draw_w_track_basis_schematic_can_fill_named_regions() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Rectangle
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    draw_w_track_basis_schematic(
+        ax,
+        trajectory_name="center_to_left",
+        show_basis=True,
+        region_fill_colors={"left_arm": "pink"},
+        region_fill_alpha=0.35,
+    )
+
+    rectangles = [patch for patch in ax.patches if isinstance(patch, Rectangle)]
+    assert len(rectangles) == 1
+    assert rectangles[0].get_facecolor() == pytest.approx(to_rgba("pink", 0.35))
+    plt.close(fig)
+
+
+def test_draw_w_track_basis_schematic_can_color_stimulus_labels_by_identity() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    draw_w_track_basis_schematic(
+        ax,
+        trajectory_name="center_to_left",
+        show_labels=True,
+        label_color="black",
+        label_colors={"A": "#66C2A5", "B": "#E78AC3"},
+    )
+
+    labels = {text.get_text(): text for text in ax.texts if text.get_text()}
+    assert to_rgba(labels["A"].get_color()) == pytest.approx(to_rgba("#66C2A5"))
+    assert to_rgba(labels["B"].get_color()) == pytest.approx(to_rgba("#E78AC3"))
+    assert to_rgba(labels["C"].get_color()) == pytest.approx(to_rgba("black"))
     plt.close(fig)
 
 

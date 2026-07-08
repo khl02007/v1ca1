@@ -36,7 +36,6 @@ from v1ca1.paper_figures.style import (
     SCHEMATIC_COLORS,
     apply_paper_style,
     figure_size,
-    label_axis,
     save_figure,
 )
 from v1ca1.xcorr.screen_xcorr import (
@@ -58,9 +57,42 @@ DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_FIGURE_HEIGHT_MM = 72.0
+DEFAULT_FIGURE_HEIGHT_MM = 110.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
-PANEL_ABC_HEADER_LABEL_X_OFFSETS = (-0.10, -0.10, -0.10)
+PANEL_ABC_WIDTH_RATIOS = (1.0, 1.0, 2.0)
+PANEL_BOTTOM_WIDTH_RATIOS = (1.0, 2.0, 2.0)
+PANEL_ABC_HEADER_LABEL_X_OFFSETS = (-0.18, -0.08, 0.0)
+PANEL_D_XLABEL_Y = -0.22
+PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT = 0.92
+PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH = 0.18
+PANEL_C_GLM_SCHEMATIC_BOTTOM_SHIFT = -0.060
+PANEL_C_GLM_SUMMARY_SCATTER_TOP = 0.835
+PANEL_D_COMPACT_SOURCE_LEFT = 0.14
+PANEL_D_COMPACT_SOURCE_RIGHT = 0.78
+PANEL_D_COMPACT_SOURCE_BOTTOM = 0.08
+PANEL_D_COMPACT_SOURCE_HEIGHT = 0.56
+PANEL_D_SOURCE_COMPARISON_TICKS = (-0.2, 0.0, 0.25, 0.5)
+PANEL_A_EXPANDED_HEATMAP_BOTTOM = 0.025
+PANEL_A_EXPANDED_HEATMAP_TOP = 0.875
+PANEL_A_EXPANDED_HEATMAP_ROW_GAP = 0.030
+PANEL_A_COLORBAR_WIDTH = 0.018
+PANEL_B_XCORR_COMPACT_HEATMAP_BOTTOM = PANEL_A_EXPANDED_HEATMAP_BOTTOM
+PANEL_B_XCORR_COMPACT_HEATMAP_TOP = (
+    PANEL_B_XCORR_COMPACT_HEATMAP_BOTTOM
+    + PANEL_A_EXPANDED_HEATMAP_TOP
+    - PANEL_A_EXPANDED_HEATMAP_BOTTOM
+    - PANEL_A_EXPANDED_HEATMAP_ROW_GAP
+)
+PANEL_B_XCORR_TICKS = (
+    -0.3,
+    0.3,
+)
+PANEL_B_XCORR_COMPACT_COLUMN_GAP = 0.105
+PANEL_B_EXAMPLE_SCATTER_SIZE = 2.2
+PANEL_B_EXAMPLE_ROW_GAP = 0.140
+PANEL_B_EXAMPLE_MAX_HEIGHT = 0.17
+PANEL_B_EXAMPLE_AXIS_LIMIT = 15.0
+PANEL_B_EXAMPLE_AXIS_TICKS = (0.0, 5.0, 10.0, 15.0)
 DEFAULT_REGIONS = REGIONS
 RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
 RIPPLE_LFP_RELATIVE_DIR = Path("ripple") / "ripple_channels_lfp"
@@ -101,6 +133,13 @@ DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S = 0.220
 DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION = 5
 DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S = 0.150
 PANEL_B_SCHEMATIC_CACHE_VERSION = 4
+PANEL_B_XCORR_DISPLAY_CA1_UNITS = 3
+PANEL_B_XCORR_DISPLAY_V1_FRACTION = 0.5
+DEFAULT_PANEL_B_PREDICTION_EXAMPLES = (
+    ("L12", "20240421", "02_r1", 24),
+    ("L19", "20250930", "02_r1", 4),
+    ("L15", "20241121", "02_r1", 466),
+)
 DEFAULT_XCORR_STATE = "ripple"
 DEFAULT_XCORR_BIN_SIZE_S = 0.005
 DEFAULT_XCORR_MAX_LAG_S = 0.5
@@ -1097,6 +1136,28 @@ def load_top_ca1_xcorr_panel_data(
         "display_vmax": float(display_vmax),
         "attrs": attrs,
     }
+
+
+def subset_xcorr_payload_for_top_ca1_and_v1_half(
+    payload: Mapping[str, Any],
+    *,
+    n_ca1_units: int = PANEL_B_XCORR_DISPLAY_CA1_UNITS,
+    v1_fraction: float = PANEL_B_XCORR_DISPLAY_V1_FRACTION,
+) -> dict[str, Any]:
+    """Return an xcorr payload cropped to the first CA1 units and top V1 rows."""
+    xcorr_values = np.asarray(payload["xcorr"], dtype=float)
+    if xcorr_values.ndim != 3:
+        raise ValueError(f"Expected xcorr array with 3 dimensions, got {xcorr_values.shape}.")
+    n_display_ca1 = min(max(1, int(n_ca1_units)), xcorr_values.shape[0])
+    n_display_v1 = min(
+        xcorr_values.shape[1],
+        max(1, int(np.ceil(xcorr_values.shape[1] * float(v1_fraction)))),
+    )
+    cropped_payload = dict(payload)
+    cropped_payload["xcorr"] = xcorr_values[:n_display_ca1, :n_display_v1, :]
+    cropped_payload["ca1_unit_ids"] = np.asarray(payload["ca1_unit_ids"])[:n_display_ca1]
+    cropped_payload["v1_unit_ids"] = np.asarray(payload["v1_unit_ids"])[:n_display_v1]
+    return cropped_payload
 
 
 def load_example_ripple_lfp_trace(
@@ -2463,39 +2524,6 @@ def _compute_similarity_from_saved_curves(
         compute_similarity_score,
     )
 
-    reference_path = get_tuning_similarity_path(
-        data_root,
-        animal_name=animal_name,
-        date=date,
-        region=region,
-        epoch=dark_epoch,
-        similarity_metric=DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
-    )
-    if not reference_path.exists():
-        raise FileNotFoundError(str(reference_path))
-
-    reference_table = pd.read_parquet(reference_path)
-    required_columns = [
-        "unit",
-        "region",
-        "epoch",
-        "comparison_family",
-        "comparison_label",
-        "side",
-        "trajectory_a",
-        "trajectory_b",
-        "flip_trajectory_b",
-        "firing_rate_hz",
-    ]
-    missing_columns = [
-        column for column in required_columns if column not in reference_table.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"Tuning similarity table {reference_path} is missing columns "
-            f"{missing_columns!r}."
-        )
-
     trajectories = sorted(
         {
             str(spec["trajectory_a"])
@@ -2520,32 +2548,12 @@ def _compute_similarity_from_saved_curves(
         comparison_label = str(spec["comparison_label"])
         trajectory_a = str(spec["trajectory_a"])
         trajectory_b = str(spec["trajectory_b"])
-        reference_rows = reference_table[
-            (reference_table["region"].astype(str) == str(region))
-            & (reference_table["epoch"].astype(str) == str(dark_epoch))
-            & (reference_table["comparison_label"].astype(str) == comparison_label)
-        ].copy()
-        if reference_rows.empty:
-            continue
-        reference_rows["unit"] = pd.to_numeric(
-            reference_rows["unit"],
-            errors="coerce",
-        )
-        reference_rows = reference_rows[
-            np.isfinite(reference_rows["unit"].to_numpy(dtype=float))
-        ].copy()
-        reference_rows["unit"] = reference_rows["unit"].astype(int)
-
         curve_a = curves[trajectory_a]
         curve_b = curves[trajectory_b]
-        common_units = set(
-            np.intersect1d(curve_a["units"], curve_b["units"]).tolist()
-        )
+        common_units = np.intersect1d(curve_a["units"], curve_b["units"])
 
-        for _row_index, reference_row in reference_rows.iterrows():
-            unit = int(reference_row["unit"])
-            if unit not in common_units:
-                continue
+        for unit in common_units:
+            unit = int(unit)
             values_a = curve_a["values"][curve_a["index_by_unit"][unit]]
             values_b = curve_b["values"][curve_b["index_by_unit"][unit]]
             if bool(spec["flip_trajectory_b"]):
@@ -2568,7 +2576,7 @@ def _compute_similarity_from_saved_curves(
                     "trajectory_a": trajectory_a,
                     "trajectory_b": trajectory_b,
                     "flip_trajectory_b": bool(spec["flip_trajectory_b"]),
-                    "firing_rate_hz": float(reference_row["firing_rate_hz"]),
+                    "firing_rate_hz": np.nan,
                     "similarity": float(similarity),
                 }
             )
@@ -3217,6 +3225,103 @@ def load_example_glm_prediction(
     }
 
 
+def load_glm_prediction_for_unit(
+    data_root: Path,
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    unit_id: int,
+    ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+    source_predictor_mode: str = SOURCE_PREDICTOR_MODE_UNIT_VECTOR,
+) -> dict[str, Any]:
+    """Load observed and predicted counts for one requested V1 GLM unit."""
+    import xarray as xr
+
+    path = get_ripple_glm_path(
+        data_root,
+        animal_name=animal_name,
+        date=date,
+        epoch=epoch,
+        ripple_window_s=ripple_window_s,
+        ripple_window_offset_s=ripple_window_offset_s,
+        ripple_selection=ripple_selection,
+        ridge_strength=ridge_strength,
+        source_predictor_mode=source_predictor_mode,
+    )
+    if not path.exists():
+        raise FileNotFoundError(f"Ripple-GLM NetCDF not found: {path}")
+
+    dataset = xr.load_dataset(path)
+    try:
+        missing_prediction_variables = [
+            name
+            for name in ("ripple_observed_count_oof", "ripple_predicted_count_oof")
+            if name not in dataset.data_vars
+        ]
+        if missing_prediction_variables:
+            raise ValueError(
+                "Ripple-GLM output lacks held-out prediction variables "
+                f"{missing_prediction_variables!r}: {path}"
+            )
+        unit_ids = np.asarray(dataset.coords["unit"].values)
+        unit_matches = np.flatnonzero(unit_ids.astype(int) == int(unit_id))
+        if unit_matches.size == 0:
+            raise KeyError(f"Unit {unit_id} not found in ripple-GLM output: {path}")
+        unit_index = int(unit_matches[0])
+        observed = np.asarray(dataset["ripple_observed_count_oof"].values[:, unit_index], dtype=float)
+        predicted = np.asarray(dataset["ripple_predicted_count_oof"].values[:, unit_index], dtype=float)
+        devexp = np.asarray(dataset["ripple_devexp_mean"].values, dtype=float)
+        p_values = np.asarray(dataset["ripple_devexp_p_value"].values, dtype=float)
+        metric_value = float(devexp[unit_index])
+        p_value = float(p_values[unit_index])
+    finally:
+        dataset.close()
+
+    return {
+        "animal_name": animal_name,
+        "date": date,
+        "epoch": epoch,
+        "unit_id": int(unit_id),
+        "observed": observed,
+        "predicted": predicted,
+        "ripple_devexp_mean": metric_value,
+        "ripple_devexp_p_value": p_value,
+        "source_path": str(path),
+    }
+
+
+def load_panel_b_prediction_examples(
+    data_root: Path,
+    *,
+    examples: Sequence[tuple[str, str, str, int]] = DEFAULT_PANEL_B_PREDICTION_EXAMPLES,
+    ripple_window_s: float = DEFAULT_RIPPLE_WINDOW_S,
+    ripple_window_offset_s: float = DEFAULT_RIPPLE_WINDOW_OFFSET_S,
+    ripple_selection: str = DEFAULT_RIPPLE_SELECTION,
+    ridge_strength: float = DEFAULT_RIDGE_STRENGTH,
+) -> list[dict[str, Any]]:
+    """Load the selected observed-versus-predicted examples for Figure 3B."""
+    loaded_examples = []
+    for animal_name, date, epoch, unit_id in examples:
+        loaded_examples.append(
+            load_glm_prediction_for_unit(
+                data_root,
+                animal_name=animal_name,
+                date=date,
+                epoch=epoch,
+                unit_id=unit_id,
+                ripple_window_s=ripple_window_s,
+                ripple_window_offset_s=ripple_window_offset_s,
+                ripple_selection=ripple_selection,
+                ridge_strength=ridge_strength,
+            )
+        )
+    return loaded_examples
+
+
 def load_first_available_glm_prediction(
     data_root: Path,
     *,
@@ -3320,10 +3425,10 @@ def draw_ripple_glm_schematic(
         "0-200 ms",
         ha="center",
         va="top",
-        fontsize=5.3,
+        fontsize=6,
         transform=transform,
     )
-    ax.text(count_window_x0, 0.930, "onset", ha="center", va="bottom", fontsize=4.8, transform=transform)
+    ax.text(count_window_x0, 0.930, "onset", ha="center", va="bottom", fontsize=6, transform=transform)
 
     if ripple_trace is not None:
         trace_time_s = np.asarray(ripple_trace.get("time_s", []), dtype=float)
@@ -3368,7 +3473,7 @@ def draw_ripple_glm_schematic(
         "ripple\nLFP",
         ha="right",
         va="center",
-        fontsize=5.0,
+        fontsize=6,
         transform=transform,
     )
 
@@ -3435,12 +3540,13 @@ def draw_ripple_glm_schematic(
     v1_top_y = 0.535
     ca1_center_y = ca1_top_y - row_step * max(len(ca1_spikes) - 1, 0) / 2.0
     v1_center_y = v1_top_y - row_step * max(len(v1_spikes) - 1, 0) / 2.0
-    ax.text(row_label_x, ca1_center_y, "CA1", ha="right", va="center", fontsize=5.4, color=ca1_color, transform=transform)
-    ax.text(row_label_x, v1_center_y, "V1", ha="right", va="center", fontsize=5.4, color=v1_color, transform=transform)
+    ax.text(row_label_x, ca1_center_y, "CA1", ha="right", va="center", fontsize=6, color=ca1_color, transform=transform)
+    ax.text(row_label_x, v1_center_y, "V1", ha="right", va="center", fontsize=6, color=v1_color, transform=transform)
     _draw_raster_rows(ca1_top_y, ca1_color, ca1_spikes, row_step=row_step)
     _draw_raster_rows(v1_top_y, v1_color, v1_spikes, row_step=row_step)
 
-    circle_y = np.linspace(0.355, 0.120, 8)
+    bottom_shift = PANEL_C_GLM_SCHEMATIC_BOTTOM_SHIFT
+    circle_y = np.linspace(0.355, 0.120, 8) + bottom_shift
     ca1_column_x = 0.17
     v1_column_x = 0.83
     glm_x0 = 0.405
@@ -3451,21 +3557,21 @@ def draw_ripple_glm_schematic(
 
     ax.text(
         ca1_column_x,
-        0.385,
+        0.385 + bottom_shift,
         "CA1 counts",
         ha="center",
         va="bottom",
-        fontsize=4.9,
+        fontsize=6,
         color=ca1_color,
         transform=transform,
     )
     ax.text(
         v1_column_x,
-        0.385,
+        0.385 + bottom_shift,
         "V1 counts",
         ha="center",
         va="bottom",
-        fontsize=4.9,
+        fontsize=6,
         color=v1_color,
         transform=transform,
     )
@@ -3544,19 +3650,20 @@ def draw_ripple_glm_schematic(
         "GLM",
         ha="center",
         va="center",
-        fontsize=5.0,
+        fontsize=6,
         color="black",
         transform=transform,
         zorder=4,
     )
     ax.text(
         0.50,
-        0.045,
+        0.045 + bottom_shift,
         "Held-out prediction",
         ha="center",
         va="center",
-        fontsize=5.4,
+        fontsize=6,
         transform=transform,
+        clip_on=False,
     )
 
 
@@ -3654,13 +3761,13 @@ def plot_peri_ripple_heatmap_panel(
             heatmap_ax.set_xlabel("Time from ripple start (s)", fontsize=6, labelpad=1)
         else:
             heatmap_ax.set_xticklabels([])
-        heatmap_ax.tick_params(labelsize=5, length=2, pad=1)
+        heatmap_ax.tick_params(labelsize=6, length=2, pad=1)
 
     if image is not None:
         colorbar_ax = ax.inset_axes([0.93, 0.18, 0.03, 0.68])
         colorbar = ax.figure.colorbar(image, cax=colorbar_ax, ticks=[0.0, 1.0])
-        colorbar.ax.tick_params(labelsize=5, length=2, pad=1)
-        colorbar.set_label("Norm. FR", fontsize=5, labelpad=2)
+        colorbar.ax.tick_params(labelsize=6, length=2, pad=1)
+        colorbar.set_label("Norm. FR", fontsize=6, labelpad=2)
 
 
 def draw_neuron_scale_bar(
@@ -3704,7 +3811,7 @@ def draw_neuron_scale_bar(
         ha="left",
         va="center",
         rotation=90,
-        fontsize=5,
+        fontsize=6,
         transform=transform,
         clip_on=False,
     )
@@ -3715,6 +3822,8 @@ def plot_epoch_ripple_heatmap_panel(
     epoch_tables: Sequence[dict[str, Any]],
     *,
     regions: Sequence[str] = DEFAULT_REGIONS,
+    expand_heatmaps_vertically: bool = False,
+    show_modulation_histogram: bool = True,
 ) -> None:
     """Plot ripple-triggered firing-rate heatmaps across light, dark, and sleep epochs."""
     ax.set_xlim(0.0, 1.0)
@@ -3728,12 +3837,23 @@ def plot_epoch_ripple_heatmap_panel(
 
     left = 0.10
     right = 0.93
-    heatmap_bottom = 0.36
-    heatmap_top = 0.96
-    hist_bottom = 0.08
-    hist_height = 0.18
+    if expand_heatmaps_vertically:
+        if show_modulation_histogram:
+            heatmap_bottom = 0.27
+            heatmap_top = 0.97
+        else:
+            heatmap_bottom = PANEL_A_EXPANDED_HEATMAP_BOTTOM
+            heatmap_top = PANEL_A_EXPANDED_HEATMAP_TOP
+        hist_bottom = 0.06
+        hist_height = 0.14
+        row_gap = PANEL_A_EXPANDED_HEATMAP_ROW_GAP
+    else:
+        heatmap_bottom = 0.36
+        heatmap_top = 0.96
+        hist_bottom = 0.08
+        hist_height = 0.18
+        row_gap = 0.045
     column_gap = 0.035
-    row_gap = 0.045
     cell_width = (right - left - column_gap * (n_epochs - 1)) / n_epochs
     available_heatmap_height = heatmap_top - heatmap_bottom - row_gap * (n_regions - 1)
     prepared_epoch_payloads = []
@@ -3810,7 +3930,7 @@ def plot_epoch_ripple_heatmap_panel(
                     "No units",
                     ha="center",
                     va="center",
-                    fontsize=5,
+                    fontsize=6,
                     transform=heatmap_ax.transAxes,
                 )
             else:
@@ -3835,21 +3955,22 @@ def plot_epoch_ripple_heatmap_panel(
             if col_index == 0:
                 heatmap_ax.set_ylabel(region.upper(), fontsize=6, labelpad=2)
             if row_index == n_regions - 1:
-                heatmap_ax.set_xlabel("Time (s)", fontsize=5, labelpad=1)
+                heatmap_ax.set_xlabel("Time (s)", fontsize=6, labelpad=1)
             else:
                 heatmap_ax.set_xticklabels([])
-            heatmap_ax.tick_params(labelsize=5, length=1.5, pad=1)
+            heatmap_ax.tick_params(labelsize=6, length=1.5, pad=1)
             y_top = y0 - row_gap
 
-        summary_table = epoch_payload.get("summary_table")
-        hist_ax = ax.inset_axes([x0, hist_bottom, cell_width, hist_height])
-        _plot_modulation_histogram_inset(
-            hist_ax,
-            summary_table,
-            regions=regions,
-            show_ylabel=col_index == 0,
-            show_legend=col_index == n_epochs - 1,
-        )
+        if show_modulation_histogram:
+            summary_table = epoch_payload.get("summary_table")
+            hist_ax = ax.inset_axes([x0, hist_bottom, cell_width, hist_height])
+            _plot_modulation_histogram_inset(
+                hist_ax,
+                summary_table,
+                regions=regions,
+                show_ylabel=col_index == 0,
+                show_legend=col_index == n_epochs - 1,
+            )
 
     if image is not None:
         if last_heatmap_ax is not None:
@@ -3858,10 +3979,54 @@ def plot_epoch_ripple_heatmap_panel(
         colorbar_bottom = heatmap_bottom + 0.5 * (
             heatmap_top - heatmap_bottom - colorbar_height
         )
-        colorbar_ax = ax.inset_axes([0.975, colorbar_bottom, 0.018, colorbar_height])
+        colorbar_ax = ax.inset_axes(
+            [0.975, colorbar_bottom, PANEL_A_COLORBAR_WIDTH, colorbar_height]
+        )
         colorbar = ax.figure.colorbar(image, cax=colorbar_ax, ticks=[0.0, 1.0])
-        colorbar.ax.tick_params(labelsize=5, length=2, pad=1)
-        colorbar.set_label("Norm. FR", fontsize=5, labelpad=2)
+        colorbar.ax.tick_params(labelsize=6, length=2, pad=1)
+        colorbar.set_label("Norm. FR", fontsize=6, labelpad=2)
+
+
+def plot_epoch_modulation_histogram_panel(
+    ax: "Axes",
+    epoch_tables: Sequence[dict[str, Any]],
+    *,
+    regions: Sequence[str] = DEFAULT_REGIONS,
+    left: float = 0.10,
+    right: float = 0.93,
+    bottom: float = 0.20,
+    height: float = 0.58,
+    column_gap: float = 0.035,
+) -> list["Axes"]:
+    """Plot the modulation-index histogram block split out from Figure 3A."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    n_epochs = len(epoch_tables)
+    if n_epochs == 0:
+        ax.text(0.5, 0.5, "No modulation data", ha="center", va="center", transform=ax.transAxes)
+        return []
+
+    cell_width = (right - left - column_gap * (n_epochs - 1)) / n_epochs
+    child_axes = []
+    for col_index, epoch_payload in enumerate(epoch_tables):
+        x0 = left + col_index * (cell_width + column_gap)
+        hist_ax = ax.inset_axes([x0, bottom, cell_width, height])
+        _plot_modulation_histogram_inset(
+            hist_ax,
+            epoch_payload.get("summary_table"),
+            regions=regions,
+            show_ylabel=col_index == 0,
+            show_legend=col_index == n_epochs - 1,
+        )
+        panel_title = {
+            "light": "",
+            "sleep": "Sleep",
+        }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
+        if panel_title:
+            hist_ax.set_title(panel_title, fontsize=6, pad=1.5)
+        child_axes.append(hist_ax)
+    return child_axes
 
 
 def _fraction_histogram_weights(values: np.ndarray) -> np.ndarray:
@@ -3925,18 +4090,18 @@ def _plot_modulation_histogram_inset(
             zorder=2,
         )
     if not has_values:
-        ax.text(0.5, 0.5, "No index", ha="center", va="center", fontsize=5, transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No index", ha="center", va="center", fontsize=6, transform=ax.transAxes)
     ax.set_xlim(-1.0, 1.0)
-    ax.set_xlabel("Mod. index", fontsize=5, labelpad=1)
+    ax.set_xlabel("Mod. index", fontsize=6, labelpad=1)
     if show_ylabel:
-        ax.set_ylabel("Frac.", fontsize=5, labelpad=1)
+        ax.set_ylabel("Frac.", fontsize=6, labelpad=1)
     else:
         ax.set_yticklabels([])
     if show_legend and has_values:
-        ax.legend(frameon=False, fontsize=5, handlelength=0.8, loc="upper right")
+        ax.legend(frameon=False, fontsize=6, handlelength=0.8, loc="upper right")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(labelsize=5, length=1.5, pad=1)
+    ax.tick_params(labelsize=6, length=1.5, pad=1)
 
 
 def plot_top_ca1_xcorr_panel(
@@ -3944,6 +4109,7 @@ def plot_top_ca1_xcorr_panel(
     payload: dict[str, Any],
     *,
     lag_label_y: float = 0.035,
+    compact_unit_titles: bool = False,
 ) -> None:
     """Plot top CA1 units' CA1-V1 xcorr heatmaps with a shared V1 order."""
     ax.set_xlim(0.0, 1.0)
@@ -3969,11 +4135,11 @@ def plot_top_ca1_xcorr_panel(
     lag_plot_s = lag_s[lag_mask]
     xcorr_plot = xcorr_values[:, :, lag_mask]
 
-    left = 0.10
-    right = 0.93
-    bottom = 0.10
-    top = 0.89
-    column_gap = 0.022
+    left = 0.085 if compact_unit_titles else 0.10
+    right = 0.94 if compact_unit_titles else 0.93
+    bottom = PANEL_B_XCORR_COMPACT_HEATMAP_BOTTOM if compact_unit_titles else 0.10
+    top = PANEL_B_XCORR_COMPACT_HEATMAP_TOP if compact_unit_titles else 0.89
+    column_gap = PANEL_B_XCORR_COMPACT_COLUMN_GAP if compact_unit_titles else 0.022
     cell_width = (right - left - column_gap * (n_ca1 - 1)) / n_ca1
     image = None
     for ca1_index, ca1_unit_id in enumerate(ca1_unit_ids):
@@ -3991,19 +4157,31 @@ def plot_top_ca1_xcorr_panel(
         )
         heatmap_ax.axvline(0.0, color="white", linewidth=0.3, alpha=0.9)
         heatmap_ax.set_xlim(lag_min_s, lag_max_s)
-        heatmap_ax.set_title(f"CA1 {ca1_unit_id}", fontsize=5.4, pad=1)
+        heatmap_ax.set_title(
+            (
+                f"Example\nCA1 cell {ca1_index + 1}"
+                if compact_unit_titles
+                else f"CA1 {ca1_unit_id}"
+            ),
+            fontsize=6,
+            pad=0.8 if compact_unit_titles else 1,
+        )
         heatmap_ax.set_yticks([])
-        heatmap_ax.tick_params(axis="x", labelsize=4.6, length=1.4, pad=1)
+        heatmap_ax.set_xticks(PANEL_B_XCORR_TICKS)
+        heatmap_ax.set_xticklabels(
+            [f"{tick_value:g}" for tick_value in PANEL_B_XCORR_TICKS]
+        )
+        heatmap_ax.tick_params(axis="x", labelsize=6, length=1.4, pad=1)
         heatmap_ax.tick_params(axis="y", length=0)
 
     ax.text(
         0.035,
         bottom + 0.5 * (top - bottom),
-        "V1 units\n(shared order)",
+        "V1",
         ha="center",
         va="center",
         rotation=90,
-        fontsize=5,
+        fontsize=6,
         transform=ax.transAxes,
     )
 
@@ -4013,16 +4191,18 @@ def plot_top_ca1_xcorr_panel(
         "Lag (s)",
         ha="center",
         va="bottom",
-        fontsize=5,
+        fontsize=6,
         transform=ax.transAxes,
     )
     if image is not None:
         colorbar_height = 0.23
         colorbar_bottom = bottom + 0.5 * (top - bottom - colorbar_height)
-        colorbar_ax = ax.inset_axes([0.955, colorbar_bottom, 0.026, colorbar_height])
+        colorbar_ax = ax.inset_axes(
+            [0.955, colorbar_bottom, PANEL_A_COLORBAR_WIDTH, colorbar_height]
+        )
         colorbar = ax.figure.colorbar(image, cax=colorbar_ax)
-        colorbar.ax.tick_params(labelsize=5, length=2, pad=1)
-        colorbar.set_label("Norm. xcorr", fontsize=5, labelpad=2)
+        colorbar.ax.tick_params(labelsize=6, length=2, pad=1)
+        colorbar.set_label("Norm. xcorr", fontsize=6, labelpad=2)
 
 
 def plot_modulation_index_panel(
@@ -4066,7 +4246,7 @@ def plot_modulation_index_panel(
         "\n".join(summary_lines),
         ha="left",
         va="top",
-        fontsize=5.2,
+        fontsize=6,
         transform=ax.transAxes,
     )
     ax.spines["top"].set_visible(False)
@@ -4096,7 +4276,7 @@ def plot_glm_summary_panel(ax: "Axes", glm_table: Any) -> None:
             f"n={int(np.sum(valid))}\nfrac p<0.05={np.mean(p_values[valid] < 0.05):.2f}",
             ha="right",
             va="bottom",
-            fontsize=5.5,
+            fontsize=6,
             transform=ax.transAxes,
         )
     else:
@@ -4108,10 +4288,129 @@ def plot_glm_summary_panel(ax: "Axes", glm_table: Any) -> None:
     ax.tick_params(labelsize=6, length=2, pad=1)
 
 
+def _plot_compact_prediction_scatter_axis(
+    ax: "Axes",
+    example: Mapping[str, Any],
+    *,
+    example_number: int,
+    axis_limit: float,
+    show_xlabel: bool,
+    show_ylabel: bool,
+) -> None:
+    """Plot one compact actual-versus-predicted GLM example."""
+    observed = np.asarray(example["observed"], dtype=float)
+    predicted = np.asarray(example["predicted"], dtype=float)
+    valid = np.isfinite(observed) & np.isfinite(predicted)
+    if np.any(valid):
+        observed_valid = observed[valid]
+        predicted_valid = predicted[valid]
+        ax.scatter(
+            observed_valid,
+            predicted_valid,
+            s=PANEL_B_EXAMPLE_SCATTER_SIZE,
+            color=MODEL_COLOR,
+            alpha=0.42,
+            edgecolors="none",
+            rasterized=True,
+            zorder=2,
+        )
+        ax.plot(
+            [0.0, axis_limit],
+            [0.0, axis_limit],
+            color="0.20",
+            linestyle="--",
+            linewidth=0.55,
+            zorder=3,
+        )
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No finite\nsamples",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
+    ax.set_xlim(0.0, axis_limit)
+    ax.set_ylim(0.0, axis_limit)
+    ax.set_xticks(PANEL_B_EXAMPLE_AXIS_TICKS)
+    ax.set_yticks(PANEL_B_EXAMPLE_AXIS_TICKS)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_box_aspect(1.0)
+    ax.set_title(
+        f"Example cell {example_number}",
+        fontsize=6,
+        pad=2.4,
+    )
+    ax.text(
+        0.04,
+        0.96,
+        f"{float(example['ripple_devexp_mean']):.2f}",
+        ha="left",
+        va="top",
+        fontsize=6,
+        transform=ax.transAxes,
+    )
+    if show_xlabel:
+        ax.set_xlabel("Actual count", fontsize=6, labelpad=0.5)
+    else:
+        ax.set_xticklabels([])
+    if show_ylabel:
+        ax.set_ylabel("Predicted count", fontsize=6, labelpad=0.5)
+    else:
+        ax.set_yticklabels([])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=6, length=1.2, pad=0.8)
+
+
+def _plot_prediction_example_column(
+    ax: "Axes",
+    prediction_examples: Sequence[Mapping[str, Any]],
+    *,
+    left: float,
+    bottom: float,
+    width: float,
+    height: float,
+    align_bottom: bool = False,
+) -> None:
+    """Plot selected actual-versus-predicted examples in one Panel B column."""
+    n_examples = len(prediction_examples)
+    if n_examples == 0:
+        return
+
+    row_gap = PANEL_B_EXAMPLE_ROW_GAP
+    available_height = height - row_gap * (n_examples - 1)
+    example_height = min(
+        PANEL_B_EXAMPLE_MAX_HEIGHT,
+        available_height / n_examples,
+    )
+    stack_height = example_height * n_examples + row_gap * (n_examples - 1)
+    stack_bottom = (
+        bottom
+        if align_bottom
+        else bottom + 0.5 * max(height - stack_height, 0.0)
+    )
+    axis_limit = PANEL_B_EXAMPLE_AXIS_LIMIT
+    for index, example in enumerate(prediction_examples):
+        y0 = stack_bottom + (n_examples - 1 - index) * (example_height + row_gap)
+        example_ax = ax.inset_axes([left, y0, width, example_height])
+        _plot_compact_prediction_scatter_axis(
+            example_ax,
+            example,
+            example_number=index + 1,
+            axis_limit=axis_limit,
+            show_xlabel=index == n_examples - 1,
+            show_ylabel=index == n_examples // 2,
+        )
+
+
 def plot_glm_analysis_panel(
     ax: "Axes",
     epoch_tables: Sequence[dict[str, Any]],
     ripple_trace: Mapping[str, Any] | None = None,
+    prediction_examples: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
     """Plot the ripple-GLM schematic and epoch-specific performance summaries."""
     ax.set_xlim(0.0, 1.0)
@@ -4121,8 +4420,25 @@ def plot_glm_analysis_panel(
         ax.text(0.5, 0.5, "No GLM data", ha="center", va="center", transform=ax.transAxes)
         return
 
-    schematic_ax = ax.inset_axes([0.00, 0.04, 0.39, 0.91])
+    column_gap = 0.035
+    column_width = (1.0 - 2.0 * column_gap) / 3.0
+    schematic_left = 0.00
+    prediction_left = schematic_left + column_width + column_gap
+    summary_left = prediction_left + column_width + column_gap
+    column_bottom = 0.045
+    column_height = 0.88
+
+    schematic_ax = ax.inset_axes([schematic_left, column_bottom, column_width, column_height])
     draw_ripple_glm_schematic(schematic_ax, ripple_trace=ripple_trace)
+    _plot_prediction_example_column(
+        ax,
+        tuple(prediction_examples or ()),
+        left=prediction_left,
+        bottom=column_bottom,
+        width=column_width,
+        height=column_height,
+        align_bottom=True,
+    )
 
     all_neglog_p: list[np.ndarray] = []
     for epoch_payload in epoch_tables:
@@ -4138,13 +4454,13 @@ def plot_glm_analysis_panel(
     x_min, x_max = PANEL_B_DEVIANCE_EXPLAINED_LIMITS
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
-    plot_left = 0.52
-    plot_right = 0.98
+    plot_left = summary_left
+    plot_right = summary_left + column_width
     scatter_bottom = 0.38
-    scatter_top = 0.94
-    box_bottom = 0.06
+    scatter_top = PANEL_C_GLM_SUMMARY_SCATTER_TOP
+    box_bottom = column_bottom
     box_top = 0.29
-    plot_gap = 0.025
+    plot_gap = 0.018
     plot_width = (plot_right - plot_left - plot_gap * (len(epoch_tables) - 1)) / len(epoch_tables)
     for index, epoch_payload in enumerate(epoch_tables):
         table = epoch_payload["summary_table"]
@@ -4199,7 +4515,7 @@ def plot_glm_analysis_panel(
                 f"n={int(np.sum(valid))}\nfrac sig={np.mean(significant):.2f}",
                 ha="right",
                 va="bottom",
-                fontsize=4.8,
+                fontsize=6,
                 transform=plot_ax.transAxes,
             )
         else:
@@ -4209,7 +4525,7 @@ def plot_glm_analysis_panel(
                 "No finite\nvalues",
                 ha="center",
                 va="center",
-                fontsize=5,
+                fontsize=6,
                 transform=plot_ax.transAxes,
             )
         panel_c_title = {
@@ -4217,21 +4533,21 @@ def plot_glm_analysis_panel(
             "sleep": "Sleep",
         }.get(str(epoch_payload["epoch_type"]), str(epoch_payload["label"]))
         if panel_c_title:
-            plot_ax.set_title(panel_c_title, fontsize=5.6, pad=1.5)
+            plot_ax.set_title(panel_c_title, fontsize=6, pad=1.5)
         plot_ax.set_xlim(x_min, x_max)
         plot_ax.set_ylim(0.0, y_max)
         plot_ax.tick_params(labelbottom=False)
         if index == 0:
             plot_ax.set_ylabel(
                 "-log10 p from shuffle",
-                fontsize=5,
+                fontsize=6,
                 labelpad=1.0,
             )
         else:
             plot_ax.set_yticklabels([])
         plot_ax.spines["top"].set_visible(False)
         plot_ax.spines["right"].set_visible(False)
-        plot_ax.tick_params(labelsize=4.8, length=1.5, pad=1)
+        plot_ax.tick_params(labelsize=6, length=1.5, pad=1)
 
         box_ax = ax.inset_axes(
             [
@@ -4284,7 +4600,7 @@ def plot_glm_analysis_panel(
                 "No values",
                 ha="center",
                 va="center",
-                fontsize=4.8,
+                fontsize=6,
                 transform=box_ax.transAxes,
             )
         box_ax.axvline(0.0, color="0.45", linewidth=0.45, zorder=1)
@@ -4292,38 +4608,14 @@ def plot_glm_analysis_panel(
         box_ax.set_ylim(0.45, 2.55)
         box_ax.set_yticks([1, 2])
         if index == 0:
-            from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
-
-            box_ax.set_yticklabels(["n.s.", ""], fontsize=4.8)
-            text_props = {"fontsize": 4.8}
-            p_label_box = HPacker(
-                children=[
-                    TextArea("p", textprops={**text_props, "fontstyle": "italic"}),
-                    TextArea(f"<{PANEL_C_SIGNIFICANCE_P_VALUE:g}", textprops=text_props),
-                ],
-                align="center",
-                pad=0,
-                sep=0,
-            )
-            box_ax.add_artist(
-                AnnotationBbox(
-                    p_label_box,
-                    (0.0, 2.0),
-                    xycoords=box_ax.get_yaxis_transform(),
-                    xybox=(-1.5, 0.0),
-                    boxcoords="offset points",
-                    box_alignment=(1.0, 0.5),
-                    frameon=False,
-                    pad=0,
-                )
-            )
+            box_ax.set_yticklabels(["n.s.", ""], fontsize=6)
         else:
             box_ax.set_yticklabels([])
         if index == len(epoch_tables) - 1:
-            box_ax.set_xlabel("Deviance explained", fontsize=5, labelpad=1)
+            box_ax.set_xlabel("Deviance explained", fontsize=6, labelpad=1)
         box_ax.spines["top"].set_visible(False)
         box_ax.spines["right"].set_visible(False)
-        box_ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
+        box_ax.tick_params(axis="x", labelsize=6, length=1.5, pad=1)
         box_ax.tick_params(axis="y", length=0, pad=1)
 
 
@@ -4475,7 +4767,7 @@ def plot_ripple_decoding_comparison_panel(
             "shuffle",
             ha="right",
             va="bottom",
-            fontsize=4.6,
+            fontsize=6,
             color="0.35",
         )
 
@@ -4539,15 +4831,15 @@ def plot_ripple_decoding_comparison_panel(
         )
         metric_ax.set_xticks([1.0, 2.0])
         if metric_index == len(categorical_metrics) - 1:
-            metric_ax.set_xticklabels(["Light", "Dark"], fontsize=5)
-            metric_ax.set_xlabel("Decode epoch", fontsize=5.2, labelpad=0.5)
+            metric_ax.set_xticklabels(["Light", "Dark"], fontsize=6)
+            metric_ax.set_xlabel("Decode epoch", fontsize=6, labelpad=0.5)
         else:
             metric_ax.set_xticklabels([])
-        metric_ax.set_ylabel("Above\nshuffle", fontsize=5.2, labelpad=1.2)
+        metric_ax.set_ylabel("Above\nshuffle", fontsize=6, labelpad=1.2)
         metric_ax.spines["top"].set_visible(False)
         metric_ax.spines["right"].set_visible(False)
         metric_ax.tick_params(axis="x", length=0, pad=1)
-        metric_ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
+        metric_ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
 
 def plot_glm_offset_panel(
@@ -4609,7 +4901,7 @@ def plot_glm_offset_panel(
         f"n={len(included_labels)} {count_label}",
         ha="right",
         va="top",
-        fontsize=4.8,
+        fontsize=6,
         color="0.35",
         transform=ax.transAxes,
     )
@@ -4699,11 +4991,11 @@ def plot_glm_offset_panel(
 
         metric_ax.set_xlim(0.65, len(target_offsets) + 0.35)
         metric_ax.set_xticks([x_by_offset[offset] for offset in target_offsets])
-        metric_ax.set_ylabel(y_label, fontsize=5.2, labelpad=1.0)
+        metric_ax.set_ylabel(y_label, fontsize=6, labelpad=1.0)
         metric_ax.spines["top"].set_visible(False)
         metric_ax.spines["right"].set_visible(False)
         metric_ax.tick_params(axis="x", length=0, pad=1)
-        metric_ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
+        metric_ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
     fraction_values = np.asarray(table["fraction_significant_positive"], dtype=float)
     finite_fraction_values = fraction_values[np.isfinite(fraction_values)]
@@ -4722,15 +5014,46 @@ def plot_glm_offset_panel(
     if finite_devexp_values.size:
         y_top = float(np.nanmax(finite_devexp_values)) * 1.18
         devexp_ax.set_ylim(0.0, max(0.02, y_top))
-    devexp_ax.set_xticklabels(x_tick_labels, fontsize=4.8)
-    devexp_ax.set_xlabel("V1 target window (ms)", fontsize=5.2, labelpad=0.5)
+    devexp_ax.set_xticklabels(x_tick_labels, fontsize=6)
+    devexp_ax.set_xlabel("V1 target window (ms)", fontsize=6, labelpad=0.5)
     fraction_ax.legend(
         frameon=False,
-        fontsize=4.6,
+        fontsize=6,
         handlelength=1.0,
         loc="upper left",
         borderpad=0.1,
         labelspacing=0.2,
+    )
+
+
+def _draw_vertical_significance_bracket(
+    ax: "Axes",
+    *,
+    x: float,
+    y0: float,
+    y1: float,
+    arm_length: float,
+    star_offset: float,
+) -> None:
+    """Draw a vertical bracket and centered significance star in data coordinates."""
+    ax.plot(
+        [x - arm_length, x, x, x - arm_length],
+        [y0, y0, y1, y1],
+        color="black",
+        linewidth=0.6,
+        clip_on=False,
+        zorder=6,
+    )
+    ax.text(
+        x + star_offset,
+        0.5 * (y0 + y1),
+        "*",
+        ha="left",
+        va="center",
+        fontsize=7.0,
+        color="black",
+        clip_on=False,
+        zorder=6,
     )
 
 
@@ -4745,6 +5068,7 @@ def _plot_dark_activity_devexp_boxplot(
     y_label: str = "",
     x_limits: tuple[float, float] | None = None,
     show_y_ticklabels: bool = True,
+    show_significance_marker: bool = True,
 ) -> None:
     """Plot significant ripple-GLM deviance explained by dark activity group."""
     ax.axvline(0.0, color="0.55", linewidth=0.55, linestyle="--", zorder=0)
@@ -4838,21 +5162,37 @@ def _plot_dark_activity_devexp_boxplot(
     if x_limits is not None:
         ax.set_xlim(*x_limits)
     ax.set_ylim(0.4, 2.6)
+    if (
+        show_significance_marker
+        and len(values_by_group) == 2
+        and all(values.size for values in values_by_group)
+    ):
+        x_low, x_high = ax.get_xlim()
+        x_range = x_high - x_low
+        _draw_vertical_significance_bracket(
+            ax,
+            x=x_high + 0.035 * x_range,
+            y0=1.0,
+            y1=2.0,
+            arm_length=0.025 * x_range,
+            star_offset=0.025 * x_range,
+        )
     ax.set_yticks([1.0, 2.0])
     if not show_y_ticklabels:
         ax.set_yticklabels([])
     else:
         ax.set_yticklabels(
-            ["Dark-inactive", "Dark active"],
-            fontsize=4.8,
+            ["Dark\ninactive", "Dark\nactive"],
+            fontsize=6,
         )
-    ax.set_title(title, fontsize=5.8, pad=1.2)
-    ax.set_xlabel("Dev. explained", fontsize=5.5, labelpad=1.0)
-    ax.set_ylabel(y_label, fontsize=5.5, labelpad=1.0)
+    ax.set_title(title, fontsize=6, pad=1.2)
+    ax.set_xlabel("Dev.\nexplained", fontsize=6, labelpad=1.0)
+    ax.xaxis.set_label_coords(0.5, PANEL_D_XLABEL_Y)
+    ax.set_ylabel(y_label, fontsize=6, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
+    ax.tick_params(axis="x", labelsize=6, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
 
 def _plot_dark_active_same_turn_similarity_histogram(
@@ -4932,7 +5272,7 @@ def _plot_dark_active_same_turn_similarity_histogram(
                 f"median={median_value:.2f}",
                 ha="right",
                 va="top",
-                fontsize=4.6,
+                fontsize=6,
                 transform=ax.transAxes,
             )
         else:
@@ -4947,19 +5287,20 @@ def _plot_dark_active_same_turn_similarity_histogram(
             )
 
     ax.set_xlim(*x_limits)
-    ax.set_title(title, fontsize=5.8, pad=1.2)
+    ax.set_title(title, fontsize=6, pad=1.2)
     if tuning_similarity_metric == "absolute_overlap":
-        x_label = "Dark DPP overlap"
+        x_label = "Dark\nDPPI"
     elif tuning_similarity_metric == "shape_overlap":
-        x_label = "Dark DPP shape overlap"
+        x_label = "Dark DPP\nshape overlap"
     else:
-        x_label = "Dark DPP corr."
-    ax.set_xlabel(x_label, fontsize=5.5, labelpad=1.0)
-    ax.set_ylabel("Frac. units", fontsize=5.5, labelpad=1.0)
+        x_label = "Dark DPP\ncorr."
+    ax.set_xlabel(x_label, fontsize=6, labelpad=1.0)
+    ax.xaxis.set_label_coords(0.5, PANEL_D_XLABEL_Y)
+    ax.set_ylabel("Fraction", fontsize=6, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=4.8, length=1.5, pad=1)
+    ax.tick_params(axis="x", labelsize=6, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
 
 def _plot_dark_activity_significant_composition(
@@ -4979,7 +5320,7 @@ def _plot_dark_activity_significant_composition(
         PANEL_D_DARK_ACTIVITY_COLORS["inactive"],
         PANEL_D_DARK_ACTIVITY_COLORS["active"],
     ]
-    group_labels = ["Dark-inactive", "Dark active"]
+    group_labels = ["Dark\ninactive", "Dark\nactive"]
     fractions = [np.nan, np.nan]
     counts = [0, 0]
     total_significant_count = 0
@@ -5123,64 +5464,31 @@ def _plot_dark_activity_significant_composition(
                 label,
                 ha=label_ha,
                 va="center",
-                fontsize=4.6,
+                fontsize=6,
             )
-        # Pooled dark-active enrichment versus the Supp. Fig. 1B V1 baseline.
         if show_significance_marker and np.isfinite(fractions[1]):
-            ax.text(
-                min(0.98, fractions[1] + 0.07),
-                positions[1],
-                "*",
-                ha="center",
-                va="center",
-                fontsize=7.0,
-                color="black",
-                zorder=6,
+            _draw_vertical_significance_bracket(
+                ax,
+                x=1.02,
+                y0=1.0,
+                y1=2.0,
+                arm_length=0.045,
+                star_offset=0.030,
             )
 
     ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.4, 2.6)
+    ax.set_ylim(0.4, 2.68)
     ax.set_xticks([0.0, 0.5, 1.0])
     ax.set_yticks([1.0, 2.0])
-    ax.set_yticklabels(group_labels, fontsize=4.8)
-    ax.set_title(title, fontsize=5.8, pad=1.2)
-    from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
-
-    ax.set_xlabel("")
-    label_font = ax.xaxis.label.get_fontproperties().copy()
-    label_font.set_size(5.5)
-    italic_label_font = label_font.copy()
-    italic_label_font.set_style("italic")
-    p_label_box = HPacker(
-        children=[
-            TextArea("p", textprops={"fontproperties": italic_label_font}),
-            TextArea(
-                f"<{p_value_threshold:g} frac.",
-                textprops={"fontproperties": label_font},
-            ),
-        ],
-        align="center",
-        pad=0,
-        sep=0,
-    )
-    ax.add_artist(
-        AnnotationBbox(
-            p_label_box,
-            (0.5, 0.0),
-            xycoords=ax.transAxes,
-            xybox=(0.0, -15.0),
-            boxcoords="offset points",
-            box_alignment=(0.5, 1.0),
-            frameon=False,
-            pad=0,
-            annotation_clip=False,
-        )
-    )
-    ax.set_ylabel("", fontsize=5.5, labelpad=1.0)
+    ax.set_yticklabels(group_labels, fontsize=6)
+    ax.set_title(title, fontsize=6, pad=1.2)
+    ax.set_xlabel(f"$p$<{p_value_threshold:g}\nfrac.", fontsize=6, labelpad=1.0)
+    ax.xaxis.set_label_coords(0.5, PANEL_D_XLABEL_Y)
+    ax.set_ylabel("", fontsize=6, labelpad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=4.8, length=1.5, pad=1)
-    ax.tick_params(axis="y", labelsize=5.0, length=1.5, pad=1)
+    ax.tick_params(axis="x", labelsize=6, length=1.5, pad=1)
+    ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
 
 def plot_glm_behavior_association_panel(
@@ -5215,11 +5523,11 @@ def plot_glm_behavior_association_panel(
             (
                 epoch_rows[0],
                 0.02,
-                0.20,
-                0.27,
-                0.27,
-                0.68,
-                0.28,
+                0.24,
+                0.31,
+                0.33,
+                PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT,
+                PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH,
             )
         ]
     else:
@@ -5284,6 +5592,7 @@ def plot_glm_behavior_association_panel(
             y_label="",
             x_limits=x_limits,
             show_y_ticklabels=False,
+            show_significance_marker=show_significance_marker,
         )
         similarity_ax = ax.inset_axes(
             [similarity_left, bottom, similarity_width, height]
@@ -5301,10 +5610,10 @@ def plot_glm_behavior_association_panel(
         ax.text(
             0.50,
             0.035,
-            "Plots show p<0.05 units; dark-active split uses 0.5 Hz",
+            "Plots show p<0.05 units; dark active split uses 0.5 Hz",
             ha="center",
             va="bottom",
-            fontsize=5.0,
+            fontsize=6,
             transform=ax.transAxes,
         )
 
@@ -5323,9 +5632,11 @@ def _plot_source_predictor_comparison_axis(
     pooled: bool = False,
     p_value_threshold: float = SIGNIFICANCE_P_VALUE,
     summary_location: str = "upper_left",
-) -> None:
+    summary_mode: str = "full",
+) -> str | None:
     """Plot vector-model deviance explained against mean-activity control."""
     lower, upper = axis_limits
+    summary_text: str | None = None
     ax.plot(
         [lower, upper],
         [lower, upper],
@@ -5341,7 +5652,7 @@ def _plot_source_predictor_comparison_axis(
             "No paired\nGLM data",
             ha="center",
             va="center",
-            fontsize=5.5,
+            fontsize=6,
             transform=ax.transAxes,
         )
     else:
@@ -5387,31 +5698,46 @@ def _plot_source_predictor_comparison_axis(
                 )
             deltas = y_values[significant] - x_values[significant]
             vector_greater_fraction = float(np.mean(deltas > 0.0))
-            if summary_location == "lower_right":
-                text_x = 0.97
-                text_y = 0.05
-                text_ha = "right"
-                text_va = "bottom"
-            elif summary_location == "upper_right":
-                text_x = 0.97
-                text_y = 0.95
-                text_ha = "right"
-                text_va = "top"
-            else:
-                text_x = 0.05
-                text_y = 0.95
-                text_ha = "left"
-                text_va = "top"
-            ax.text(
-                text_x,
-                text_y,
+            summary_text = (
                 f"n={int(np.sum(significant))}\n"
-                f"frac vector>mean={vector_greater_fraction:.2f}",
-                ha=text_ha,
-                va=text_va,
-                fontsize=4.6,
-                transform=ax.transAxes,
+                f"frac vector>mean={vector_greater_fraction:.2f}"
             )
+            if summary_location != "none":
+                display_summary_text = (
+                    f"n={int(np.sum(significant))}"
+                    if summary_mode == "n_only"
+                    else summary_text
+                )
+                if summary_location == "lower_right":
+                    text_x = 0.97
+                    text_y = 0.05
+                    text_ha = "right"
+                    text_va = "bottom"
+                elif summary_location == "upper_right":
+                    text_x = 0.97
+                    text_y = 0.95
+                    text_ha = "right"
+                    text_va = "top"
+                else:
+                    text_x = 0.05
+                    text_y = 0.95
+                    text_ha = "left"
+                    text_va = "top"
+                ax.text(
+                    text_x,
+                    text_y,
+                    display_summary_text,
+                    ha=text_ha,
+                    va=text_va,
+                    fontsize=6,
+                    transform=ax.transAxes,
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.75,
+                        "pad": 0.35,
+                    },
+                )
         else:
             ax.text(
                 0.5,
@@ -5419,17 +5745,28 @@ def _plot_source_predictor_comparison_axis(
                 "No p<0.05\nunits",
                 ha="center",
                 va="center",
-                fontsize=5.5,
+                fontsize=6,
                 transform=ax.transAxes,
             )
 
     ax.set_xlim(lower, upper)
     ax.set_ylim(lower, upper)
+    tick_values = [
+        tick_value
+        for tick_value in PANEL_D_SOURCE_COMPARISON_TICKS
+        if lower <= tick_value <= upper
+    ]
+    tick_labels = [f"{tick_value:g}" for tick_value in tick_values]
+    ax.set_xticks(tick_values)
+    ax.set_xticklabels(tick_labels)
+    ax.set_yticks(tick_values)
+    ax.set_yticklabels(tick_labels)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(title, fontsize=5.8, pad=1.4)
+    ax.set_title(title, fontsize=6, pad=1.4)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="both", labelsize=4.7, length=1.5, pad=1)
+    ax.tick_params(axis="both", labelsize=6, length=1.5, pad=1)
+    return summary_text
 
 
 def plot_glm_source_predictor_comparison_panel(
@@ -5486,10 +5823,10 @@ def plot_glm_source_predictor_comparison_panel(
         )
         return
 
-    left = 0.10 if compact_labels else 0.075
-    right = 0.985
-    bottom = 0.10 if compact_labels else 0.20
-    height = 0.82 if compact_labels else 0.70
+    left = PANEL_D_COMPACT_SOURCE_LEFT if compact_labels else 0.075
+    right = PANEL_D_COMPACT_SOURCE_RIGHT if compact_labels else 0.985
+    bottom = PANEL_D_COMPACT_SOURCE_BOTTOM if compact_labels else 0.20
+    height = PANEL_D_COMPACT_SOURCE_HEIGHT if compact_labels else 0.70
     gap = 0.030
     width = (right - left - gap * (len(groups) - 1)) / len(groups)
     for index, (title, rows, pooled) in enumerate(groups):
@@ -5503,11 +5840,12 @@ def plot_glm_source_predictor_comparison_panel(
             pooled=pooled,
             p_value_threshold=SIGNIFICANCE_P_VALUE,
             summary_location="lower_right" if compact_labels else "upper_left",
+            summary_mode="n_only" if compact_labels else "full",
         )
         if compact_labels:
-            child_ax.set_xlabel("Mean CA1 devexp", fontsize=5.3, labelpad=1.0)
+            child_ax.set_xlabel("Mean CA1\ndev. explained", fontsize=6, labelpad=0.8)
             if index == 0:
-                child_ax.set_ylabel("CA1 vector devexp", fontsize=5.3, labelpad=1.0)
+                child_ax.set_ylabel("CA1 vector\ndev. explained", fontsize=6, labelpad=1.0)
         if index > 0:
             child_ax.set_yticklabels([])
 
@@ -5515,7 +5853,7 @@ def plot_glm_source_predictor_comparison_panel(
         ax.text(
             0.52,
             0.035,
-            "Mean CA1 activity deviance explained",
+            "Mean CA1 activity\ndev. explained",
             ha="center",
             va="bottom",
             fontsize=6.0,
@@ -5528,14 +5866,14 @@ def plot_glm_source_predictor_comparison_panel(
             f"Showing vector p<{SIGNIFICANCE_P_VALUE:g} units",
             ha="right",
             va="bottom",
-            fontsize=5.2,
+            fontsize=6,
             transform=ax.transAxes,
         )
     if not compact_labels:
         ax.text(
             0.018,
             0.56,
-            "CA1 spike vector deviance explained",
+            "CA1 spike vector\ndev. explained",
             ha="center",
             va="center",
             rotation=90,
@@ -5597,7 +5935,7 @@ def plot_observed_predicted_panel(ax: "Axes", example: dict[str, Any]) -> None:
         f"devexp={float(example['ripple_devexp_mean']):.2f}\np={float(example['ripple_devexp_p_value']):.3f}",
         ha="left",
         va="top",
-        fontsize=5.5,
+        fontsize=6,
         transform=ax.transAxes,
     )
     ax.spines["top"].set_visible(False)
@@ -5618,14 +5956,15 @@ def add_aligned_panel_headers(
     if not (len(axes) == len(labels) == len(titles) == len(label_x_offsets)):
         raise ValueError("axes, labels, titles, and label_x_offsets must have equal length.")
 
-    title_y_values = [
+    header_y_values = [
         fig.transFigure.inverted()
         .transform(axis.title.get_transform().transform(axis.title.get_position()))[1]
         for axis in axes
     ]
-    header_y = max(title_y_values)
+    header_y = max(header_y_values)
 
     label_kwargs = PANEL_LABEL_KWARGS.copy()
+    label_kwargs["va"] = "top"
     for axis, label, title, label_x_offset in zip(
         axes,
         labels,
@@ -5647,7 +5986,7 @@ def add_aligned_panel_headers(
             header_y,
             title,
             ha="center",
-            va="bottom",
+            va="top",
             multialignment="center",
             fontsize=fontsize,
             transform=fig.transFigure,
@@ -5740,6 +6079,17 @@ def make_figure_3(
                 f"was unavailable for {example_animal} {example_date} "
                 f"{example_epoch}: {fallback_exc}"
             )
+    panel_b_prediction_examples: list[dict[str, Any]] = []
+    try:
+        panel_b_prediction_examples = load_panel_b_prediction_examples(
+            data_root,
+            ripple_window_s=ripple_window_s,
+            ripple_window_offset_s=ripple_window_offset_s,
+            ripple_selection=ripple_selection,
+            ridge_strength=ridge_strength,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"Panel B prediction examples unavailable: {exc}")
     behavior_payload = load_glm_dark_activity_devexp_tables(
         data_root,
         datasets,
@@ -5765,6 +6115,25 @@ def make_figure_3(
         ripple_selection=ripple_selection,
         ridge_strength=ridge_strength,
     )
+    xcorr_payload: dict[str, Any] | None = None
+    xcorr_animal, xcorr_date, xcorr_epoch = normalize_dataset_id(DEFAULT_XCORR_DATASET)
+    try:
+        xcorr_payload = load_top_ca1_xcorr_panel_data(
+            data_root,
+            animal_name=xcorr_animal,
+            date=xcorr_date,
+            epoch=xcorr_epoch,
+            state=DEFAULT_XCORR_STATE,
+            top_n_ca1_units=DEFAULT_XCORR_TOP_CA1_UNITS,
+            bin_size_s=DEFAULT_XCORR_BIN_SIZE_S,
+            max_lag_s=DEFAULT_XCORR_MAX_LAG_S,
+            display_vmax=DEFAULT_XCORR_DISPLAY_VMAX,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(
+            "Panel B xcorr unavailable for "
+            f"{xcorr_animal} {xcorr_date} {xcorr_epoch}: {exc}"
+        )
     panel_a_epoch_tables = filter_epoch_payloads(heatmap_epoch_tables, PANEL_A_EPOCH_ORDER)
     panel_c_epoch_tables = filter_epoch_payloads(glm_epoch_tables, PANEL_C_EPOCH_ORDER)
     fig = plt.figure(
@@ -5773,62 +6142,113 @@ def make_figure_3(
     )
     outer_grid = fig.add_gridspec(
         nrows=2,
-        ncols=8,
-        height_ratios=[0.46, 0.54],
+        ncols=3,
+        height_ratios=[0.66, 0.34],
+        width_ratios=PANEL_ABC_WIDTH_RATIOS,
+    )
+    lower_grid = outer_grid[1, :].subgridspec(
+        nrows=1,
+        ncols=3,
+        width_ratios=PANEL_BOTTOM_WIDTH_RATIOS,
     )
     axes = [
-        fig.add_subplot(outer_grid[:, :2]),
-        fig.add_subplot(outer_grid[:, 2:5]),
-        fig.add_subplot(outer_grid[0, 5:]),
-        fig.add_subplot(outer_grid[1, 5:]),
+        fig.add_subplot(outer_grid[0, 0]),
+        fig.add_subplot(outer_grid[0, 1]),
+        fig.add_subplot(outer_grid[0, 2]),
+        fig.add_subplot(lower_grid[0, 0]),
+        fig.add_subplot(lower_grid[0, 1]),
     ]
+    spacer_axis = fig.add_subplot(lower_grid[0, 2])
+    spacer_axis.axis("off")
 
-    plot_epoch_ripple_heatmap_panel(axes[0], panel_a_epoch_tables, regions=regions)
+    plot_epoch_ripple_heatmap_panel(
+        axes[0],
+        panel_a_epoch_tables,
+        regions=regions,
+        expand_heatmaps_vertically=True,
+        show_modulation_histogram=False,
+    )
     axes[0].set_title("Ripple-triggered\nmean firing rates", fontsize=7.2, pad=2)
-    plot_glm_analysis_panel(axes[1], panel_c_epoch_tables, ripple_trace=ripple_schematic_trace)
-    axes[1].set_title(
+    if xcorr_payload is not None:
+        panel_b_xcorr_payload = subset_xcorr_payload_for_top_ca1_and_v1_half(
+            xcorr_payload,
+        )
+        plot_top_ca1_xcorr_panel(
+            axes[1],
+            panel_b_xcorr_payload,
+            lag_label_y=-0.055,
+            compact_unit_titles=True,
+        )
+    else:
+        axes[1].axis("off")
+        axes[1].text(
+            0.5,
+            0.5,
+            "No xcorr data",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=axes[1].transAxes,
+        )
+    axes[1].set_title("CA1-V1 correlogram\nduring ripples", fontsize=7.2, pad=2)
+    plot_glm_analysis_panel(
+        axes[2],
+        panel_c_epoch_tables,
+        ripple_trace=ripple_schematic_trace,
+        prediction_examples=panel_b_prediction_examples,
+    )
+    axes[2].set_title(
         "Predicting V1 activity during ripples\nwith CA1 activity",
         fontsize=7.2,
         pad=2,
     )
     plot_glm_source_predictor_comparison_panel(
-        axes[2],
+        axes[3],
         source_comparison_payload,
         include_per_animal=False,
         include_pooled=True,
         compact_labels=True,
         show_color_note=False,
     )
-    axes[2].set_title(
-        "CA1 spike vector vs. mean CA1 activity",
+    axes[3].set_title(
+        "CA1 spike vector vs.\nmean CA1 activity",
         fontsize=7.2,
         pad=2,
     )
     plot_glm_behavior_association_panel(
-        axes[3],
+        axes[4],
         behavior_payload,
         show_note=False,
     )
-    axes[3].set_title(
-        "Relationship to dark-active DPP cells",
-        fontsize=7.2,
-        pad=2,
-    )
-
-    label_axis(axes[3], "D", x=-0.10, y=1.04)
+    panel_d_title = "Relationship to dark active DPP cells"
+    axes[4].set_title(panel_d_title, fontsize=7.2, pad=2)
 
     fig.canvas.draw()
     fig.set_constrained_layout(False)
+    panel_a_box = axes[0].get_position()
+    panel_d_box = axes[3].get_position()
+    panel_a_label_x = (
+        panel_a_box.x0 + PANEL_ABC_HEADER_LABEL_X_OFFSETS[0] * panel_a_box.width
+    )
+    panel_d_label_x_offset = (panel_a_label_x - panel_d_box.x0) / panel_d_box.width
     add_aligned_panel_headers(
         fig,
         axes[:3],
         labels=("A", "B", "C"),
         titles=(
             "Ripple-triggered\nmean firing rates",
+            "CA1-V1 correlogram\nduring ripples",
             "Predicting V1 activity during ripples\nwith CA1 activity",
-            "CA1 spike vector vs. mean CA1 activity",
         ),
         label_x_offsets=PANEL_ABC_HEADER_LABEL_X_OFFSETS,
+        fontsize=7.2,
+    )
+    add_aligned_panel_headers(
+        fig,
+        (axes[3], axes[4]),
+        labels=("D", "E"),
+        titles=("CA1 spike vector vs.\nmean CA1 activity", panel_d_title),
+        label_x_offsets=(panel_d_label_x_offset, -0.08),
         fontsize=7.2,
     )
 
@@ -5836,13 +6256,13 @@ def make_figure_3(
     plt.close(fig)
     for missing in behavior_payload["missing_artifacts"]:
         print(
-            "Panel D dark-activity missing "
+            "Panel E dark-activity missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
         )
     for missing in source_comparison_payload["missing_artifacts"]:
         print(
-            "Panel C source-comparison missing "
+            "Panel D source-comparison missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']} "
             f"({missing['source_predictor_mode']}): {missing['path']}"
@@ -5894,7 +6314,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=parse_dataset_id,
         default=DEFAULT_EXAMPLE_DATASET,
         help=(
-            "Data set used for the example ripple-band LFP trace in panel C. "
+            "Data set used for the example ripple-band LFP trace in panel B. "
             "Format: animal:date:epoch."
         ),
     )
@@ -5903,7 +6323,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="append",
         choices=REGIONS,
         help=(
-            "Region to include in peri-ripple and modulation panels. May be repeated. "
+            "Region to include in the peri-ripple heatmap panel. May be repeated. "
             f"Default: {', '.join(DEFAULT_REGIONS)}."
         ),
     )
@@ -5911,7 +6331,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--light-epoch",
         default=None,
         help=(
-            "Light run epoch for panel A. "
+            "Light run epoch for Figure 3 panels. "
             "Default: use v1ca1.paper_figures.datasets registry."
         ),
     )
@@ -5919,7 +6339,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dark-epoch",
         default=None,
         help=(
-            "Dark run epoch for panel A. "
+            "Dark run epoch for Figure 3 panels. "
             "Default: use each data set's registered dark epoch."
         ),
     )
@@ -5927,7 +6347,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--sleep-epoch",
         default=None,
         help=(
-            "Sleep epoch for panel A. "
+            "Sleep epoch for Figure 3 panels. "
             "Default: use v1ca1.paper_figures.datasets registry."
         ),
     )
@@ -5936,7 +6356,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_FIGURE_CACHE_DIR,
         help=(
-            "Directory for cached dark movement firing-rate tables used by Panel C. "
+            "Directory for cached dark movement firing-rate tables used by Panel D. "
             f"Default: {DEFAULT_FIGURE_CACHE_DIR}"
         ),
     )
@@ -5979,7 +6399,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("allripples", "deduped", "single"),
         default=DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
         help=(
-            "Ripple-GLM selection suffix for Figure 3 Panels C and D. "
+            "Ripple-GLM selection suffix for Figure 3 Panels B-D. "
             f"Default: {DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION}"
         ),
     )

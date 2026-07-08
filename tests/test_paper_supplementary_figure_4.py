@@ -10,7 +10,9 @@ from v1ca1.paper_figures.supplementary_figure_4 import (
     DEFAULT_EPOCH_TYPES,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_NAME,
+    DEFAULT_REGIONS,
     DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE,
+    DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_SELECTION_MODES,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     SUPPLEMENTARY_FIGURE_4_SIGNIFICANCE_P_VALUE,
@@ -45,6 +47,9 @@ def test_default_cli_matches_supplementary_figure_4_defaults() -> None:
     assert args.output_name == DEFAULT_OUTPUT_NAME
     assert tuple(args.ripple_selection) == DEFAULT_RIPPLE_SELECTION_MODES
     assert DEFAULT_RIPPLE_SELECTION_MODES == ("single",)
+    assert args.region is None
+    assert DEFAULT_REGIONS == ("v1", "ca1")
+    assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
     assert DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE == pytest.approx(0.05)
     assert args.dataset is None
     assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S
@@ -496,7 +501,43 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
         "lag_s": np.array([-0.01, 0.0, 0.01]),
         "xcorr": np.ones((1, 2, 3), dtype=float),
     }
+    heatmap_epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "animal_name": "L14",
+            "date": "20240611",
+            "epoch": "02_r1",
+            "firing_rate_table": pd.DataFrame(
+                {
+                    "animal_name": ["L14", "L14", "L14", "L14"],
+                    "date": ["20240611", "20240611", "20240611", "20240611"],
+                    "epoch": ["02_r1", "02_r1", "02_r1", "02_r1"],
+                    "region": ["ca1", "ca1", "v1", "v1"],
+                    "unit_id": [101, 101, 11, 11],
+                    "time_s": [-0.02, 0.0, -0.02, 0.0],
+                    "mean_rate_hz": [1.0, 2.0, 3.0, 4.0],
+                }
+            ),
+            "summary_table": pd.DataFrame(
+                {
+                    "region": ["ca1", "v1"],
+                    "ripple_modulation_index": [0.1, 0.2],
+                }
+            ),
+        }
+    ]
     calls: dict[str, object] = {}
+
+    def fake_load_heatmap_tables(*_args, **kwargs):
+        calls["heatmap_kwargs"] = kwargs
+        return heatmap_epoch_tables
+
+    monkeypatch.setattr(
+        supp_figure_4_module,
+        "load_pooled_ripple_heatmap_epoch_tables",
+        fake_load_heatmap_tables,
+    )
 
     monkeypatch.setattr(
         supp_figure_4_module,
@@ -559,6 +600,11 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
         data_root=Path("/analysis"),
         output_path=output_path,
         datasets=[("L14", "20240611", "08_r4")],
+        regions=("ca1", "v1"),
+        light_epoch=None,
+        dark_epoch=None,
+        sleep_epoch=None,
+        ripple_threshold_zscore=2.0,
         xcorr_dataset=("L15", "20241121", "02_r1"),
         xcorr_state="ripple",
         xcorr_top_ca1_units=1,
@@ -575,6 +621,8 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
     assert saved_path == output_path
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
+    assert calls["heatmap_kwargs"]["ripple_threshold_zscore"] == 2.0
+    assert calls["heatmap_kwargs"]["light_epoch"] is None
     assert calls["glm_epoch_kwargs"]["epoch_types"] == ("dark",)
     assert calls["glm_epoch_kwargs"]["ripple_selection"] == "single"
     assert calls["glm_epoch_kwargs"]["ripple_window_offset_s"] == 0.0
@@ -585,9 +633,12 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
         "B",
         "C",
         "D",
+        "E",
     }
     assert calls["lag_label_y"] == [pytest.approx(-0.025)]
     assert "Figure 4C run scatter by animal (single)" not in calls["panel_labels"]
+    assert "Ripple modulation index" in calls["axis_titles"]
+    assert "CA1-V1 cross correlation during ripples" in calls["axis_titles"]
     assert (
         "Predicting V1 activity during ripples\nwith CA1 activity"
         in calls["axis_titles"]

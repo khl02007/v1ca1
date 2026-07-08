@@ -88,19 +88,39 @@ DEFAULT_TOP_ROW_HEIGHT_MM = 40.0
 DEFAULT_HEATMAP_HEIGHT_MM = 84.0
 DEFAULT_MIDDLE_TO_FINAL_ROW_SPACER_MM = 0.5
 DEFAULT_BOTTOM_ROW_HEIGHT_MM = 30.0
-DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION = 0.7
-DEFAULT_PANEL_E_WIDTH_FRACTION = 0.3
-DEFAULT_PANEL_F_WIDTH_FRACTION = 1.0 / 3.0
-DEFAULT_PANEL_G_WIDTH_FRACTION = 1.0 / 3.0
-DEFAULT_PANEL_H_WIDTH_FRACTION = 1.0 / 3.0
+DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION = 2.0 / 3.0
+DEFAULT_PANEL_E_WIDTH_FRACTION = 1.0 / 3.0
+DEFAULT_PANEL_F_WIDTH_FRACTION = DEFAULT_PANEL_E_WIDTH_FRACTION
+DEFAULT_PANEL_G_WIDTH_FRACTION = (1.0 - DEFAULT_PANEL_F_WIDTH_FRACTION) / 2.0
+DEFAULT_PANEL_H_WIDTH_FRACTION = DEFAULT_PANEL_G_WIDTH_FRACTION
 PANEL_H_DECODING_ANIMALS = ("L12", "L14", "L15", "L19")
 BOTTOM_ROW_PANEL_WSPACE = 0.05
+BOTTOM_ROW_PLOT_BOUNDS = (0.14, 0.18, 0.78, 0.72)
+PANEL_G_TITLE = "Cross path decoding"
+PANEL_E_RIGHT_ANNOTATION_X = 0.56
+PANEL_E_RIGHT_SUMMARY_POSITION = (0.97, 0.06)
+PANEL_F_RIGHT_SUMMARY_POSITION = (0.97, 0.06)
+PANEL_F_RIGHT_SUMMARY_Y_STEP = 0.12
+PANEL_C_EXAMPLE_TITLE = "Example dark DPP coding cells"
+PANEL_C_LABEL_X_OFFSET = -0.04
+PANEL_D_LABEL_X = -0.12
+PANEL_D_LABEL_Y = 1.04
 HEATMAP_COLORBAR_PAD = 0.001
+HEATMAP_COLORBAR_ASPECT = 14
 HEATMAP_COLORBAR_LABEL_FONTSIZE = 4.9
 HEATMAP_COLORBAR_LABELPAD = 0
 HEATMAP_TUNING_LABEL_OFFSET = -0.004
 HEATMAP_ORDER_LABEL_OFFSET = 0.007
 HEATMAP_PATH_LABEL_OFFSET = 0.020
+PANEL_D_HEATMAP_BLOCK_OUTLINE_COLOR = "red"
+PANEL_D_HEATMAP_BLOCK_OUTLINE_LINEWIDTH = 1.2
+PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD = 0.004
+PANEL_D_HEATMAP_BLOCK_OUTLINE_LINESTYLE = "-"
+PANEL_D_HEATMAP_BLOCK_OUTLINE_SPECS = (
+    ((0, 2), (0, 2)),
+    ((2, 4), (2, 4)),
+)
+MIN_FIGURE_1_FONTSIZE_PT = 6.0
 PANEL_D_TRAJECTORY_TYPES = (
     "right_to_center",
     "center_to_left",
@@ -148,6 +168,13 @@ PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS = {
     }
     for trajectory_type in PANEL_DARK_LIGHT_RIGHT_ARM_TRAJECTORIES
 }
+PANEL_B_VISUAL_ICON_LABEL_X_OFFSET = 0.86
+PANEL_B_VISUAL_ICON_COLORS = {
+    "A": "#66C2A5",
+    "B": "#E78AC3",
+}
+PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA = 0.92
+PANEL_B_VISUAL_SHARED_XLABEL_Y = 0.035
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 RASTER_ASSET_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 NEURON_SCALE_BAR_COUNT = 100
@@ -163,6 +190,10 @@ PANEL_E_FR_TRAJECTORY_PAIRS = (
     ("center_to_left", "right_to_center"),
     ("center_to_right", "left_to_center"),
 )
+PANEL_C_EXAMPLE_BLOCK_HEIGHT = 0.47
+PANEL_C_EXAMPLE_BLOCK_Y_POSITIONS = (0.55, 0.02)
+PANEL_C_EXAMPLE_SHARED_XLABEL_Y = 0.005
+PANEL_C_EXAMPLE_YLABEL_X = -0.190
 PANEL_E_TRAJECTORY_LABELS = {
     "center_to_left": "C→L",
     "center_to_right": "C→R",
@@ -174,7 +205,7 @@ PANEL_E_RASTER_TICK_MARKERSIZE = RASTER_TICK_KWARGS["markersize"]
 PANEL_E_RASTER_TICK_MARKEREDGEWIDTH = RASTER_TICK_KWARGS["markeredgewidth"]
 PANEL_E_AXIS_LABEL_FONTSIZE = 5.4
 PANEL_E_TICK_LABEL_FONTSIZE = 5.0
-TASK_PROGRESSION_XLABEL = "Norm. goal progression"
+TASK_PROGRESSION_XLABEL = "Norm. path progression"
 TASK_PROGRESSION_SEGMENT_BOUNDARIES = (0.4, 0.6)
 TASK_PROGRESSION_SEGMENT_BOUNDARY_COLOR = NEUTRAL_COLORS["segment_boundary"]
 TASK_PROGRESSION_SEGMENT_BOUNDARY_LINEWIDTH = 0.45
@@ -225,12 +256,12 @@ STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
-        "DGP - absolute place",
+        "DPP - absolute place",
         "delta_bits_generalized_place_vs_tp",
     ),
     (
         "dpp_vs_absolute_task_progression",
-        "DGP - distance-to-reward",
+        "DPP - distance-to-reward",
         "delta_bits_gtp_vs_tp",
     ),
 )
@@ -284,10 +315,19 @@ DECODING_TRAIN_LABEL_Y = -0.32
 TOP_ROW_PANEL_LABEL_X_OFFSETS = (-0.04, -0.02)
 TOP_ROW_PANEL_TITLE_FONTSIZES = (8.0, 8.0)
 BOTTOM_ROW_PANEL_LABEL_X_OFFSETS = (-0.04, -0.08, -0.04)
-DECODING_YLABEL_FONTSIZE = 7.6
+DECODING_YLABEL_FONTSIZE = 6.0
+DECODING_YLABEL_X = -0.16
 DECODING_XTICK_LABEL_FONTSIZE = 5.6
 DECODING_MEDIAN_LABEL_FONTSIZE = 4.8
 DECODING_MEDIAN_LABEL_X_OFFSET = 0.09
+DECODING_SIGNIFICANCE_BRACKETS = (
+    (1.0, 2.0, 0.500, "****"),
+    (1.0, 3.0, 0.635, "**"),
+)
+DECODING_SIGNIFICANCE_BRACKET_HEIGHT = 0.016
+DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH = 0.6
+DECODING_SIGNIFICANCE_LABEL_FONTSIZE = 7.0
+DECODING_SIGNIFICANCE_LABEL_Y_OFFSET = 0.004
 DELTA_LOG_LIKELIHOOD_AXIS_LABEL = "Δ log likelihood\n(bits/spike)"
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
@@ -352,8 +392,9 @@ CYCLE_ARROW_SPECS = (
 )
 CYCLE_ARROW_LINEWIDTH = 1.08
 CYCLE_ARROW_MUTATION_SCALE = 12.6
-TASK_DESIGN_TRAJECTORY_BOUNDS = (0.00, 0.29, 0.49, 0.71)
-TASK_DESIGN_VISUAL_STIMULUS_BOUNDS = (0.51, 0.32, 0.49, 0.68)
+TASK_DESIGN_TRAJECTORY_BOUNDS = (-0.025, 0.09, 0.46, 0.82)
+TASK_DESIGN_VISUAL_STIMULUS_BOUNDS = (0.505, 0.00, 0.495, 1.00)
+TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y = 0.225
 TASK_DESIGN_PROGRESSION_BOUNDS = (0.02, 0.02, 0.96, 0.25)
 TASK_DESIGN_PROGRESSION_SEGMENTS = (
     ("AB", ("A", "B")),
@@ -361,6 +402,7 @@ TASK_DESIGN_PROGRESSION_SEGMENTS = (
     ("BA", ("B", "A")),
     ("dark", ("dark",)),
 )
+TASK_DESIGN_TITLE = "W-track task with visual landmarks"
 TASK_DESIGN_PROGRESSION_SLEEP_LABEL = "sleep"
 TASK_DESIGN_PROGRESSION_DURATION_LABEL = "Run/sleep epochs (~25 min each)"
 TASK_DESIGN_RUN_EPOCH_LINEWIDTH = 1.20
@@ -544,6 +586,134 @@ def add_aligned_panel_headers(
             fontsize=title_fontsize,
             transform=fig.transFigure,
         )
+
+
+def add_aligned_panel_headers_at_label_positions(
+    fig: Any,
+    axes: Sequence["Axes"],
+    *,
+    labels: Sequence[str],
+    titles: Sequence[str],
+    label_x_positions: Sequence[float],
+    fontsize: float = 8.0,
+) -> None:
+    """Draw panel labels at fixed figure x positions with aligned titles."""
+    if not (len(axes) == len(labels) == len(titles) == len(label_x_positions)):
+        raise ValueError(
+            "axes, labels, titles, and label_x_positions must have equal length."
+        )
+
+    title_y_values = [
+        fig.transFigure.inverted()
+        .transform(axis.title.get_transform().transform(axis.title.get_position()))[1]
+        for axis in axes
+    ]
+    header_y = max(title_y_values)
+
+    label_kwargs = PANEL_LABEL_KWARGS.copy()
+    label_kwargs["fontsize"] = fontsize
+    for axis, label, title, label_x in zip(
+        axes,
+        labels,
+        titles,
+        label_x_positions,
+        strict=True,
+    ):
+        box = axis.get_position()
+        axis.set_title("")
+        fig.text(
+            label_x,
+            header_y,
+            label,
+            transform=fig.transFigure,
+            **label_kwargs,
+        )
+        fig.text(
+            (box.x0 + box.x1) / 2.0,
+            header_y,
+            title,
+            ha="center",
+            va="bottom",
+            fontsize=fontsize,
+            transform=fig.transFigure,
+        )
+
+
+def add_panel_header_at_reference_y(
+    fig: Any,
+    axis: "Axes",
+    *,
+    label: str,
+    title: str,
+    label_x_offset: float,
+    reference_axis: "Axes",
+    reference_y: float,
+    fontsize: float = 8.0,
+) -> tuple["Text", "Text"]:
+    """Draw one panel label/title at a reference axes-relative y level."""
+    reference_y_figure = fig.transFigure.inverted().transform(
+        reference_axis.transAxes.transform((0.0, reference_y))
+    )[1]
+    box = axis.get_position()
+
+    label_kwargs = PANEL_LABEL_KWARGS.copy()
+    label_kwargs["fontsize"] = fontsize
+    label_text = fig.text(
+        box.x0 + label_x_offset * box.width,
+        reference_y_figure,
+        label,
+        transform=fig.transFigure,
+        **label_kwargs,
+    )
+    title_text = fig.text(
+        (box.x0 + box.x1) / 2.0,
+        reference_y_figure,
+        title,
+        ha="center",
+        va="bottom",
+        fontsize=fontsize,
+        transform=fig.transFigure,
+    )
+    return label_text, title_text
+
+
+def raise_figure_text_to_minimum_fontsize(fig: Any, min_fontsize: float) -> None:
+    """Raise all figure text below a minimum font size."""
+
+    def _iter_axes_tree(ax: Any) -> Sequence[Any]:
+        axes = [ax]
+        for child_ax in getattr(ax, "child_axes", ()):
+            axes.extend(_iter_axes_tree(child_ax))
+        return axes
+
+    def _maybe_raise(text: Any) -> None:
+        if text is not None and text.get_fontsize() < min_fontsize:
+            text.set_fontsize(min_fontsize)
+
+    seen_axes: set[int] = set()
+    for root_ax in fig.axes:
+        for ax in _iter_axes_tree(root_ax):
+            ax_id = id(ax)
+            if ax_id in seen_axes:
+                continue
+            seen_axes.add(ax_id)
+            _maybe_raise(ax.title)
+            _maybe_raise(ax.xaxis.label)
+            _maybe_raise(ax.yaxis.label)
+            _maybe_raise(ax.xaxis.get_offset_text())
+            _maybe_raise(ax.yaxis.get_offset_text())
+            for tick_label in ax.get_xticklabels():
+                _maybe_raise(tick_label)
+            for tick_label in ax.get_yticklabels():
+                _maybe_raise(tick_label)
+            for text in ax.texts:
+                _maybe_raise(text)
+            legend = ax.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    _maybe_raise(text)
+    for text in fig.texts:
+        _maybe_raise(text)
 
 
 def get_dark_epoch(animal_name: str, date: str, dark_epoch: str | None = None) -> str:
@@ -1002,7 +1172,7 @@ def load_motor_delta_table(
         MOTOR_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 motor+DGP versus motor deltas for stable dark-epoch units."""
+    """Load pooled V1 motor+DPP versus motor deltas for stable dark-epoch units."""
     import pandas as pd
     import xarray as xr
 
@@ -1079,7 +1249,7 @@ def load_encoding_delta_table(
         ENCODING_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 DGP-versus-absolute-model deltas for stable dark-epoch units."""
+    """Load pooled V1 DPP-versus-absolute-model deltas for stable dark-epoch units."""
     import pandas as pd
 
     rows: list[dict[str, Any]] = []
@@ -2439,6 +2609,59 @@ def plot_pooled_heatmap_grid(
     return color_image
 
 
+def add_panel_d_heatmap_block_outlines(axes: np.ndarray) -> tuple[Any, ...]:
+    """Draw outlines around the diagonal 2x2 blocks in the Panel D heatmap grid."""
+    from matplotlib.patches import Rectangle
+
+    heatmap_axes = np.asarray(axes, dtype=object)
+    if heatmap_axes.ndim != 2:
+        raise ValueError("axes must be a 2D array.")
+
+    if (
+        heatmap_axes.shape[0] < len(PANEL_D_TRAJECTORY_TYPES)
+        or heatmap_axes.shape[1] < len(PANEL_D_TRAJECTORY_TYPES)
+    ):
+        return ()
+
+    fig = heatmap_axes.flat[0].figure
+    outlines = []
+    region_row_count = len(PANEL_D_TRAJECTORY_TYPES)
+    for row_start in range(0, heatmap_axes.shape[0], region_row_count):
+        if row_start + region_row_count > heatmap_axes.shape[0]:
+            break
+        for (relative_row_start, relative_row_stop), (col_start, col_stop) in (
+            PANEL_D_HEATMAP_BLOCK_OUTLINE_SPECS
+        ):
+            block_axes = heatmap_axes[
+                row_start + relative_row_start : row_start + relative_row_stop,
+                col_start:col_stop,
+            ]
+            positions = [block_ax.get_position() for block_ax in block_axes.ravel()]
+            x0 = min(position.x0 for position in positions)
+            y0 = min(position.y0 for position in positions)
+            x1 = max(position.x1 for position in positions)
+            y1 = max(position.y1 for position in positions)
+            x0 -= PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+            y0 -= PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+            x1 += PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+            y1 += PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+            outline = Rectangle(
+                (x0, y0),
+                x1 - x0,
+                y1 - y0,
+                fill=False,
+                edgecolor=PANEL_D_HEATMAP_BLOCK_OUTLINE_COLOR,
+                linewidth=PANEL_D_HEATMAP_BLOCK_OUTLINE_LINEWIDTH,
+                linestyle=PANEL_D_HEATMAP_BLOCK_OUTLINE_LINESTYLE,
+                transform=fig.transFigure,
+                clip_on=False,
+                zorder=1000,
+            )
+            fig.add_artist(outline)
+            outlines.append(outline)
+    return tuple(outlines)
+
+
 def add_task_progression_segment_boundary_lines(ax: "Axes") -> None:
     """Draw normalized task-progression segment boundaries."""
     for boundary in TASK_PROGRESSION_SEGMENT_BOUNDARIES:
@@ -2586,12 +2809,69 @@ def draw_behavior_task_design_panel(
 
     del asset_dir, behavior_asset_name, rotate_behavior_180
 
+    from v1ca1.paper_figures import figure_summary
+
     trajectory_ax = ax.inset_axes(TASK_DESIGN_TRAJECTORY_BOUNDS)
     visual_ax = ax.inset_axes(TASK_DESIGN_VISUAL_STIMULUS_BOUNDS)
-    progression_ax = ax.inset_axes(TASK_DESIGN_PROGRESSION_BOUNDS)
-    draw_w_track_cycle_panel(trajectory_ax, include_visual_stimuli=False)
-    draw_visual_stimuli_schematic(visual_ax)
-    draw_task_design_progression_bar(progression_ax)
+    figure_summary._draw_summary_trajectory_cycle(trajectory_ax)
+    draw_task_design_visual_stimulus_block_with_swapped_colors(
+        visual_ax,
+        figure_summary=figure_summary,
+        timeline_style="run_sleep_boxes",
+    )
+
+
+def draw_task_design_visual_stimulus_block_with_swapped_colors(
+    ax: "Axes",
+    *,
+    figure_summary: Any,
+    timeline_style: str,
+) -> None:
+    """Draw the summary visual schematic with Figure 1A green/pink colors swapped."""
+    left_color = figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR
+    right_color = figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR
+    try:
+        figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR = right_color
+        figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR = left_color
+        figure_summary._draw_summary_visual_stimulus_block(
+            ax,
+            timeline_style=timeline_style,
+            run_sleep_timeline_arrow_y=TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y,
+        )
+        add_task_design_visual_stimulus_labels(ax, figure_summary=figure_summary)
+    finally:
+        figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR = left_color
+        figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR = right_color
+
+
+def add_task_design_visual_stimulus_labels(ax: "Axes", *, figure_summary: Any) -> None:
+    """Label Figure 1A visual-stimulus icons with their A/B conditions."""
+    if not ax.child_axes:
+        return
+    visual_icons_ax = ax.child_axes[-1]
+    screen_y = figure_summary.SUMMARY_VISUAL_SCREEN_Y
+    screen_w = figure_summary.SUMMARY_VISUAL_SCREEN_W
+    screen_h = figure_summary.SUMMARY_VISUAL_SCREEN_H
+    screen_gap = figure_summary.SUMMARY_VISUAL_SCREEN_GAP
+    screen_x = figure_summary.SUMMARY_VISUAL_SCREEN_X
+    label_y = screen_y + screen_h + 0.08
+    for index, label, color in (
+        (0, "A", figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR),
+        (1, "B", figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR),
+    ):
+        visual_icons_ax.text(
+            screen_x + index * (screen_w + screen_gap) + screen_w / 2.0,
+            label_y,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=6.0,
+            fontweight="bold",
+            color=color,
+            transform=visual_icons_ax.transAxes,
+            clip_on=False,
+            zorder=20,
+        )
 
 
 def _scale_points_to_axes(
@@ -3143,14 +3423,19 @@ def _format_delta_advantage_summary(
     values: np.ndarray,
     *,
     label: str | None = None,
+    include_median: bool = True,
 ) -> str:
-    """Return compact DGP-side summary text for delta log-likelihood values."""
+    """Return compact DPP-side summary text for delta log-likelihood values."""
     values = np.asarray(values, dtype=float).reshape(-1)
     values = values[np.isfinite(values)]
     prefix = "" if label is None else f"{label}\n"
     if values.size == 0:
-        return f"{prefix}n/a >0, med. n/a"
+        if include_median:
+            return f"{prefix}n/a >0, med. n/a"
+        return f"{prefix}n/a >0"
     fraction_positive = float(np.mean(values > 0.0))
+    if not include_median:
+        return f"{prefix}{fraction_positive:.0%} >0"
     median = float(np.median(values))
     return f"{prefix}{fraction_positive:.0%} >0, med. {median:.2f}"
 
@@ -3320,7 +3605,7 @@ def plot_stability_panel(
 
 
 def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
-    """Plot pooled V1 motor+DGP versus motor delta log-likelihood values."""
+    """Plot pooled V1 motor+DPP versus motor delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     values = np.asarray(
@@ -3367,20 +3652,20 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.text(
-        0.68,
+        PANEL_E_RIGHT_ANNOTATION_X,
         0.97,
-        "Motor+DGP better",
+        "Motor+DPP better",
         ha="left",
         va="top",
         fontsize=5.5,
         transform=ax.transAxes,
     )
     ax.text(
-        0.68,
-        0.74,
-        _format_delta_advantage_summary(values),
-        ha="left",
-        va="top",
+        PANEL_E_RIGHT_SUMMARY_POSITION[0],
+        PANEL_E_RIGHT_SUMMARY_POSITION[1],
+        _format_delta_advantage_summary(values, include_median=False),
+        ha="right",
+        va="bottom",
         fontsize=4.8,
         color=REGION_COLORS.get(MOTOR_DELTA_REGION, REGION_COLORS["v1"]),
         transform=ax.transAxes,
@@ -3400,14 +3685,14 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     )
     ax.set_xlim(*x_limits)
     ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
-    ax.set_ylabel("Frac.", fontsize=8, labelpad=2)
+    ax.set_ylabel("Fraction", fontsize=7, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=7, length=2, pad=1)
 
 
 def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
-    """Plot pooled V1 DGP-versus-absolute-model delta log-likelihood values."""
+    """Plot pooled V1 DPP-versus-absolute-model delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     all_values = np.asarray(
@@ -3457,11 +3742,10 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
                 **COMPACT_HISTOGRAM_KWARGS,
                 zorder=2,
             )
-            median = float(np.median(values))
             summary_rows.append(
                 (
                     comparison,
-                    f"{np.mean(values > 0.0):.0%} >0, med. {median:.2f}",
+                    f"{np.mean(values > 0.0):.0%} >0",
                     color,
                 )
             )
@@ -3489,24 +3773,21 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DGP better",
+        "DPP better",
         ha="left",
         va="top",
         fontsize=4.8,
         color="black",
         transform=ax.transAxes,
     )
-    summary_label_by_comparison = {
-        "dpp_vs_absolute_place": "DGP > abs place",
-        "dpp_vs_absolute_task_progression": "DGP > dist.-to-reward",
-    }
-    for row_index, (comparison, summary, color) in enumerate(summary_rows):
+    for row_index, (_comparison, summary, color) in enumerate(summary_rows):
         ax.text(
-            0.67,
-            0.74 - 0.28 * row_index,
-            f"{summary_label_by_comparison[comparison]}\n{summary}",
-            ha="left",
-            va="top",
+            PANEL_F_RIGHT_SUMMARY_POSITION[0],
+            PANEL_F_RIGHT_SUMMARY_POSITION[1]
+            + PANEL_F_RIGHT_SUMMARY_Y_STEP * (len(summary_rows) - row_index - 1),
+            summary,
+            ha="right",
+            va="bottom",
             fontsize=4.2,
             color=color,
             transform=ax.transAxes,
@@ -3526,10 +3807,43 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     )
     ax.set_xlim(*x_limits)
     ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
-    ax.set_ylabel("Frac.", fontsize=8, labelpad=2)
+    ax.set_ylabel("Fraction", fontsize=7, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=7, length=2, pad=1)
+
+
+def add_decoding_significance_brackets(
+    ax: "Axes",
+    *,
+    brackets: Sequence[tuple[float, float, float, str]] = DECODING_SIGNIFICANCE_BRACKETS,
+) -> None:
+    """Draw planned significance brackets above Panel G decoding summaries."""
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+    for x_start, x_stop, y, label in brackets:
+        if x_start < x_min or x_stop > x_max or y < y_min or y > y_max:
+            continue
+        y_top = y + DECODING_SIGNIFICANCE_BRACKET_HEIGHT
+        ax.plot(
+            [x_start, x_start, x_stop, x_stop],
+            [y, y_top, y_top, y],
+            color="black",
+            linewidth=DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
+            clip_on=False,
+            zorder=6,
+        )
+        ax.text(
+            (x_start + x_stop) / 2.0,
+            y_top + DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
+            color="black",
+            clip_on=False,
+            zorder=7,
+        )
 
 
 def plot_decoding_error_panel(
@@ -3599,11 +3913,17 @@ def plot_decoding_error_panel(
             medians,
             strict=True,
         ):
+            is_last_position = np.isclose(position, positions[-1])
+            median_label_offset = (
+                -DECODING_MEDIAN_LABEL_X_OFFSET
+                if is_last_position
+                else DECODING_MEDIAN_LABEL_X_OFFSET
+            )
             plot_ax.text(
-                position + DECODING_MEDIAN_LABEL_X_OFFSET,
+                position + median_label_offset,
                 median,
                 f"med. {median:.2f}",
-                ha="left",
+                ha="right" if is_last_position else "left",
                 va="center",
                 fontsize=DECODING_MEDIAN_LABEL_FONTSIZE,
                 color="0.20",
@@ -3623,16 +3943,19 @@ def plot_decoding_error_panel(
     plot_ax.set_xticks(positions)
     plot_ax.set_xticklabels(labels, fontsize=DECODING_XTICK_LABEL_FONTSIZE)
     plot_ax.set_xlim(0.5, len(comparisons) + 0.5)
-    plot_ax.set_ylim(0.0, 0.5)
+    plot_ax.set_ylim(0.0, 0.72)
     plot_ax.set_ylabel(
-        "Abs. norm. error",
+        "|Norm. error|",
         fontsize=DECODING_YLABEL_FONTSIZE,
         labelpad=2,
     )
+    plot_ax.yaxis.set_label_coords(DECODING_YLABEL_X, 0.5)
     plot_ax.spines["top"].set_visible(False)
     plot_ax.spines["right"].set_visible(False)
     plot_ax.tick_params(axis="y", labelsize=7, length=2, pad=1)
     plot_ax.tick_params(axis="x", length=0, pad=1)
+    if plotted_any:
+        add_decoding_significance_brackets(plot_ax)
 
     train_center = DECODING_TRAIN_SCHEMATIC_CENTER_X
     ax.text(
@@ -3700,6 +4023,7 @@ def plot_position_aligned_raster_axis(
     trajectory_type: str,
     *,
     show_ylabel: bool = False,
+    ylabel_x: float | None = None,
 ) -> None:
     """Plot spikes by normalized task progression across trajectory trials."""
     for trial_index, positions in enumerate(trial_positions, start=1):
@@ -3724,6 +4048,8 @@ def plot_position_aligned_raster_axis(
     ax.set_yticks([])
     if show_ylabel:
         ax.set_ylabel("Trials", fontsize=PANEL_E_AXIS_LABEL_FONTSIZE, labelpad=1)
+        if ylabel_x is not None:
+            ax.yaxis.set_label_coords(ylabel_x, 0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(length=0.9, width=0.35, pad=1)
@@ -3750,6 +4076,8 @@ def plot_panel_e_rate_axis(
     y_max: float,
     show_ylabel: bool = False,
     show_legend: bool = True,
+    show_xlabel: bool = True,
+    ylabel_x: float | None = None,
 ) -> None:
     """Plot occupancy-normalized firing rates for a pair of trajectories."""
     for trajectory_type in trajectory_pair:
@@ -3769,13 +4097,16 @@ def plot_panel_e_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel(
-        TASK_PROGRESSION_XLABEL,
-        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
-        labelpad=1,
-    )
+    if show_xlabel:
+        ax.set_xlabel(
+            TASK_PROGRESSION_XLABEL,
+            fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
+            labelpad=1,
+        )
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=PANEL_E_AXIS_LABEL_FONTSIZE, labelpad=1)
+        if ylabel_x is not None:
+            ax.yaxis.set_label_coords(ylabel_x, 0.5)
     if show_legend:
         ax.legend(frameon=False, fontsize=3.8, handlelength=0.9, borderpad=0.1)
     ax.spines["top"].set_visible(False)
@@ -3795,6 +4126,8 @@ def plot_panel_e_example(
     title: str | None = None,
     show_ylabel: bool = True,
     show_rate_legends: bool = True,
+    show_rate_xlabels: bool = True,
+    show_shared_xlabel: bool = False,
 ) -> None:
     """Plot one panel E example with trajectory rasters and firing-rate curves."""
     ax.set_xlim(0.0, 1.0)
@@ -3836,6 +4169,7 @@ def plot_panel_e_example(
                 trajectory_type,
                 show_ylabel=show_ylabel
                 and trajectory_type in {"center_to_left", "right_to_center"},
+                ylabel_x=PANEL_C_EXAMPLE_YLABEL_X,
             )
 
     finite_rate_maxima = [
@@ -3854,6 +4188,18 @@ def plot_panel_e_example(
             y_max=y_max,
             show_ylabel=show_ylabel and pair_index == 0,
             show_legend=show_rate_legends,
+            show_xlabel=show_rate_xlabels,
+            ylabel_x=PANEL_C_EXAMPLE_YLABEL_X,
+        )
+    if show_shared_xlabel:
+        ax.text(
+            0.5,
+            PANEL_C_EXAMPLE_SHARED_XLABEL_Y,
+            TASK_PROGRESSION_XLABEL,
+            ha="center",
+            va="top",
+            fontsize=6.0,
+            transform=ax.transAxes,
         )
 
 
@@ -3869,8 +4215,11 @@ def plot_panel_e_examples(
         ax.text(0.5, 0.5, "No examples", ha="center", va="center", transform=ax.transAxes)
         return
 
-    block_height = 0.47
-    y_positions = np.linspace(1.0 - block_height, 0.02, len(examples))
+    block_height = PANEL_C_EXAMPLE_BLOCK_HEIGHT
+    if len(examples) == len(PANEL_C_EXAMPLE_BLOCK_Y_POSITIONS):
+        y_positions = np.asarray(PANEL_C_EXAMPLE_BLOCK_Y_POSITIONS, dtype=float)
+    else:
+        y_positions = np.linspace(1.0 - block_height, 0.02, len(examples))
     for example_index, (y0, example) in enumerate(
         zip(y_positions, examples, strict=False),
         start=1,
@@ -3880,6 +4229,8 @@ def plot_panel_e_examples(
             example_ax,
             example,
             title=f"Example cell {example_index}",
+            show_rate_xlabels=False,
+            show_shared_xlabel=True,
         )
 
 
@@ -4057,7 +4408,7 @@ def draw_panel_b_visual_epoch_icon(
     )
     if left_label is not None:
         ax.text(
-            dims["x0"] - 0.58,
+            dims["x0"] - PANEL_B_VISUAL_ICON_LABEL_X_OFFSET,
             dims["y2"] / 2,
             left_label,
             ha="center",
@@ -4068,10 +4419,10 @@ def draw_panel_b_visual_epoch_icon(
                 if label_colors is not None
                 else "black"
             ),
-        )
+    )
     if right_label is not None:
         ax.text(
-            dims["x5"] + 0.58,
+            dims["x5"] + PANEL_B_VISUAL_ICON_LABEL_X_OFFSET,
             dims["y2"] / 2,
             right_label,
             ha="center",
@@ -4097,6 +4448,7 @@ def plot_panel_b_visual_rate_axis(
     y_max: float,
     show_ylabel: bool = False,
     show_legend: bool = False,
+    show_xlabel: bool = True,
     trajectory_epoch_color_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     """Plot Figure 1B firing-rate curves for one route across epochs."""
@@ -4126,7 +4478,8 @@ def plot_panel_b_visual_rate_axis(
     ax.set_xticks([0.0, 1.0])
     ax.set_yticks([0.0, y_max])
     ax.set_yticklabels(["0", f"{y_max:g}"])
-    ax.set_xlabel(TASK_PROGRESSION_XLABEL, fontsize=4.8, labelpad=1)
+    if show_xlabel:
+        ax.set_xlabel(TASK_PROGRESSION_XLABEL, fontsize=4.8, labelpad=1)
     if show_ylabel:
         ax.set_ylabel("FR (Hz)", fontsize=4.8, labelpad=1)
     if show_legend:
@@ -4252,12 +4605,21 @@ def plot_panel_b_visual_example(
             "right_label": "B",
             "fill_track": False,
             "region_fill_colors": {
-                "left_arm": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["A"],
-                "right_arm": PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["B"],
+                "left_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
+                "right_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
             },
-            "region_fill_alpha": 0.22,
+            "region_fill_alpha": PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
         },
-        {"left_label": "B", "right_label": "A", "fill_track": False},
+        {
+            "left_label": "B",
+            "right_label": "A",
+            "fill_track": False,
+            "region_fill_colors": {
+                "left_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
+                "right_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
+            },
+            "region_fill_alpha": PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
+        },
         {"left_label": None, "right_label": None, "fill_track": True},
     )
     for row_index, icon_spec in enumerate(icon_specs):
@@ -4304,8 +4666,22 @@ def plot_panel_b_visual_example(
             y_max=y_max,
             show_ylabel=trajectory_index == 0,
             show_legend=False,
+            show_xlabel=False,
             trajectory_epoch_color_overrides=trajectory_epoch_color_overrides,
         )
+    rate_area_left = left_margin
+    rate_area_right = left_margin + len(trajectories) * column_width + (
+        len(trajectories) - 1
+    ) * column_gap
+    ax.text(
+        (rate_area_left + rate_area_right) / 2.0,
+        PANEL_B_VISUAL_SHARED_XLABEL_Y,
+        TASK_PROGRESSION_XLABEL,
+        ha="center",
+        va="top",
+        fontsize=6.0,
+        transform=ax.transAxes,
+    )
 
 
 def plot_dark_light_example_panel(
@@ -4339,7 +4715,7 @@ def plot_dark_light_example_panel(
     plot_panel_b_visual_example(
         ax,
         example,
-        visual_label_colors=PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS,
+        visual_label_colors=PANEL_B_VISUAL_ICON_COLORS,
         trajectory_epoch_color_overrides=PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS,
         trajectory_epoch_backgrounds=PANEL_DARK_LIGHT_TRAJECTORY_EPOCH_BACKGROUNDS,
         epoch_background_alpha=PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
@@ -4430,7 +4806,7 @@ def make_figure_1(
         behavior_asset_name=DEFAULT_FIGURE_1A_BEHAVIOR_ASSET_NAME,
         rotate_behavior_180=True,
     )
-    panel_b_axis.set_title("Task design", fontsize=8, pad=2)
+    panel_b_axis.set_title(TASK_DESIGN_TITLE, fontsize=8, pad=2)
 
     panel_dark_light_axis = fig.add_subplot(main_grid[0, 1])
     plot_dark_light_example_panel(
@@ -4475,8 +4851,7 @@ def make_figure_1(
         for animal_name, date, epoch, region, unit_id in PANEL_E_EXAMPLES
     ]
     plot_panel_e_examples(panel_d_axis, panel_e_examples)
-    panel_d_axis.set_title("Example dark DGP coding cells", fontsize=8, pad=2)
-    label_axis(panel_d_axis, "C", x=-0.04, y=1.02)
+    panel_d_axis.set_title(PANEL_C_EXAMPLE_TITLE, fontsize=8, pad=2)
 
     spacer_axis = fig.add_subplot(outer_grid[2])
     spacer_axis.axis("off")
@@ -4493,12 +4868,17 @@ def make_figure_1(
     panel_f_axis = fig.add_subplot(final_row_grid[0, 0])
     panel_g_axis = fig.add_subplot(final_row_grid[0, 1])
     panel_h_axis = fig.add_subplot(final_row_grid[0, 2])
+    for final_row_axis in (panel_f_axis, panel_g_axis, panel_h_axis):
+        final_row_axis.axis("off")
+    panel_f_plot_axis = panel_f_axis.inset_axes(BOTTOM_ROW_PLOT_BOUNDS)
+    panel_g_plot_axis = panel_g_axis.inset_axes(BOTTOM_ROW_PLOT_BOUNDS)
+    panel_h_plot_axis = panel_h_axis.inset_axes(BOTTOM_ROW_PLOT_BOUNDS)
     motor_delta_table = load_motor_delta_table(
         data_root=data_root,
         datasets=datasets,
         region=MOTOR_DELTA_REGION,
     )
-    plot_motor_delta_panel(panel_f_axis, motor_delta_table)
+    plot_motor_delta_panel(panel_f_plot_axis, motor_delta_table)
     panel_f_axis.set_title("Comparison to motor", fontsize=8, pad=2)
     encoding_delta_table = load_encoding_delta_table(
         data_root=data_root,
@@ -4506,15 +4886,15 @@ def make_figure_1(
         region=ENCODING_COMPARISON_REGION,
         place_bin_size_cm=encoding_place_bin_size_cm,
     )
-    plot_encoding_delta_panel(panel_g_axis, encoding_delta_table)
+    plot_encoding_delta_panel(panel_g_plot_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
         datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
         region=DECODING_COMPARISON_REGION,
     )
-    plot_decoding_error_panel(panel_h_axis, decoding_error_table)
-    panel_h_axis.set_title("Cross route decoding", fontsize=8, pad=2)
+    plot_decoding_error_panel(panel_h_plot_axis, decoding_error_table)
+    panel_h_axis.set_title(PANEL_G_TITLE, fontsize=8, pad=2)
 
     axes = np.asarray(
         [
@@ -4572,7 +4952,7 @@ def make_figure_1(
             ax=heatmap_axes.ravel().tolist(),
             shrink=0.24,
             pad=HEATMAP_COLORBAR_PAD,
-            aspect=7,
+            aspect=HEATMAP_COLORBAR_ASPECT,
             ticks=[0.0, 1.0],
         )
         colorbar.ax.set_yticklabels(["0", "1"])
@@ -4587,12 +4967,34 @@ def make_figure_1(
     draw_neuron_scale_bar(heatmap_axes[-1, -1])
 
     fig.canvas.draw()
+    add_panel_d_heatmap_block_outlines(heatmap_axes)
     fig.set_constrained_layout(False)
+    panel_e_position = panel_f_axis.get_position()
+    panel_c_position = panel_d_axis.get_position()
+    final_row_left = panel_c_position.x0
+    final_row_right = panel_dark_light_axis.get_position().x1
+    final_row_panel_width = panel_c_position.width
+    final_row_gap = (
+        final_row_right - final_row_left - 3.0 * final_row_panel_width
+    ) / 2.0
+    for panel_index, final_row_axis in enumerate(
+        (panel_f_axis, panel_g_axis, panel_h_axis)
+    ):
+        final_row_axis.set_position(
+            [
+                final_row_left
+                + panel_index * (final_row_panel_width + final_row_gap),
+                panel_e_position.y0,
+                final_row_panel_width,
+                panel_e_position.height,
+            ]
+        )
+    panel_d_axis.set_title("")
     add_aligned_panel_headers(
         fig,
         (panel_b_axis, panel_dark_light_axis),
         labels=("A", "B"),
-        titles=("Task design", PANEL_DARK_LIGHT_EXAMPLE_TITLE),
+        titles=(TASK_DESIGN_TITLE, PANEL_DARK_LIGHT_EXAMPLE_TITLE),
         label_x_offsets=TOP_ROW_PANEL_LABEL_X_OFFSETS,
         title_fontsizes=TOP_ROW_PANEL_TITLE_FONTSIZES,
     )
@@ -4616,20 +5018,42 @@ def make_figure_1(
         y_offset=HEATMAP_PATH_LABEL_OFFSET,
         fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
     )
-    label_axis(corner_axis, "D", x=-0.12, y=1.04)
-    add_aligned_panel_headers(
+    add_panel_header_at_reference_y(
+        fig,
+        panel_d_axis,
+        label="C",
+        title=PANEL_C_EXAMPLE_TITLE,
+        label_x_offset=PANEL_C_LABEL_X_OFFSET,
+        reference_axis=corner_axis,
+        reference_y=PANEL_D_LABEL_Y,
+        fontsize=8,
+    )
+    label_axis(corner_axis, "D", x=PANEL_D_LABEL_X, y=PANEL_D_LABEL_Y)
+    panel_c_label_x = (
+        panel_d_axis.get_position().x0
+        + PANEL_C_LABEL_X_OFFSET * panel_d_axis.get_position().width
+    )
+    panel_d_label_x = fig.transFigure.inverted().transform(
+        corner_axis.transAxes.transform((PANEL_D_LABEL_X, PANEL_D_LABEL_Y))
+    )[0]
+    panel_g_label_x = (
+        panel_h_axis.get_position().x0
+        + BOTTOM_ROW_PANEL_LABEL_X_OFFSETS[2] * panel_h_axis.get_position().width
+    )
+    add_aligned_panel_headers_at_label_positions(
         fig,
         (panel_f_axis, panel_g_axis, panel_h_axis),
         labels=("E", "F", "G"),
         titles=(
             "Comparison to motor",
             "Comparison to alternative codes",
-            "Cross route decoding",
+            PANEL_G_TITLE,
         ),
-        label_x_offsets=BOTTOM_ROW_PANEL_LABEL_X_OFFSETS,
+        label_x_positions=(panel_c_label_x, panel_d_label_x, panel_g_label_x),
         fontsize=8,
     )
-    save_figure(fig, output_path, dpi=dpi)
+    raise_figure_text_to_minimum_fontsize(fig, MIN_FIGURE_1_FONTSIZE_PT)
+    save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
     print(f"Saved Figure 1 to {output_path}")
     return output_path

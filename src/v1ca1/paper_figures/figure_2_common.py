@@ -164,8 +164,10 @@ PANEL_B_EXAMPLE_MODEL_LABELS = {
     PANEL_B_EXAMPLE_SHARED_MODEL_NAME: "Segment scalar",
 }
 PANEL_C_DARK_LIGHT_EXAMPLES = (
-    ("L14", "20240611", "v1", 30, "center_to_left"),
+    ("L14", "20240611", "v1", 34, "center_to_left"),
+    ("L15", "20241121", "v1", 473, "center_to_right"),
     ("L12", "20240421", "v1", 37, "left_to_center"),
+    ("L14", "20240611", "v1", 30, "center_to_left"),
 )
 PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
 PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)

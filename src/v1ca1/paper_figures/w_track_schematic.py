@@ -209,6 +209,7 @@ def _add_compact_stimulus_labels(
     stimulus_layout: str,
     label_color: str,
     label_fontsize: float,
+    label_colors: Mapping[str, Any] | None = None,
 ) -> None:
     """Add compact outside stimulus labels to an existing W-track axis."""
     label_maps = {
@@ -219,6 +220,13 @@ def _add_compact_stimulus_labels(
         raise ValueError(f"stimulus_layout must be one of {STIMULUS_LAYOUTS!r}.")
 
     labels = label_maps[stimulus_layout]
+    def _color_for_label(label: str) -> Any:
+        return (
+            label_colors.get(label, label_color)
+            if label_colors is not None
+            else label_color
+        )
+
     x0, x5 = dims["x0"], dims["x5"]
     y0, y2 = dims["y0"], dims["y2"]
     ax.text(
@@ -228,7 +236,7 @@ def _add_compact_stimulus_labels(
         ha="center",
         va="center",
         fontsize=label_fontsize,
-        color=label_color,
+        color=_color_for_label(labels["left"]),
     )
     ax.text(
         x5 + 0.82,
@@ -237,7 +245,7 @@ def _add_compact_stimulus_labels(
         ha="center",
         va="center",
         fontsize=label_fontsize,
-        color=label_color,
+        color=_color_for_label(labels["right"]),
     )
     ax.text(
         x5 / 2,
@@ -246,7 +254,7 @@ def _add_compact_stimulus_labels(
         ha="center",
         va="center",
         fontsize=label_fontsize,
-        color=label_color,
+        color=_color_for_label(labels["center"]),
     )
 
 
@@ -257,6 +265,7 @@ def draw_w_track_basis_schematic(
     stimulus_layout: str = "stim1",
     show_labels: bool = False,
     label_color: str = "black",
+    label_colors: Mapping[str, Any] | None = None,
     label_fontsize: float = 8.0,
     arrow_color: str | None = None,
     track_edge_color: str = "black",
@@ -265,6 +274,7 @@ def draw_w_track_basis_schematic(
     arrow_mutation_scale: float = 8.0,
     fill_track_black: bool = False,
     show_arrow: bool = True,
+    show_trajectory: bool = True,
     show_basis: bool = False,
     basis_segment_styles: list[dict[str, Any]] | None = None,
     basis_edge_color: str = "black",
@@ -280,9 +290,12 @@ def draw_w_track_basis_schematic(
     oval_fill_color: str = SCHEMATIC_COLORS["light_basis"],
     oval_fill_alpha: float = 0.35,
     oval_linewidth: float = 1.0,
+    region_fill_colors: Mapping[str, Any] | None = None,
+    region_fill_alpha: float | None = None,
 ) -> "Axes":
     """Draw a W-track with optional basis/segment overlays on an existing axis."""
-    from matplotlib.patches import Polygon
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Polygon, Rectangle
 
     if arrow_color is None:
         arrow_color = TRAJECTORY_COLORS.get(
@@ -292,6 +305,9 @@ def draw_w_track_basis_schematic(
 
     outline, points, dims = get_w_track_geometry()
     path = trajectory_points(trajectory_name, points)
+    normalized_region_fill_colors = _normalize_w_track_region_fill_colors(
+        region_fill_colors
+    )
     ax.add_patch(
         Polygon(
             outline,
@@ -303,6 +319,25 @@ def draw_w_track_basis_schematic(
             zorder=1,
         )
     )
+    region_rectangles = _get_w_track_region_rectangles(dims)
+    for region_name, color in normalized_region_fill_colors.items():
+        x, y, width, height = region_rectangles[region_name]
+        facecolor = (
+            color
+            if region_fill_alpha is None
+            else to_rgba(color, alpha=region_fill_alpha)
+        )
+        ax.add_patch(
+            Rectangle(
+                (x, y),
+                width,
+                height,
+                facecolor=facecolor,
+                edgecolor="none",
+                linewidth=0.0,
+                zorder=2,
+            )
+        )
 
     if show_basis:
         draw_segmented_basis_circles(
@@ -331,41 +366,42 @@ def draw_w_track_basis_schematic(
         )
 
     xs, ys = zip(*path, strict=True)
-    if show_arrow:
-        ax.plot(
-            xs[:-1],
-            ys[:-1],
-            color=arrow_color,
-            linewidth=trajectory_linewidth,
-            solid_capstyle="round",
-            solid_joinstyle="round",
-            zorder=5,
-        )
-        ax.annotate(
-            "",
-            xy=path[-1],
-            xytext=path[-2],
-            arrowprops={
-                "arrowstyle": "-|>",
-                "color": arrow_color,
-                "lw": trajectory_linewidth,
-                "mutation_scale": arrow_mutation_scale,
-                "shrinkA": 0,
-                "shrinkB": 0,
-                "connectionstyle": "arc3,rad=0",
-            },
-            zorder=6,
-        )
-    else:
-        ax.plot(
-            xs,
-            ys,
-            color=arrow_color,
-            linewidth=trajectory_linewidth,
-            solid_capstyle="round",
-            solid_joinstyle="round",
-            zorder=5,
-        )
+    if show_trajectory:
+        if show_arrow:
+            ax.plot(
+                xs[:-1],
+                ys[:-1],
+                color=arrow_color,
+                linewidth=trajectory_linewidth,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                zorder=5,
+            )
+            ax.annotate(
+                "",
+                xy=path[-1],
+                xytext=path[-2],
+                arrowprops={
+                    "arrowstyle": "-|>",
+                    "color": arrow_color,
+                    "lw": trajectory_linewidth,
+                    "mutation_scale": arrow_mutation_scale,
+                    "shrinkA": 0,
+                    "shrinkB": 0,
+                    "connectionstyle": "arc3,rad=0",
+                },
+                zorder=6,
+            )
+        else:
+            ax.plot(
+                xs,
+                ys,
+                color=arrow_color,
+                linewidth=trajectory_linewidth,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                zorder=5,
+            )
 
     if show_labels:
         _add_compact_stimulus_labels(
@@ -373,6 +409,7 @@ def draw_w_track_basis_schematic(
             dims,
             stimulus_layout=stimulus_layout,
             label_color=label_color,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
         )
 

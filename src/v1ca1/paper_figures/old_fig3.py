@@ -20,6 +20,10 @@ from v1ca1.helper.session import (
     TRAJECTORY_TYPES,
     get_analysis_path,
 )
+from v1ca1.helper.plot_wtrack_schematic import (
+    get_w_track_geometry,
+    trajectory_points,
+)
 from v1ca1.paper_figures.datasets import (
     DEFAULT_DARK_EPOCH,
     DEFAULT_LIGHT_EPOCH,
@@ -288,6 +292,19 @@ PANEL_G_FIELD_LABEL_Y = 0.98
 PANEL_G_INDEPENDENT_BASIS_LABEL_Y = 0.87
 PANEL_G_COMPONENT_LABEL_FONTSIZE = 4.3
 PANEL_G_SEGMENT_MODULATION_LABEL_GAP = 0.045
+PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET = 0.16
+PANEL_G_PLACE_FIELD_PATH_ARROW_TRAJECTORY = "center_to_left"
+PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_COLOR = "white"
+PANEL_G_PLACE_FIELD_PATH_ARROW_COLOR = "black"
+PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_ALPHA = 0.88
+PANEL_G_PLACE_FIELD_PATH_ARROW_ALPHA = 0.78
+PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_LINEWIDTH = 0.72
+PANEL_G_PLACE_FIELD_PATH_ARROW_LINEWIDTH = 0.40
+PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_LENGTH = 0.42
+PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_WIDTH = 0.38
+PANEL_G_PLACE_FIELD_PATH_ARROW_ZORDER = 3.30
+PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_OUTLINE_ZORDER = 3.34
+PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_ZORDER = 3.35
 PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH = 0.16
 PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT = 0.24
 PANEL_G_INDEPENDENT_BASIS_ICON_LEFT_X = 0.43
@@ -1537,6 +1554,11 @@ def plot_panel_a_example(
     title: str | None = None,
     y_shift: float = 0.0,
     y_max: float | None = None,
+    dark_epoch_axis_left: float = 0.10,
+    light_epoch_axis_left: float = 0.56,
+    epoch_axis_width: float = 0.40,
+    schematic_axis_left: float = 0.012,
+    schematic_axis_width: float = 0.070,
     show_correlation: bool = False,
     similarity_annotation: str = "correlation",
     correlation_text_position: tuple[float, float] = (0.96, 0.92),
@@ -1569,7 +1591,14 @@ def plot_panel_a_example(
             + raster_height * section_centers[trajectory_type]
             - schematic_height / 2.0
         )
-        schematic_ax = ax.inset_axes([0.012, schematic_y, 0.070, schematic_height])
+        schematic_ax = ax.inset_axes(
+            [
+                schematic_axis_left,
+                schematic_y,
+                schematic_axis_width,
+                schematic_height,
+            ]
+        )
         draw_w_track_schematic(
             schematic_ax,
             trajectory_name=trajectory_type,
@@ -1579,8 +1608,12 @@ def plot_panel_a_example(
             arrow_mutation_scale=5.8,
             fill_track=False,
         )
-    dark_raster_ax = ax.inset_axes([0.10, raster_y, 0.40, raster_height])
-    light_raster_ax = ax.inset_axes([0.56, raster_y, 0.40, raster_height])
+    dark_raster_ax = ax.inset_axes(
+        [dark_epoch_axis_left, raster_y, epoch_axis_width, raster_height]
+    )
+    light_raster_ax = ax.inset_axes(
+        [light_epoch_axis_left, raster_y, epoch_axis_width, raster_height]
+    )
     dark_raster_ax.set_facecolor(PANEL_A_DARK_EPOCH_BACKGROUND)
     plot_panel_a_raster_axis(
         dark_raster_ax,
@@ -1599,10 +1632,20 @@ def plot_panel_a_example(
     )
 
     dark_ax = ax.inset_axes(
-        [0.10, PANEL_A_EXAMPLE_RATE_Y + y_shift, 0.40, PANEL_A_EXAMPLE_RATE_HEIGHT]
+        [
+            dark_epoch_axis_left,
+            PANEL_A_EXAMPLE_RATE_Y + y_shift,
+            epoch_axis_width,
+            PANEL_A_EXAMPLE_RATE_HEIGHT,
+        ]
     )
     light_ax = ax.inset_axes(
-        [0.56, PANEL_A_EXAMPLE_RATE_Y + y_shift, 0.40, PANEL_A_EXAMPLE_RATE_HEIGHT]
+        [
+            light_epoch_axis_left,
+            PANEL_A_EXAMPLE_RATE_Y + y_shift,
+            epoch_axis_width,
+            PANEL_A_EXAMPLE_RATE_HEIGHT,
+        ]
     )
     dark_ax.set_facecolor(PANEL_A_DARK_EPOCH_BACKGROUND)
     plot_epoch_path_rate_axis(
@@ -3292,6 +3335,11 @@ def load_panel_glm_data(
             region=region,
             light_epoch=light_epoch,
             dark_epoch=dark_epoch,
+            example_count=(
+                len(dark_light_requested_examples)
+                if dark_light_requested_examples is not None
+                else PANEL_G_EXAMPLE_COUNT
+            ),
             requested_examples=dark_light_requested_examples,
         ),
         "swap_delta": load_panel_h_swap_delta_table(
@@ -3952,8 +4000,14 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     ax.set_aspect("equal", adjustable="datalim")
     ax.axis("off")
     line_kwargs = {"color": "black", "linewidth": 1.05, "solid_capstyle": "butt"}
+    vertical_span = (
+        PANEL_G_INDEPENDENT_BASIS_ICON_TOP
+        - PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM
+    )
+    horizontal_left = 0.5 - vertical_span / 2.0
+    horizontal_right = 0.5 + vertical_span / 2.0
     ax.plot(
-        [0.21, 0.79],
+        [horizontal_left, horizontal_right],
         [PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM] * 2,
         **line_kwargs,
     )
@@ -3975,6 +4029,226 @@ def _draw_panel_g_basis_icon(ax: "Axes") -> None:
     )
 
 
+def _draw_panel_g_place_field_blob(
+    ax: "Axes",
+    *,
+    colors: Sequence[str] | None = None,
+    size_scale: float = 1.0,
+    arm: str = "left",
+) -> None:
+    """Draw a compact path-aligned place-field heat strip on a W-track schematic."""
+    from matplotlib.patches import Ellipse
+
+    selected_colors = tuple(colors or ("#FEE08B", "#FDAE61", "#D73027"))
+    selected_size_scale = float(size_scale)
+    _outline, _points, dims = get_w_track_geometry()
+    arm_centers = {
+        "left": (dims["x0"] + dims["x1"]) / 2.0,
+        "left_arm": (dims["x0"] + dims["x1"]) / 2.0,
+        "center": (dims["x2"] + dims["x3"]) / 2.0,
+        "center_arm": (dims["x2"] + dims["x3"]) / 2.0,
+        "right": (dims["x4"] + dims["x5"]) / 2.0,
+        "right_arm": (dims["x4"] + dims["x5"]) / 2.0,
+    }
+    center_x = arm_centers[arm]
+    field_center_y = dims["y1"] + 1.45
+    field_sigma = 0.58
+    y_values = np.linspace(dims["y1"] + 0.35, dims["y2"] - 0.28, 8)
+    for y in y_values:
+        relative_rate = float(np.exp(-0.5 * ((y - field_center_y) / field_sigma) ** 2))
+        if relative_rate < 0.06:
+            continue
+        color = selected_colors[2] if relative_rate > 0.72 else selected_colors[1]
+        if relative_rate < 0.32:
+            color = selected_colors[0]
+        ax.add_patch(
+            Ellipse(
+                (center_x, y),
+                dims["corridor_w"] * 0.96 * selected_size_scale,
+                0.72 * selected_size_scale,
+                facecolor=color,
+                edgecolor="none",
+                alpha=0.24 + 0.74 * relative_rate,
+                zorder=4.0 + relative_rate,
+            )
+        )
+
+
+def _panel_g_arrow_head_geometry(
+    tail: tuple[float, float],
+    tip: tuple[float, float],
+    *,
+    head_length: float = PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_LENGTH,
+    head_width: float = PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_WIDTH,
+) -> tuple[list[tuple[float, float]], tuple[float, float]]:
+    """Return triangle vertices and shaft endpoint for a directed arrow head."""
+    tail_xy = np.asarray(tail, dtype=float)
+    tip_xy = np.asarray(tip, dtype=float)
+    direction = tip_xy - tail_xy
+    segment_length = float(np.hypot(direction[0], direction[1]))
+    if segment_length == 0.0:
+        raise ValueError("Cannot draw an arrow head on a zero-length segment.")
+
+    unit = direction / segment_length
+    base_center = tip_xy - unit * min(head_length, segment_length)
+    perpendicular = np.asarray((-unit[1], unit[0]), dtype=float)
+    base_left = base_center + perpendicular * head_width / 2.0
+    base_right = base_center - perpendicular * head_width / 2.0
+    vertices = np.vstack((tip_xy, base_left, base_right))
+    return (
+        [(float(x), float(y)) for x, y in vertices],
+        (float(base_center[0]), float(base_center[1])),
+    )
+
+
+def _draw_panel_g_place_field_path_arrow(
+    ax: "Axes",
+    *,
+    trajectory_name: str = PANEL_G_PLACE_FIELD_PATH_ARROW_TRAJECTORY,
+) -> None:
+    """Draw a low-contrast haloed path arrow over a place-field schematic."""
+    from matplotlib import patheffects
+    from matplotlib.colors import to_rgba
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch, Polygon
+
+    _outline, points, _dims = get_w_track_geometry()
+    path = trajectory_points(trajectory_name, points)
+    arrow_head_vertices, shaft_end = _panel_g_arrow_head_geometry(path[-2], path[-1])
+    shaft_path = [*path[:-1], shaft_end]
+    xs, ys = zip(*shaft_path, strict=True)
+    arrow_effects = [
+        patheffects.Stroke(
+            linewidth=PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_LINEWIDTH,
+            foreground=to_rgba(
+                PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_COLOR,
+                PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_ALPHA,
+            ),
+        ),
+        patheffects.Normal(),
+    ]
+    (line,) = ax.plot(
+        xs,
+        ys,
+        color=to_rgba(
+            PANEL_G_PLACE_FIELD_PATH_ARROW_COLOR,
+            PANEL_G_PLACE_FIELD_PATH_ARROW_ALPHA,
+        ),
+        linewidth=PANEL_G_PLACE_FIELD_PATH_ARROW_LINEWIDTH,
+        solid_capstyle="round",
+        solid_joinstyle="round",
+        zorder=PANEL_G_PLACE_FIELD_PATH_ARROW_ZORDER,
+        label="_place_field_path_arrow",
+    )
+    line.set_path_effects(arrow_effects)
+    ax.add_patch(
+        PathPatch(
+            Path(
+                [
+                    arrow_head_vertices[1],
+                    arrow_head_vertices[0],
+                    arrow_head_vertices[2],
+                ],
+                [Path.MOVETO, Path.LINETO, Path.LINETO],
+            ),
+            facecolor="none",
+            edgecolor=to_rgba(
+                PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_COLOR,
+                PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_ALPHA,
+            ),
+            linewidth=PANEL_G_PLACE_FIELD_PATH_ARROW_HALO_LINEWIDTH,
+            capstyle="round",
+            joinstyle="round",
+            zorder=PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_OUTLINE_ZORDER,
+            label="_place_field_path_arrow_head_outline",
+        )
+    )
+    ax.add_patch(
+        Polygon(
+            arrow_head_vertices,
+            closed=True,
+            facecolor=to_rgba(
+                PANEL_G_PLACE_FIELD_PATH_ARROW_COLOR,
+                PANEL_G_PLACE_FIELD_PATH_ARROW_ALPHA,
+            ),
+            edgecolor="none",
+            linewidth=0.0,
+            zorder=PANEL_G_PLACE_FIELD_PATH_ARROW_HEAD_ZORDER,
+            label="_place_field_path_arrow_head",
+        )
+    )
+
+
+def _draw_panel_g_segment_gain_outlines(
+    ax: "Axes",
+    *,
+    outline_colors: Mapping[str, Any],
+    outline_linewidths: Mapping[str, float] | None = None,
+) -> None:
+    """Draw colored segment outlines outside the W-track corridor boundary."""
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch
+
+    _outline, _points, dims = get_w_track_geometry()
+    region_rectangles = {
+        "left_arm": (
+            dims["x0"],
+            dims["y1"],
+            dims["x1"] - dims["x0"],
+            dims["y2"] - dims["y1"],
+        ),
+        "center_arm": (
+            dims["x2"],
+            dims["y1"],
+            dims["x3"] - dims["x2"],
+            dims["y2"] - dims["y1"],
+        ),
+        "right_arm": (
+            dims["x4"],
+            dims["y1"],
+            dims["x5"] - dims["x4"],
+            dims["y2"] - dims["y1"],
+        ),
+        "left_center_connector": (
+            dims["x0"],
+            dims["y0"],
+            dims["x3"] - dims["x0"],
+            dims["y1"] - dims["y0"],
+        ),
+        "center_right_connector": (
+            dims["x2"],
+            dims["y0"],
+            dims["x5"] - dims["x2"],
+            dims["y1"] - dims["y0"],
+        ),
+    }
+    outset = PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET
+    for region_name, color in outline_colors.items():
+        x, y, width, height = region_rectangles[region_name]
+        left = x - outset
+        right = x + width + outset
+        bottom = y - outset
+        top = y + height + outset
+        ax.add_patch(
+            PathPatch(
+                Path(
+                    [(left, bottom), (left, top), (right, top), (right, bottom)],
+                    [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO],
+                ),
+                facecolor="none",
+                edgecolor=color,
+                linewidth=(
+                    outline_linewidths.get(region_name, 1.4)
+                    if outline_linewidths is not None
+                    else 1.4
+                ),
+                joinstyle="miter",
+                capstyle="butt",
+                zorder=6.5,
+            )
+        )
+
+
 def _draw_panel_g_track(
     ax: "Axes",
     *,
@@ -3986,6 +4260,20 @@ def _draw_panel_g_track(
     oval_regions: Sequence[str] | None = None,
     fill_oval_regions: bool = True,
     label_fontsize: float = 4.8,
+    label_colors: Mapping[str, Any] | None = None,
+    region_fill_colors: Mapping[str, Any] | None = None,
+    region_fill_alpha: float | None = None,
+    segment_outline_colors: Mapping[str, Any] | None = None,
+    segment_outline_linewidths: Mapping[str, float] | None = None,
+    dark_basis_edge_color: str = "black",
+    dark_basis_fill_color: str = PANEL_G_BASIS_DARK_COLOR,
+    dark_basis_fill_alpha: float = 0.7,
+    dark_basis_linewidth: float = 0.25,
+    show_place_field_blob: bool = False,
+    place_field_colors: Sequence[str] | None = None,
+    place_field_blob_size_scale: float = 1.0,
+    place_field_arm: str = "left",
+    show_place_field_path_arrow: bool = False,
 ) -> None:
     """Draw one W-track field component for the Panel G model schematic."""
     trajectory_color = PANEL_G_ARROW_COLOR
@@ -3998,18 +4286,28 @@ def _draw_panel_g_track(
             stimulus_layout=stimulus_layout,
             label_color="white",
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=_panel_g_basis_styles(
-                edge_color="black",
-                fill_color=PANEL_G_BASIS_DARK_COLOR,
-                fill_alpha=0.7,
-                linewidth=0.25,
+                edge_color=dark_basis_edge_color,
+                fill_color=dark_basis_fill_color,
+                fill_alpha=dark_basis_fill_alpha,
+                linewidth=dark_basis_linewidth,
             ),
             arrow_color=trajectory_color,
             track_linewidth=0.55,
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
+        if show_place_field_path_arrow:
+            _draw_panel_g_place_field_path_arrow(ax)
         _remove_w_track_center_label(ax)
         return
 
@@ -4029,14 +4327,27 @@ def _draw_panel_g_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=basis_segment_styles,
             arrow_color=trajectory_color,
             track_linewidth=0.55,
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
+            region_fill_colors=region_fill_colors,
+            region_fill_alpha=region_fill_alpha,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
+        if show_place_field_path_arrow:
+            _draw_panel_g_place_field_path_arrow(ax)
         _remove_w_track_center_label(ax)
         return
 
@@ -4049,8 +4360,11 @@ def _draw_panel_g_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_large_ovals=True,
+            show_arrow=segment_outline_colors is None,
+            show_trajectory=segment_outline_colors is None,
+            show_large_ovals=segment_outline_colors is None,
             oval_regions=selected_oval_regions,
             oval_styles=_panel_g_oval_styles(
                 len(selected_oval_regions),
@@ -4061,6 +4375,12 @@ def _draw_panel_g_track(
             trajectory_linewidth=0.78,
             arrow_mutation_scale=6.0,
         )
+        if segment_outline_colors is not None:
+            _draw_panel_g_segment_gain_outlines(
+                ax,
+                outline_colors=segment_outline_colors,
+                outline_linewidths=segment_outline_linewidths,
+            )
         _remove_w_track_center_label(ax)
         return
 
@@ -4073,15 +4393,17 @@ def _draw_panel_g_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=_panel_g_basis_styles(
                 edge_color="black",
                 fill_color=PANEL_G_BASIS_DARK_COLOR,
                 fill_alpha=0.7,
                 linewidth=0.25,
             ),
-            show_large_ovals=True,
+            show_large_ovals=not show_place_field_blob,
             oval_regions=selected_oval_regions,
             oval_styles=_panel_g_oval_styles(
                 len(selected_oval_regions),
@@ -4091,7 +4413,24 @@ def _draw_panel_g_track(
             track_linewidth=0.55,
             trajectory_linewidth=0.85,
             arrow_mutation_scale=6.5,
+            region_fill_colors=region_fill_colors,
+            region_fill_alpha=region_fill_alpha,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
+        if show_place_field_path_arrow:
+            _draw_panel_g_place_field_path_arrow(ax)
+        if segment_outline_colors is not None:
+            _draw_panel_g_segment_gain_outlines(
+                ax,
+                outline_colors=segment_outline_colors,
+                outline_linewidths=segment_outline_linewidths,
+            )
         _remove_w_track_center_label(ax)
         return
 
@@ -4106,6 +4445,7 @@ def _plot_panel_g_architecture_schematic(
     track_size: tuple[float, float] | None = None,
     independent_basis_icon_scale: float = 1.0,
     independent_basis_label: str = "Independent\nbasis functions",
+    independent_basis_label_y: float = PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
     show_dark_track_labels: bool = False,
     field_label_y: float = PANEL_G_FIELD_LABEL_Y,
     model_label_x: float = 0.08,
@@ -4116,6 +4456,26 @@ def _plot_panel_g_architecture_schematic(
     segment_modulation_label: str = "Segment-specific modulation",
     segment_modulation_label_gap: float = PANEL_G_SEGMENT_MODULATION_LABEL_GAP,
     fill_oval_regions: bool = True,
+    independent_light_region_fill_colors: Mapping[str, Any] | None = None,
+    independent_light_region_fill_alpha: float | None = None,
+    independent_light_label_colors: Mapping[str, Any] | None = None,
+    shared_light_region_fill_colors: Mapping[str, Any] | None = None,
+    shared_light_region_fill_alpha: float | None = None,
+    shared_light_label_colors: Mapping[str, Any] | None = None,
+    dark_basis_edge_color: str = "black",
+    dark_basis_fill_color: str = PANEL_G_BASIS_DARK_COLOR,
+    dark_basis_fill_alpha: float = 0.7,
+    dark_basis_linewidth: float = 0.25,
+    show_place_field_blobs: bool = False,
+    independent_dark_place_field_colors: Sequence[str] | None = None,
+    independent_light_place_field_colors: Sequence[str] | None = None,
+    shared_dark_place_field_colors: Sequence[str] | None = None,
+    shared_light_place_field_colors: Sequence[str] | None = None,
+    place_field_blob_size_scale: float = 1.0,
+    show_place_field_path_arrow: bool = False,
+    segment_gain_outline_colors: Mapping[str, Any] | None = None,
+    segment_gain_outline_linewidths: Mapping[str, float] | None = None,
+    segment_gain_label_colors: Mapping[str, Any] | None = None,
 ) -> None:
     """Draw the compact dark/light GLM architecture schematic."""
     ax.set_xlim(0.0, 1.0)
@@ -4216,7 +4576,7 @@ def _plot_panel_g_architecture_schematic(
     )
     ax.text(
         independent_basis_center_x,
-        PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
+        independent_basis_label_y,
         independent_basis_label,
         ha="center",
         va="center",
@@ -4244,6 +4604,14 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="dark",
         show_labels=show_dark_track_labels,
+        dark_basis_edge_color=dark_basis_edge_color,
+        dark_basis_fill_color=dark_basis_fill_color,
+        dark_basis_fill_alpha=dark_basis_fill_alpha,
+        dark_basis_linewidth=dark_basis_linewidth,
+        show_place_field_blob=show_place_field_blobs,
+        place_field_colors=independent_dark_place_field_colors,
+        place_field_blob_size_scale=place_field_blob_size_scale,
+        show_place_field_path_arrow=show_place_field_path_arrow,
     )
     basis_ax = ax.inset_axes(
         [
@@ -4267,6 +4635,13 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="independent_light",
         show_labels=True,
+        label_colors=independent_light_label_colors,
+        region_fill_colors=independent_light_region_fill_colors,
+        region_fill_alpha=independent_light_region_fill_alpha,
+        show_place_field_blob=show_place_field_blobs,
+        place_field_colors=independent_light_place_field_colors,
+        place_field_blob_size_scale=place_field_blob_size_scale,
+        show_place_field_path_arrow=show_place_field_path_arrow,
     )
 
     _draw_panel_g_track(
@@ -4280,6 +4655,14 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="dark",
         show_labels=show_dark_track_labels,
+        dark_basis_edge_color=dark_basis_edge_color,
+        dark_basis_fill_color=dark_basis_fill_color,
+        dark_basis_fill_alpha=dark_basis_fill_alpha,
+        dark_basis_linewidth=dark_basis_linewidth,
+        show_place_field_blob=show_place_field_blobs,
+        place_field_colors=shared_dark_place_field_colors,
+        place_field_blob_size_scale=place_field_blob_size_scale,
+        show_place_field_path_arrow=show_place_field_path_arrow,
     )
     ax.text(
         0.39,
@@ -4301,7 +4684,10 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="segment_modulation",
         show_labels=True,
+        label_colors=segment_gain_label_colors,
         fill_oval_regions=fill_oval_regions,
+        segment_outline_colors=segment_gain_outline_colors,
+        segment_outline_linewidths=segment_gain_outline_linewidths,
     )
     ax.annotate(
         "",
@@ -4330,7 +4716,16 @@ def _plot_panel_g_architecture_schematic(
         ),
         track_kind="shared_light",
         show_labels=True,
+        label_colors=shared_light_label_colors,
         fill_oval_regions=fill_oval_regions,
+        region_fill_colors=shared_light_region_fill_colors,
+        region_fill_alpha=shared_light_region_fill_alpha,
+        show_place_field_blob=show_place_field_blobs,
+        place_field_colors=shared_light_place_field_colors,
+        place_field_blob_size_scale=place_field_blob_size_scale,
+        show_place_field_path_arrow=show_place_field_path_arrow,
+        segment_outline_colors=segment_gain_outline_colors,
+        segment_outline_linewidths=segment_gain_outline_linewidths,
     )
 
 
@@ -4433,10 +4828,13 @@ def _plot_panel_g_example_columns(
     layout: str = "columns",
     row_height: float = 0.46,
     row_gap: float = 0.05,
+    show_ylabels_for_all_examples: bool = False,
+    show_epoch_titles: bool = True,
+    show_light_yticklabels: bool = True,
     model_colors: Mapping[str, str] | None = None,
     model_labels: Mapping[str, str] | None = None,
 ) -> None:
-    """Plot two example cells below the Panel G schematic."""
+    """Plot example cells below or beside the Panel G schematic."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -4454,6 +4852,9 @@ def _plot_panel_g_example_columns(
         *,
         column_left: float,
         show_legend: bool,
+        show_ylabel: bool = True,
+        show_epoch_titles: bool = True,
+        show_light_yticklabels: bool = True,
     ) -> None:
         y_max = _panel_g_examples_y_max([example])
         plot_left = column_left + plot_left_offset
@@ -4499,8 +4900,8 @@ def _plot_panel_g_example_columns(
             example,
             epoch_key="dark",
             y_max=y_max,
-            show_ylabel=True,
-            show_title=True,
+            show_ylabel=show_ylabel,
+            show_title=show_epoch_titles,
             model_colors=model_colors,
             model_labels=model_labels,
         )
@@ -4509,13 +4910,15 @@ def _plot_panel_g_example_columns(
             example,
             epoch_key="light",
             y_max=y_max,
-            show_title=True,
+            show_title=show_epoch_titles,
             show_legend=show_legend,
             legend_loc="center left",
             legend_bbox_to_anchor=(1.02, 0.5),
             model_colors=model_colors,
             model_labels=model_labels,
         )
+        if not show_light_yticklabels:
+            light_ax.tick_params(axis="y", labelleft=False)
         block_ax.text(
             plot_center,
             xlabel_y,
@@ -4536,21 +4939,56 @@ def _plot_panel_g_example_columns(
                 example_index,
                 column_left=column_left,
                 show_legend=example_index == 2,
+                show_ylabel=True,
+                show_epoch_titles=show_epoch_titles,
+                show_light_yticklabels=show_light_yticklabels,
             )
         return
 
-    for example_index, example in enumerate(examples[:2], start=1):
-        row_bottom = 1.0 - example_index * row_height - (example_index - 1) * row_gap
-        row_ax = ax.inset_axes([0.0, row_bottom, 1.0, row_height])
-        row_ax.set_xlim(0.0, 1.0)
-        row_ax.set_ylim(0.0, 1.0)
-        row_ax.axis("off")
+    display_examples = list(examples[:4])
+    if len(display_examples) <= 2:
+        for example_index, example in enumerate(display_examples, start=1):
+            row_bottom = (
+                1.0 - example_index * row_height - (example_index - 1) * row_gap
+            )
+            row_ax = ax.inset_axes([0.0, row_bottom, 1.0, row_height])
+            row_ax.set_xlim(0.0, 1.0)
+            row_ax.set_ylim(0.0, 1.0)
+            row_ax.axis("off")
+            _plot_example_block(
+                row_ax,
+                example,
+                example_index,
+                column_left=0.0,
+                show_legend=example_index == 2,
+                show_ylabel=True,
+                show_epoch_titles=show_epoch_titles,
+                show_light_yticklabels=show_light_yticklabels,
+            )
+        return
+
+    column_count = 2
+    row_count = (len(display_examples) + column_count - 1) // column_count
+    cell_width = (1.0 - column_gap * (column_count - 1)) / column_count
+    cell_height = (1.0 - row_gap * (row_count - 1)) / row_count
+    for example_index, example in enumerate(display_examples, start=1):
+        row_index = (example_index - 1) // column_count
+        column_index = (example_index - 1) % column_count
+        left = column_index * (cell_width + column_gap)
+        bottom = 1.0 - (row_index + 1) * cell_height - row_index * row_gap
+        cell_ax = ax.inset_axes([left, bottom, cell_width, cell_height])
+        cell_ax.set_xlim(0.0, 1.0)
+        cell_ax.set_ylim(0.0, 1.0)
+        cell_ax.axis("off")
         _plot_example_block(
-            row_ax,
+            cell_ax,
             example,
             example_index,
             column_left=0.0,
             show_legend=example_index == 2,
+            show_ylabel=show_ylabels_for_all_examples or column_index == 0,
+            show_epoch_titles=show_epoch_titles,
+            show_light_yticklabels=show_light_yticklabels,
         )
 
 
@@ -4756,6 +5194,15 @@ def _draw_panel_h_track(
     oval_regions: Sequence[str] | None = None,
     fill_oval_regions: bool = True,
     label_fontsize: float = 3.1,
+    label_colors: Mapping[str, Any] | None = None,
+    region_fill_colors: Mapping[str, Any] | None = None,
+    region_fill_alpha: float | None = None,
+    show_place_field_blob: bool = False,
+    place_field_colors: Sequence[str] | None = None,
+    place_field_blob_size_scale: float = 1.0,
+    place_field_arm: str = "left",
+    segment_outline_colors: Mapping[str, Any] | None = None,
+    segment_outline_linewidths: Mapping[str, float] | None = None,
 ) -> None:
     """Draw one thin W-track component for the scaled Panel H swap schematic."""
     trajectory_color = GLM_TRAJECTORY_ARROW_COLOR
@@ -4768,7 +5215,8 @@ def _draw_panel_h_track(
             stimulus_layout=stimulus_layout,
             label_color="white",
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=_panel_h_basis_styles(
                 edge_color="black",
                 fill_color=GLM_BASIS_DARK_COLOR,
@@ -4780,6 +5228,13 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
         _remove_w_track_center_label(ax)
         return
 
@@ -4799,14 +5254,25 @@ def _draw_panel_h_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=basis_segment_styles,
             arrow_color=trajectory_color,
             track_linewidth=PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
+            region_fill_colors=region_fill_colors,
+            region_fill_alpha=region_fill_alpha,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
         _remove_w_track_center_label(ax)
         return
 
@@ -4817,8 +5283,11 @@ def _draw_panel_h_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_large_ovals=True,
+            show_arrow=segment_outline_colors is None,
+            show_trajectory=segment_outline_colors is None,
+            show_large_ovals=segment_outline_colors is None,
             oval_regions=selected_oval_regions,
             oval_styles=_panel_h_oval_styles(
                 len(selected_oval_regions),
@@ -4829,6 +5298,12 @@ def _draw_panel_h_track(
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
         )
+        if segment_outline_colors is not None:
+            _draw_panel_g_segment_gain_outlines(
+                ax,
+                outline_colors=segment_outline_colors,
+                outline_linewidths=segment_outline_linewidths,
+            )
         _remove_w_track_center_label(ax)
         return
 
@@ -4839,12 +5314,14 @@ def _draw_panel_h_track(
             trajectory_name=trajectory_name,
             show_labels=show_labels,
             stimulus_layout=stimulus_layout,
+            label_colors=label_colors,
             label_fontsize=label_fontsize,
-            show_basis=True,
+            show_trajectory=not show_place_field_blob,
+            show_basis=not show_place_field_blob,
             basis_segment_styles=_panel_h_shared_basis_styles_with_filled_segments(
                 (3,)
             ),
-            show_large_ovals=True,
+            show_large_ovals=not show_place_field_blob,
             oval_regions=selected_oval_regions,
             oval_styles=_panel_h_oval_styles(
                 len(selected_oval_regions),
@@ -4854,7 +5331,22 @@ def _draw_panel_h_track(
             track_linewidth=PANEL_H_SCHEMATIC_TRACK_LINEWIDTH,
             trajectory_linewidth=PANEL_H_SCHEMATIC_TRAJECTORY_LINEWIDTH,
             arrow_mutation_scale=PANEL_H_SCHEMATIC_ARROW_SCALE,
+            region_fill_colors=region_fill_colors,
+            region_fill_alpha=region_fill_alpha,
         )
+        if show_place_field_blob:
+            _draw_panel_g_place_field_blob(
+                ax,
+                colors=place_field_colors,
+                size_scale=place_field_blob_size_scale,
+                arm=place_field_arm,
+            )
+        if segment_outline_colors is not None:
+            _draw_panel_g_segment_gain_outlines(
+                ax,
+                outline_colors=segment_outline_colors,
+                outline_linewidths=segment_outline_linewidths,
+            )
         _remove_w_track_center_label(ax)
         return
 

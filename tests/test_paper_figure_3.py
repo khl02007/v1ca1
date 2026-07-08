@@ -45,17 +45,21 @@ from v1ca1.paper_figures.figure_3 import (
     get_ripple_glm_model_window_path,
     get_ripple_lfp_path,
     get_ripple_modulation_paths,
+    get_place_tuning_curve_path,
     get_ripple_decoding_comparison_summary_path,
     get_screen_xcorr_paths,
     get_tuning_similarity_path,
     load_glm_behavior_association_tables,
     load_glm_source_predictor_comparison_tables,
     load_dark_movement_firing_rate_cache,
+    load_glm_prediction_for_unit,
     load_panel_b_schematic_cache,
+    load_panel_b_prediction_examples,
     load_glm_offset_panel_tables,
     load_example_glm_prediction,
     load_example_ripple_lfp_trace,
     load_first_available_glm_prediction,
+    load_dark_same_turn_tuning_similarity_table,
     load_glm_epoch_summary_tables,
     load_modulation_summary_table,
     load_pooled_ripple_heatmap_epoch_tables,
@@ -68,7 +72,9 @@ from v1ca1.paper_figures.figure_3 import (
     save_panel_b_schematic_cache,
     parse_arguments,
     parse_dataset_id,
+    subset_xcorr_payload_for_top_ca1_and_v1_half,
     plot_glm_summary_panel,
+    plot_epoch_modulation_histogram_panel,
     plot_epoch_ripple_heatmap_panel,
     plot_glm_behavior_association_panel,
     plot_glm_analysis_panel,
@@ -106,16 +112,20 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
     import matplotlib.pyplot as plt
 
     fig = plt.figure(constrained_layout=True)
-    grid = fig.add_gridspec(nrows=2, ncols=8)
+    grid = fig.add_gridspec(
+        nrows=2,
+        ncols=3,
+        width_ratios=[1.0, 2.0, 1.0],
+    )
     axes = [
-        fig.add_subplot(grid[:, :2]),
-        fig.add_subplot(grid[:, 2:5]),
-        fig.add_subplot(grid[0, 5:]),
+        fig.add_subplot(grid[:, 0]),
+        fig.add_subplot(grid[:, 1]),
+        fig.add_subplot(grid[0, 2]),
     ]
     titles = (
         "Ripple-triggered\nmean firing rates",
         "Predicting V1 activity during ripples\nwith CA1 activity",
-        "CA1 spike vector vs. mean CA1 activity",
+        "CA1 spike vector vs.\nmean CA1 activity",
     )
     for axis, title in zip(axes, titles, strict=True):
         axis.set_title(title, fontsize=7.2, pad=2)
@@ -138,11 +148,18 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
         "B",
         "Predicting V1 activity during ripples\nwith CA1 activity",
         "C",
-        "CA1 spike vector vs. mean CA1 activity",
+        "CA1 spike vector vs.\nmean CA1 activity",
     ]
     assert {text.get_position()[1] for text in header_texts} == {
         header_texts[0].get_position()[1]
     }
+    assert {text.get_va() for text in header_texts} == {"top"}
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for label_text, title_text in zip(header_texts[::2], header_texts[1::2], strict=True):
+        assert not label_text.get_window_extent(renderer).overlaps(
+            title_text.get_window_extent(renderer)
+        )
     plt.close(fig)
 
 
@@ -436,6 +453,22 @@ def test_load_top_ca1_xcorr_panel_data_uses_shared_v1_order(tmp_path: Path) -> N
     assert np.allclose(payload["xcorr"][0, 0], xcorr[1, 1])
 
 
+def test_subset_xcorr_payload_for_top_ca1_and_v1_half() -> None:
+    payload = {
+        "ca1_unit_ids": np.array([11, 10, 9, 8]),
+        "v1_unit_ids": np.array([101, 102, 103, 104, 105]),
+        "lag_s": np.array([-0.01, 0.0, 0.01]),
+        "xcorr": np.arange(4 * 5 * 3, dtype=float).reshape(4, 5, 3),
+    }
+
+    cropped = subset_xcorr_payload_for_top_ca1_and_v1_half(payload)
+
+    assert cropped["ca1_unit_ids"].tolist() == [11, 10, 9]
+    assert cropped["v1_unit_ids"].tolist() == [101, 102, 103]
+    assert cropped["xcorr"].shape == (3, 3, 3)
+    np.testing.assert_allclose(cropped["xcorr"], payload["xcorr"][:3, :3, :])
+
+
 def _write_ripple_events(tmp_path: Path) -> Path:
     pytest.importorskip("pyarrow")
     path = get_ripple_event_path(tmp_path, "L14", "20240611")
@@ -702,7 +735,12 @@ def test_plot_epoch_ripple_heatmap_panel_scales_region_height_by_unit_count() ->
             "label": "Light run",
             "epoch": "02_r1",
             "firing_rate_table": table,
-            "summary_table": None,
+            "summary_table": pd.DataFrame(
+                {
+                    "region": ["v1", "ca1"],
+                    "ripple_modulation_index": [0.2, -0.1],
+                }
+            ),
         }
     ]
 
@@ -713,6 +751,90 @@ def test_plot_epoch_ripple_heatmap_panel_scales_region_height_by_unit_count() ->
     v1_height = ax.child_axes[0].get_position().height
     ca1_height = ax.child_axes[1].get_position().height
     assert v1_height / ca1_height == pytest.approx(3.0)
+    plt.close(fig)
+
+
+def test_plot_epoch_ripple_heatmap_panel_can_expand_vertically() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pd.DataFrame(
+        {
+            "region": ["v1"] * 2 + ["ca1"] * 2,
+            "unit_id": [1, 1, 101, 101],
+            "time_s": [-0.02, 0.0] * 2,
+            "mean_rate_hz": [1.0, 2.0, 1.5, 2.5],
+        }
+    )
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "firing_rate_table": table,
+            "summary_table": None,
+        }
+    ]
+
+    default_fig, default_ax = plt.subplots()
+    plot_epoch_ripple_heatmap_panel(default_ax, epoch_tables, regions=("v1", "ca1"))
+    default_fig.canvas.draw()
+    default_height = sum(
+        child_axis.get_position().height for child_axis in default_ax.child_axes[:2]
+    )
+
+    expanded_fig, expanded_ax = plt.subplots()
+    plot_epoch_ripple_heatmap_panel(
+        expanded_ax,
+        epoch_tables,
+        regions=("v1", "ca1"),
+        expand_heatmaps_vertically=True,
+        show_modulation_histogram=False,
+    )
+    expanded_fig.canvas.draw()
+    expanded_height = sum(
+        child_axis.get_position().height for child_axis in expanded_ax.child_axes[:2]
+    )
+
+    assert expanded_height > default_height
+    assert len(default_ax.child_axes) == 4
+    assert len(expanded_ax.child_axes) == 3
+    plt.close(default_fig)
+    plt.close(expanded_fig)
+
+
+def test_plot_epoch_modulation_histogram_panel_splits_from_heatmap() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "summary_table": pd.DataFrame(
+                {
+                    "region": ["v1", "v1", "ca1"],
+                    "ripple_modulation_index": [0.2, -0.1, 0.4],
+                }
+            ),
+        }
+    ]
+
+    fig, ax = plt.subplots()
+    child_axes = plot_epoch_modulation_histogram_panel(
+        ax,
+        epoch_tables,
+        regions=("v1", "ca1"),
+    )
+
+    assert len(child_axes) == 1
+    assert child_axes[0].get_xlabel() == "Mod. index"
+    assert child_axes[0].get_ylabel() == "Frac."
+    assert child_axes[0].patches
+    assert not child_axes[0].images
     plt.close(fig)
 
 
@@ -965,6 +1087,38 @@ def _write_tuning_similarity_table(
     return path
 
 
+def _write_place_tuning_curve(
+    tmp_path: Path,
+    *,
+    trajectory: str,
+    values: np.ndarray,
+    units: np.ndarray,
+    animal_name: str = "L14",
+    date: str = "20240611",
+    epoch: str = "08_r4",
+) -> Path:
+    xr = pytest.importorskip("xarray")
+    path = get_place_tuning_curve_path(
+        tmp_path,
+        animal_name=animal_name,
+        date=date,
+        region="v1",
+        epoch=epoch,
+        trajectory=trajectory,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data_array = xr.DataArray(
+        np.asarray(values, dtype=float),
+        dims=("unit", "position_bin"),
+        coords={
+            "unit": np.asarray(units, dtype=int),
+            "position_bin": np.arange(np.asarray(values).shape[1]),
+        },
+    )
+    data_array.to_netcdf(path)
+    return path
+
+
 def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     tmp_path: Path,
 ) -> None:
@@ -984,6 +1138,48 @@ def test_load_glm_behavior_association_tables_joins_dark_epoch_metrics(
     assert set(similarity_table["tuning_epoch"]) == {"08_r4"}
     assert sorted(similarity_table["unit"].unique().tolist()) == [11, 12]
     assert sorted(similarity_table["same_turn_tuning_similarity"].unique().tolist()) == [0.3, 0.6]
+
+
+def test_load_dark_same_turn_tuning_similarity_table_computes_missing_metric_from_curves(
+    tmp_path: Path,
+) -> None:
+    units = np.array([11, 12])
+    tuning_path = get_tuning_similarity_path(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="08_r4",
+        similarity_metric="absolute_overlap",
+    )
+    assert not tuning_path.exists()
+
+    curves_by_trajectory = {
+        "center_to_left": np.array([[1.0, 0.0], [0.0, 1.0]]),
+        "right_to_center": np.array([[1.0, 0.0], [1.0, 0.0]]),
+        "center_to_right": np.array([[0.0, 1.0], [1.0, 1.0]]),
+        "left_to_center": np.array([[0.0, 1.0], [0.0, 1.0]]),
+    }
+    for trajectory, values in curves_by_trajectory.items():
+        _write_place_tuning_curve(
+            tmp_path,
+            trajectory=trajectory,
+            values=values,
+            units=units,
+        )
+
+    table = load_dark_same_turn_tuning_similarity_table(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+        region="v1",
+        tuning_similarity_metric="absolute_overlap",
+    )
+
+    assert table["unit"].tolist() == [11, 12]
+    assert np.allclose(table["same_turn_tuning_similarity"], [1.0, 0.5])
+    assert table["tuning_source_path"].tolist() == [str(tuning_path), str(tuning_path)]
 
 
 def test_load_glm_behavior_association_tables_reports_missing_tuning(
@@ -1149,6 +1345,37 @@ def test_load_example_glm_prediction_selects_top_devexp_unit(tmp_path: Path) -> 
     assert example["ripple_devexp_mean"] == pytest.approx(0.4)
     assert np.allclose(example["observed"], [0.0, 1.0, 3.0])
     assert np.allclose(example["predicted"], [0.2, 1.3, 2.5])
+
+
+def test_load_glm_prediction_for_unit_selects_requested_unit(tmp_path: Path) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+
+    example = load_glm_prediction_for_unit(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+        unit_id=11,
+    )
+
+    assert example["unit_id"] == 11
+    assert example["ripple_devexp_mean"] == pytest.approx(0.1)
+    assert np.allclose(example["observed"], [1.0, 2.0, 0.0])
+    assert np.allclose(example["predicted"], [0.8, 1.7, 0.2])
+
+
+def test_load_panel_b_prediction_examples_preserves_selected_order(tmp_path: Path) -> None:
+    _write_ripple_glm_dataset(tmp_path)
+
+    examples = load_panel_b_prediction_examples(
+        tmp_path,
+        examples=(
+            ("L14", "20240611", "08_r4", 12),
+            ("L14", "20240611", "08_r4", 11),
+        ),
+    )
+
+    assert [example["unit_id"] for example in examples] == [12, 11]
 
 
 def test_load_first_available_glm_prediction_skips_old_schema(tmp_path: Path) -> None:
@@ -1449,6 +1676,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert "Lag (s)" in [text.get_text() for text in axes[2, 1].texts]
     lag_label = next(text for text in axes[2, 1].texts if text.get_text() == "Lag (s)")
     assert lag_label.get_position()[1] == pytest.approx(0.035)
+    panel_b_y_label = next(text for text in axes[2, 1].texts if text.get_text() == "V1")
+    assert panel_b_y_label.get_fontsize() == pytest.approx(6.0)
     assert len(axes[1, 0].patches) >= 3
     assert len(axes[1, 1].collections) == 1
     assert len(axes[1, 2].collections) == 1
@@ -1471,25 +1700,138 @@ def test_plot_helpers_draw_expected_axes() -> None:
         "frac sig=" in text.get_text()
         for text in axes[2, 2].child_axes[1].texts
     )
-    assert len(axes[2, 2].child_axes[2].artists) == 1
+    plt.close(fig)
+
+    prediction_examples = [
+        {
+            **prediction,
+            "animal_name": animal_name,
+            "unit_id": unit_id,
+            "ripple_devexp_mean": devexp,
+        }
+        for animal_name, unit_id, devexp in (
+            ("L12", 24, 0.33),
+            ("L19", 4, 0.24),
+            ("L15", 476, 0.27),
+        )
+    ]
+    fig, ax = plt.subplots()
+    plot_glm_analysis_panel(
+        ax,
+        glm_epoch_tables,
+        prediction_examples=prediction_examples,
+    )
+    assert len(ax.child_axes) == 10
+    assert [child.get_title() for child in ax.child_axes[1:4]] == [
+        "Example cell 1",
+        "Example cell 2",
+        "Example cell 3",
+    ]
+    assert ax.child_axes[3].get_xlabel() == "Actual count"
+    assert all(len(child.artists) == 0 for child in ax.child_axes[1:4])
+    assert all(len(child.patches) == 0 for child in ax.child_axes[1:4])
+    assert all(len(child.collections) == 1 for child in ax.child_axes[1:4])
+    assert all(
+        child.collections[0].get_sizes()[0] == pytest.approx(2.2)
+        for child in ax.child_axes[1:4]
+    )
+    assert ax.child_axes[1].get_xlim()[0] == pytest.approx(0.0)
+    assert ax.child_axes[1].get_xlim()[1] == pytest.approx(15.0)
+    assert all(
+        child.get_xlim() == pytest.approx(ax.child_axes[1].get_xlim())
+        for child in ax.child_axes[1:4]
+    )
+    assert all(
+        child.get_ylim() == pytest.approx(ax.child_axes[1].get_xlim())
+        for child in ax.child_axes[1:4]
+    )
+    for child in ax.child_axes[1:4]:
+        np.testing.assert_allclose(child.get_xticks(), [0.0, 5.0, 10.0, 15.0])
+        np.testing.assert_allclose(child.get_yticks(), [0.0, 5.0, 10.0, 15.0])
+    assert [child.get_ylabel() for child in ax.child_axes[1:4]] == [
+        "",
+        "Predicted count",
+        "",
+    ]
+    assert all(len(child.texts) == 1 for child in ax.child_axes[1:4])
+    assert all(
+        child.texts[0].get_text() == f"{devexp:.2f}"
+        for child, devexp in zip(ax.child_axes[1:4], (0.33, 0.24, 0.27), strict=True)
+    )
+    assert all(child.texts[0].get_ha() == "left" for child in ax.child_axes[1:4])
+    assert all(child.texts[0].get_va() == "top" for child in ax.child_axes[1:4])
+    fig.canvas.draw()
+    parent_position = ax.get_position()
+    example_positions = [child.get_position() for child in ax.child_axes[1:4]]
+    example_heights = [
+        position.height / parent_position.height
+        for position in example_positions
+    ]
+    for child in ax.child_axes[1:4]:
+        origin = child.transData.transform((0.0, 0.0))
+        x_unit = child.transData.transform((1.0, 0.0))
+        y_unit = child.transData.transform((0.0, 1.0))
+        x_distance = float(np.linalg.norm(x_unit - origin))
+        y_distance = float(np.linalg.norm(y_unit - origin))
+        assert x_distance == pytest.approx(y_distance, rel=1e-6)
+    example_gaps = [
+        (example_positions[index].y0 - example_positions[index + 1].y1)
+        / parent_position.height
+        for index in range(len(example_positions) - 1)
+    ]
+    assert max(example_heights) < 0.19
+    assert min(example_gaps) > 0.08
+    summary_positions = [child.get_position() for child in ax.child_axes[4:]]
+    example_bottom = min(position.y0 for position in example_positions)
+    summary_box_bottoms = [
+        position.y0 for position in summary_positions[1::2]
+    ]
+    assert all(
+        summary_bottom == pytest.approx(example_bottom, abs=0.01)
+        for summary_bottom in summary_box_bottoms
+    )
+    example_top = max(position.y1 for position in example_positions)
+    summary_scatter_tops = [
+        position.y1 for position in summary_positions[::2]
+    ]
+    assert all(
+        summary_top == pytest.approx(example_top, abs=0.01)
+        for summary_top in summary_scatter_tops
+    )
+    assert ax.child_axes[4].get_ylabel() == "-log10 p from shuffle"
     plt.close(fig)
 
     fig, ax = plt.subplots()
     plot_glm_behavior_association_panel(ax, association_payload)
     assert len(ax.child_axes) == 3
     fraction_ax, box_ax, similarity_ax = ax.child_axes
-    assert fraction_ax.get_xlabel() == ""
-    assert len(fraction_ax.artists) == 1
+    assert fraction_ax.get_xlabel() == "$p$<0.05\nfrac."
+    assert len(fraction_ax.artists) == 0
     assert fraction_ax.get_ylabel() == ""
     assert fraction_ax.get_title() == ""
     assert box_ax.get_ylabel() == ""
-    assert box_ax.get_xlabel() == "Dev. explained"
+    assert box_ax.get_xlabel() == "Dev.\nexplained"
     assert box_ax.get_title() == ""
-    assert similarity_ax.get_xlabel() == "Dark DPP overlap"
-    assert similarity_ax.get_ylabel() == "Frac. units"
+    assert similarity_ax.get_xlabel() == "Dark\nDPPI"
+    assert similarity_ax.get_ylabel() == "Fraction"
     assert similarity_ax.get_title() == ""
+    label_y_values = [
+        child_axis.xaxis.label.get_position()[1]
+        for child_axis in (fraction_ax, box_ax, similarity_ax)
+    ]
+    assert len(set(label_y_values)) == 1
+    fig.canvas.draw()
+    box_position = box_ax.get_position()
+    fraction_position = fraction_ax.get_position()
+    similarity_position = similarity_ax.get_position()
+    parent_position = ax.get_position()
+    fraction_width = fraction_position.width / parent_position.width
+    box_width = box_position.width / parent_position.width
+    assert fraction_width > 0.23
+    assert box_width > 0.32
+    assert similarity_position.x0 - box_position.x1 > 0.18
     assert ax.texts[-1].get_text() == (
-        "Plots show p<0.05 units; dark-active split uses 0.5 Hz"
+        "Plots show p<0.05 units; dark active split uses 0.5 Hz"
     )
     assert len(fraction_ax.patches) == 2
     assert len(box_ax.patches) == 2
@@ -1534,8 +1876,8 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert fraction_ax.get_xlim()[0] == pytest.approx(0.0)
     assert fraction_ax.get_xlim()[1] == pytest.approx(1.0)
     assert [tick.get_text() for tick in fraction_ax.get_yticklabels()] == [
-        "Dark-inactive",
-        "Dark active",
+        "Dark\ninactive",
+        "Dark\nactive",
     ]
     assert sum(
         len(collection.get_offsets())
@@ -1548,10 +1890,20 @@ def test_plot_helpers_draw_expected_axes() -> None:
     devexp_box_line_max = max(
         np.nanmax(np.asarray(line.get_xdata(), dtype=float))
         for line in box_ax.lines
-        if len(line.get_xdata())
+        if len(line.get_xdata()) and len(line.get_xdata()) != 4
     )
     assert devexp_box_line_max == pytest.approx(0.4)
-    assert not box_ax.texts
+    box_significance_markers = [
+        text for text in box_ax.texts if text.get_text() == "*"
+    ]
+    assert len(box_significance_markers) == 1
+    assert box_significance_markers[0].get_position()[0] > devexp_box_line_max
+    assert box_significance_markers[0].get_position()[1] == pytest.approx(1.5)
+    box_bracket_lines = [
+        line for line in box_ax.lines if len(line.get_xdata()) == 4
+    ]
+    assert box_bracket_lines
+    assert min(box_bracket_lines[-1].get_xdata()) > devexp_box_line_max
     assert [text.get_text() for text in similarity_ax.texts] == ["median=0.80"]
     assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
     assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
@@ -1559,8 +1911,17 @@ def test_plot_helpers_draw_expected_axes() -> None:
         text for text in fraction_ax.texts if text.get_text() == "*"
     ]
     assert len(significance_markers) == 1
-    assert significance_markers[0].get_position()[0] == pytest.approx((2.0 / 3.0) + 0.07)
-    assert significance_markers[0].get_position()[1] == pytest.approx(2.0)
+    assert significance_markers[0].get_position()[0] == pytest.approx(1.05)
+    assert significance_markers[0].get_position()[1] == pytest.approx(1.5)
+    bracket_lines = [
+        line for line in fraction_ax.lines if len(line.get_xdata()) == 4
+    ]
+    assert bracket_lines
+    np.testing.assert_allclose(
+        bracket_lines[-1].get_xdata(),
+        [0.975, 1.02, 1.02, 0.975],
+    )
+    np.testing.assert_allclose(bracket_lines[-1].get_ydata(), [1.0, 1.0, 2.0, 2.0])
     assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
     plt.close(fig)
 
@@ -1576,11 +1937,11 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(ax.child_axes[2].collections) == 2
     assert len(ax.child_axes[0].lines) == 1
     assert any(
-        text.get_text() == "Mean CA1 activity deviance explained"
+        text.get_text() == "Mean CA1 activity\ndev. explained"
         for text in ax.texts
     )
     assert any(
-        text.get_text() == "CA1 spike vector deviance explained"
+        text.get_text() == "CA1 spike vector\ndev. explained"
         for text in ax.texts
     )
     assert any(
@@ -1602,8 +1963,22 @@ def test_plot_helpers_draw_expected_axes() -> None:
         compact_labels=True,
         show_color_note=False,
     )
-    compact_summary_text = ax.child_axes[0].texts[-1]
-    assert compact_summary_text.get_text() == "n=2\nfrac vector>mean=1.00"
+    fig.canvas.draw()
+    parent_position = ax.get_position()
+    child_position = ax.child_axes[0].get_position()
+    compact_child_top = (child_position.y1 - parent_position.y0) / parent_position.height
+    assert compact_child_top < 0.75
+    assert ax.child_axes[0].get_xlabel() == "Mean CA1\ndev. explained"
+    assert ax.child_axes[0].get_ylabel() == "CA1 vector\ndev. explained"
+    np.testing.assert_allclose(ax.child_axes[0].get_xticks(), ax.child_axes[0].get_yticks())
+    assert [
+        tick.get_text() for tick in ax.child_axes[0].get_xticklabels()
+    ] == [
+        tick.get_text() for tick in ax.child_axes[0].get_yticklabels()
+    ]
+    assert not ax.texts
+    compact_summary_text = next(text for text in ax.child_axes[0].texts if text.get_text() == "n=2")
+    assert compact_summary_text.get_position() == pytest.approx((0.97, 0.05))
     assert compact_summary_text.get_ha() == "right"
     assert compact_summary_text.get_va() == "bottom"
     plt.close(fig)

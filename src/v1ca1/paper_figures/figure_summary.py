@@ -89,6 +89,8 @@ SUMMARY_CONDITION_TRACK_BOUNDS = (
 )
 SUMMARY_VISUAL_STIMULUS_LABEL = (0.50, 0.82)
 SUMMARY_TIMELINE_ARROW_Y = 0.21
+SUMMARY_RUN_SLEEP_TIMELINE_ARROW_Y = 0.305
+SUMMARY_RUN_SLEEP_TIMELINE_TIME_LABEL_OFFSET = 0.045
 SUMMARY_TIMELINE_STIMULUS_MARKER_CENTERS = (0.16, 0.50, 0.84)
 SUMMARY_VISUAL_STIMULUS_BOUNDS = (0.02, 0.54, 0.92, 0.28)
 SUMMARY_VISUAL_STIMULUS_ORDER = ("grating", "dots", "black")
@@ -469,10 +471,13 @@ def _draw_summary_timeline_stimulus_markers(ax: Any) -> None:
         )
 
 
-def _draw_summary_run_sleep_timeline_markers(ax: Any) -> None:
+def _draw_summary_run_sleep_timeline_markers(
+    ax: Any,
+    *,
+    arrow_y: float = SUMMARY_RUN_SLEEP_TIMELINE_ARROW_Y,
+) -> None:
     """Draw the condensed run/sleep sequence as a plain timeline arrow."""
-    arrow_y = 0.305
-    time_label_y = arrow_y - 0.045
+    time_label_y = arrow_y - SUMMARY_RUN_SLEEP_TIMELINE_TIME_LABEL_OFFSET
     ax.annotate(
         "",
         xy=(0.98, arrow_y),
@@ -557,6 +562,7 @@ def _draw_summary_visual_stimulus_block(
     ax: Any,
     *,
     timeline_style: str = "arrow",
+    run_sleep_timeline_arrow_y: float = SUMMARY_RUN_SLEEP_TIMELINE_ARROW_Y,
 ) -> None:
     """Draw stimulus-location icons, timeline arrow, and stimulus cartoons."""
     ax.set_xlim(0.0, 1.0)
@@ -610,7 +616,10 @@ def _draw_summary_visual_stimulus_block(
         )
         _draw_summary_timeline_stimulus_markers(ax)
     elif timeline_style == "run_sleep_boxes":
-        _draw_summary_run_sleep_timeline_markers(ax)
+        _draw_summary_run_sleep_timeline_markers(
+            ax,
+            arrow_y=run_sleep_timeline_arrow_y,
+        )
     else:
         raise ValueError("timeline_style must be 'arrow' or 'run_sleep_boxes'.")
     visual_ax = ax.inset_axes(SUMMARY_VISUAL_STIMULUS_BOUNDS)

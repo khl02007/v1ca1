@@ -37,10 +37,16 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_SCHEMATIC_HEIGHT,
     DECODING_SCHEMATIC_WIDTH,
     DECODING_SCHEMATIC_Y,
+    DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
+    DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
+    DECODING_SIGNIFICANCE_BRACKETS,
+    DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
+    DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
     DECODING_TRAIN_LABEL_Y,
     DECODING_TRAIN_SCHEMATIC_CENTER_X,
     DECODING_XTICK_LABEL_FONTSIZE,
     DECODING_YLABEL_FONTSIZE,
+    DECODING_YLABEL_X,
     DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
@@ -50,6 +56,7 @@ from v1ca1.paper_figures.figure_1 import (
     HEATMAP_COLORBAR_LABELPAD,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
     HEATMAP_COLORBAR_PAD,
+    HEATMAP_COLORBAR_ASPECT,
     HEATMAP_ORDER_LABEL_OFFSET,
     HEATMAP_PATH_LABEL_OFFSET,
     HEATMAP_TUNING_LABEL_OFFSET,
@@ -67,6 +74,11 @@ from v1ca1.paper_figures.figure_1 import (
     PANEL_E_EXAMPLES,
     PANEL_E_AXIS_LABEL_FONTSIZE,
     PANEL_E_CACHE_VERSION,
+    PANEL_C_EXAMPLE_YLABEL_X,
+    PANEL_E_RIGHT_ANNOTATION_X,
+    PANEL_E_RIGHT_SUMMARY_POSITION,
+    PANEL_F_RIGHT_SUMMARY_POSITION,
+    PANEL_F_RIGHT_SUMMARY_Y_STEP,
     PANEL_E_FR_TRAJECTORY_PAIRS,
     PANEL_E_RASTER_TICK_MARKEREDGEWIDTH,
     PANEL_E_RASTER_TICK_MARKERSIZE,
@@ -77,6 +89,10 @@ from v1ca1.paper_figures.figure_1 import (
     PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
     PANEL_D_CACHE_VERSION,
     PANEL_D_FIRING_RATE_NORMALIZATION,
+    PANEL_D_HEATMAP_BLOCK_OUTLINE_COLOR,
+    PANEL_D_HEATMAP_BLOCK_OUTLINE_LINEWIDTH,
+    PANEL_D_HEATMAP_BLOCK_OUTLINE_LINESTYLE,
+    PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD,
     PANEL_D_HEATMAP_CMAP,
     PANEL_D_LINEAR_POSITION_ORIENTATION,
     PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
@@ -96,8 +112,11 @@ from v1ca1.paper_figures.figure_1 import (
     TOP_ROW_PANEL_TITLE_FONTSIZES,
     TRAJECTORY_TYPES,
     add_aligned_panel_headers,
+    add_aligned_panel_headers_at_label_positions,
     add_centered_axis_text,
     add_centered_below_axis_text,
+    add_panel_d_heatmap_block_outlines,
+    add_panel_header_at_reference_y,
     build_normalized_position_bins,
     build_pooled_panel_values,
     build_pooled_panel_values_and_unit_order,
@@ -929,18 +948,27 @@ def test_default_figure_width_fits_letter_page_with_one_inch_margins() -> None:
 
 
 def test_bottom_row_width_fractions_reserve_panel_e_space() -> None:
-    assert DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION == pytest.approx(0.7)
-    assert DEFAULT_PANEL_E_WIDTH_FRACTION == pytest.approx(0.3)
+    assert DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION == pytest.approx(2.0 / 3.0)
+    assert DEFAULT_PANEL_E_WIDTH_FRACTION == pytest.approx(1.0 / 3.0)
+    assert DEFAULT_PANEL_E_WIDTH_FRACTION == pytest.approx(
+        DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION / 2.0
+    )
     assert BOTTOM_ROW_PANEL_WSPACE == pytest.approx(0.05)
     assert (
         DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION + DEFAULT_PANEL_E_WIDTH_FRACTION
     ) == pytest.approx(1.0)
 
 
-def test_final_row_width_fractions_make_panels_f_g_h_equal() -> None:
-    assert DEFAULT_PANEL_F_WIDTH_FRACTION == pytest.approx(1.0 / 3.0)
-    assert DEFAULT_PANEL_G_WIDTH_FRACTION == pytest.approx(1.0 / 3.0)
-    assert DEFAULT_PANEL_H_WIDTH_FRACTION == pytest.approx(1.0 / 3.0)
+def test_final_row_width_fractions_match_left_column_and_split_remainder() -> None:
+    assert DEFAULT_PANEL_F_WIDTH_FRACTION == pytest.approx(
+        DEFAULT_PANEL_E_WIDTH_FRACTION
+    )
+    assert DEFAULT_PANEL_G_WIDTH_FRACTION == pytest.approx(
+        (1.0 - DEFAULT_PANEL_E_WIDTH_FRACTION) / 2.0
+    )
+    assert DEFAULT_PANEL_H_WIDTH_FRACTION == pytest.approx(
+        DEFAULT_PANEL_G_WIDTH_FRACTION
+    )
     assert (
         DEFAULT_PANEL_F_WIDTH_FRACTION
         + DEFAULT_PANEL_G_WIDTH_FRACTION
@@ -951,6 +979,7 @@ def test_final_row_width_fractions_make_panels_f_g_h_equal() -> None:
 def test_panel_d_colorbar_label_size_uses_requested_scale() -> None:
     assert HEATMAP_COLORBAR_LABEL_FONTSIZE == pytest.approx(4.9)
     assert HEATMAP_COLORBAR_PAD == pytest.approx(0.001)
+    assert HEATMAP_COLORBAR_ASPECT == pytest.approx(14)
     assert HEATMAP_COLORBAR_LABELPAD == pytest.approx(0)
     assert HEATMAP_TUNING_LABEL_OFFSET == pytest.approx(-0.004)
     assert HEATMAP_ORDER_LABEL_OFFSET == pytest.approx(0.007)
@@ -1075,23 +1104,61 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
     ]
     assert len(top_epoch_region_patches) == 2
     assert top_epoch_region_patches[0].get_facecolor() == pytest.approx(
-        to_rgba(PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["A"], 0.22)
+        to_rgba(
+            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
+            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
+        )
     )
     assert top_epoch_region_patches[1].get_facecolor() == pytest.approx(
-        to_rgba(PANEL_DARK_LIGHT_VISUAL_LABEL_COLORS["B"], 0.22)
+        to_rgba(
+            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
+            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
+        )
     )
-    assert not any(
-        isinstance(patch, Rectangle) for patch in second_epoch_icon_axis.patches
+    second_epoch_region_patches = [
+        patch
+        for patch in second_epoch_icon_axis.patches
+        if isinstance(patch, Rectangle)
+    ]
+    assert len(second_epoch_region_patches) == 2
+    assert second_epoch_region_patches[0].get_facecolor() == pytest.approx(
+        to_rgba(
+            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
+            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
+        )
+    )
+    assert second_epoch_region_patches[1].get_facecolor() == pytest.approx(
+        to_rgba(
+            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
+            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
+        )
     )
     assert not any(
         isinstance(patch, Rectangle) for patch in dark_epoch_icon_axis.patches
     )
-    rate_axes = [
-        child_axis
-        for child_axis in ax.child_axes
-        if child_axis.get_xlabel() == TASK_PROGRESSION_XLABEL
-    ]
+    _outline, _points, dims = figure_1_module.get_w_track_geometry()
+    assert top_epoch_icon_axis.texts[0].get_position()[0] == pytest.approx(
+        dims["x0"] - figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+    )
+    assert top_epoch_icon_axis.texts[1].get_position()[0] == pytest.approx(
+        dims["x5"] + figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+    )
+    assert to_rgba(top_epoch_icon_axis.texts[0].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
+    )
+    assert to_rgba(top_epoch_icon_axis.texts[1].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
+    )
+    assert to_rgba(second_epoch_icon_axis.texts[0].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
+    )
+    assert to_rgba(second_epoch_icon_axis.texts[1].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
+    )
+    rate_axes = ax.child_axes[5::3]
     assert len(rate_axes) == 4
+    assert all(rate_axis.get_xlabel() == "" for rate_axis in rate_axes)
+    assert [text.get_text() for text in ax.texts].count(TASK_PROGRESSION_XLABEL) == 1
     assert rate_axes[0].get_ylabel() == "FR (Hz)"
     assert all(rate_axis.get_ylabel() == "" for rate_axis in rate_axes[1:])
     assert {
@@ -1294,7 +1361,7 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
     titles = (
         "Comparison to motor",
         "Comparison to alternative codes",
-        "Cross route decoding",
+        "Cross path decoding",
     )
     for axis, title in zip(axes, titles, strict=True):
         axis.set_title(title, fontsize=8, pad=2)
@@ -1317,8 +1384,52 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
         "F",
         "Comparison to alternative codes",
         "G",
-        "Cross route decoding",
+        "Cross path decoding",
     ]
+    assert {text.get_position()[1] for text in header_texts} == {
+        header_texts[0].get_position()[1]
+    }
+    plt.close(fig)
+
+
+def test_add_aligned_panel_headers_at_label_positions_uses_requested_x_positions() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(ncols=3)
+    titles = (
+        "Comparison to motor",
+        "Comparison to alternative codes",
+        "Cross path decoding",
+    )
+    for axis, title in zip(axes, titles, strict=True):
+        axis.set_title(title, fontsize=8, pad=2)
+    fig.canvas.draw()
+
+    label_x_positions = (0.10, 0.40, 0.70)
+    add_aligned_panel_headers_at_label_positions(
+        fig,
+        axes,
+        labels=("E", "F", "G"),
+        titles=titles,
+        label_x_positions=label_x_positions,
+        fontsize=8,
+    )
+
+    assert [axis.get_title() for axis in axes] == ["", "", ""]
+    header_texts = fig.texts[-6:]
+    assert [text.get_text() for text in header_texts] == [
+        "E",
+        "Comparison to motor",
+        "F",
+        "Comparison to alternative codes",
+        "G",
+        "Cross path decoding",
+    ]
+    assert [text.get_position()[0] for text in header_texts[0::2]] == pytest.approx(
+        label_x_positions
+    )
     assert {text.get_position()[1] for text in header_texts} == {
         header_texts[0].get_position()[1]
     }
@@ -1366,6 +1477,35 @@ def test_add_aligned_panel_headers_supports_top_row_title_sizes() -> None:
     plt.close(fig)
 
 
+def test_add_panel_header_at_reference_y_aligns_to_reference_axis_level() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(ncols=2)
+    fig.canvas.draw()
+
+    label_text, title_text = add_panel_header_at_reference_y(
+        fig,
+        axes[0],
+        label="C",
+        title="Example dark DPP coding cells",
+        label_x_offset=-0.04,
+        reference_axis=axes[1],
+        reference_y=1.04,
+        fontsize=8,
+    )
+    expected_y = fig.transFigure.inverted().transform(
+        axes[1].transAxes.transform((0.0, 1.04))
+    )[1]
+
+    assert label_text.get_text() == "C"
+    assert title_text.get_text() == "Example dark DPP coding cells"
+    assert label_text.get_position()[1] == pytest.approx(expected_y)
+    assert title_text.get_position()[1] == pytest.approx(expected_y)
+    plt.close(fig)
+
+
 def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -1404,6 +1544,59 @@ def test_plot_pooled_heatmap_grid_adds_segment_boundary_lines() -> None:
     for ax in axes[:-1, :].ravel():
         assert ax.get_xticks().size == 0
         assert ax.get_xlabel() == ""
+    plt.close(fig)
+
+
+def test_add_panel_d_heatmap_block_outlines_frames_diagonal_blocks() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Rectangle
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(
+        nrows=len(PANEL_D_TRAJECTORY_TYPES),
+        ncols=len(PANEL_D_TRAJECTORY_TYPES),
+    )
+    fig.canvas.draw()
+
+    outlines = add_panel_d_heatmap_block_outlines(axes)
+
+    assert len(outlines) == 2
+    assert all(isinstance(outline, Rectangle) for outline in outlines)
+    assert tuple(fig.artists[-2:]) == outlines
+    for outline, block_axes in zip(
+        outlines,
+        (axes[:2, :2], axes[2:, 2:]),
+        strict=True,
+    ):
+        positions = [block_ax.get_position() for block_ax in block_axes.ravel()]
+        assert outline.get_x() == pytest.approx(
+            min(position.x0 for position in positions)
+            - PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+        )
+        assert outline.get_y() == pytest.approx(
+            min(position.y0 for position in positions)
+            - PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+        )
+        assert outline.get_width() == pytest.approx(
+            max(position.x1 for position in positions)
+            - min(position.x0 for position in positions)
+            + 2.0 * PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+        )
+        assert outline.get_height() == pytest.approx(
+            max(position.y1 for position in positions)
+            - min(position.y0 for position in positions)
+            + 2.0 * PANEL_D_HEATMAP_BLOCK_OUTLINE_PAD
+        )
+        assert not outline.get_fill()
+        assert outline.get_edgecolor() == pytest.approx(
+            to_rgba(PANEL_D_HEATMAP_BLOCK_OUTLINE_COLOR)
+        )
+        assert outline.get_linewidth() == pytest.approx(
+            PANEL_D_HEATMAP_BLOCK_OUTLINE_LINEWIDTH
+        )
+        assert outline.get_linestyle() == PANEL_D_HEATMAP_BLOCK_OUTLINE_LINESTYLE
     plt.close(fig)
 
 
@@ -1561,7 +1754,11 @@ def test_draw_panel_a_anatomy_assets_places_probe_left_of_histology(
 def test_draw_behavior_task_design_panel_places_schematics_without_behavior_photo() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    from matplotlib.text import Annotation
+    from matplotlib.patches import ConnectionPatch
     import matplotlib.pyplot as plt
+    from v1ca1.paper_figures import figure_summary
 
     fig, ax = plt.subplots()
     draw_behavior_task_design_panel(
@@ -1571,27 +1768,68 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
         rotate_behavior_180=True,
     )
 
-    assert len(ax.child_axes) == 3
-    trajectory_ax, visual_ax, progression_ax = ax.child_axes
+    assert len(ax.child_axes) == 2
+    trajectory_ax, visual_ax = ax.child_axes
     assert trajectory_ax.get_position().x0 < visual_ax.get_position().x0
-    assert progression_ax.get_position().y1 < trajectory_ax.get_position().y0
-    assert progression_ax.get_position().y1 < visual_ax.get_position().y0
+    assert trajectory_ax.get_position().x0 < ax.get_position().x0
+    assert visual_ax.get_position().x0 - trajectory_ax.get_position().x1 > 0.03
+    parent_center_y = ax.get_position().y0 + ax.get_position().height / 2.0
+    trajectory_center_y = (
+        trajectory_ax.get_position().y0 + trajectory_ax.get_position().height / 2.0
+    )
+    visual_center_y = visual_ax.get_position().y0 + visual_ax.get_position().height / 2.0
+    assert trajectory_center_y == pytest.approx(parent_center_y)
+    assert visual_center_y == pytest.approx(parent_center_y)
+    assert visual_ax.get_position().y0 == pytest.approx(ax.get_position().y0)
+    assert visual_ax.get_position().height == pytest.approx(ax.get_position().height)
     assert not any(child.images for child in ax.child_axes)
     assert len(trajectory_ax.child_axes) == 4
-    assert "Visual stimuli" in [text.get_text() for text in visual_ax.texts]
-    assert [text.get_text() for text in progression_ax.texts] == [
-        figure_1_module.TASK_DESIGN_PROGRESSION_DURATION_LABEL,
-        "A",
-        "B",
-        "sleep",
-        "gray",
-        "sleep",
-        "B",
-        "A",
-        "sleep",
-        "dark",
-        "...",
+    trajectory_labels = [
+        text.get_text()
+        for child_ax in trajectory_ax.child_axes
+        for text in child_ax.texts
+        if text.get_text()
     ]
+    assert trajectory_labels == ["L", "C", "R"]
+    visible_visual_text = [text for text in visual_ax.texts if text.get_text()]
+    assert [text.get_text() for text in visible_visual_text] == ["Time"]
+    time_text = visible_visual_text[0]
+    assert time_text.get_position()[1] == pytest.approx(
+        figure_1_module.TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y
+        - figure_summary.SUMMARY_RUN_SLEEP_TIMELINE_TIME_LABEL_OFFSET
+    )
+    timeline_arrows = [
+        text
+        for text in visual_ax.texts
+        if isinstance(text, Annotation) and not text.get_text()
+    ]
+    assert len(timeline_arrows) == 1
+    assert timeline_arrows[0].xy[1] == pytest.approx(
+        figure_1_module.TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y
+    )
+    assert len(visual_ax.child_axes) == 4
+    condition_axes = visual_ax.child_axes[:3]
+    stimulus_ax = visual_ax.child_axes[3]
+    assert all(
+        condition_ax.get_position().y0 < stimulus_ax.get_position().y0
+        for condition_ax in condition_axes
+    )
+    stimulus_text_by_label = {
+        text.get_text(): text for text in stimulus_ax.texts if text.get_text()
+    }
+    assert {"A", "B"} <= set(stimulus_text_by_label)
+    connectors = [
+        artist for artist in fig.artists if isinstance(artist, ConnectionPatch)
+    ]
+    assert len(connectors) == 4
+    green = to_rgba(figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR)[:3]
+    pink = to_rgba(figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR)[:3]
+    assert to_rgba(stimulus_text_by_label["A"].get_color())[:3] == pytest.approx(green)
+    assert to_rgba(stimulus_text_by_label["B"].get_color())[:3] == pytest.approx(pink)
+    connector_colors = np.asarray(
+        [to_rgba(connector.get_edgecolor())[:3] for connector in connectors]
+    )
+    assert connector_colors == pytest.approx(np.asarray([green, green, pink, pink]))
     plt.close(fig)
 
 
@@ -1927,16 +2165,24 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
             _fake_panel_e_example("L15", 38),
         ],
     )
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
 
     assert len(ax.lines) == 0
     assert len(ax.child_axes) == 2
+    assert ax.child_axes[0].get_position().y1 > ax.get_position().y1
+    assert ax.child_axes[0].get_position().y0 > ax.child_axes[1].get_position().y1
+    assert len(ax.texts) == 0
     for example_index, example_ax in enumerate(ax.child_axes, start=1):
         assert len(example_ax.child_axes) == 10
         assert [text.get_text() for text in example_ax.texts] == [
-            f"Example cell {example_index}"
+            f"Example cell {example_index}",
+            TASK_PROGRESSION_XLABEL,
         ]
         assert example_ax.texts[0].get_position()[0] == pytest.approx(0.50)
         assert example_ax.texts[0].get_horizontalalignment() == "center"
+        assert example_ax.texts[1].get_position()[0] == pytest.approx(0.50)
+        assert example_ax.texts[1].get_horizontalalignment() == "center"
         assert all(child.get_title() == "" for child in example_ax.child_axes)
         schematic_width = example_ax.child_axes[0].get_position().width
         raster_width = example_ax.child_axes[1].get_position().width
@@ -1955,20 +2201,29 @@ def test_plot_panel_e_examples_stacks_two_example_blocks() -> None:
             "left_to_center",
         ]
         rate_axes = example_ax.child_axes[8:]
-        assert all(
-            rate_axis.get_xlabel() == "Norm. goal progression"
-            for rate_axis in rate_axes
+        assert all(rate_axis.get_xlabel() == "" for rate_axis in rate_axes)
+        ylabel_axes = [
+            panel_e_axis
+            for panel_e_axis in [*raster_axes, *rate_axes]
+            if panel_e_axis.get_ylabel()
+        ]
+        assert [axis.yaxis.label.get_position()[0] for axis in ylabel_axes] == (
+            pytest.approx([PANEL_C_EXAMPLE_YLABEL_X] * len(ylabel_axes))
         )
-        assert all(
-            rate_axis.xaxis.label.get_fontsize()
-            == pytest.approx(PANEL_E_AXIS_LABEL_FONTSIZE)
-            for rate_axis in rate_axes
-        )
+        for rate_axis in rate_axes:
+            if rate_axis.get_ylabel() != "FR (Hz)":
+                continue
+            label_box = rate_axis.yaxis.label.get_window_extent(renderer)
+            tick_boxes = [
+                tick_label.get_window_extent(renderer)
+                for tick_label in rate_axis.get_yticklabels()
+                if tick_label.get_text()
+            ]
+            assert label_box.x1 < min(tick_box.x0 for tick_box in tick_boxes)
         assert all(
             panel_e_axis.yaxis.label.get_fontsize()
             == pytest.approx(PANEL_E_AXIS_LABEL_FONTSIZE)
-            for panel_e_axis in [*raster_axes, *rate_axes]
-            if panel_e_axis.get_ylabel()
+            for panel_e_axis in ylabel_axes
         )
         for panel_e_axis in [*raster_axes, *rate_axes]:
             boundary_lines = panel_e_axis.lines[
@@ -2064,22 +2319,24 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     fig, ax = plt.subplots()
     plot_motor_delta_panel(ax, table)
 
-    assert ax.get_ylabel() == "Frac."
+    assert ax.get_ylabel() == "Fraction"
     assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
-    assert "Motor+DGP better" in text_labels
-    assert "50% >0, med. 0.10" in text_labels
+    assert "Motor+DPP better" in text_labels
+    assert "50% >0" in text_labels
+    assert "50% >0, med. 0.10" not in text_labels
     assert "n = 4 cells\n2 animals" in text_labels
     assert ax.texts[0].get_horizontalalignment() == "left"
     assert ax.texts[0].get_position()[0] == pytest.approx(0.03)
     assert ax.texts[1].get_horizontalalignment() == "left"
-    assert ax.texts[1].get_position()[0] == pytest.approx(0.68)
-    assert ax.texts[2].get_horizontalalignment() == "left"
-    assert ax.texts[2].get_position()[0] == pytest.approx(0.68)
+    assert ax.texts[1].get_position()[0] == pytest.approx(PANEL_E_RIGHT_ANNOTATION_X)
+    assert ax.texts[2].get_horizontalalignment() == "right"
+    assert ax.texts[2].get_verticalalignment() == "bottom"
+    assert ax.texts[2].get_position() == pytest.approx(PANEL_E_RIGHT_SUMMARY_POSITION)
     assert ax.texts[2].get_bbox_patch() is None
     assert len(ax.patches) == 21
     assert ax.patches[0].get_extents().x1 <= ax.transData.transform((0.0, 0.0))[0]
@@ -2112,11 +2369,11 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
                 "dpp_vs_absolute_place",
             ],
             "comparison_label": [
-                "DGP - absolute place",
-                "DGP - absolute place",
-                "DGP - distance-to-reward",
-                "DGP - distance-to-reward",
-                "DGP - absolute place",
+                "DPP - absolute place",
+                "DPP - absolute place",
+                "DPP - distance-to-reward",
+                "DPP - distance-to-reward",
+                "DPP - absolute place",
             ],
             "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
@@ -2124,7 +2381,7 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     fig, ax = plt.subplots()
     plot_encoding_delta_panel(ax, table)
 
-    assert ax.get_ylabel() == "Frac."
+    assert ax.get_ylabel() == "Fraction"
     assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
@@ -2132,9 +2389,12 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     text_labels = [text.get_text() for text in ax.texts]
     assert "Abs place better" in text_labels
     assert "Distance-to-reward\nbetter" in text_labels
-    assert text_labels.count("DGP better") == 1
-    assert "DGP > abs place\n50% >0, med. 0.05" in text_labels
-    assert "DGP > dist.-to-reward\n50% >0, med. -0.10" in text_labels
+    assert text_labels.count("DPP better") == 1
+    assert text_labels.count("50% >0") == 2
+    assert "DPP > abs place\n50% >0" not in text_labels
+    assert "DPP > dist.-to-reward\n50% >0" not in text_labels
+    assert "DPP > abs place\n50% >0, med. 0.05" not in text_labels
+    assert "DPP > dist.-to-reward\n50% >0, med. -0.10" not in text_labels
     assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"
@@ -2154,10 +2414,17 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     assert ax.texts[4].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_task_progression"
     ]
-    assert ax.texts[3].get_horizontalalignment() == "left"
-    assert ax.texts[4].get_horizontalalignment() == "left"
-    assert ax.texts[3].get_position()[0] == pytest.approx(0.67)
-    assert ax.texts[4].get_position()[0] == pytest.approx(0.67)
+    assert ax.texts[3].get_horizontalalignment() == "right"
+    assert ax.texts[4].get_horizontalalignment() == "right"
+    assert ax.texts[3].get_verticalalignment() == "bottom"
+    assert ax.texts[4].get_verticalalignment() == "bottom"
+    assert ax.texts[3].get_position() == pytest.approx(
+        (
+            PANEL_F_RIGHT_SUMMARY_POSITION[0],
+            PANEL_F_RIGHT_SUMMARY_POSITION[1] + PANEL_F_RIGHT_SUMMARY_Y_STEP,
+        )
+    )
+    assert ax.texts[4].get_position() == pytest.approx(PANEL_F_RIGHT_SUMMARY_POSITION)
     assert ax.lines[0].get_color() == "black"
     assert ax.get_legend() is None
     assert len(ax.patches) == 41
@@ -2191,11 +2458,12 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
 
     plot_ax = ax.child_axes[0]
     schematic_axes = ax.child_axes[1:]
-    assert plot_ax.get_ylabel() == "Abs. norm. error"
+    assert plot_ax.get_ylabel() == "|Norm. error|"
     assert plot_ax.yaxis.label.get_fontsize() == pytest.approx(
         DECODING_YLABEL_FONTSIZE
     )
-    assert plot_ax.get_ylim() == pytest.approx((0.0, 0.5))
+    assert plot_ax.yaxis.label.get_position()[0] == pytest.approx(DECODING_YLABEL_X)
+    assert plot_ax.get_ylim() == pytest.approx((0.0, 0.72))
     assert plot_ax.get_position().bounds == pytest.approx(ax.get_position().bounds)
     assert [text.get_text() for text in plot_ax.get_xticklabels()] == [
         label for _comparison, label, _family, _pairs in DECODING_CROSS_TRAJECTORY_COMPARISONS
@@ -2207,36 +2475,87 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
         text.get_fontsize() == pytest.approx(DECODING_XTICK_LABEL_FONTSIZE)
         for text in plot_ax.get_xticklabels()
     )
-    assert len(plot_ax.lines) == 0
+    assert len(plot_ax.lines) == len(DECODING_SIGNIFICANCE_BRACKETS)
     assert len(plot_ax.collections) == 2
-    assert [text.get_text() for text in plot_ax.texts] == [
+    median_texts = [
+        text for text in plot_ax.texts if text.get_text().startswith("med. ")
+    ]
+    significance_texts = [
+        text for text in plot_ax.texts if text.get_text() in {"****", "**"}
+    ]
+    assert [text.get_text() for text in median_texts] == [
         "med. 0.20",
         "med. 0.20",
         "med. 0.20",
     ]
     assert all(
         text.get_fontsize() == pytest.approx(DECODING_MEDIAN_LABEL_FONTSIZE)
-        for text in plot_ax.texts
+        for text in median_texts
     )
-    assert [text.get_horizontalalignment() for text in plot_ax.texts] == [
+    assert [text.get_horizontalalignment() for text in median_texts] == [
         "left",
         "left",
-        "left",
+        "right",
     ]
-    assert [text.get_verticalalignment() for text in plot_ax.texts] == [
+    assert [text.get_verticalalignment() for text in median_texts] == [
         "center",
         "center",
         "center",
     ]
-    assert [text.get_position()[0] for text in plot_ax.texts] == pytest.approx(
+    assert [text.get_position()[0] for text in median_texts] == pytest.approx(
         [
             position + DECODING_MEDIAN_LABEL_X_OFFSET
-            for position in (1.0, 2.0, 3.0)
+            for position in (1.0, 2.0)
         ]
+        + [3.0 - DECODING_MEDIAN_LABEL_X_OFFSET]
     )
-    assert [text.get_position()[1] for text in plot_ax.texts] == pytest.approx(
+    assert [text.get_position()[1] for text in median_texts] == pytest.approx(
         [0.2, 0.2, 0.2]
     )
+    assert [text.get_text() for text in significance_texts] == ["****", "**"]
+    assert all(
+        text.get_fontsize() == pytest.approx(DECODING_SIGNIFICANCE_LABEL_FONTSIZE)
+        for text in significance_texts
+    )
+    assert [text.get_horizontalalignment() for text in significance_texts] == [
+        "center",
+        "center",
+    ]
+    assert [text.get_verticalalignment() for text in significance_texts] == [
+        "bottom",
+        "bottom",
+    ]
+    assert [text.get_position()[0] for text in significance_texts] == pytest.approx(
+        [
+            (x_start + x_stop) / 2.0
+            for x_start, x_stop, _y, _label in DECODING_SIGNIFICANCE_BRACKETS
+        ]
+    )
+    assert [text.get_position()[1] for text in significance_texts] == pytest.approx(
+        [
+            y
+            + DECODING_SIGNIFICANCE_BRACKET_HEIGHT
+            + DECODING_SIGNIFICANCE_LABEL_Y_OFFSET
+            for _x_start, _x_stop, y, _label in DECODING_SIGNIFICANCE_BRACKETS
+        ]
+    )
+    for line, (x_start, x_stop, y, _label) in zip(
+        plot_ax.lines,
+        DECODING_SIGNIFICANCE_BRACKETS,
+        strict=True,
+    ):
+        assert line.get_xdata() == pytest.approx([x_start, x_start, x_stop, x_stop])
+        assert line.get_ydata() == pytest.approx(
+            [
+                y,
+                y + DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
+                y + DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
+                y,
+            ]
+        )
+        assert line.get_linewidth() == pytest.approx(
+            DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH
+        )
     legend = plot_ax.get_legend()
     assert legend is None
     scatter = plot_ax.collections[1]
