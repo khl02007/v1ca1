@@ -215,6 +215,8 @@ PANEL_B_DPPI_EQUATION = "DPPI = max(left overlap,\nright overlap)"
 PANEL_B_DPPI_EQUATION_POSITION = (0.50, 0.08)
 PANEL_B_GROUPED_AXIS_BOUNDS = (0.325, 0.32, 0.285, 0.54)
 PANEL_B_SCATTER_AXIS_BOUNDS = (0.635, 0.12, 0.360, 0.76)
+PANEL_B_DPPI_SCHEMATIC_WITHOUT_GROUP_AXIS_BOUNDS = (0.000, 0.12, 0.380, 0.76)
+PANEL_B_SCATTER_WITHOUT_GROUP_AXIS_BOUNDS = (0.425, 0.125, 0.570, 0.80)
 PANEL_B_SCATTER_MAIN_TICKS = (0.0, 0.5, 1.0)
 PANEL_B_SCATTER_MAIN_TICK_LABELS = ("0", "0.5", "1")
 PANEL_C_CROSS_DECODING_AXIS_BOUNDS = (0.06, 0.16, 0.40, 0.66)
@@ -910,7 +912,7 @@ def _format_panel_b_dppi_scatter_axes(ax: Any) -> None:
                 fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                 labelpad=1.0,
             )
-            child_ax.xaxis.set_label_coords(0.50, -0.12)
+            child_ax.xaxis.set_label_coords(0.50, -0.18)
             child_ax.set_ylabel(
                 "Light DPPI",
                 fontsize=MIN_PUBLICATION_FONTSIZE_PT,
@@ -933,11 +935,15 @@ def _format_panel_b_dppi_scatter_axes(ax: Any) -> None:
             child_ax.set_xlabel(
                 "Frac.",
                 fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-                labelpad=0.6,
+                labelpad=1.0,
             )
-            child_ax.xaxis.set_label_coords(0.50, -0.11)
-            child_ax.set_xticks([])
-            child_ax.tick_params(axis="x", labelbottom=False, bottom=False)
+            child_ax.xaxis.set_label_coords(0.50, -0.18)
+            child_ax.set_xticks((0.0, 0.1))
+            child_ax.set_xticklabels(
+                ("0", "0.1"),
+                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            )
+            child_ax.tick_params(axis="x", labelbottom=True, bottom=True, pad=0.8)
 
         if child_ax.get_ylabel() == "Frac.":
             child_ax.set_ylabel(
@@ -945,9 +951,13 @@ def _format_panel_b_dppi_scatter_axes(ax: Any) -> None:
                 fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                 labelpad=0.4,
             )
-            child_ax.yaxis.set_label_coords(-0.12, 0.50)
-            child_ax.set_yticks([])
-            child_ax.tick_params(axis="y", labelleft=False, left=False)
+            child_ax.yaxis.set_label_coords(-0.103, 0.50)
+            child_ax.set_yticks((0.0, 0.1))
+            child_ax.set_yticklabels(
+                ("0", "0.1"),
+                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            )
+            child_ax.tick_params(axis="y", labelleft=True, left=True, pad=0.6)
 
 
 def plot_panel_b_dpp_overlap_with_schematic(
@@ -957,40 +967,72 @@ def plot_panel_b_dpp_overlap_with_schematic(
     example: dict[str, Any],
     low_threshold: float,
     high_threshold: float,
+    show_grouped: bool = True,
+    show_scatter_linear_fit: bool = False,
+    show_scatter_r2: bool = False,
+    scatter_equal_aspect: bool = False,
 ) -> None:
     """Plot Figure 2 Panel B with DPPI schematic and overlap summaries."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    schematic_ax = ax.inset_axes(PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS)
-    grouped_ax = ax.inset_axes(PANEL_B_GROUPED_AXIS_BOUNDS)
-    scatter_ax = ax.inset_axes(PANEL_B_SCATTER_AXIS_BOUNDS)
+    schematic_bounds = (
+        PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS
+        if show_grouped
+        else PANEL_B_DPPI_SCHEMATIC_WITHOUT_GROUP_AXIS_BOUNDS
+    )
+    schematic_ax = ax.inset_axes(schematic_bounds)
+    scatter_bounds = (
+        PANEL_B_SCATTER_AXIS_BOUNDS
+        if show_grouped
+        else PANEL_B_SCATTER_WITHOUT_GROUP_AXIS_BOUNDS
+    )
+    if show_grouped:
+        grouped_ax = ax.inset_axes(PANEL_B_GROUPED_AXIS_BOUNDS)
+    scatter_ax = ax.inset_axes(scatter_bounds)
     plot_panel_b_dppi_schematic(schematic_ax, example)
-    plot_panel_b_dpp_overlap_grouped(
-        grouped_ax,
+    if show_grouped:
+        plot_panel_b_dpp_overlap_grouped(
+            grouped_ax,
+            overlap_table,
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
+        )
+        for text in grouped_ax.texts:
+            if "> 0.5" in text.get_text():
+                text.set_text("")
+    plot_panel_b_dpp_overlap_scatter(
+        scatter_ax,
         overlap_table,
-        low_threshold=low_threshold,
-        high_threshold=high_threshold,
+        title=None,
+        show_linear_fit=show_scatter_linear_fit,
+        show_r2_annotation=show_scatter_r2,
+        equal_aspect=scatter_equal_aspect,
     )
-    for text in grouped_ax.texts:
-        if "> 0.5" in text.get_text():
-            text.set_text("")
-    plot_panel_b_dpp_overlap_scatter(scatter_ax, overlap_table, title=None)
     _format_panel_b_dppi_scatter_axes(scatter_ax)
-    grouped_ax.set_title("")
-    grouped_ax.set_xlabel("Dark DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=0.6)
-    grouped_ax.set_ylabel("Light DPPI", fontsize=MIN_PUBLICATION_FONTSIZE_PT, labelpad=1.0)
-    low_threshold_label = f"{float(low_threshold):g}"
-    high_threshold_label = f"{float(high_threshold):g}"
-    grouped_labels = (
-        f"Low\n<{low_threshold_label}",
-        f"Mid\n{low_threshold_label}-{high_threshold_label}",
-        f"High\n>={high_threshold_label}",
-    )
-    grouped_ax.set_xticklabels(grouped_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
-    _remove_axis_tick_label_lines(grouped_ax, prefixes=("n=",))
-    grouped_ax.xaxis.set_label_coords(0.5, -0.26)
-    grouped_ax.tick_params(axis="x", pad=1.0)
+    if show_grouped:
+        grouped_ax.set_title("")
+        grouped_ax.set_xlabel(
+            "Dark DPPI",
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            labelpad=0.6,
+        )
+        grouped_ax.set_ylabel(
+            "Light DPPI",
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            labelpad=1.0,
+        )
+        low_threshold_label = f"{float(low_threshold):g}"
+        high_threshold_label = f"{float(high_threshold):g}"
+        grouped_labels = (
+            f"Low\n<{low_threshold_label}",
+            f"Mid\n{low_threshold_label}-{high_threshold_label}",
+            f"High\n>={high_threshold_label}",
+        )
+        grouped_ax.set_xticklabels(grouped_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
+        _remove_axis_tick_label_lines(grouped_ax, prefixes=("n=",))
+        grouped_ax.xaxis.set_label_coords(0.5, -0.26)
+        grouped_ax.tick_params(axis="x", pad=1.0)
 
 
 def plot_panel_c_cross_and_place_decoding(

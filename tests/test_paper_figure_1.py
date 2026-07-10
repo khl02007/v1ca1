@@ -1097,75 +1097,91 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
     top_epoch_icon_axis = ax.child_axes[0]
     second_epoch_icon_axis = ax.child_axes[1]
     dark_epoch_icon_axis = ax.child_axes[2]
-    top_epoch_region_patches = [
-        patch
-        for patch in top_epoch_icon_axis.patches
-        if isinstance(patch, Rectangle)
-    ]
-    assert len(top_epoch_region_patches) == 2
-    assert top_epoch_region_patches[0].get_facecolor() == pytest.approx(
-        to_rgba(
-            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
-            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
-        )
-    )
-    assert top_epoch_region_patches[1].get_facecolor() == pytest.approx(
-        to_rgba(
-            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
-            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
-        )
-    )
-    second_epoch_region_patches = [
-        patch
-        for patch in second_epoch_icon_axis.patches
-        if isinstance(patch, Rectangle)
-    ]
-    assert len(second_epoch_region_patches) == 2
-    assert second_epoch_region_patches[0].get_facecolor() == pytest.approx(
-        to_rgba(
-            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
-            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
-        )
-    )
-    assert second_epoch_region_patches[1].get_facecolor() == pytest.approx(
-        to_rgba(
-            figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
-            figure_1_module.PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
-        )
-    )
-    assert not any(
-        isinstance(patch, Rectangle) for patch in dark_epoch_icon_axis.patches
-    )
     _outline, _points, dims = figure_1_module.get_w_track_geometry()
-    assert top_epoch_icon_axis.texts[0].get_position()[0] == pytest.approx(
-        dims["x0"] - figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+    assert not [
+        patch
+        for icon_axis in (
+            top_epoch_icon_axis,
+            second_epoch_icon_axis,
+            dark_epoch_icon_axis,
+        )
+        for patch in icon_axis.patches
+        if isinstance(patch, Rectangle)
+    ]
+
+    def _assert_arm_side_outlines(
+        icon_axis: object,
+        *,
+        left_arm_color: str,
+        right_arm_color: str,
+    ) -> None:
+        gap = figure_1_module.PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_GAP
+        expected = {
+            "_panel_b_visual_icon_arm_side_outline_left_arm_left": (
+                dims["x0"] - gap,
+                left_arm_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_left_arm_right": (
+                dims["x1"] + gap,
+                left_arm_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_right_arm_left": (
+                dims["x4"] - gap,
+                right_arm_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_right_arm_right": (
+                dims["x5"] + gap,
+                right_arm_color,
+            ),
+        }
+        lines = {
+            line.get_label(): line
+            for line in icon_axis.lines
+            if line.get_label().startswith(
+                "_panel_b_visual_icon_arm_side_outline_"
+            )
+        }
+        assert set(lines) == set(expected)
+        for label, (x_position, color) in expected.items():
+            line = lines[label]
+            assert list(line.get_xdata()) == pytest.approx(
+                [x_position, x_position]
+            )
+            assert list(line.get_ydata()) == pytest.approx(
+                [dims["y1"], dims["y2"]]
+            )
+            assert to_rgba(line.get_color()) == pytest.approx(to_rgba(color))
+            assert line.get_linewidth() == pytest.approx(
+                figure_1_module.PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_LINEWIDTH
+            )
+
+    _assert_arm_side_outlines(
+        top_epoch_icon_axis,
+        left_arm_color=figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
+        right_arm_color=figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
     )
-    assert top_epoch_icon_axis.texts[1].get_position()[0] == pytest.approx(
-        dims["x5"] + figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+    _assert_arm_side_outlines(
+        second_epoch_icon_axis,
+        left_arm_color=figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"],
+        right_arm_color=figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"],
     )
-    assert to_rgba(top_epoch_icon_axis.texts[0].get_color())[:3] == pytest.approx(
-        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
-    )
-    assert to_rgba(top_epoch_icon_axis.texts[1].get_color())[:3] == pytest.approx(
-        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
-    )
-    assert to_rgba(second_epoch_icon_axis.texts[0].get_color())[:3] == pytest.approx(
-        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
-    )
-    assert to_rgba(second_epoch_icon_axis.texts[1].get_color())[:3] == pytest.approx(
-        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
-    )
+    assert not [
+        line
+        for line in dark_epoch_icon_axis.lines
+        if line.get_label().startswith("_panel_b_visual_icon_arm_side_outline_")
+    ]
+    assert not [
+        text
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
+        if text.get_text() in {"A", "B"}
+    ]
     rate_axes = ax.child_axes[5::3]
     assert len(rate_axes) == 4
     assert all(rate_axis.get_xlabel() == "" for rate_axis in rate_axes)
     assert [text.get_text() for text in ax.texts].count(TASK_PROGRESSION_XLABEL) == 1
     assert rate_axes[0].get_ylabel() == "FR (Hz)"
     assert all(rate_axis.get_ylabel() == "" for rate_axis in rate_axes[1:])
-    assert {
-        text.get_text()
-        for child_axis in ax.child_axes
-        for text in child_axis.texts
-    } >= {"A", "B"}
     plt.close(fig)
 
 
@@ -1756,7 +1772,7 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
     matplotlib.use("Agg")
     from matplotlib.colors import to_rgba
     from matplotlib.text import Annotation
-    from matplotlib.patches import ConnectionPatch
+    from matplotlib.patches import ConnectionPatch, Rectangle
     import matplotlib.pyplot as plt
     from v1ca1.paper_figures import figure_summary
 
@@ -1768,21 +1784,29 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
         rotate_behavior_180=True,
     )
 
-    assert len(ax.child_axes) == 2
-    trajectory_ax, visual_ax = ax.child_axes
-    assert trajectory_ax.get_position().x0 < visual_ax.get_position().x0
-    assert trajectory_ax.get_position().x0 < ax.get_position().x0
-    assert visual_ax.get_position().x0 - trajectory_ax.get_position().x1 > 0.03
-    parent_center_y = ax.get_position().y0 + ax.get_position().height / 2.0
-    trajectory_center_y = (
-        trajectory_ax.get_position().y0 + trajectory_ax.get_position().height / 2.0
-    )
-    visual_center_y = visual_ax.get_position().y0 + visual_ax.get_position().height / 2.0
-    assert trajectory_center_y == pytest.approx(parent_center_y)
-    assert visual_center_y == pytest.approx(parent_center_y)
-    assert visual_ax.get_position().y0 == pytest.approx(ax.get_position().y0)
-    assert visual_ax.get_position().height == pytest.approx(ax.get_position().height)
+    assert len(ax.child_axes) == 3
+    trajectory_ax, arena_ax, condition_ax = ax.child_axes
+    trajectory_bounds = trajectory_ax.get_position()
+    arena_bounds = arena_ax.get_position()
+    condition_bounds = condition_ax.get_position()
+    assert trajectory_bounds.x0 < arena_bounds.x0
+    assert trajectory_bounds.x1 < arena_bounds.x0
+    assert trajectory_bounds.y0 == pytest.approx(arena_bounds.y0)
+    assert trajectory_bounds.height == pytest.approx(arena_bounds.height)
+    assert trajectory_bounds.width == pytest.approx(arena_bounds.width)
+    assert trajectory_bounds.height == pytest.approx(2.0 * condition_bounds.height)
+    assert condition_bounds.y1 < trajectory_bounds.y0
+    assert condition_bounds.x0 == pytest.approx(trajectory_bounds.x0)
+    assert condition_bounds.x1 == pytest.approx(arena_bounds.x1)
     assert not any(child.images for child in ax.child_axes)
+    assert [text.get_text() for text in ax.texts if text.get_text()] == [
+        figure_1_module.TASK_DESIGN_DIVIDER_HEADING
+    ]
+    assert len(ax.lines) == 1
+    assert list(ax.lines[0].get_ydata()) == pytest.approx(
+        [figure_1_module.TASK_DESIGN_DIVIDER_Y] * 2
+    )
+
     assert len(trajectory_ax.child_axes) == 4
     trajectory_labels = [
         text.get_text()
@@ -1790,46 +1814,140 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
         for text in child_ax.texts
         if text.get_text()
     ]
-    assert trajectory_labels == ["L", "C", "R"]
-    visible_visual_text = [text for text in visual_ax.texts if text.get_text()]
-    assert [text.get_text() for text in visible_visual_text] == ["Time"]
-    time_text = visible_visual_text[0]
+    assert trajectory_labels == []
+
+    arena_text_by_label = {
+        text.get_text(): text for text in arena_ax.texts if text.get_text()
+    }
+    assert {
+        "L",
+        "C",
+        "R",
+        "Monitor locations",
+        "Dark",
+        "A",
+        "B",
+    } == set(arena_text_by_label)
+    assert to_rgba(arena_text_by_label["A"].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
+    )
+    assert to_rgba(arena_text_by_label["B"].get_color())[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
+    )
+
+    visible_condition_text = [
+        text for text in condition_ax.texts if text.get_text()
+    ]
+    assert [text.get_text() for text in visible_condition_text] == [
+        *figure_1_module.TASK_DESIGN_PHASE_LABELS,
+        "Time",
+    ]
+    phase_texts = visible_condition_text[:3]
+    assert [text.get_position()[1] for text in phase_texts] == pytest.approx(
+        [figure_1_module.TASK_DESIGN_PHASE_LABEL_Y] * 3
+    )
+    time_text = visible_condition_text[-1]
     assert time_text.get_position()[1] == pytest.approx(
         figure_1_module.TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y
         - figure_summary.SUMMARY_RUN_SLEEP_TIMELINE_TIME_LABEL_OFFSET
     )
     timeline_arrows = [
         text
-        for text in visual_ax.texts
+        for text in condition_ax.texts
         if isinstance(text, Annotation) and not text.get_text()
     ]
     assert len(timeline_arrows) == 1
     assert timeline_arrows[0].xy[1] == pytest.approx(
         figure_1_module.TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y
     )
-    assert len(visual_ax.child_axes) == 4
-    condition_axes = visual_ax.child_axes[:3]
-    stimulus_ax = visual_ax.child_axes[3]
-    assert all(
-        condition_ax.get_position().y0 < stimulus_ax.get_position().y0
-        for condition_ax in condition_axes
+    timeline_marker_lines = [
+        line for line in condition_ax.lines if line.get_marker() == "o"
+    ]
+    assert len(timeline_marker_lines) == 1
+    assert list(timeline_marker_lines[0].get_xdata()) == pytest.approx(
+        [
+            bounds[0] + bounds[2] / 2.0
+            for bounds in figure_1_module.TASK_DESIGN_CONDITION_TRACK_BOUNDS
+        ]
     )
-    stimulus_text_by_label = {
-        text.get_text(): text for text in stimulus_ax.texts if text.get_text()
-    }
-    assert {"A", "B"} <= set(stimulus_text_by_label)
+    assert len(condition_ax.child_axes) == 3
+    condition_axes = condition_ax.child_axes
+    green = to_rgba(figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR)[:3]
+    pink = to_rgba(figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR)[:3]
+    assert not [
+        patch
+        for condition_ax in condition_axes[:2]
+        for patch in condition_ax.patches
+        if isinstance(patch, Rectangle)
+    ]
+
+    _outline, _points, dims = figure_1_module.get_w_track_geometry()
+    gap = figure_1_module.PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_GAP
+
+    def _assert_condition_rails(
+        condition_ax: object,
+        *,
+        left_color: tuple[float, ...],
+        right_color: tuple[float, ...],
+    ) -> None:
+        expected = {
+            "_panel_b_visual_icon_arm_side_outline_left_arm_left": (
+                dims["x0"] - gap,
+                left_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_left_arm_right": (
+                dims["x1"] + gap,
+                left_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_right_arm_left": (
+                dims["x4"] - gap,
+                right_color,
+            ),
+            "_panel_b_visual_icon_arm_side_outline_right_arm_right": (
+                dims["x5"] + gap,
+                right_color,
+            ),
+        }
+        lines = {
+            line.get_label(): line
+            for line in condition_ax.lines
+            if line.get_label().startswith(
+                "_panel_b_visual_icon_arm_side_outline_"
+            )
+        }
+        assert set(lines) == set(expected)
+        for label, (x_position, color) in expected.items():
+            line = lines[label]
+            assert list(line.get_xdata()) == pytest.approx(
+                [x_position, x_position]
+            )
+            assert list(line.get_ydata()) == pytest.approx(
+                [dims["y1"], dims["y2"]]
+            )
+            assert to_rgba(line.get_color())[:3] == pytest.approx(color)
+            assert line.get_linewidth() == pytest.approx(
+                figure_1_module.PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_LINEWIDTH
+            )
+
+    _assert_condition_rails(
+        condition_axes[0],
+        left_color=green,
+        right_color=pink,
+    )
+    _assert_condition_rails(
+        condition_axes[1],
+        left_color=pink,
+        right_color=green,
+    )
+    assert not [
+        line
+        for line in condition_axes[2].lines
+        if line.get_label().startswith("_panel_b_visual_icon_arm_side_outline_")
+    ]
     connectors = [
         artist for artist in fig.artists if isinstance(artist, ConnectionPatch)
     ]
-    assert len(connectors) == 4
-    green = to_rgba(figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR)[:3]
-    pink = to_rgba(figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR)[:3]
-    assert to_rgba(stimulus_text_by_label["A"].get_color())[:3] == pytest.approx(green)
-    assert to_rgba(stimulus_text_by_label["B"].get_color())[:3] == pytest.approx(pink)
-    connector_colors = np.asarray(
-        [to_rgba(connector.get_edgecolor())[:3] for connector in connectors]
-    )
-    assert connector_colors == pytest.approx(np.asarray([green, green, pink, pink]))
+    assert not connectors
     plt.close(fig)
 
 
@@ -1961,7 +2079,11 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     from matplotlib.patches import Ellipse, Polygon, Rectangle
 
     fig, ax = plt.subplots()
-    draw_visual_stimuli_schematic(ax)
+    draw_visual_stimuli_schematic(
+        ax,
+        show_condition_labels=True,
+        show_monitor_legend=True,
+    )
 
     rectangles = [patch for patch in ax.patches if isinstance(patch, Rectangle)]
     visual_stimulus_color = to_rgba(SCHEMATIC_COLORS["visual_stimulus"])[:3]
@@ -1970,11 +2092,21 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
         for patch in rectangles
         if patch.get_facecolor()[:3] == pytest.approx(visual_stimulus_color)
     ]
+    screen_border_rectangles = [
+        patch
+        for patch in rectangles
+        if patch.get_height() == pytest.approx(0.175)
+        and patch.get_facecolor()[3] == pytest.approx(0.0)
+        and patch.get_edgecolor()[3] > 0.0
+    ]
     screen_rectangles = [
         patch
         for patch in rectangles
-        if patch.get_height() == pytest.approx(0.140)
-        and patch.get_edgecolor()[3] > 0.0
+        if patch.get_height() == pytest.approx(0.175)
+        and patch.get_facecolor()[3] > 0.0
+        and screen_border_rectangles
+        and patch.get_width()
+        == pytest.approx(screen_border_rectangles[0].get_width())
     ]
     black_screen_rectangles = [
         patch
@@ -1988,15 +2120,23 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     ]
     track_polygons = [patch for patch in ax.patches if isinstance(patch, Polygon)]
     dot_ellipses = [patch for patch in ax.patches if isinstance(patch, Ellipse)]
+    monitor_key_rectangles = [
+        patch
+        for patch in yellow_monitor_rectangles
+        if patch.get_width() == pytest.approx(0.075)
+        and patch.get_height() == pytest.approx(0.025)
+    ]
     assert len(yellow_monitor_rectangles) == 6
+    assert len(monitor_key_rectangles) == 1
     assert len(screen_rectangles) == 3
+    assert len(screen_border_rectangles) == 3
     assert all(patch.get_width() < patch.get_height() for patch in screen_rectangles)
     assert track_polygons
     track_vertices = track_polygons[0].get_xy()
     axes_aspect = (ax.get_position().width * fig.get_figwidth()) / (
         ax.get_position().height * fig.get_figheight()
     )
-    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.3224)
+    assert np.ptp(track_vertices[:, 1]) == pytest.approx(0.400)
     assert (
         np.ptp(track_vertices[:, 0]) / np.ptp(track_vertices[:, 1]) * axes_aspect
     ) == pytest.approx(4.1 / 4.0)
@@ -2017,13 +2157,41 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     assert dot_screen_rectangles
     assert len(dot_ellipses) == 11
     assert all(patch.width < patch.height for patch in dot_ellipses)
-    assert [text.get_text() for text in ax.texts] == ["L", "C", "R", "Visual stimuli"]
-    assert ax.texts[-1].get_fontsize() == pytest.approx(4.9)
-    assert ax.texts[-1].get_position()[1] == pytest.approx(0.300)
-    assert np.min(track_vertices[:, 1]) > ax.texts[-1].get_position()[1]
+    assert [text.get_text() for text in ax.texts] == [
+        "L",
+        "C",
+        "R",
+        "Monitor locations",
+        "Dark",
+        "A",
+        "B",
+    ]
+    monitor_legend_text = ax.texts[3]
+    assert monitor_legend_text.get_fontsize() == pytest.approx(5.8)
+    assert monitor_legend_text.get_position()[1] == pytest.approx(0.375)
+    assert monitor_key_rectangles[0].get_y() + (
+        monitor_key_rectangles[0].get_height() / 2.0
+    ) == pytest.approx(monitor_legend_text.get_position()[1])
+    condition_texts = ax.texts[4:]
+    assert [text.get_fontsize() for text in condition_texts] == pytest.approx(
+        [6.2, 6.2, 6.2]
+    )
+    assert np.min(track_vertices[:, 1]) > max(
+        text.get_position()[1] for text in condition_texts
+    )
     assert max(
         patch.get_y() + patch.get_height() for patch in screen_rectangles
-    ) < ax.texts[-1].get_position()[1]
+    ) < min(text.get_position()[1] for text in condition_texts)
+    assert all(text.get_fontsize() == pytest.approx(6.3) for text in ax.texts[:3])
+    assert all(
+        patch.get_edgecolor()[3] > 0.0 for patch in yellow_monitor_rectangles
+    )
+    assert screen_border_rectangles[1].get_edgecolor()[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
+    )
+    assert screen_border_rectangles[2].get_edgecolor()[:3] == pytest.approx(
+        to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
+    )
     assert not ax.axison
     center_wall_lines = [
         line

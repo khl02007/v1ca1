@@ -96,6 +96,42 @@ def _normalize_w_track_region_fill_colors(
     return normalized
 
 
+def draw_w_track_arm_side_outlines(
+    ax: "Axes",
+    *,
+    arm_colors: Mapping[str, Any],
+    gap: float,
+    linewidth: float,
+    label_prefix: str = "_w_track_arm_side_outline",
+    zorder: float = 5.5,
+) -> None:
+    """Draw paired colored rails outside the left and right W-track arms."""
+    from matplotlib.lines import Line2D
+
+    _outline, _points, dims = get_w_track_geometry()
+    arm_edges = {
+        "left_arm": (dims["x0"], dims["x1"]),
+        "right_arm": (dims["x4"], dims["x5"]),
+    }
+    for arm_name, x_edges in arm_edges.items():
+        for edge_name, x_position, edge_offset in zip(
+            ("left", "right"),
+            x_edges,
+            (-float(gap), float(gap)),
+            strict=True,
+        ):
+            line = Line2D(
+                [x_position + edge_offset, x_position + edge_offset],
+                [dims["y1"], dims["y2"]],
+                color=arm_colors[arm_name],
+                linewidth=float(linewidth),
+                solid_capstyle="butt",
+                zorder=float(zorder),
+            )
+            line.set_label(f"{label_prefix}_{arm_name}_{edge_name}")
+            ax.add_line(line)
+
+
 def draw_w_track_schematic(
     ax: "Axes",
     *,

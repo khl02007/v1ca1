@@ -30,7 +30,6 @@ from v1ca1.paper_figures.figure_2 import (
     DEFAULT_SIGMA_BINS,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     FIGURE_2_PANEL_A_EXAMPLES,
-    MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT,
     MIN_PUBLICATION_FONTSIZE_PT,
     PANEL_A_EXAMPLE_Y_MAX_OVERRIDES,
     PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
@@ -106,6 +105,7 @@ SUMMARY_PANEL_E_CROSS_AXIS_BOUNDS = (0.06, 0.18, 0.40, 0.62)
 SUMMARY_PANEL_E_PLACE_AXIS_BOUNDS = (0.57, 0.18, 0.39, 0.62)
 SUMMARY_TOP_HEADER_Y_PAD = 0.012
 SUMMARY_TOP_HEADER_LABEL_X_PAD = 0.02
+SUMMARY_MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT = frozenset({"A", "B"})
 
 
 def _raise_text_to_minimum_fontsize(
@@ -115,7 +115,9 @@ def _raise_text_to_minimum_fontsize(
     additional_exempt_text: Sequence[str] = (),
 ) -> None:
     """Raise final figure text to a minimum size, preserving W-track A/B labels."""
-    exempt_text = MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT.union(additional_exempt_text)
+    exempt_text = SUMMARY_MIN_PUBLICATION_FONTSIZE_EXEMPT_TEXT.union(
+        additional_exempt_text
+    )
 
     def _iter_axes_tree(ax: Any) -> Sequence[Any]:
         axes = [ax]
@@ -214,18 +216,28 @@ def _draw_summary_condition_track(
     fill_track: bool = False,
     left_arm_color: str | None = None,
     right_arm_color: str | None = None,
+    arm_side_outlines: bool = False,
 ) -> None:
     """Draw one summary W-track condition icon."""
-    region_fill_colors = {}
+    arm_colors = {}
     if left_arm_color is not None:
-        region_fill_colors["left_arm"] = left_arm_color
+        arm_colors["left_arm"] = left_arm_color
     if right_arm_color is not None:
-        region_fill_colors["right_arm"] = right_arm_color
+        arm_colors["right_arm"] = right_arm_color
+    color_kwargs = {}
+    if arm_colors:
+        color_kwargs = (
+            {"arm_side_outline_colors": arm_colors}
+            if arm_side_outlines
+            else {
+                "region_fill_colors": arm_colors,
+                "region_fill_alpha": 0.92,
+            }
+        )
     draw_panel_b_visual_epoch_icon(
         ax,
         fill_track=fill_track,
-        region_fill_colors=region_fill_colors,
-        region_fill_alpha=0.92,
+        **color_kwargs,
     )
 
 
@@ -563,6 +575,7 @@ def _draw_summary_visual_stimulus_block(
     *,
     timeline_style: str = "arrow",
     run_sleep_timeline_arrow_y: float = SUMMARY_RUN_SLEEP_TIMELINE_ARROW_Y,
+    arm_side_outlines: bool = False,
 ) -> None:
     """Draw stimulus-location icons, timeline arrow, and stimulus cartoons."""
     ax.set_xlim(0.0, 1.0)
@@ -596,7 +609,11 @@ def _draw_summary_visual_stimulus_block(
     ):
         condition_ax = ax.inset_axes(bounds)
         condition_axes.append(condition_ax)
-        _draw_summary_condition_track(condition_ax, **condition_spec)
+        _draw_summary_condition_track(
+            condition_ax,
+            arm_side_outlines=arm_side_outlines,
+            **condition_spec,
+        )
     if timeline_style == "arrow":
         ax.annotate(
             "",

@@ -1397,19 +1397,91 @@ def _plot_panel_b_overlap_boxplot(
     )
 
 
+def _align_panel_b_marginals_to_scatter(
+    parent_ax: Any,
+    scatter_ax: Any,
+    top_ax: Any,
+    right_ax: Any,
+    *,
+    top_bounds: tuple[float, float, float, float],
+    right_bounds: tuple[float, float, float, float],
+) -> None:
+    """Align marginal histogram lengths to the active scatter-axis box."""
+    from matplotlib.transforms import Bbox
+
+    def _base_bounds(bounds: tuple[float, float, float, float]) -> tuple[float, ...]:
+        parent_bounds = parent_ax.get_position()
+        return (
+            parent_bounds.x0 + bounds[0] * parent_bounds.width,
+            parent_bounds.y0 + bounds[1] * parent_bounds.height,
+            bounds[2] * parent_bounds.width,
+            bounds[3] * parent_bounds.height,
+        )
+
+    def _top_locator(_target_ax: Any, _renderer: Any) -> Bbox:
+        _, y0, _, height = _base_bounds(top_bounds)
+        scatter_bounds = scatter_ax.get_position()
+        return Bbox.from_bounds(
+            scatter_bounds.x0,
+            y0,
+            scatter_bounds.width,
+            height,
+        )
+
+    def _right_locator(_target_ax: Any, _renderer: Any) -> Bbox:
+        parent_bounds = parent_ax.get_position()
+        scatter_bounds = scatter_ax.get_position()
+        scatter_right_axes = (
+            scatter_bounds.x0 + scatter_bounds.width - parent_bounds.x0
+        ) / parent_bounds.width
+        scatter_top_axes = (
+            scatter_bounds.y0 + scatter_bounds.height - parent_bounds.y0
+        ) / parent_bounds.height
+        top_gap_axes = top_bounds[1] - scatter_top_axes
+        x0 = parent_bounds.x0 + (
+            scatter_right_axes + top_gap_axes
+        ) * parent_bounds.width
+        _, _, width, _ = _base_bounds(right_bounds)
+        return Bbox.from_bounds(
+            x0,
+            scatter_bounds.y0,
+            width,
+            scatter_bounds.height,
+        )
+
+    top_ax.set_axes_locator(_top_locator)
+    right_ax.set_axes_locator(_right_locator)
+
+
 def _plot_panel_b_overlap_scatter_with_marginals(
     ax: Any,
     table: Any,
     *,
     title: str | None = "Dark vs light DPP",
+    show_linear_fit: bool = False,
+    show_r2_annotation: bool = False,
+    equal_aspect: bool = False,
 ) -> None:
     """Plot dark-vs-light DPP overlap with marginal fraction histograms."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    scatter_ax = ax.inset_axes((0.14, 0.13, 0.60, 0.62))
-    top_ax = ax.inset_axes((0.14, 0.79, 0.60, 0.15), sharex=scatter_ax)
-    right_ax = ax.inset_axes((0.78, 0.13, 0.18, 0.62), sharey=scatter_ax)
+    scatter_bounds = (0.14, 0.13, 0.60, 0.62)
+    top_bounds = (0.14, 0.825, 0.60, 0.15)
+    right_bounds = (0.755, 0.13, 0.18, 0.62)
+    scatter_ax = ax.inset_axes(scatter_bounds)
+    top_ax = ax.inset_axes(top_bounds, sharex=scatter_ax)
+    right_ax = ax.inset_axes(right_bounds, sharey=scatter_ax)
+    if equal_aspect:
+        scatter_ax.set_box_aspect(1.0)
+        _align_panel_b_marginals_to_scatter(
+            ax,
+            scatter_ax,
+            top_ax,
+            right_ax,
+            top_bounds=top_bounds,
+            right_bounds=right_bounds,
+        )
 
     if table is None or not len(table):
         scatter_ax.text(0.5, 0.5, "No paired\noverlap", ha="center", va="center")
@@ -1441,7 +1513,46 @@ def _plot_panel_b_overlap_scatter_with_marginals(
         edgecolors="none",
         zorder=2,
     )
-    if dark_values.size:
+    if show_linear_fit and dark_values.size >= 2:
+        x_span = np.asarray([0.0, 1.0], dtype=float)
+        if float(np.nanstd(dark_values)) > 0.0:
+            slope, intercept = np.polyfit(dark_values, light_values, deg=1)
+            fit_values = slope * dark_values + intercept
+            residual_sum_squares = float(np.nansum((light_values - fit_values) ** 2))
+            total_sum_squares = float(
+                np.nansum((light_values - float(np.nanmean(light_values))) ** 2)
+            )
+            r2 = (
+                1.0 - residual_sum_squares / total_sum_squares
+                if total_sum_squares > 0.0
+                else float("nan")
+            )
+            scatter_ax.plot(
+                x_span,
+                slope * x_span + intercept,
+                color="black",
+                linewidth=0.85,
+                zorder=3,
+            )
+        else:
+            r2 = float("nan")
+    elif dark_values.size:
+        r2 = float("nan")
+    else:
+        r2 = float("nan")
+
+    if show_r2_annotation and dark_values.size:
+        r2_text = f"{r2:.2f}" if np.isfinite(r2) else "n/a"
+        scatter_ax.text(
+            0.04,
+            0.94,
+            f"R²={r2_text}",
+            ha="left",
+            va="top",
+            fontsize=4.0,
+            transform=scatter_ax.transAxes,
+        )
+    elif dark_values.size:
         median_delta = float(np.nanmedian(light_values - dark_values))
         scatter_ax.text(
             0.04,
@@ -1470,6 +1581,8 @@ def _plot_panel_b_overlap_scatter_with_marginals(
     )
     top_ax.axvline(0.5, color="0.35", linestyle=":", linewidth=0.55)
     top_ax.set_ylim(0.0, 0.13)
+    top_ax.set_yticks((0.0, 0.1))
+    top_ax.set_yticklabels(("0", "0.1"), fontsize=3.2)
     top_ax.set_ylabel("Frac.", fontsize=3.6, labelpad=0.6)
     top_ax.tick_params(axis="x", labelbottom=False, length=0.0)
     top_ax.tick_params(axis="y", labelsize=3.2, length=1.0, pad=0.5)
@@ -1487,6 +1600,8 @@ def _plot_panel_b_overlap_scatter_with_marginals(
     )
     right_ax.axhline(0.5, color="0.35", linestyle=":", linewidth=0.55)
     right_ax.set_xlim(0.0, 0.13)
+    right_ax.set_xticks((0.0, 0.1))
+    right_ax.set_xticklabels(("0", "0.1"), fontsize=3.2)
     right_ax.set_xlabel("Frac.", fontsize=3.6, labelpad=0.6)
     right_ax.tick_params(axis="y", labelleft=False, length=0.0)
     right_ax.tick_params(axis="x", labelsize=3.2, length=1.0, pad=0.5)
@@ -1700,9 +1815,19 @@ def plot_panel_b_dpp_overlap_scatter(
     table: Any,
     *,
     title: str | None = "Dark vs light DPP",
+    show_linear_fit: bool = False,
+    show_r2_annotation: bool = False,
+    equal_aspect: bool = False,
 ) -> None:
     """Plot dark-vs-light DPP overlap with marginal distributions."""
-    _plot_panel_b_overlap_scatter_with_marginals(ax, table, title=title)
+    _plot_panel_b_overlap_scatter_with_marginals(
+        ax,
+        table,
+        title=title,
+        show_linear_fit=show_linear_fit,
+        show_r2_annotation=show_r2_annotation,
+        equal_aspect=equal_aspect,
+    )
 
 
 def _add_panel_b_activity_light_dpp_annotation(

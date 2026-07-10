@@ -53,7 +53,10 @@ from v1ca1.paper_figures.style import (
     label_axis,
     save_figure,
 )
-from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
+from v1ca1.paper_figures.w_track_schematic import (
+    draw_w_track_arm_side_outlines,
+    draw_w_track_schematic,
+)
 from v1ca1.raster.plot_place_field_heatmap import (
     DEFAULT_SIGMA_BINS,
     build_linear_position_by_trajectory,
@@ -174,6 +177,8 @@ PANEL_B_VISUAL_ICON_COLORS = {
     "B": "#E78AC3",
 }
 PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA = 0.92
+PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_GAP = 0.32
+PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_LINEWIDTH = 1.25
 PANEL_B_VISUAL_SHARED_XLABEL_Y = 0.035
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 RASTER_ASSET_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
@@ -392,10 +397,23 @@ CYCLE_ARROW_SPECS = (
 )
 CYCLE_ARROW_LINEWIDTH = 1.08
 CYCLE_ARROW_MUTATION_SCALE = 12.6
-TASK_DESIGN_TRAJECTORY_BOUNDS = (-0.025, 0.09, 0.46, 0.82)
-TASK_DESIGN_VISUAL_STIMULUS_BOUNDS = (0.505, 0.00, 0.495, 1.00)
-TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y = 0.225
-TASK_DESIGN_PROGRESSION_BOUNDS = (0.02, 0.02, 0.96, 0.25)
+TASK_DESIGN_TOP_LEFT_BOUNDS = (0.02, 0.40, 0.46, 0.56)
+TASK_DESIGN_TOP_RIGHT_BOUNDS = (0.52, 0.40, 0.46, 0.56)
+TASK_DESIGN_BOTTOM_BOUNDS = (0.02, 0.02, 0.96, 0.28)
+TASK_DESIGN_CONDITION_TRACK_BOUNDS = (
+    (0.05, 0.25, 0.26, 0.55),
+    (0.37, 0.25, 0.26, 0.55),
+    (0.69, 0.25, 0.26, 0.55),
+)
+TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y = 0.19
+TASK_DESIGN_DIVIDER_Y = 0.35
+TASK_DESIGN_DIVIDER_HEADING = "Visual conditions over time"
+TASK_DESIGN_PHASE_LABEL_Y = 0.82
+TASK_DESIGN_PHASE_LABELS = (
+    "Initial A/B",
+    "Cue swap (B/A)",
+    "Dark",
+)
 TASK_DESIGN_PROGRESSION_SEGMENTS = (
     ("AB", ("A", "B")),
     ("gray", ("gray",)),
@@ -2811,67 +2829,109 @@ def draw_behavior_task_design_panel(
 
     from v1ca1.paper_figures import figure_summary
 
-    trajectory_ax = ax.inset_axes(TASK_DESIGN_TRAJECTORY_BOUNDS)
-    visual_ax = ax.inset_axes(TASK_DESIGN_VISUAL_STIMULUS_BOUNDS)
-    figure_summary._draw_summary_trajectory_cycle(trajectory_ax)
-    draw_task_design_visual_stimulus_block_with_swapped_colors(
-        visual_ax,
+    trajectory_ax = ax.inset_axes(TASK_DESIGN_TOP_LEFT_BOUNDS)
+    arena_ax = ax.inset_axes(TASK_DESIGN_TOP_RIGHT_BOUNDS)
+    condition_ax = ax.inset_axes(TASK_DESIGN_BOTTOM_BOUNDS)
+    ax.plot(
+        [0.02, 0.98],
+        [TASK_DESIGN_DIVIDER_Y, TASK_DESIGN_DIVIDER_Y],
+        color="0.75",
+        linewidth=0.6,
+        transform=ax.transAxes,
+        clip_on=False,
+        zorder=20,
+    )
+    ax.text(
+        0.5,
+        TASK_DESIGN_DIVIDER_Y,
+        TASK_DESIGN_DIVIDER_HEADING,
+        ha="center",
+        va="center",
+        fontsize=5.8,
+        fontweight="bold",
+        color="0.25",
+        bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.5},
+        transform=ax.transAxes,
+        zorder=21,
+    )
+    draw_w_track_cycle_panel(trajectory_ax, include_visual_stimuli=False)
+    draw_visual_stimuli_schematic(
+        arena_ax,
+        show_condition_labels=True,
+        show_monitor_legend=True,
+    )
+    draw_task_design_condition_timeline_block(
+        condition_ax,
         figure_summary=figure_summary,
-        timeline_style="run_sleep_boxes",
     )
 
 
-def draw_task_design_visual_stimulus_block_with_swapped_colors(
+def draw_task_design_condition_timeline_block(
     ax: "Axes",
     *,
     figure_summary: Any,
-    timeline_style: str,
 ) -> None:
-    """Draw the summary visual schematic with Figure 1A green/pink colors swapped."""
-    left_color = figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR
-    right_color = figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR
-    try:
-        figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR = right_color
-        figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR = left_color
-        figure_summary._draw_summary_visual_stimulus_block(
-            ax,
-            timeline_style=timeline_style,
-            run_sleep_timeline_arrow_y=TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y,
-        )
-        add_task_design_visual_stimulus_labels(ax, figure_summary=figure_summary)
-    finally:
-        figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR = left_color
-        figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR = right_color
+    """Draw the three Figure 1A visual conditions over a time arrow."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
 
-
-def add_task_design_visual_stimulus_labels(ax: "Axes", *, figure_summary: Any) -> None:
-    """Label Figure 1A visual-stimulus icons with their A/B conditions."""
-    if not ax.child_axes:
-        return
-    visual_icons_ax = ax.child_axes[-1]
-    screen_y = figure_summary.SUMMARY_VISUAL_SCREEN_Y
-    screen_w = figure_summary.SUMMARY_VISUAL_SCREEN_W
-    screen_h = figure_summary.SUMMARY_VISUAL_SCREEN_H
-    screen_gap = figure_summary.SUMMARY_VISUAL_SCREEN_GAP
-    screen_x = figure_summary.SUMMARY_VISUAL_SCREEN_X
-    label_y = screen_y + screen_h + 0.08
-    for index, label, color in (
-        (0, "A", figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR),
-        (1, "B", figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR),
+    color_a = figure_summary.SUMMARY_TASK_RIGHT_ARM_COLOR
+    color_b = figure_summary.SUMMARY_TASK_LEFT_ARM_COLOR
+    condition_specs = (
+        {"left_arm_color": color_a, "right_arm_color": color_b},
+        {"left_arm_color": color_b, "right_arm_color": color_a},
+        {"fill_track": True},
+    )
+    condition_centers = tuple(
+        bounds[0] + bounds[2] / 2.0
+        for bounds in TASK_DESIGN_CONDITION_TRACK_BOUNDS
+    )
+    for bounds, condition_spec in zip(
+        TASK_DESIGN_CONDITION_TRACK_BOUNDS,
+        condition_specs,
+        strict=True,
     ):
-        visual_icons_ax.text(
-            screen_x + index * (screen_w + screen_gap) + screen_w / 2.0,
-            label_y,
-            label,
+        condition_ax = ax.inset_axes(bounds)
+        figure_summary._draw_summary_condition_track(
+            condition_ax,
+            arm_side_outlines=True,
+            **condition_spec,
+        )
+    for center_x, phase_label in zip(
+        condition_centers,
+        TASK_DESIGN_PHASE_LABELS,
+        strict=True,
+    ):
+        ax.text(
+            center_x,
+            TASK_DESIGN_PHASE_LABEL_Y,
+            phase_label,
             ha="center",
             va="bottom",
-            fontsize=6.0,
+            fontsize=5.4,
             fontweight="bold",
-            color=color,
-            transform=visual_icons_ax.transAxes,
-            clip_on=False,
-            zorder=20,
+            color="0.20",
+            transform=ax.transAxes,
+            zorder=5,
         )
+    figure_summary._draw_summary_run_sleep_timeline_markers(
+        ax,
+        arrow_y=TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y,
+    )
+    ax.plot(
+        condition_centers,
+        [TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y] * len(condition_centers),
+        linestyle="none",
+        marker="o",
+        markersize=2.8,
+        markerfacecolor="white",
+        markeredgecolor="0.25",
+        markeredgewidth=0.65,
+        transform=ax.transAxes,
+        clip_on=False,
+        zorder=6,
+    )
 
 
 def _scale_points_to_axes(
@@ -2922,8 +2982,13 @@ def _get_axes_display_aspect(ax: "Axes") -> float:
     return (box.width * fig_width) / height
 
 
-def draw_visual_stimuli_schematic(ax: "Axes") -> None:
-    """Draw a compact W-track and visual-stimulus sequence in panel B."""
+def draw_visual_stimuli_schematic(
+    ax: "Axes",
+    *,
+    show_condition_labels: bool = False,
+    show_monitor_legend: bool = False,
+) -> None:
+    """Draw a compact W-track, monitor layout, walls, and visual stimuli."""
     from matplotlib.patches import Ellipse, Polygon, Rectangle
 
     ax.set_xlim(0.0, 1.0)
@@ -2936,13 +3001,13 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
     source_xlim = (dims["x0"] - 0.35, dims["x5"] + 0.35)
     source_ylim = (dims["y0"] - 0.55, dims["y2"] + 0.45)
     axes_aspect = _get_axes_display_aspect(ax)
-    track_height = 0.403
+    track_height = 0.50
     track_width = track_height * (
         (source_xlim[1] - source_xlim[0])
         / (source_ylim[1] - source_ylim[0])
         / axes_aspect
     )
-    track_bounds = ((1.0 - track_width) / 2.0, 0.470, track_width, track_height)
+    track_bounds = ((1.0 - track_width) / 2.0, 0.43, track_width, track_height)
     scaled_outline = _scale_points_to_axes(
         outline,
         bounds=track_bounds,
@@ -2951,17 +3016,18 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
     )
 
     monitor_color = SCHEMATIC_COLORS["visual_stimulus"]
-    monitor_bar_w = 0.16
+    monitor_edge_color = "0.25"
+    monitor_bar_w = 0.26
     monitor_y = dims["y1"] + 0.12
     monitor_h = dims["y2"] - dims["y1"] - 0.32
     monitor_source_rects = (
-        (dims["x0"] - 0.24, monitor_y, monitor_bar_w, monitor_h),
-        (dims["x1"] + 0.10, monitor_y, monitor_bar_w, monitor_h),
-        (dims["x4"] - 0.26, monitor_y, monitor_bar_w, monitor_h),
-        (dims["x5"] + 0.10, monitor_y, monitor_bar_w, monitor_h),
+        (dims["x0"] - 0.29, monitor_y, monitor_bar_w, monitor_h),
+        (dims["x1"] + 0.05, monitor_y, monitor_bar_w, monitor_h),
+        (dims["x4"] - 0.31, monitor_y, monitor_bar_w, monitor_h),
+        (dims["x5"] + 0.05, monitor_y, monitor_bar_w, monitor_h),
         (
             dims["x0"],
-            dims["y0"] - 0.42,
+            dims["y0"] - 0.47,
             dims["x5"] - dims["x0"],
             monitor_bar_w,
         ),
@@ -2979,16 +3045,16 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
                 rect[2],
                 rect[3],
                 facecolor=monitor_color,
-                edgecolor="none",
-                alpha=0.90,
+                edgecolor=monitor_edge_color,
+                linewidth=0.45,
                 transform=transform,
                 zorder=1,
             )
         )
     wall_top_y = dims["y2"] + 0.20
     wall_bottom_y = dims["y1"] + 0.06
-    wall_color = "0.25"
-    wall_linewidth = 0.8
+    wall_color = "0.45"
+    wall_linewidth = 1.0
     horizontal_wall = _scale_points_to_axes(
         [
             (dims["x0"] - 0.18, wall_top_y),
@@ -3033,7 +3099,7 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             closed=True,
             facecolor="white",
             edgecolor="black",
-            linewidth=0.8,
+            linewidth=1.15,
             transform=transform,
             zorder=2,
         )
@@ -3055,17 +3121,26 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             label,
             ha="center",
             va="bottom",
-            fontsize=5.2,
+            fontsize=6.3,
+            fontweight="bold",
             color="black",
             transform=transform,
             zorder=4,
         )
 
-    screen_y = 0.070
-    screen_h = 0.140
+    screen_y = 0.025
+    screen_h = 0.175
     screen_w = screen_h / axes_aspect * 1.10
-    screen_gap = 0.055
-    screen_start = 0.5 - (3 * screen_w + 2 * screen_gap) / 2.0
+    screen_gap = 0.045
+    ellipsis_gap = 0.045
+    ellipsis_step = 0.028
+    stimulus_row_width = (
+        3 * screen_w
+        + 2 * screen_gap
+        + ellipsis_gap
+        + 2 * ellipsis_step
+    )
+    screen_start = (1.0 - stimulus_row_width) / 2.0
     screen_specs = (
         (screen_start, "black"),
         (screen_start + screen_w + screen_gap, "grating"),
@@ -3093,40 +3168,68 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             )
         )
 
-    ax.text(
-        stimulus_center,
-        0.300,
-        "Visual stimuli",
-        ha="center",
-        va="bottom",
-        fontsize=4.9,
-        transform=transform,
-        zorder=4,
-    )
-
-    ax.add_patch(
-        Rectangle(
-            (screen_start - 0.090, screen_y + 0.010),
-            0.014,
-            screen_h - 0.020,
-            facecolor=monitor_color,
-            edgecolor="none",
-            alpha=0.90,
-            transform=transform,
-            zorder=2,
-        )
-    )
-    for y in (screen_y + 0.045, screen_y + 0.090):
+    if show_monitor_legend:
+        monitor_legend_y = 0.375
+        monitor_legend_x = 0.285
+        monitor_legend_width = 0.075
+        monitor_legend_height = 0.025
         ax.add_patch(
             Rectangle(
-                (screen_start - 0.055, y),
-                0.012,
-                0.012,
-                facecolor="black",
-                edgecolor="black",
+                (
+                    monitor_legend_x,
+                    monitor_legend_y - monitor_legend_height / 2.0,
+                ),
+                monitor_legend_width,
+                monitor_legend_height,
+                facecolor=monitor_color,
+                edgecolor=monitor_edge_color,
+                linewidth=0.45,
                 transform=transform,
-                zorder=3,
+                zorder=4,
             )
+        )
+        ax.text(
+            monitor_legend_x + monitor_legend_width + 0.025,
+            monitor_legend_y,
+            "Monitor locations",
+            ha="left",
+            va="center",
+            fontsize=5.8,
+            color="black",
+            transform=transform,
+            zorder=4,
+        )
+
+    if show_condition_labels:
+        label_y = screen_y + screen_h + 0.025
+        label_specs = (
+            (0, "Dark", "black"),
+            (1, "A", PANEL_B_VISUAL_ICON_COLORS["A"]),
+            (2, "B", PANEL_B_VISUAL_ICON_COLORS["B"]),
+        )
+        for screen_index, label, color in label_specs:
+            ax.text(
+                screen_specs[screen_index][0] + screen_w / 2.0,
+                label_y,
+                label,
+                ha="center",
+                va="bottom",
+                fontsize=6.2,
+                fontweight="bold",
+                color=color,
+                transform=transform,
+                zorder=4,
+            )
+    else:
+        ax.text(
+            stimulus_center,
+            0.325,
+            "Visual stimuli",
+            ha="center",
+            va="bottom",
+            fontsize=5.6,
+            transform=transform,
+            zorder=4,
         )
 
     for x0, screen_type in screen_specs:
@@ -3136,14 +3239,22 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
             facecolor = "0.65"
         else:
             facecolor = "white"
+        edgecolor = "black"
+        linewidth = 0.8
+        if show_condition_labels and screen_type == "grating":
+            edgecolor = PANEL_B_VISUAL_ICON_COLORS["A"]
+            linewidth = 1.25
+        elif show_condition_labels and screen_type == "dots":
+            edgecolor = PANEL_B_VISUAL_ICON_COLORS["B"]
+            linewidth = 1.25
         ax.add_patch(
             Rectangle(
                 (x0, screen_y),
                 screen_w,
                 screen_h,
                 facecolor=facecolor,
-                edgecolor="black",
-                linewidth=0.6,
+                edgecolor="none",
+                linewidth=0.0,
                 transform=transform,
                 zorder=2,
             )
@@ -3180,10 +3291,26 @@ def draw_visual_stimuli_schematic(ax: "Axes") -> None:
                     radius_frac * screen_h,
                     color,
                 )
+        ax.add_patch(
+            Rectangle(
+                (x0, screen_y),
+                screen_w,
+                screen_h,
+                facecolor="none",
+                edgecolor=edgecolor,
+                linewidth=linewidth,
+                transform=transform,
+                zorder=4,
+            )
+        )
 
-    ellipsis_start = screen_specs[-1][0] + screen_w + 0.050
-    for x in (ellipsis_start, ellipsis_start + 0.030, ellipsis_start + 0.060):
-        add_display_circle(x, screen_y + 0.52 * screen_h, 0.006, "black")
+    ellipsis_start = screen_specs[-1][0] + screen_w + ellipsis_gap
+    for x in (
+        ellipsis_start,
+        ellipsis_start + ellipsis_step,
+        ellipsis_start + 2 * ellipsis_step,
+    ):
+        add_display_circle(x, screen_y + 0.52 * screen_h, 0.007, "black")
 
 
 def _task_design_progression_color(label: str) -> str:
@@ -4346,6 +4473,7 @@ def draw_panel_b_visual_epoch_icon(
     label_colors: Mapping[str, str] | None = None,
     region_fill_colors: Mapping[str, str] | None = None,
     region_fill_alpha: float | None = None,
+    arm_side_outline_colors: Mapping[str, str] | None = None,
 ) -> None:
     """Draw one Figure 1B epoch-condition W-track icon."""
     from matplotlib.colors import to_rgba
@@ -4406,6 +4534,15 @@ def draw_panel_b_visual_epoch_icon(
             zorder=3,
         )
     )
+    if arm_side_outline_colors is not None:
+        draw_w_track_arm_side_outlines(
+            ax,
+            arm_colors=arm_side_outline_colors,
+            gap=PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_GAP,
+            linewidth=PANEL_B_VISUAL_ICON_ARM_SIDE_OUTLINE_LINEWIDTH,
+            label_prefix="_panel_b_visual_icon_arm_side_outline",
+            zorder=4,
+        )
     if left_label is not None:
         ax.text(
             dims["x0"] - PANEL_B_VISUAL_ICON_LABEL_X_OFFSET,
@@ -4601,24 +4738,18 @@ def plot_panel_b_visual_example(
 
     icon_specs = (
         {
-            "left_label": "A",
-            "right_label": "B",
             "fill_track": False,
-            "region_fill_colors": {
+            "arm_side_outline_colors": {
                 "left_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
                 "right_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
             },
-            "region_fill_alpha": PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
         },
         {
-            "left_label": "B",
-            "right_label": "A",
             "fill_track": False,
-            "region_fill_colors": {
+            "arm_side_outline_colors": {
                 "left_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
                 "right_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
             },
-            "region_fill_alpha": PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
         },
         {"left_label": None, "right_label": None, "fill_track": True},
     )

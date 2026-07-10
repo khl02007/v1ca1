@@ -13,6 +13,7 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_FIGURE_CACHE_DIR,
     DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_PANEL_B_PREDICTION_EXAMPLES,
     DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
     DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
     DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
@@ -72,7 +73,7 @@ from v1ca1.paper_figures.figure_3 import (
     save_panel_b_schematic_cache,
     parse_arguments,
     parse_dataset_id,
-    subset_xcorr_payload_for_top_ca1_and_v1_half,
+    prepare_xcorr_payload_for_display,
     plot_glm_summary_panel,
     plot_epoch_modulation_histogram_panel,
     plot_epoch_ripple_heatmap_panel,
@@ -86,6 +87,7 @@ from v1ca1.paper_figures.figure_3 import (
     plot_ripple_decoding_comparison_panel,
     plot_ripple_lfp_panel,
     plot_top_ca1_xcorr_panel,
+    _prediction_example_axis_limit,
 )
 
 
@@ -101,6 +103,30 @@ def test_build_output_path_uses_requested_format() -> None:
     assert build_output_path(Path("paper_figures"), "figure_3", "svg") == Path(
         "paper_figures/figure_3.svg"
     )
+
+
+def test_panel_c_prediction_examples_use_selected_low_bias_cells() -> None:
+    assert DEFAULT_PANEL_B_PREDICTION_EXAMPLES == (
+        ("L12", "20240421", "02_r1", 24),
+        ("L12", "20240421", "02_r1", 32),
+        ("L12", "20240421", "02_r1", 110),
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_value", "expected_limit"),
+    ((11.0, 12.0), (17.7, 20.0), (24.0, 25.0), (37.0, 40.0)),
+)
+def test_prediction_example_axis_limit_contains_all_values(
+    max_value: float,
+    expected_limit: float,
+) -> None:
+    example = {
+        "observed": np.array([0.0, max_value]),
+        "predicted": np.array([0.0, max_value - 1.0]),
+    }
+
+    assert _prediction_example_axis_limit(example) == pytest.approx(expected_limit)
 
     with pytest.raises(ValueError, match="Unknown output format"):
         build_output_path(Path("paper_figures"), "figure_3", "jpg")
@@ -453,20 +479,66 @@ def test_load_top_ca1_xcorr_panel_data_uses_shared_v1_order(tmp_path: Path) -> N
     assert np.allclose(payload["xcorr"][0, 0], xcorr[1, 1])
 
 
-def test_subset_xcorr_payload_for_top_ca1_and_v1_half() -> None:
+def test_prepare_xcorr_payload_for_display_keeps_all_v1_cells() -> None:
+    xcorr = np.ones((4, 6, 5), dtype=float)
+    xcorr[0, 0, 2] = 9.0
+    xcorr[0, 1, 2] = 8.0
+    xcorr[1, 2, 2] = 9.0
+    xcorr[1, 3, 2] = 8.0
+    xcorr[2, 4, 2] = 9.0
+    xcorr[2, 5, 2] = 8.0
     payload = {
         "ca1_unit_ids": np.array([11, 10, 9, 8]),
-        "v1_unit_ids": np.array([101, 102, 103, 104, 105]),
-        "lag_s": np.array([-0.01, 0.0, 0.01]),
-        "xcorr": np.arange(4 * 5 * 3, dtype=float).reshape(4, 5, 3),
+        "v1_unit_ids": np.array([101, 102, 103, 104, 105, 106]),
+        "lag_s": np.array([-0.02, -0.01, 0.0, 0.01, 0.02]),
+        "xcorr": xcorr,
     }
 
-    cropped = subset_xcorr_payload_for_top_ca1_and_v1_half(payload)
+    cropped = prepare_xcorr_payload_for_display(payload)
 
     assert cropped["ca1_unit_ids"].tolist() == [11, 10, 9]
-    assert cropped["v1_unit_ids"].tolist() == [101, 102, 103]
-    assert cropped["xcorr"].shape == (3, 3, 3)
-    np.testing.assert_allclose(cropped["xcorr"], payload["xcorr"][:3, :3, :])
+    assert cropped["v1_unit_ids"].tolist() == [101, 102, 103, 104, 105, 106]
+    assert cropped["v1_group_ca1_indices"].tolist() == [0, 0, 1, 1, 2, 2]
+    assert cropped["v1_group_boundaries"].tolist() == [2, 4]
+    assert cropped["v1_ordering"] == "shared_multi_example_partner_rank"
+    assert cropped["xcorr"].shape == (3, 6, 5)
+    np.testing.assert_allclose(cropped["xcorr"], xcorr[:3])
+
+
+def test_plot_top_ca1_xcorr_panel_smooths_only_lag_and_marks_v1_groups() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    xcorr = np.zeros((2, 4, 7), dtype=float)
+    xcorr[0, 0, 3] = 5.0
+    payload = {
+        "ca1_unit_ids": np.array([11, 10]),
+        "v1_unit_ids": np.array([101, 102, 103, 104]),
+        "lag_s": np.linspace(-0.03, 0.03, 7),
+        "xcorr": xcorr,
+        "display_vmax": 5.0,
+        "v1_group_ca1_indices": np.array([0, 0, 1, 1]),
+        "v1_group_boundaries": np.array([2]),
+    }
+
+    fig, ax = plt.subplots()
+    plot_top_ca1_xcorr_panel(ax, payload)
+
+    plotted = np.asarray(ax.child_axes[0].images[0].get_array(), dtype=float)
+    assert 0.0 < plotted[0, 3] < 5.0
+    assert plotted[0, 2] > 0.0
+    assert np.allclose(plotted[1:], 0.0)
+    assert xcorr[0, 0, 2] == pytest.approx(0.0)
+    horizontal_lines = [
+        line
+        for line in ax.child_axes[0].lines
+        if np.ptp(np.asarray(line.get_ydata(), dtype=float)) == pytest.approx(0.0)
+    ]
+    assert len(horizontal_lines) == 1
+    assert horizontal_lines[0].get_ydata()[0] == pytest.approx(2.0)
+    assert {text.get_text() for text in ax.texts} >= {"V1 sets", "1", "2"}
+    plt.close(fig)
 
 
 def _write_ripple_events(tmp_path: Path) -> Path:
@@ -1723,9 +1795,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
     )
     assert len(ax.child_axes) == 10
     assert [child.get_title() for child in ax.child_axes[1:4]] == [
-        "Example cell 1",
-        "Example cell 2",
-        "Example cell 3",
+        "Example cell 1\n(Dev. exp. 0.33)",
+        "Example cell 2\n(Dev. exp. 0.24)",
+        "Example cell 3\n(Dev. exp. 0.27)",
     ]
     assert ax.child_axes[3].get_xlabel() == "Actual count"
     assert all(len(child.artists) == 0 for child in ax.child_axes[1:4])
@@ -1736,7 +1808,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
         for child in ax.child_axes[1:4]
     )
     assert ax.child_axes[1].get_xlim()[0] == pytest.approx(0.0)
-    assert ax.child_axes[1].get_xlim()[1] == pytest.approx(15.0)
+    assert ax.child_axes[1].get_xlim()[1] == pytest.approx(4.0)
     assert all(
         child.get_xlim() == pytest.approx(ax.child_axes[1].get_xlim())
         for child in ax.child_axes[1:4]
@@ -1746,20 +1818,14 @@ def test_plot_helpers_draw_expected_axes() -> None:
         for child in ax.child_axes[1:4]
     )
     for child in ax.child_axes[1:4]:
-        np.testing.assert_allclose(child.get_xticks(), [0.0, 5.0, 10.0, 15.0])
-        np.testing.assert_allclose(child.get_yticks(), [0.0, 5.0, 10.0, 15.0])
+        np.testing.assert_allclose(child.get_xticks(), [0.0, 2.0, 4.0])
+        np.testing.assert_allclose(child.get_yticks(), [0.0, 2.0, 4.0])
     assert [child.get_ylabel() for child in ax.child_axes[1:4]] == [
         "",
         "Predicted count",
         "",
     ]
-    assert all(len(child.texts) == 1 for child in ax.child_axes[1:4])
-    assert all(
-        child.texts[0].get_text() == f"{devexp:.2f}"
-        for child, devexp in zip(ax.child_axes[1:4], (0.33, 0.24, 0.27), strict=True)
-    )
-    assert all(child.texts[0].get_ha() == "left" for child in ax.child_axes[1:4])
-    assert all(child.texts[0].get_va() == "top" for child in ax.child_axes[1:4])
+    assert all(len(child.texts) == 0 for child in ax.child_axes[1:4])
     fig.canvas.draw()
     parent_position = ax.get_position()
     example_positions = [child.get_position() for child in ax.child_axes[1:4]]

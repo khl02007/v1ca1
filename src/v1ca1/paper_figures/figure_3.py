@@ -92,7 +92,10 @@ PANEL_B_EXAMPLE_SCATTER_SIZE = 2.2
 PANEL_B_EXAMPLE_ROW_GAP = 0.140
 PANEL_B_EXAMPLE_MAX_HEIGHT = 0.17
 PANEL_B_EXAMPLE_AXIS_LIMIT = 15.0
-PANEL_B_EXAMPLE_AXIS_TICKS = (0.0, 5.0, 10.0, 15.0)
+PANEL_B_EXAMPLE_AXIS_PADDING_FRACTION = 0.03
+PANEL_B_EXAMPLE_AXIS_TARGET_INTERVALS = 6
+PANEL_B_EXAMPLE_AXIS_TICK_INTERVALS = 3
+PANEL_B_EXAMPLE_AXIS_NICE_STEP_FACTORS = (1.0, 2.0, 2.5, 5.0, 10.0)
 DEFAULT_REGIONS = REGIONS
 RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
 RIPPLE_LFP_RELATIVE_DIR = Path("ripple") / "ripple_channels_lfp"
@@ -134,11 +137,13 @@ DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION = 5
 DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S = 0.150
 PANEL_B_SCHEMATIC_CACHE_VERSION = 4
 PANEL_B_XCORR_DISPLAY_CA1_UNITS = 3
-PANEL_B_XCORR_DISPLAY_V1_FRACTION = 0.5
+PANEL_B_XCORR_DISPLAY_V1_FRACTION = 1.0
+PANEL_B_XCORR_SMOOTH_SIGMA_BINS = 1.0
+PANEL_B_XCORR_GROUP_SEPARATOR_LINEWIDTH = 0.55
 DEFAULT_PANEL_B_PREDICTION_EXAMPLES = (
     ("L12", "20240421", "02_r1", 24),
-    ("L19", "20250930", "02_r1", 4),
-    ("L15", "20241121", "02_r1", 466),
+    ("L12", "20240421", "02_r1", 32),
+    ("L12", "20240421", "02_r1", 110),
 )
 DEFAULT_XCORR_STATE = "ripple"
 DEFAULT_XCORR_BIN_SIZE_S = 0.005
@@ -1138,13 +1143,13 @@ def load_top_ca1_xcorr_panel_data(
     }
 
 
-def subset_xcorr_payload_for_top_ca1_and_v1_half(
+def prepare_xcorr_payload_for_display(
     payload: Mapping[str, Any],
     *,
     n_ca1_units: int = PANEL_B_XCORR_DISPLAY_CA1_UNITS,
     v1_fraction: float = PANEL_B_XCORR_DISPLAY_V1_FRACTION,
 ) -> dict[str, Any]:
-    """Return an xcorr payload cropped to the first CA1 units and top V1 rows."""
+    """Return top CA1 examples with one shared multi-example V1 ordering."""
     xcorr_values = np.asarray(payload["xcorr"], dtype=float)
     if xcorr_values.ndim != 3:
         raise ValueError(f"Expected xcorr array with 3 dimensions, got {xcorr_values.shape}.")
@@ -1153,11 +1158,152 @@ def subset_xcorr_payload_for_top_ca1_and_v1_half(
         xcorr_values.shape[1],
         max(1, int(np.ceil(xcorr_values.shape[1] * float(v1_fraction)))),
     )
+    display_xcorr = xcorr_values[:n_display_ca1]
+    partner_scores = _compute_xcorr_partner_scores(
+        display_xcorr,
+        np.asarray(payload["lag_s"], dtype=float),
+    )
+    v1_order, v1_group_indices = _build_shared_v1_display_order(
+        partner_scores,
+        n_display_v1=n_display_v1,
+    )
+    group_boundaries = np.flatnonzero(np.diff(v1_group_indices) != 0) + 1
+
     cropped_payload = dict(payload)
-    cropped_payload["xcorr"] = xcorr_values[:n_display_ca1, :n_display_v1, :]
+    cropped_payload["xcorr"] = display_xcorr[:, v1_order, :]
     cropped_payload["ca1_unit_ids"] = np.asarray(payload["ca1_unit_ids"])[:n_display_ca1]
-    cropped_payload["v1_unit_ids"] = np.asarray(payload["v1_unit_ids"])[:n_display_v1]
+    cropped_payload["v1_unit_ids"] = np.asarray(payload["v1_unit_ids"])[v1_order]
+    cropped_payload["v1_group_ca1_indices"] = v1_group_indices
+    cropped_payload["v1_group_boundaries"] = group_boundaries
+    cropped_payload["v1_ordering"] = "shared_multi_example_partner_rank"
     return cropped_payload
+
+
+def _compute_xcorr_partner_scores(
+    xcorr_values: np.ndarray,
+    lag_s: np.ndarray,
+    *,
+    lag_window_s: tuple[float, float] = DEFAULT_XCORR_LAG_WINDOW_S,
+) -> np.ndarray:
+    """Return each pair's strongest raw three-bin mean in the display window."""
+    values = np.asarray(xcorr_values, dtype=float)
+    lag = np.asarray(lag_s, dtype=float).reshape(-1)
+    if values.ndim != 3:
+        raise ValueError(f"Expected xcorr array with 3 dimensions, got {values.shape}.")
+    if values.shape[-1] != lag.size:
+        raise ValueError("xcorr lag dimension does not match lag_s.")
+
+    lag_mask = (lag >= lag_window_s[0]) & (lag <= lag_window_s[1])
+    if not np.any(lag_mask):
+        raise ValueError(f"xcorr lags do not overlap requested window {lag_window_s}.")
+    curves = values[..., lag_mask]
+    if curves.shape[-1] >= 3:
+        neighborhoods = np.stack(
+            (curves[..., :-2], curves[..., 1:-1], curves[..., 2:]),
+            axis=-1,
+        )
+        finite_counts = np.sum(np.isfinite(neighborhoods), axis=-1)
+        local_means = np.full(finite_counts.shape, np.nan, dtype=float)
+        np.divide(
+            np.nansum(neighborhoods, axis=-1),
+            finite_counts,
+            out=local_means,
+            where=finite_counts > 0,
+        )
+    else:
+        local_means = curves
+
+    finite = np.isfinite(local_means)
+    scores = np.max(np.where(finite, local_means, -np.inf), axis=-1)
+    scores[~np.any(finite, axis=-1)] = np.nan
+    return scores
+
+
+def _rank_xcorr_partner_scores(partner_scores: np.ndarray) -> np.ndarray:
+    """Return within-example percentile ranks for CA1-V1 partner scores."""
+    from scipy.stats import rankdata
+
+    scores = np.asarray(partner_scores, dtype=float)
+    ranks = np.full(scores.shape, np.nan, dtype=float)
+    for ca1_index, row in enumerate(scores):
+        finite = np.isfinite(row)
+        if not np.any(finite):
+            continue
+        ranks[ca1_index, finite] = rankdata(
+            row[finite],
+            method="average",
+        ) / float(np.sum(finite))
+    return ranks
+
+
+def _descending_score_order(scores: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    """Return indices sorted by descending finite score with stable ID ties."""
+    indices = np.asarray(indices, dtype=int)
+    values = np.nan_to_num(
+        np.asarray(scores, dtype=float)[indices],
+        nan=-np.inf,
+    )
+    return indices[np.lexsort((indices, -values))]
+
+
+def _build_shared_v1_display_order(
+    partner_scores: np.ndarray,
+    *,
+    n_display_v1: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select shared strong partners and group them by preferred CA1 example."""
+    scores = np.asarray(partner_scores, dtype=float)
+    if scores.ndim != 2:
+        raise ValueError(f"Expected partner scores with 2 dimensions, got {scores.shape}.")
+    n_ca1, n_v1 = scores.shape
+    if n_ca1 == 0 or n_v1 == 0:
+        raise ValueError("Partner scores must include at least one CA1 and V1 unit.")
+    n_display = min(max(1, int(n_display_v1)), n_v1)
+    ranks = _rank_xcorr_partner_scores(scores)
+
+    quota_base, quota_remainder = divmod(n_display, n_ca1)
+    selected = np.zeros(n_v1, dtype=bool)
+    all_v1_indices = np.arange(n_v1, dtype=int)
+    for ca1_index in range(n_ca1):
+        quota = quota_base + int(ca1_index < quota_remainder)
+        ordered = _descending_score_order(scores[ca1_index], all_v1_indices)
+        selected[ordered[:quota]] = True
+
+    if int(np.sum(selected)) < n_display:
+        aggregate_rank = np.max(
+            np.where(np.isfinite(ranks), ranks, -np.inf),
+            axis=0,
+        )
+        remaining = all_v1_indices[~selected]
+        fill_order = _descending_score_order(aggregate_rank, remaining)
+        selected[fill_order[: n_display - int(np.sum(selected))]] = True
+
+    selected_indices = all_v1_indices[selected]
+    selected_ranks = np.where(
+        np.isfinite(ranks[:, selected_indices]),
+        ranks[:, selected_indices],
+        -np.inf,
+    )
+    preferred_ca1 = np.argmax(selected_ranks, axis=0)
+    no_finite_rank = ~np.any(np.isfinite(ranks[:, selected_indices]), axis=0)
+    preferred_ca1[no_finite_rank] = -1
+
+    ordered_groups = []
+    group_indices = []
+    for ca1_index in range(n_ca1):
+        group_rows = selected_indices[preferred_ca1 == ca1_index]
+        group_rows = _descending_score_order(scores[ca1_index], group_rows)
+        ordered_groups.append(group_rows)
+        group_indices.extend([ca1_index] * len(group_rows))
+    unassigned_rows = selected_indices[preferred_ca1 < 0]
+    if unassigned_rows.size:
+        ordered_groups.append(unassigned_rows)
+        group_indices.extend([-1] * len(unassigned_rows))
+
+    return (
+        np.concatenate(ordered_groups).astype(int, copy=False),
+        np.asarray(group_indices, dtype=int),
+    )
 
 
 def load_example_ripple_lfp_trace(
@@ -4104,14 +4250,50 @@ def _plot_modulation_histogram_inset(
     ax.tick_params(labelsize=6, length=1.5, pad=1)
 
 
+def _smooth_xcorr_along_lag(
+    xcorr_values: np.ndarray,
+    *,
+    sigma_bins: float,
+) -> np.ndarray:
+    """Gaussian-smooth xcorr values along lag without mixing V1 rows."""
+    values = np.asarray(xcorr_values, dtype=float)
+    if sigma_bins <= 0.0:
+        return values.copy()
+
+    from scipy.ndimage import gaussian_filter1d
+
+    finite = np.isfinite(values)
+    numerator = gaussian_filter1d(
+        np.where(finite, values, 0.0),
+        sigma=float(sigma_bins),
+        axis=-1,
+        mode="nearest",
+    )
+    denominator = gaussian_filter1d(
+        finite.astype(float),
+        sigma=float(sigma_bins),
+        axis=-1,
+        mode="nearest",
+    )
+    smoothed = np.full(values.shape, np.nan, dtype=float)
+    np.divide(
+        numerator,
+        denominator,
+        out=smoothed,
+        where=denominator > 0.0,
+    )
+    return smoothed
+
+
 def plot_top_ca1_xcorr_panel(
     ax: "Axes",
     payload: dict[str, Any],
     *,
     lag_label_y: float = 0.035,
     compact_unit_titles: bool = False,
+    smooth_sigma_bins: float = PANEL_B_XCORR_SMOOTH_SIGMA_BINS,
 ) -> None:
-    """Plot top CA1 units' CA1-V1 xcorr heatmaps with a shared V1 order."""
+    """Plot lag-smoothed CA1-V1 xcorr heatmaps with a shared V1 order."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -4133,7 +4315,19 @@ def plot_top_ca1_xcorr_panel(
             f"Screen-xcorr lags do not overlap requested window {DEFAULT_XCORR_LAG_WINDOW_S}."
         )
     lag_plot_s = lag_s[lag_mask]
-    xcorr_plot = xcorr_values[:, :, lag_mask]
+    xcorr_plot = _smooth_xcorr_along_lag(
+        xcorr_values[:, :, lag_mask],
+        sigma_bins=smooth_sigma_bins,
+    )
+    v1_group_indices = np.asarray(
+        payload.get("v1_group_ca1_indices", []),
+        dtype=int,
+    )
+    group_boundaries = np.asarray(
+        payload.get("v1_group_boundaries", []),
+        dtype=int,
+    )
+    has_v1_groups = v1_group_indices.shape == (n_v1,)
 
     left = 0.085 if compact_unit_titles else 0.10
     right = 0.94 if compact_unit_titles else 0.93
@@ -4156,6 +4350,15 @@ def plot_top_ca1_xcorr_panel(
             vmax=display_vmax,
         )
         heatmap_ax.axvline(0.0, color="white", linewidth=0.3, alpha=0.9)
+        if has_v1_groups:
+            for boundary in group_boundaries:
+                if 0 < int(boundary) < n_v1:
+                    heatmap_ax.axhline(
+                        float(boundary),
+                        color="white",
+                        linewidth=PANEL_B_XCORR_GROUP_SEPARATOR_LINEWIDTH,
+                        alpha=0.95,
+                    )
         heatmap_ax.set_xlim(lag_min_s, lag_max_s)
         heatmap_ax.set_title(
             (
@@ -4175,15 +4378,33 @@ def plot_top_ca1_xcorr_panel(
         heatmap_ax.tick_params(axis="y", length=0)
 
     ax.text(
-        0.035,
+        0.022 if has_v1_groups else 0.035,
         bottom + 0.5 * (top - bottom),
-        "V1",
+        "V1 sets" if has_v1_groups else "V1",
         ha="center",
         va="center",
         rotation=90,
         fontsize=6,
         transform=ax.transAxes,
     )
+    if has_v1_groups:
+        for ca1_index in range(n_ca1):
+            group_rows = np.flatnonzero(v1_group_indices == ca1_index)
+            if group_rows.size == 0:
+                continue
+            group_center = 0.5 * (group_rows[0] + group_rows[-1] + 1.0)
+            group_center_y = top - (group_center / n_v1) * (top - bottom)
+            ax.text(
+                left - 0.020,
+                group_center_y,
+                str(ca1_index + 1),
+                ha="center",
+                va="center",
+                fontsize=5.0,
+                fontweight="bold",
+                color="0.20",
+                transform=ax.transAxes,
+            )
 
     ax.text(
         0.5 * (left + right),
@@ -4296,6 +4517,7 @@ def _plot_compact_prediction_scatter_axis(
     axis_limit: float,
     show_xlabel: bool,
     show_ylabel: bool,
+    show_all_ticklabels: bool = False,
 ) -> None:
     """Plot one compact actual-versus-predicted GLM example."""
     observed = np.asarray(example["observed"], dtype=float)
@@ -4334,35 +4556,61 @@ def _plot_compact_prediction_scatter_axis(
         )
     ax.set_xlim(0.0, axis_limit)
     ax.set_ylim(0.0, axis_limit)
-    ax.set_xticks(PANEL_B_EXAMPLE_AXIS_TICKS)
-    ax.set_yticks(PANEL_B_EXAMPLE_AXIS_TICKS)
+    tick_step = _nice_axis_step(axis_limit / PANEL_B_EXAMPLE_AXIS_TICK_INTERVALS)
+    axis_ticks = np.arange(0.0, axis_limit + 0.5 * tick_step, tick_step)
+    axis_ticks = axis_ticks[axis_ticks <= axis_limit]
+    ax.set_xticks(axis_ticks)
+    ax.set_yticks(axis_ticks)
     ax.set_aspect("equal", adjustable="box")
     ax.set_box_aspect(1.0)
     ax.set_title(
-        f"Example cell {example_number}",
+        (
+            f"Example cell {example_number}\n"
+            f"(Dev. exp. {float(example['ripple_devexp_mean']):.2f})"
+        ),
         fontsize=6,
         pad=2.4,
     )
-    ax.text(
-        0.04,
-        0.96,
-        f"{float(example['ripple_devexp_mean']):.2f}",
-        ha="left",
-        va="top",
-        fontsize=6,
-        transform=ax.transAxes,
-    )
     if show_xlabel:
         ax.set_xlabel("Actual count", fontsize=6, labelpad=0.5)
-    else:
+    elif not show_all_ticklabels:
         ax.set_xticklabels([])
     if show_ylabel:
         ax.set_ylabel("Predicted count", fontsize=6, labelpad=0.5)
-    else:
+    elif not show_all_ticklabels:
         ax.set_yticklabels([])
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=6, length=1.2, pad=0.8)
+
+
+def _nice_axis_step(raw_step: float) -> float:
+    """Round an approximate axis step up to a compact human-readable value."""
+    magnitude = 10.0 ** np.floor(np.log10(raw_step))
+    normalized_step = raw_step / magnitude
+    for factor in PANEL_B_EXAMPLE_AXIS_NICE_STEP_FACTORS:
+        if normalized_step <= factor:
+            return float(factor * magnitude)
+    return float(PANEL_B_EXAMPLE_AXIS_NICE_STEP_FACTORS[-1] * magnitude)
+
+
+def _prediction_example_axis_limit(example: Mapping[str, Any]) -> float:
+    """Return a tight rounded square limit containing one prediction example."""
+    observed = np.asarray(example["observed"], dtype=float)
+    predicted = np.asarray(example["predicted"], dtype=float)
+    finite_values = np.concatenate(
+        (observed[np.isfinite(observed)], predicted[np.isfinite(predicted)])
+    )
+    if finite_values.size == 0:
+        return PANEL_B_EXAMPLE_AXIS_LIMIT
+    max_value = float(np.max(finite_values))
+    if max_value <= 0.0:
+        return PANEL_B_EXAMPLE_AXIS_LIMIT
+    padded_max = max_value * (1.0 + PANEL_B_EXAMPLE_AXIS_PADDING_FRACTION)
+    axis_step = _nice_axis_step(
+        padded_max / PANEL_B_EXAMPLE_AXIS_TARGET_INTERVALS
+    )
+    return float(np.ceil(padded_max / axis_step) * axis_step)
 
 
 def _plot_prediction_example_column(
@@ -4392,8 +4640,17 @@ def _plot_prediction_example_column(
         if align_bottom
         else bottom + 0.5 * max(height - stack_height, 0.0)
     )
-    axis_limit = PANEL_B_EXAMPLE_AXIS_LIMIT
-    for index, example in enumerate(prediction_examples):
+    axis_limits = tuple(
+        _prediction_example_axis_limit(example)
+        for example in prediction_examples
+    )
+    show_all_ticklabels = not all(
+        np.isclose(axis_limit, axis_limits[0])
+        for axis_limit in axis_limits[1:]
+    )
+    for index, (example, axis_limit) in enumerate(
+        zip(prediction_examples, axis_limits, strict=True)
+    ):
         y0 = stack_bottom + (n_examples - 1 - index) * (example_height + row_gap)
         example_ax = ax.inset_axes([left, y0, width, example_height])
         _plot_compact_prediction_scatter_axis(
@@ -4403,6 +4660,7 @@ def _plot_prediction_example_column(
             axis_limit=axis_limit,
             show_xlabel=index == n_examples - 1,
             show_ylabel=index == n_examples // 2,
+            show_all_ticklabels=show_all_ticklabels,
         )
 
 
@@ -6170,7 +6428,7 @@ def make_figure_3(
     )
     axes[0].set_title("Ripple-triggered\nmean firing rates", fontsize=7.2, pad=2)
     if xcorr_payload is not None:
-        panel_b_xcorr_payload = subset_xcorr_payload_for_top_ca1_and_v1_half(
+        panel_b_xcorr_payload = prepare_xcorr_payload_for_display(
             xcorr_payload,
         )
         plot_top_ca1_xcorr_panel(
