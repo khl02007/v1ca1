@@ -29,7 +29,7 @@ from v1ca1.paper_figures.figure_3 import (
     load_dark_movement_firing_rate_cache,
     save_dark_movement_firing_rate_cache,
 )
-from v1ca1.paper_figures.old_fig3 import (
+from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_POSITION_BIN_COUNT,
@@ -2467,7 +2467,3 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.high_dark_tuning_correlation_threshold
         ),
     )
-
-
-if __name__ == "__main__":
-    main()

@@ -15,7 +15,7 @@ from v1ca1.paper_figures.figure_1 import (
     plot_position_aligned_raster_axis,
 )
 from v1ca1.paper_figures import figure_summary as base
-from v1ca1.paper_figures import old_fig3
+from v1ca1.paper_figures import _dark_light as dark_light
 
 
 DEFAULT_OUTPUT_NAME = "condensed"
@@ -34,7 +34,7 @@ CONDENSED_RATE_Y = 0.15
 CONDENSED_RATE_HEIGHT = 0.18
 CONDENSED_DECODING_CROSS_AXIS_BOUNDS = (0.18, 0.55, 0.78, 0.30)
 CONDENSED_DECODING_PLACE_AXIS_BOUNDS = (0.18, CONDENSED_RATE_Y, 0.78, 0.30)
-CONDENSED_DECODING_CROSS_YLIM = old_fig3.PANEL_E_NORM_ERROR_YLIM
+CONDENSED_DECODING_CROSS_YLIM = dark_light.PANEL_E_NORM_ERROR_YLIM
 CONDENSED_DECODING_SHARED_YLABEL_X = -0.16
 CONDENSED_DECODING_SHARED_YLABEL_Y = 0.50
 CONDENSED_DECODING_CROSS_LABEL_X = 0.08
@@ -378,15 +378,15 @@ def _plot_condensed_place_decoding_axis(
     ax.set_xticks(positions)
     ax.set_xticklabels(
         [
-            old_fig3.PANEL_QUANT_EPOCH_LABELS[epoch_type]
+            dark_light.PANEL_QUANT_EPOCH_LABELS[epoch_type]
             for epoch_type in CONDENSED_PANEL_D_EPOCH_ORDER
         ]
     )
     ax.set_xlim(0.5, len(CONDENSED_PANEL_D_EPOCH_ORDER) + 0.5)
-    ax.set_ylim(*old_fig3.PANEL_E_PLACE_ERROR_YLIM)
+    ax.set_ylim(*dark_light.PANEL_E_PLACE_ERROR_YLIM)
     if table.empty:
         ax.text(0.5, 0.5, "No place\ndecoding", ha="center", va="center")
-        old_fig3._style_panel_e_error_axis(ax, ylabel=ylabel)
+        dark_light._style_panel_e_error_axis(ax, ylabel=ylabel)
         return
 
     for position, epoch_type in zip(
@@ -398,17 +398,17 @@ def _plot_condensed_place_decoding_axis(
         if rows.empty:
             continue
         row = rows.iloc[0]
-        old_fig3._plot_panel_e_interval_point(
+        dark_light._plot_panel_e_interval_point(
             ax,
             x=float(position),
             q25=float(row["q25_error"]),
             median=float(row["median_error"]),
             q75=float(row["q75_error"]),
-            color=old_fig3.PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            color=dark_light.PANEL_QUANT_EPOCH_COLORS[epoch_type],
             marker="o",
         )
 
-    old_fig3._style_panel_e_error_axis(ax, ylabel=ylabel)
+    dark_light._style_panel_e_error_axis(ax, ylabel=ylabel)
 
 
 def _plot_condensed_cross_decoding_axis(
@@ -421,13 +421,13 @@ def _plot_condensed_cross_decoding_axis(
     table = decoding_error_table[
         decoding_error_table["analysis"].astype(str) == "cross_trajectory"
     ].copy()
-    comparisons = list(old_fig3.PANEL_E_CROSS_COMPARISONS)
+    comparisons = list(dark_light.PANEL_E_CROSS_COMPARISONS)
     comparison = comparisons[0][0] if comparisons else None
     positions = np.arange(1, len(CONDENSED_PANEL_D_CROSS_EPOCH_ORDER) + 1, dtype=float)
     ax.set_xticks(positions)
     ax.set_xticklabels(
         [
-            old_fig3.PANEL_QUANT_EPOCH_LABELS[epoch_type]
+            dark_light.PANEL_QUANT_EPOCH_LABELS[epoch_type]
             for epoch_type in CONDENSED_PANEL_D_CROSS_EPOCH_ORDER
         ]
     )
@@ -435,7 +435,7 @@ def _plot_condensed_cross_decoding_axis(
     ax.set_ylim(*CONDENSED_DECODING_CROSS_YLIM)
     if table.empty:
         ax.text(0.5, 0.5, "No cross-path\ndecoding", ha="center", va="center")
-        old_fig3._style_panel_e_error_axis(ax, ylabel=ylabel)
+        dark_light._style_panel_e_error_axis(ax, ylabel=ylabel)
         return
 
     for position, epoch_type in zip(
@@ -449,21 +449,21 @@ def _plot_condensed_cross_decoding_axis(
         if rows.empty:
             continue
         row = rows.iloc[0]
-        old_fig3._plot_panel_e_interval_point(
+        dark_light._plot_panel_e_interval_point(
             ax,
             x=float(position),
             q25=float(row["q25_error"]),
             median=float(row["median_error"]),
             q75=float(row["q75_error"]),
-            color=old_fig3.PANEL_QUANT_EPOCH_COLORS[epoch_type],
+            color=dark_light.PANEL_QUANT_EPOCH_COLORS[epoch_type],
             marker="o",
             size=11,
             linewidth=0.85,
             alpha=0.70,
         )
 
-    old_fig3._set_panel_e_error_ylim(ax, table)
-    old_fig3._style_panel_e_error_axis(ax, ylabel=ylabel)
+    dark_light._set_panel_e_error_ylim(ax, table)
+    dark_light._style_panel_e_error_axis(ax, ylabel=ylabel)
 
 
 def plot_light_example_column(

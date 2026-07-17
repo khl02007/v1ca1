@@ -18,7 +18,7 @@ from v1ca1.paper_figures.datasets import (
 )
 from v1ca1.paper_figures.figure_1 import get_stability_table_path
 from v1ca1.paper_figures.figure_3 import load_dark_movement_firing_rate_table
-from v1ca1.paper_figures.old_fig3 import (
+from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_REGIONS,
@@ -109,11 +109,11 @@ MIXED_GLM_TASK_LABEL = MULTIPLICATIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_SA_LABEL = ADDITIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_AD_LABEL = ADDITIVE_SHORT_LABEL
 FULL_ADDITIVE_INDEPENDENT_LABEL = "Independent"
-FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL = "Shared-scaffold"
+FULL_ADDITIVE_DARK_SCAFFOLD_LABEL = "Dark scaffold"
 FULL_ADDITIVE_ADDITIVE_LABEL = ADDITIVE_LABEL
 FULL_ADDITIVE_BEST_MODEL_DISPLAY_LABELS = {
     "V": FULL_ADDITIVE_INDEPENDENT_LABEL,
-    MIXED_GLM_TASK_LABEL: FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+    MIXED_GLM_TASK_LABEL: FULL_ADDITIVE_DARK_SCAFFOLD_LABEL,
     MIXED_EMPIRICAL_AD_LABEL: FULL_ADDITIVE_ADDITIVE_LABEL,
     "tie": "tie",
 }
@@ -2356,7 +2356,7 @@ def filter_swapped_segment_shared_scaffold_gain_table(
     gain_table: Any,
     comparison_table: Any,
 ) -> Any:
-    """Return swapped-segment gains where shared-scaffold beats additive."""
+    """Return swapped-segment gains where the dark scaffold beats additive."""
     import pandas as pd
 
     gain_columns = list(FULL_SEGMENT_GAIN_TABLE_COLUMNS)
@@ -2461,7 +2461,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
     *,
     threshold: float = FULL_SEGMENT_LOG_GAIN_THRESHOLD,
 ) -> None:
-    """Plot swapped-segment coefficients where shared-scaffold beats additive."""
+    """Plot swapped-segment coefficients where the dark scaffold beats additive."""
     trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
     filtered_table = filter_swapped_segment_shared_scaffold_gain_table(
         gain_table,
@@ -2481,7 +2481,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
         ax.text(
             0.5,
             0.5,
-            "No swapped-segment\nShared-scaffold > Additive values",
+            "No swapped-segment\nDark scaffold > Additive values",
             ha="center",
             va="center",
         )
@@ -2578,7 +2578,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
         0.50,
         0.055,
         (
-            "Swapped segment only; Shared-scaffold > Additive; "
+            "Swapped segment only; Dark scaffold > Additive; "
             f"cells={len(unique_cells)}, trajectory-unit fits={len(unique_fits)}"
         ),
         ha="center",
@@ -3467,7 +3467,7 @@ def plot_mixed_glm_full_additive_pairwise_delta(
     trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
     model_columns = {
         FULL_ADDITIVE_INDEPENDENT_LABEL: "V_bits_per_spike",
-        FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL: (
+        FULL_ADDITIVE_DARK_SCAFFOLD_LABEL: (
             f"{MIXED_GLM_TASK_LABEL}_bits_per_spike"
         ),
         FULL_ADDITIVE_ADDITIVE_LABEL: (
@@ -3477,18 +3477,18 @@ def plot_mixed_glm_full_additive_pairwise_delta(
     delta_pairs = (
         (
             (
-                f"{FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL} - "
+                f"{FULL_ADDITIVE_DARK_SCAFFOLD_LABEL} - "
                 f"{FULL_ADDITIVE_INDEPENDENT_LABEL}"
             ),
-            FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+            FULL_ADDITIVE_DARK_SCAFFOLD_LABEL,
             FULL_ADDITIVE_INDEPENDENT_LABEL,
         ),
         (
             (
-                f"{FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL} - "
+                f"{FULL_ADDITIVE_DARK_SCAFFOLD_LABEL} - "
                 f"{FULL_ADDITIVE_ADDITIVE_LABEL}"
             ),
-            FULL_ADDITIVE_SHARED_SCAFFOLD_LABEL,
+            FULL_ADDITIVE_DARK_SCAFFOLD_LABEL,
             FULL_ADDITIVE_ADDITIVE_LABEL,
         ),
         (
@@ -3902,7 +3902,7 @@ def make_supplementary_figure_2(
         animal_names=tuple(animal_groups),
     )
     scalar_axis.set_title(
-        "Shared scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory",
+        "Dark scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )
@@ -3930,7 +3930,7 @@ def make_supplementary_figure_2(
         mixed_full_additive_table,
     )
     mixed_axis.set_title(
-        "Comparison between shared-scaffold, independent, and additive model",
+        "Comparison between Dark scaffold, independent, and additive models",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )

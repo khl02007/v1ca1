@@ -171,7 +171,7 @@ PANEL_DARK_LIGHT_RIGHT_ARM_EPOCH_COLORS = {
     }
     for trajectory_type in PANEL_DARK_LIGHT_RIGHT_ARM_TRAJECTORIES
 }
-PANEL_B_VISUAL_ICON_LABEL_X_OFFSET = 0.86
+PANEL_B_VISUAL_ICON_LABEL_X_OFFSET = 1.15
 PANEL_B_VISUAL_ICON_COLORS = {
     "A": "#66C2A5",
     "B": "#E78AC3",
@@ -2898,22 +2898,33 @@ def draw_task_design_condition_timeline_block(
             arm_side_outlines=True,
             **condition_spec,
         )
+    neutral_text_color = "0.20"
+    phase_label_fragments = {
+        "Initial A/B": (
+            ("Initial ", neutral_text_color),
+            ("A", color_a),
+            ("/", neutral_text_color),
+            ("B", color_b),
+        ),
+        "Cue swap (B/A)": (
+            ("Cue swap (", neutral_text_color),
+            ("B", color_b),
+            ("/", neutral_text_color),
+            ("A", color_a),
+            (")", neutral_text_color),
+        ),
+        "Dark": (("Dark", neutral_text_color),),
+    }
     for center_x, phase_label in zip(
         condition_centers,
         TASK_DESIGN_PHASE_LABELS,
         strict=True,
     ):
-        ax.text(
-            center_x,
-            TASK_DESIGN_PHASE_LABEL_Y,
-            phase_label,
-            ha="center",
-            va="bottom",
-            fontsize=5.4,
-            fontweight="bold",
-            color="0.20",
-            transform=ax.transAxes,
-            zorder=5,
+        _add_colored_task_design_phase_label(
+            ax,
+            x=center_x,
+            y=TASK_DESIGN_PHASE_LABEL_Y,
+            fragments=phase_label_fragments[phase_label],
         )
     figure_summary._draw_summary_run_sleep_timeline_markers(
         ax,
@@ -2931,6 +2942,45 @@ def draw_task_design_condition_timeline_block(
         transform=ax.transAxes,
         clip_on=False,
         zorder=6,
+    )
+
+
+def _add_colored_task_design_phase_label(
+    ax: "Axes",
+    *,
+    x: float,
+    y: float,
+    fragments: Sequence[tuple[str, str]],
+) -> None:
+    """Draw one centered task-design label with per-fragment colors."""
+    from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
+
+    text_box = HPacker(
+        children=[
+            TextArea(
+                text,
+                textprops={
+                    "fontsize": MIN_FIGURE_1_FONTSIZE_PT,
+                    "fontweight": "bold",
+                    "color": color,
+                },
+            )
+            for text, color in fragments
+        ],
+        align="baseline",
+        pad=0,
+        sep=0,
+    )
+    ax.add_artist(
+        AnnotationBbox(
+            text_box,
+            (x, y),
+            xycoords=ax.transAxes,
+            box_alignment=(0.5, 0.0),
+            frameon=False,
+            pad=0,
+            zorder=5,
+        )
     )
 
 
@@ -3142,9 +3192,9 @@ def draw_visual_stimuli_schematic(
     )
     screen_start = (1.0 - stimulus_row_width) / 2.0
     screen_specs = (
-        (screen_start, "black"),
-        (screen_start + screen_w + screen_gap, "grating"),
-        (screen_start + 2 * (screen_w + screen_gap), "dots"),
+        (screen_start, "grating"),
+        (screen_start + screen_w + screen_gap, "dots"),
+        (screen_start + 2 * (screen_w + screen_gap), "black"),
     )
     stimulus_center = (screen_specs[0][0] + screen_specs[-1][0] + screen_w) / 2
 
@@ -3203,9 +3253,9 @@ def draw_visual_stimuli_schematic(
     if show_condition_labels:
         label_y = screen_y + screen_h + 0.025
         label_specs = (
-            (0, "Dark", "black"),
-            (1, "A", PANEL_B_VISUAL_ICON_COLORS["A"]),
-            (2, "B", PANEL_B_VISUAL_ICON_COLORS["B"]),
+            (0, "A", PANEL_B_VISUAL_ICON_COLORS["A"]),
+            (1, "B", PANEL_B_VISUAL_ICON_COLORS["B"]),
+            (2, "Dark", "black"),
         )
         for screen_index, label, color in label_specs:
             ax.text(
@@ -4411,7 +4461,7 @@ def load_panel_b_visual_example_data(
     refresh_panel_example_cache: bool = False,
 ) -> dict[str, Any]:
     """Load the Figure 1B example cell rasters and rate curves across epochs."""
-    from v1ca1.paper_figures.old_fig3 import load_or_compute_panel_example_data
+    from v1ca1.paper_figures._dark_light import load_or_compute_panel_example_data
 
     epoch_specs = build_panel_b_visual_epoch_specs(
         animal_name,
@@ -4738,6 +4788,8 @@ def plot_panel_b_visual_example(
 
     icon_specs = (
         {
+            "left_label": "A",
+            "right_label": "B",
             "fill_track": False,
             "arm_side_outline_colors": {
                 "left_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
@@ -4745,6 +4797,8 @@ def plot_panel_b_visual_example(
             },
         },
         {
+            "left_label": "B",
+            "right_label": "A",
             "fill_track": False,
             "arm_side_outline_colors": {
                 "left_arm": PANEL_B_VISUAL_ICON_COLORS["B"],

@@ -3,466 +3,314 @@
 from __future__ import annotations
 
 import argparse
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+from matplotlib import colormaps
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import PowerNorm, to_hex
 
+from v1ca1.helper.plot_wtrack_schematic import (
+    draw_large_ovals,
+    get_w_track_geometry,
+)
 from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
-from v1ca1.paper_figures.datasets import (
-    DatasetId,
-    get_processed_datasets,
-    normalize_dataset_id,
-)
-from v1ca1.paper_figures import figure_2_common as _figure_2_common
+from v1ca1.paper_figures import _figure_2_base as _figure_2
+from v1ca1.paper_figures.datasets import DatasetId, get_processed_datasets
 from v1ca1.paper_figures.figure_1 import (
-    DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
-    PANEL_B_VISUAL_ICON_COLORS,
-    PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA,
-    PANEL_E_RIGHT_ANNOTATION_X,
-    PANEL_E_RIGHT_SUMMARY_POSITION,
-    _format_cell_animal_count,
-    _format_delta_advantage_summary,
-    get_stability_table_path,
+    DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
+    DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
+    DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
+    DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
 )
-from v1ca1.paper_figures.figure_2_common import *  # noqa: F403
-from v1ca1.paper_figures.figure_2_common import (
-    DEFAULT_FIGURE_WIDTH_MM,
-    DEFAULT_OUTPUT_FORMAT,
-    DEFAULT_POSITION_BIN_COUNT,
-    DEFAULT_POSITION_OFFSET,
-    DEFAULT_REGIONS,
-    DEFAULT_SIGMA_BINS,
-    DEFAULT_SPEED_THRESHOLD_CM_S,
-    FIGURE_2_CONSTRAINED_LAYOUT_PADS,
-    FIGURE_2_PANEL_A_EXAMPLES,
-    FIGURE_FORMATS,
-    PANEL_AB_WIDTH_RATIOS,
-    PANEL_AB_WSPACE,
-    PANEL_A_EXAMPLE_ROW_HEIGHT_MM,
-    PANEL_A_LABEL_Y,
-    PANEL_A_TITLE_PAD,
-    PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y,
-    PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y,
-    PANEL_BC_LABEL_Y,
-    PANEL_BC_ROW_HEIGHT_MM,
-    PANEL_BC_TITLE_PAD,
-    PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-    PANEL_B_EXAMPLE_FIELD_HEIGHT,
-    PANEL_B_EXAMPLE_FIELD_Y,
-    PANEL_B_EXAMPLE_MODEL_COLORS,
-    PANEL_B_EXAMPLE_MODEL_LABELS,
-    PANEL_B_FIELD_LABEL_Y,
-    PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
-    PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
-    PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
-    PANEL_B_INDEPENDENT_BASIS_LABEL,
-    PANEL_B_LABEL_Y,
-    PANEL_B_MODEL_LABEL_FONTSIZE,
-    PANEL_B_MODEL_LABEL_X,
-    PANEL_B_SEGMENT_MODULATION_LABEL,
-    PANEL_B_SEGMENT_MODULATION_LABEL_Y,
-    PANEL_B_TUNING_CORRELATION_TRAJECTORIES,
-    PANEL_B_TITLE_PAD,
-    PANEL_B_COMPONENT_LABEL_FONTSIZE,
-    PANEL_C_DELTA_AXIS_BOUNDS,
-    PANEL_C_DARK_LIGHT_EXAMPLES,
-    PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS,
-    PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS,
-    PANEL_C_INDEPENDENT_PREDICTION_LABEL_Y,
-    PANEL_C_INDEPENDENT_TRACK_CENTER_Y,
-    PANEL_C_PREDICTION_LABEL_FONTSIZE,
-    PANEL_C_SCHEMATIC_AXIS_BOUNDS,
-    PANEL_C_SEGMENT_MODULATION_TRACK_CENTER_Y,
-    PANEL_C_SHARED_DARK_TRACK_CENTER_Y,
-    PANEL_C_SHARED_LIGHT_TRACK_CENTER_Y,
-    PANEL_C_SHARED_PREDICTION_LABEL_Y,
-    PANEL_C_SWAP_EXAMPLES,
-    PANEL_C_SWAP_MODEL_COLORS,
-    PANEL_C_SWAP_MODEL_LABELS,
-    PANEL_C_SWAP_MODEL_NAME,
-    PANEL_A_EXAMPLE_Y_MAX_OVERRIDES,
-    build_output_path,
-    load_panel_a_example_data,
-    load_panel_b_tuning_overlap_table,
-    load_panel_glm_data,
-    parse_dataset_id,
-    plot_panel_a_example,
-    plot_panel_b_dpp_overlap_grouped,
-    plot_panel_b_dpp_overlap_scatter,
-    _align_text_to_reference_display_x,
-    _align_texts_to_reference_display_y,
-    _shift_axis_horizontally,
-)
-from v1ca1.paper_figures.old_fig3 import (
-    DEFAULT_OUTPUT_DIR,
-    PANEL_G_DARK_TRACK_CENTER_X,
-    PANEL_G_INDEPENDENT_BASIS_LABEL_Y,
-    PANEL_G_LIGHT_TRACK_CENTER_X,
-    PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X,
-    PANEL_G_SHARED_OUTPUT_ARROW_X,
-    PANEL_TRAJECTORY_COLORS,
-    PANEL_H_DELTA_TRAJECTORIES,
-    PANEL_H_DELTA_X_LIMITS,
+from v1ca1.paper_figures._dark_light import (
+    GLM_EMPIRICAL_COLOR,
+    PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM,
+    PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT,
+    PANEL_G_INDEPENDENT_BASIS_ICON_TOP,
+    PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH,
+    _draw_panel_g_basis_icon,
     _draw_panel_h_track,
-    _filter_panel_h_heldout_delta,
-    _fraction_histogram_weights,
-    get_dark_epoch,
-    get_light_epoch,
-    _plot_panel_e_cross_axis,
-    _panel_model_color,
-    _panel_model_label,
-    _plot_panel_e_place_axis,
-    _plot_panel_g_architecture_schematic,
-    _plot_panel_g_example_columns,
-    _plot_panel_h_switched_segment_example,
-    load_panel_e_decoding_error_table,
 )
 from v1ca1.paper_figures.style import (
-    EMPHASIS_HISTOGRAM_KWARGS,
-    NEUTRAL_COLORS,
     apply_paper_style,
     figure_size,
     label_axis,
     save_figure,
 )
-from v1ca1.paper_figures.w_track_schematic import draw_w_track_schematic
+from v1ca1.paper_figures.w_track_schematic import draw_w_track_arm_side_outlines
 
 
 DEFAULT_OUTPUT_NAME = "figure_2"
-PANEL_A_SINGLE_ROW_HEIGHT_MM = PANEL_A_EXAMPLE_ROW_HEIGHT_MM * 0.76
-PANEL_BC_QUANT_ROW_HEIGHT_MM = PANEL_A_SINGLE_ROW_HEIGHT_MM
-PANEL_D_ROW_HEIGHT_MM = PANEL_A_SINGLE_ROW_HEIGHT_MM
-PANEL_E_ROW_HEIGHT_MM = PANEL_A_SINGLE_ROW_HEIGHT_MM
-PANEL_BC_ROW_WIDTH_RATIOS = (2.0, 1.0)
-PANEL_BC_ROW_WSPACE = 0.03
-PANEL_E_HORIZONTAL_SHIFT = 0.0
+DEFAULT_FIGURE_WIDTH_MM = _figure_2.DEFAULT_FIGURE_WIDTH_MM
 DEFAULT_FIGURE_HEIGHT_MM = (
-    PANEL_A_SINGLE_ROW_HEIGHT_MM
-    + PANEL_BC_QUANT_ROW_HEIGHT_MM
-    + PANEL_D_ROW_HEIGHT_MM
-    + PANEL_E_ROW_HEIGHT_MM
+    _figure_2.PANEL_A_SINGLE_ROW_HEIGHT_MM
+    + _figure_2.PANEL_BC_QUANT_ROW_HEIGHT_MM
+    + _figure_2.PANEL_D_ROW_HEIGHT_MM
 )
-CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS = {
-    **FIGURE_2_CONSTRAINED_LAYOUT_PADS,
-    "hspace": 0.08,
-}
-PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS = (0.005, 0.04, 0.49, 0.92)
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS = (0.50, 0.06, 0.50, 0.90)
-PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE = (0.194, 0.241)
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_ICON_BOUNDS = (0.018, 0.345, 0.050, 0.205)
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_XLABEL_Y = 0.06
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_WIDTH = 0.50
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_GAP = 0.02
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_PLOT_LEFT_OFFSET = 0.13
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_Y = 0.19
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_HEIGHT = 0.64
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_WIDTH = 0.32
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_GAP = 0.045
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP = 0.12
-PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_HEIGHT = (
-    1.0 - PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP
-) / 2.0
-PANEL_D_COMPACT_SLOT_BOUNDS = (
-    (0.055, 0.700, 0.300, 0.215),
-    (0.055, 0.410, 0.300, 0.215),
-    (0.055, 0.120, 0.300, 0.215),
-    (0.650, 0.125, 0.330, 0.700),
+PANEL_B2C2_ROW_WIDTH_RATIOS = (1.0, 1.0)
+PANEL_B2C2_ROW_WSPACE = 0.035
+PANEL_D2E2_ROW_WIDTH_RATIOS = (1.0, 1.0)
+PANEL_D2E2_ROW_WSPACE = 0.050
+PANEL_C2_SIGNIFICANCE_BRACKET_X = (1.0, 2.0)
+PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION = 0.82
+PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION = 0.68
+PANEL_C2_SIGNIFICANCE_LABEL = "*"
+PANEL_C2_ERROR_AXIS_LABEL = "|Norm. error|"
+PANEL_A2_SINGLE_ROW_SCHEMATIC_AXIS_LEFT = -0.055
+PANEL_D2_SCHEMATIC_AXIS_BOUNDS = _figure_2.PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS
+PANEL_D2_RESULT_AXIS_BOUNDS = _figure_2.PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS
+PANEL_D2_DARK_TRACK_CENTER_X = 0.18
+PANEL_D2_SEGMENT_TRACK_CENTER_X = 0.405
+PANEL_D2_LIGHT_TRACK_CENTER_X = 0.615
+PANEL_D2_BASIS_ICON_CENTER_X = 0.5 * (
+    PANEL_D2_DARK_TRACK_CENTER_X + PANEL_D2_LIGHT_TRACK_CENTER_X
 )
-PANEL_D_COMPACT_EXAMPLE_ICON_BOUNDS = (-0.38, 0.35, 0.18, 0.28)
-PANEL_E_EXAMPLE_SLOT_BOUNDS = (
-    (0.040, 0.700, 0.420, 0.235),
-    (0.040, 0.390, 0.420, 0.235),
-    (0.040, 0.080, 0.420, 0.235),
+PANEL_D2_PREDICT_TRACK_CENTER_X = 0.860
+PANEL_D2_SHARED_PLUS_X = 0.295
+PANEL_D2_SHARED_ARROW_X = (0.500, 0.545)
+PANEL_D2_EQUALS_X = 0.5 * (PANEL_D2_SHARED_ARROW_X[0] + PANEL_D2_SHARED_ARROW_X[1])
+PANEL_D2_CUE_SWAP_ARROW_MARGIN = 0.006
+PANEL_D2_INDEPENDENT_ROW_Y_OFFSET = 0.0
+PANEL_D2_SHARED_ROW_Y_OFFSET = -0.070
+PANEL_D2_SEGMENT_LABEL_GAP = 0.095
+PANEL_D2_CUE_SWAP_LABEL_Y_OFFSET = 0.080
+PANEL_D2_RIGHT_ARM_OUTLINE_COLOR = "#0072B2"
+PANEL_D2_PLACE_FIELD_COLORS = ("#221150", "#B73779", "#FCFDBF")
+PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP = "inferno"
+PANEL_D2_DARK_SCAFFOLD_FIELD_COLOR_VALUES = (0.08, 0.54, 0.92)
+PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS = tuple(
+    to_hex(colormaps[PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP](value))
+    for value in PANEL_D2_DARK_SCAFFOLD_FIELD_COLOR_VALUES
 )
-PANEL_E_MEAN_DELTA_AXIS_BOUNDS = (0.605, 0.165, 0.380, 0.685)
-PANEL_E_EXAMPLE_ICON_BOUNDS = (-0.30, 0.32, 0.135, 0.265)
-PANEL_D_SCHEMATIC_TRACK_SIZE = PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE
-PANEL_E_SCHEMATIC_AXIS_BOUNDS = PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS
-PANEL_E_DELTA_AXIS_BOUNDS = (0.50, 0.08, 0.50, 0.86)
-PANEL_A_HORIZONTAL_AXIS_BOUNDS = (0.040, 0.950)
-PANEL_B_HORIZONTAL_WIDTH_SCALE = 1.00
-PANEL_A_SINGLE_ROW_COLUMN_GAP = 0.035
-PANEL_A_SINGLE_ROW_DARK_EPOCH_LEFT = 0.05
-PANEL_A_SINGLE_ROW_LIGHT_EPOCH_LEFT = 0.58
-PANEL_A_SINGLE_ROW_EPOCH_AXIS_WIDTH = 0.37
-PANEL_A_SINGLE_ROW_SCHEMATIC_AXIS_LEFT = -0.025
-PANEL_A_SINGLE_ROW_XLABEL_Y = 0.075
-PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS = (-0.015, 0.12, 0.315, 0.76)
-PANEL_B_DPPI_TITLE_POSITION = (0.50, 0.99)
-PANEL_B_DPPI_OVERLAP_DEFINITION = "same-turn overlap ="
-PANEL_B_DPPI_OVERLAP_DEFINITION_POSITION = (0.50, 0.80)
-PANEL_B_DPPI_FORMULA_Y = 0.695
-PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR = "#404040"
-PANEL_B_DPPI_MIN_OUTLINE_COLOR = "#238B45"
-PANEL_B_DPPI_MAX_OUTLINE_COLOR = "#6A51A3"
-PANEL_B_DPPI_CURVE_AXIS_BOUNDS = (0.08, 0.29, 0.84, 0.28)
-PANEL_B_DPPI_RATE_COLORS = ("#000000", "#000000")
-PANEL_B_DPPI_RATE_LINEWIDTH = 1.9
-PANEL_B_DPPI_OUTLINE_LINEWIDTH = 1.35
-PANEL_B_DPPI_MAX_FILL_ALPHA = 0.16
-PANEL_B_DPPI_MIN_FILL_ALPHA = 0.24
-PANEL_B_DPPI_RATE_LABEL_POSITIONS = ((0.34, 1.20), (0.70, 1.09))
-PANEL_B_DPPI_TURN_ICON_BOUNDS = (
-    (0.020, 0.575, 0.230, 0.350),
-    (0.750, 0.540, 0.230, 0.350),
+PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_COLORS = (
+    PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS
 )
-PANEL_B_DPPI_TURN_ICON_TRACK_LINEWIDTH = 0.35
-PANEL_B_DPPI_TURN_ICON_TRAJECTORY_LINEWIDTH = 0.55
-PANEL_B_DPPI_TURN_ICON_ARROW_SCALE = 4.4
-PANEL_B_DPPI_EQUATION = "DPPI = max(left overlap,\nright overlap)"
-PANEL_B_DPPI_EQUATION_POSITION = (0.50, 0.08)
-PANEL_B_GROUPED_AXIS_BOUNDS = (0.325, 0.32, 0.285, 0.54)
-PANEL_B_SCATTER_AXIS_BOUNDS = (0.635, 0.12, 0.360, 0.76)
-PANEL_B_DPPI_SCHEMATIC_WITHOUT_GROUP_AXIS_BOUNDS = (0.000, 0.12, 0.380, 0.76)
-PANEL_B_SCATTER_WITHOUT_GROUP_AXIS_BOUNDS = (0.425, 0.125, 0.570, 0.80)
-PANEL_B_SCATTER_MAIN_TICKS = (0.0, 0.5, 1.0)
-PANEL_B_SCATTER_MAIN_TICK_LABELS = ("0", "0.5", "1")
-PANEL_C_CROSS_DECODING_AXIS_BOUNDS = (0.06, 0.16, 0.40, 0.66)
-PANEL_C_PLACE_DECODING_AXIS_BOUNDS = (0.57, 0.16, 0.39, 0.66)
-PANEL_D_MODEL_LABEL_X = PANEL_B_MODEL_LABEL_X
-PANEL_D_SCHEMATIC_LABEL_FONTSIZE = 3.8
-PANEL_D_TRAIN_TRACK_CENTER_X = PANEL_G_DARK_TRACK_CENTER_X
-PANEL_D_PREDICT_TRACK_CENTER_X = PANEL_G_LIGHT_TRACK_CENTER_X
-PANEL_D_SHARED_DARK_TRACK_CENTER_X = PANEL_D_TRAIN_TRACK_CENTER_X
-PANEL_D_SHARED_PLUS_X = 0.39
-PANEL_D_SHARED_SEGMENT_TRACK_CENTER_X = PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X
-PANEL_D_SHARED_ARROW_X = PANEL_G_SHARED_OUTPUT_ARROW_X
-PANEL_D_SHARED_ARROW_Y_OFFSET = 0.0
-PANEL_D_SHARED_LIGHT_TRACK_CENTER_X = PANEL_D_PREDICT_TRACK_CENTER_X
-PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT = -0.105
-PANEL_D_INDEPENDENT_TRACK_CENTER_Y = 0.765
-PANEL_D_SHARED_TRACK_CENTER_Y = 0.354
-PANEL_D_SHARED_PREDICTION_LABEL_Y = 0.124
-PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA = PANEL_B_VISUAL_ICON_REGION_FILL_ALPHA
-PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS = {
-    "left_arm": 1.15,
+PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_COLORS = PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS
+PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS = PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS
+PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN = 0.25
+PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN = 0.65
+PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN = 1.0
+PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA = 0.65
+PANEL_D2_RATE_COLORBAR_BOUNDS = (0.690, 0.405, 0.160, 0.025)
+PANEL_D2_RATE_COLORBAR_AXIS_LABEL = "panel_d2_relative_firing_rate_colorbar"
+PANEL_D2_RATE_COLORBAR_LABEL = "Relative firing rate"
+PANEL_D2_RATE_COLORBAR_ENDPOINT_LABELS = ("Low", "High")
+PANEL_D2_RATE_COLORBAR_FONTSIZE = _figure_2.MIN_PUBLICATION_FONTSIZE_PT
+PANEL_D2_DARK_FIELD_PLACE_FIELD_ALPHA = 0.5
+PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA = 1.0
+PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA = 1.0
+PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA = 1.0
+PANEL_D2_SEGMENT_ARROW_COLOR = "black"
+PANEL_D2_SEGMENT_ARROW_Y_MARGIN = 0.34
+PANEL_D2_SEGMENT_ARROW_LINEWIDTH = 0.9
+PANEL_D2_SEGMENT_ARROW_MUTATION_SCALE = 6.8
+PANEL_D2_SEGMENT_OVAL_REGIONS = ("left_arm", "right_arm")
+PANEL_D2_SEGMENT_OVAL_FILL_COLOR = "#8A8A8A"
+PANEL_D2_SEGMENT_OVAL_EDGE_COLOR = "black"
+PANEL_D2_SEGMENT_OVAL_LINEWIDTH = 0.45
+PANEL_D2_SEGMENT_OVAL_ALPHAS = (0.46, 0.16)
+PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_COLORS = {
+    "left_arm": _figure_2.PANEL_B_VISUAL_ICON_COLORS["A"],
+    "right_arm": _figure_2.PANEL_B_VISUAL_ICON_COLORS["B"],
 }
-PANEL_D_DARK_PLACE_FIELD_COLORS = ("#D6ECFF", "#1E88E5", "#005CB9")
-PANEL_D_LIGHT_PLACE_FIELD_COLORS = ("#FEE08B", "#FDAE61", "#D73027")
-PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE = 1.35
-PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS = {
-    "stim1": {
-        "left_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
-        "right_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
-    },
-    "stim2": {
-        "left_arm": PANEL_B_VISUAL_ICON_COLORS["B"],
-        "right_arm": PANEL_B_VISUAL_ICON_COLORS["A"],
-    },
+PANEL_D2_DARK_SCAFFOLD_PREDICTION_ARM_SIDE_OUTLINE_COLORS = {
+    "left_arm": PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_COLORS["right_arm"],
+    "right_arm": PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_COLORS["left_arm"],
 }
-PANEL_D_CENTER_TO_LEFT_SEGMENT_OUTLINE_COLORS = {
-    "left_arm": "#E69F00",
+PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_GAP = 0.32
+PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_LINEWIDTH = 1.25
+PANEL_D2_SEGMENT_OUTLINE_COLORS = {
+    **_figure_2.PANEL_D_CENTER_TO_LEFT_SEGMENT_OUTLINE_COLORS,
+    "right_arm": PANEL_D2_RIGHT_ARM_OUTLINE_COLOR,
 }
-PANEL_E_RIGHT_ARM_SEGMENT_OUTLINE_COLORS = {
-    "right_arm": PANEL_D_CENTER_TO_LEFT_SEGMENT_OUTLINE_COLORS["left_arm"],
+PANEL_D2_SEGMENT_OUTLINE_LINEWIDTHS = {
+    **_figure_2.PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS,
+    "right_arm": _figure_2.PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS["left_arm"],
 }
-PANEL_E_RIGHT_ARM_SEGMENT_OUTLINE_LINEWIDTHS = {
-    "right_arm": PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS["left_arm"],
-}
-PANEL_E_VERTICAL_SHIFT = 0.0
-PANEL_2_3_INDEPENDENT_MODEL_COLOR = "#E69F00"
-PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR = "#0072B2"
-PANEL_DARK_SCAFFOLD_MODEL_LABEL = "Dark scaffold"
-PANEL_B_EXAMPLE_MODEL_COLORS_2_3 = {
-    **PANEL_B_EXAMPLE_MODEL_COLORS,
-    "visual": PANEL_2_3_INDEPENDENT_MODEL_COLOR,
-    PANEL_C_SWAP_MODEL_NAME: PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR,
-}
-PANEL_B_EXAMPLE_MODEL_LABELS_2_3 = {
-    **PANEL_B_EXAMPLE_MODEL_LABELS,
-    PANEL_C_SWAP_MODEL_NAME: PANEL_DARK_SCAFFOLD_MODEL_LABEL,
-}
-PANEL_C_SWAP_MODEL_COLORS_2_3 = {
-    **PANEL_C_SWAP_MODEL_COLORS,
-    "visual": PANEL_2_3_INDEPENDENT_MODEL_COLOR,
-    PANEL_C_SWAP_MODEL_NAME: PANEL_2_3_DARK_SCAFFOLD_MODEL_COLOR,
-}
-PANEL_C_SWAP_MODEL_LABELS_2_3 = {
-    **PANEL_C_SWAP_MODEL_LABELS,
-    PANEL_C_SWAP_MODEL_NAME: PANEL_DARK_SCAFFOLD_MODEL_LABEL,
-}
-MIN_PUBLICATION_FONTSIZE_PT = 6.0
+PANEL_D2_SEGMENT_MODULATION_LABEL = "Stimulus-specific\ngain modulation"
+PANEL_D2_BASIS_BOTTOM_LINEWIDTH = 2.6
+PANEL_D2_BASIS_LABEL_Y_OFFSET = (
+    0.5 - 0.5 * (
+        PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM + PANEL_G_INDEPENDENT_BASIS_ICON_TOP
+    )
+) * (
+    PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT
+    * _figure_2.PANEL_B_INDEPENDENT_BASIS_ICON_SCALE
+)
+PANEL_D2_EXAMPLE_SLOT_BOUNDS = (
+    (0.080, 0.610, 0.150, 0.240),
+    (0.310, 0.610, 0.150, 0.240),
+    (0.080, 0.175, 0.150, 0.240),
+)
+PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS = (0.285, 0.175, 0.175, 0.240)
+PANEL_D2_HISTOGRAM_AXIS_BOUNDS = (0.600, 0.165, 0.380, 0.685)
+PANEL_D2_EXAMPLE_ICON_BOUNDS = (-0.20, 0.27, 0.15, 0.30)
+PANEL_D2_EXAMPLE_HEADER_X = 0.64
+PANEL_D2_TRACE_LEGEND_ANCHOR = (0.485, 0.985)
 
 
 def __getattr__(name: str) -> Any:
-    """Delegate legacy Figure 2 helper lookups to the shared implementation."""
-    return getattr(_figure_2_common, name)
+    """Delegate unchanged Figure 2 helpers and constants to the base module."""
+    return getattr(_figure_2, name)
 
 
-def _shift_axis_vertically(ax: Any, dy_figure_fraction: float) -> None:
-    """Shift one axis vertically after constrained layout selects its size."""
-    if dy_figure_fraction == 0.0:
-        return
-    box = ax.get_position()
-    ax.set_axes_locator(None)
-    ax.set_position(
-        [
-            box.x0,
-            box.y0 + dy_figure_fraction,
-            box.width,
-            box.height,
-        ]
-    )
-
-
-def _set_axis_horizontal_bounds(
-    ax: Any,
-    *,
-    left: float,
+def _bounds_from_center(
+    center_x: float,
+    center_y: float,
     width: float,
-) -> None:
-    """Set one axis horizontal figure bounds after constrained layout."""
-    box = ax.get_position()
-    ax.set_axes_locator(None)
-    ax.set_position([left, box.y0, width, box.height])
+    height: float,
+) -> list[float]:
+    """Return inset bounds from center coordinates."""
+    return [center_x - width / 2.0, center_y - height / 2.0, width, height]
 
 
-def _set_axis_height_preserving_top(ax: Any, height: float) -> None:
-    """Set one axis height while preserving its top edge."""
-    box = ax.get_position()
-    top_y = box.y0 + box.height
-    ax.set_axes_locator(None)
-    ax.set_position([box.x0, top_y - height, box.width, height])
-
-
-def _scale_axis_width_from_left(ax: Any, scale: float) -> None:
-    """Scale one axis horizontally from its left edge."""
-    if scale == 1.0:
+def _align_text_tops_to_reference_display_y(fig: Any, texts: Sequence[Any]) -> None:
+    """Align text artists by their rendered top edge in display coordinates."""
+    if len(texts) < 2:
         return
-    box = ax.get_position()
-    ax.set_axes_locator(None)
-    ax.set_position([box.x0, box.y0, box.width * scale, box.height])
+    for text in texts:
+        axes = getattr(text, "axes", None)
+        if axes is not None and text is axes.title:
+            axes._autotitlepos = False
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    reference_top = max(text.get_window_extent(renderer).y1 for text in texts)
+    for text in texts:
+        bbox = text.get_window_extent(renderer)
+        display_position = text.get_transform().transform(text.get_position())
+        adjusted_position = text.get_transform().inverted().transform(
+            (display_position[0], display_position[1] + reference_top - bbox.y1)
+        )
+        text.set_position((text.get_position()[0], float(adjusted_position[1])))
 
 
-def _iter_nested_axes(ax: Any) -> Any:
-    """Yield all nested inset axes below one axes."""
-    for child_ax in getattr(ax, "child_axes", ()):
-        yield child_ax
-        yield from _iter_nested_axes(child_ax)
-
-
-def _replace_nested_text(
-    ax: Any,
-    old_text: str,
-    new_text: str,
-    *,
-    fontsize: float | None = None,
+def _align_text_center_to_reference_display_x(
+    fig: Any,
+    text: Any,
+    reference_text: Any,
 ) -> None:
-    """Replace matching text in one axes tree."""
-    for candidate_ax in (ax, *_iter_nested_axes(ax)):
-        for text in (
-            candidate_ax.xaxis.label,
-            candidate_ax.yaxis.label,
-            *candidate_ax.texts,
-        ):
-            if text.get_text() == old_text:
-                text.set_text(new_text)
-                if fontsize is not None:
-                    text.set_fontsize(fontsize)
+    """Align one text artist to another by rendered horizontal center."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    text_bbox = text.get_window_extent(renderer)
+    reference_bbox = reference_text.get_window_extent(renderer)
+    text_center_x = text_bbox.x0 + text_bbox.width / 2.0
+    reference_center_x = reference_bbox.x0 + reference_bbox.width / 2.0
+    display_position = text.get_transform().transform(text.get_position())
+    adjusted_position = text.get_transform().inverted().transform(
+        (display_position[0] + reference_center_x - text_center_x, display_position[1])
+    )
+    text.set_position((float(adjusted_position[0]), text.get_position()[1]))
 
 
-def _keep_last_nested_text(
-    ax: Any,
-    text_value: str,
-    *,
-    replacement: str | None = None,
-    fontsize: float | None = None,
+def _align_panel_b_top_histogram_label_to_scatter(
+    fig: Any,
+    panel_b_axis: Any,
 ) -> None:
-    """Keep only the final matching text in one axes tree."""
-    matches = []
-    for candidate_ax in (ax, *_iter_nested_axes(ax)):
-        for text in (
-            candidate_ax.xaxis.label,
-            candidate_ax.yaxis.label,
-            *candidate_ax.texts,
-        ):
-            if text.get_text() == text_value:
-                matches.append(text)
-    for text in matches[:-1]:
-        text.set_text("")
-    if not matches:
+    """Align Panel B top histogram y-label to the scatter y-label."""
+    scatter_parent = next(
+        (
+            child_axis
+            for child_axis in panel_b_axis.child_axes
+            if len(child_axis.child_axes) == 3
+        ),
+        None,
+    )
+    if scatter_parent is None:
         return
-    if replacement is not None:
-        matches[-1].set_text(replacement)
-    if fontsize is not None:
-        matches[-1].set_fontsize(fontsize)
-
-
-def _set_nested_legend_fontsize(ax: Any, fontsize: float) -> None:
-    """Set legend text size throughout one axes tree."""
-    for candidate_ax in (ax, *_iter_nested_axes(ax)):
-        legend = candidate_ax.get_legend()
-        if legend is None:
-            continue
-        for text in legend.get_texts():
-            text.set_fontsize(fontsize)
-
-
-def _raise_text_to_minimum_fontsize(fig: Any, min_fontsize: float) -> None:
-    """Raise final figure text to a minimum size."""
-    seen_axes: set[int] = set()
-
-    def _maybe_raise(text: Any) -> None:
-        if text is None:
-            return
-        if text.get_fontsize() < min_fontsize:
-            text.set_fontsize(min_fontsize)
-
-    for ax in fig.axes:
-        for candidate_ax in (ax, *_iter_nested_axes(ax)):
-            axis_id = id(candidate_ax)
-            if axis_id in seen_axes:
-                continue
-            seen_axes.add(axis_id)
-            _maybe_raise(candidate_ax.title)
-            _maybe_raise(candidate_ax.xaxis.label)
-            _maybe_raise(candidate_ax.yaxis.label)
-            for tick_label in candidate_ax.get_xticklabels():
-                _maybe_raise(tick_label)
-            for tick_label in candidate_ax.get_yticklabels():
-                _maybe_raise(tick_label)
-            for text in candidate_ax.texts:
-                _maybe_raise(text)
-            legend = candidate_ax.get_legend()
-            if legend is not None:
-                for text in legend.get_texts():
-                    _maybe_raise(text)
-
-
-def _remove_axis_tick_label_lines(ax: Any, prefixes: Sequence[str]) -> None:
-    """Remove tick-label lines that begin with any prefix."""
-    cleaned_labels = []
-    for tick in ax.get_xticklabels():
-        lines = [
-            line
-            for line in tick.get_text().splitlines()
-            if not any(line.startswith(prefix) for prefix in prefixes)
-        ]
-        cleaned_labels.append("\n".join(lines))
-    ax.set_xticklabels(cleaned_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
-
-
-def _equal_width_row_bounds(
-    item_count: int,
-    gap: float,
-) -> tuple[tuple[float, float], ...]:
-    """Return equal-width left and width bounds for one horizontal row."""
-    if item_count <= 0:
-        return ()
-    item_width = (1.0 - float(gap) * (item_count - 1)) / item_count
-    return tuple(
-        (item_index * (item_width + float(gap)), item_width)
-        for item_index in range(item_count)
+    main_axis = next(
+        (
+            child_axis
+            for child_axis in scatter_parent.child_axes
+            if child_axis.get_xlabel() == "Dark DPPI"
+        ),
+        None,
+    )
+    top_histogram_axis = next(
+        (
+            child_axis
+            for child_axis in scatter_parent.child_axes
+            if child_axis.get_ylabel() == "Frac."
+        ),
+        None,
+    )
+    if main_axis is None or top_histogram_axis is None:
+        return
+    _align_text_center_to_reference_display_x(
+        fig,
+        top_histogram_axis.yaxis.label,
+        main_axis.yaxis.label,
     )
 
 
-def plot_panel_a_examples_single_row(
+def _add_panel_c2_light_dark_bracket(
+    ax: Any,
+    *,
+    y_fraction: float = PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION,
+) -> None:
+    """Draw the Figure 2 Panel C light-dark significance bracket."""
+    x_start, x_stop = PANEL_C2_SIGNIFICANCE_BRACKET_X
+    y_min, y_max = ax.get_ylim()
+    y_span = y_max - y_min
+    y = y_min + float(y_fraction) * y_span
+    y_top = y + DECODING_SIGNIFICANCE_BRACKET_HEIGHT
+    if y_top > y_max:
+        y_top = y_max
+        y = y_top - DECODING_SIGNIFICANCE_BRACKET_HEIGHT
+    ax.plot(
+        [x_start, x_start, x_stop, x_stop],
+        [y, y_top, y_top, y],
+        color="black",
+        linewidth=DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
+        clip_on=False,
+        zorder=6,
+    )
+    ax.text(
+        (x_start + x_stop) / 2.0,
+        y_top + DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
+        PANEL_C2_SIGNIFICANCE_LABEL,
+        ha="center",
+        va="bottom",
+        fontsize=DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
+        color="black",
+        clip_on=False,
+        zorder=7,
+    )
+
+
+def add_panel_c2_light_dark_brackets(panel_c_axis: Any) -> None:
+    """Add light-dark significance brackets to the two Panel C summary axes."""
+    y_fractions = (
+        PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION,
+        PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION,
+    )
+    for child_axis, y_fraction in zip(
+        panel_c_axis.child_axes[:2],
+        y_fractions,
+        strict=False,
+    ):
+        _add_panel_c2_light_dark_bracket(child_axis, y_fraction=y_fraction)
+
+
+def format_panel_c2_decoding_axes(panel_c_axis: Any) -> None:
+    """Apply Figure 2-specific cleanup to Panel C decoding axes."""
+    child_axes = panel_c_axis.child_axes[:2]
+    for child_axis in child_axes:
+        for text in list(child_axis.texts):
+            if text.get_text().startswith(("Light med.", "Dark med.")):
+                text.remove()
+    if child_axes:
+        child_axes[0].yaxis.label.set_text(PANEL_C2_ERROR_AXIS_LABEL)
+
+
+def plot_panel_a2_examples_single_row(
     ax: Any,
     examples: Sequence[dict[str, Any]],
 ) -> None:
-    """Plot all Figure 2 Panel A examples in one horizontal row."""
+    """Plot Figure 2 Panel A with W-track icons farther from the rasters."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -470,9 +318,9 @@ def plot_panel_a_examples_single_row(
         ax.text(0.5, 0.5, "No examples", ha="center", va="center")
         return
 
-    column_bounds = _equal_width_row_bounds(
+    column_bounds = _figure_2._equal_width_row_bounds(
         len(examples),
-        PANEL_A_SINGLE_ROW_COLUMN_GAP,
+        _figure_2.PANEL_A_SINGLE_ROW_COLUMN_GAP,
     )
     for example_index, (example, (left, column_width)) in enumerate(
         zip(examples, column_bounds, strict=True),
@@ -481,17 +329,17 @@ def plot_panel_a_examples_single_row(
         example_ax = ax.inset_axes([left, 0.0, column_width, 1.0])
         plot_kwargs: dict[str, Any] = {
             "title": None,
-            "dark_epoch_axis_left": PANEL_A_SINGLE_ROW_DARK_EPOCH_LEFT,
-            "light_epoch_axis_left": PANEL_A_SINGLE_ROW_LIGHT_EPOCH_LEFT,
-            "epoch_axis_width": PANEL_A_SINGLE_ROW_EPOCH_AXIS_WIDTH,
-            "schematic_axis_left": PANEL_A_SINGLE_ROW_SCHEMATIC_AXIS_LEFT,
+            "dark_epoch_axis_left": _figure_2.PANEL_A_SINGLE_ROW_DARK_EPOCH_LEFT,
+            "light_epoch_axis_left": _figure_2.PANEL_A_SINGLE_ROW_LIGHT_EPOCH_LEFT,
+            "epoch_axis_width": _figure_2.PANEL_A_SINGLE_ROW_EPOCH_AXIS_WIDTH,
+            "schematic_axis_left": PANEL_A2_SINGLE_ROW_SCHEMATIC_AXIS_LEFT,
             "show_correlation": False,
             "similarity_annotation": "dppi",
         }
-        y_max_override = PANEL_A_EXAMPLE_Y_MAX_OVERRIDES.get(example_index)
+        y_max_override = _figure_2.PANEL_A_EXAMPLE_Y_MAX_OVERRIDES.get(example_index)
         if y_max_override is not None:
             plot_kwargs["y_max"] = y_max_override
-        plot_panel_a_example(example_ax, example, **plot_kwargs)
+        _figure_2.plot_panel_a_example(example_ax, example, **plot_kwargs)
         rate_axes = [
             child_ax for child_ax in example_ax.child_axes if child_ax.get_xlabel()
         ]
@@ -499,7 +347,7 @@ def plot_panel_a_examples_single_row(
             rate_ax.set_xlabel("")
             rate_ax.tick_params(
                 axis="x",
-                labelsize=MIN_PUBLICATION_FONTSIZE_PT,
+                labelsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
                 pad=0.4,
             )
         example_ax.text(
@@ -508,925 +356,554 @@ def plot_panel_a_examples_single_row(
             f"Example cell {example_index}",
             ha="center",
             va="top",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            fontsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
             transform=example_ax.transAxes,
         )
         example_ax.text(
             0.5,
-            PANEL_A_SINGLE_ROW_XLABEL_Y,
+            _figure_2.PANEL_A_SINGLE_ROW_XLABEL_Y,
             "Norm. path progression",
             ha="center",
             va="top",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            fontsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
             transform=example_ax.transAxes,
             clip_on=False,
         )
 
 
-def _draw_overlap_curve_schematic(
+def _draw_panel_d2_track(
     ax: Any,
     *,
-    position: np.ndarray,
-    first_rate: np.ndarray,
-    second_rate: np.ndarray,
-    first_color: str,
-    second_color: str,
-) -> None:
-    """Draw one schematic same-turn overlap computation."""
-    x = np.asarray(position, dtype=float)
-    curve_a = np.clip(np.asarray(first_rate, dtype=float), 0.0, None)
-    curve_b = np.clip(np.asarray(second_rate, dtype=float), 0.0, None)
-    valid = np.isfinite(x) & np.isfinite(curve_a) & np.isfinite(curve_b)
-    x = x[valid]
-    curve_a = curve_a[valid]
-    curve_b = curve_b[valid]
-    if x.size < 2:
-        return
-    scale = max(float(np.nanmax(curve_a)), float(np.nanmax(curve_b)), 1.0)
-    display_scale = 1.35
-    curve_a = curve_a / scale * display_scale
-    curve_b = curve_b / scale * display_scale
-    overlap = np.minimum(curve_a, curve_b)
-    envelope = np.maximum(curve_a, curve_b)
+    center_x: float,
+    center_y: float,
+    track_kind: str,
+    track_size: tuple[float, float],
+    **kwargs: Any,
+) -> Any:
+    """Draw one Figure 2 Panel D W-track icon."""
+    track_ax = ax.inset_axes(
+        _bounds_from_center(center_x, center_y, track_size[0], track_size[1])
+    )
+    track_ax.set_zorder(0)
+    track_ax.patch.set_visible(False)
+    _draw_panel_h_track(track_ax, track_kind=track_kind, **kwargs)
+    _remove_panel_d2_stimulus_labels(track_ax)
+    return track_ax
 
-    ax.fill_between(
-        x,
-        0.0,
-        envelope,
-        color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
-        alpha=PANEL_B_DPPI_MAX_FILL_ALPHA,
-        linewidth=0.0,
-        zorder=1,
+
+def _remove_panel_d2_stimulus_labels(ax: Any) -> None:
+    """Remove standalone A/B labels without changing W-track geometry."""
+    for text in tuple(ax.texts):
+        if text.get_text() in {"A", "B"}:
+            text.remove()
+
+
+def _set_panel_d2_place_field_alpha(ax: Any, alpha: float) -> None:
+    """Set a uniform alpha on place-field ellipses in one Panel D2 icon."""
+    from matplotlib.patches import Ellipse
+
+    for patch in ax.patches:
+        if type(patch) is Ellipse:
+            patch.set_alpha(float(alpha))
+
+
+def _apply_panel_d2_place_field_rate_gain(ax: Any, gain: float) -> None:
+    """Recolor Panel D2 place-field ellipses as fixed-scale rate values."""
+    from matplotlib.patches import Ellipse
+
+    _outline, _points, dims = get_w_track_geometry()
+    field_center_y = dims["y1"] + 1.45
+    field_sigma = 0.58
+    cmap = colormaps[PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP]
+    for patch in ax.patches:
+        if type(patch) is not Ellipse:
+            continue
+        relative_rate = math.exp(
+            -0.5 * ((float(patch.center[1]) - field_center_y) / field_sigma) ** 2
+        )
+        color_value = min(max(float(gain) * relative_rate, 0.0), 1.0)
+        color_value = color_value**PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA
+        patch.set_facecolor(cmap(color_value))
+        patch.set_edgecolor("none")
+        patch.set_alpha(1.0)
+
+
+def _draw_panel_d2_rate_colorbar(ax: Any) -> Any:
+    """Draw the schematic relative-rate scale used for Panel D2 fields."""
+    colorbar_ax = ax.inset_axes(PANEL_D2_RATE_COLORBAR_BOUNDS)
+    colorbar_ax.set_label(PANEL_D2_RATE_COLORBAR_AXIS_LABEL)
+    colorbar_ax.set_zorder(0)
+    mappable = ScalarMappable(
+        norm=PowerNorm(
+            gamma=PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA,
+            vmin=0.0,
+            vmax=1.0,
+        ),
+        cmap=PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP,
     )
-    ax.fill_between(
-        x,
-        0.0,
-        overlap,
-        color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
-        alpha=PANEL_B_DPPI_MIN_FILL_ALPHA,
-        linewidth=0.0,
-        zorder=2,
+    colorbar = ax.figure.colorbar(
+        mappable,
+        cax=colorbar_ax,
+        orientation="horizontal",
+        ticks=(0.0, 1.0),
     )
-    ax.plot(
-        x,
-        curve_a,
-        color=first_color,
-        linewidth=PANEL_B_DPPI_RATE_LINEWIDTH,
-        zorder=3,
+    colorbar.set_ticklabels(PANEL_D2_RATE_COLORBAR_ENDPOINT_LABELS)
+    colorbar.ax.tick_params(
+        axis="x",
+        which="both",
+        length=0.0,
+        pad=0.6,
+        labelsize=PANEL_D2_RATE_COLORBAR_FONTSIZE,
     )
-    ax.plot(
-        x,
-        curve_b,
-        color=second_color,
-        linewidth=PANEL_B_DPPI_RATE_LINEWIDTH,
-        zorder=4,
+    colorbar.ax.set_title(
+        PANEL_D2_RATE_COLORBAR_LABEL,
+        fontsize=PANEL_D2_RATE_COLORBAR_FONTSIZE,
+        pad=1.0,
     )
-    ax.plot(
-        x,
-        envelope,
-        color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
-        linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
+    colorbar.outline.set_linewidth(0.4)
+    return colorbar_ax
+
+
+def _draw_panel_d2_segment_ovals(ax: Any) -> None:
+    """Draw bilateral gain ovals in the dark-scaffold modulation icon."""
+    _outline, _points, dims = get_w_track_geometry()
+    draw_large_ovals(
+        ax,
+        dims,
+        oval_regions=list(PANEL_D2_SEGMENT_OVAL_REGIONS),
+        oval_styles=[
+            {
+                "edge_color": PANEL_D2_SEGMENT_OVAL_EDGE_COLOR,
+                "fill_color": PANEL_D2_SEGMENT_OVAL_FILL_COLOR,
+                "fill_alpha": alpha,
+                "linewidth": PANEL_D2_SEGMENT_OVAL_LINEWIDTH,
+            }
+            for alpha in PANEL_D2_SEGMENT_OVAL_ALPHAS
+        ],
+    )
+
+
+def _draw_panel_d2_segment_arrows(ax: Any) -> None:
+    """Draw full gain-direction arrows in the segment modulation icon."""
+    _outline, _points, dims = get_w_track_geometry()
+    y_bottom = dims["y1"] + PANEL_D2_SEGMENT_ARROW_Y_MARGIN
+    y_top = dims["y2"] - PANEL_D2_SEGMENT_ARROW_Y_MARGIN
+    for center_x, y_start, y_end, label_suffix in (
+        ((dims["x0"] + dims["x1"]) / 2.0, y_bottom, y_top, "up"),
+        ((dims["x4"] + dims["x5"]) / 2.0, y_top, y_bottom, "down"),
+    ):
+        ax.annotate(
+            "",
+            xy=(center_x, y_end),
+            xytext=(center_x, y_start),
+            xycoords="data",
+            textcoords="data",
+            arrowprops={
+                "arrowstyle": "-|>",
+                "color": PANEL_D2_SEGMENT_ARROW_COLOR,
+                "lw": PANEL_D2_SEGMENT_ARROW_LINEWIDTH,
+                "mutation_scale": PANEL_D2_SEGMENT_ARROW_MUTATION_SCALE,
+                "shrinkA": 0,
+                "shrinkB": 0,
+                "connectionstyle": "arc3,rad=0",
+            },
+            annotation_clip=False,
+            zorder=6,
+        ).arrow_patch.set_label(f"_panel_d2_segment_arrow_{label_suffix}")
+
+
+def _draw_panel_d2_segment_arm_side_outlines(
+    ax: Any,
+    *,
+    arm_colors: Mapping[str, str] = PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_COLORS,
+) -> None:
+    """Draw stim-colored side outlines for the arm-specific modulation icon."""
+    draw_w_track_arm_side_outlines(
+        ax,
+        arm_colors=arm_colors,
+        gap=PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_GAP,
+        linewidth=PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_LINEWIDTH,
+        label_prefix="_panel_d2_segment_arm_side_outline",
+    )
+
+
+def _draw_panel_d2_basis_icon(
+    ax: Any,
+    *,
+    center_x: float,
+    center_y: float,
+    scale: float,
+) -> None:
+    """Draw the independent-basis icon in the Figure 2 Panel D schematic."""
+    width = PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH * float(scale)
+    height = PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT * float(scale)
+    visual_center_y = 0.5 * (
+        PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM + PANEL_G_INDEPENDENT_BASIS_ICON_TOP
+    )
+    basis_ax = ax.inset_axes(
+        [
+            center_x - width / 2.0,
+            center_y - height * visual_center_y,
+            width,
+            height,
+        ]
+    )
+    basis_ax.set_zorder(0)
+    basis_ax.patch.set_visible(False)
+    _draw_panel_g_basis_icon(basis_ax)
+    vertical_span = (
+        PANEL_G_INDEPENDENT_BASIS_ICON_TOP - PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM
+    )
+    horizontal_left = 0.5 - vertical_span / 2.0
+    horizontal_right = 0.5 + vertical_span / 2.0
+    basis_ax.plot(
+        [horizontal_left, horizontal_right],
+        [PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM] * 2,
+        color="black",
+        linewidth=PANEL_D2_BASIS_BOTTOM_LINEWIDTH,
+        solid_capstyle="butt",
         zorder=5,
     )
-    ax.plot(
-        x,
-        overlap,
-        color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
-        linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
-        zorder=6,
-    )
-    for label, color, (label_x, label_y) in (
-        ("r1", first_color, PANEL_B_DPPI_RATE_LABEL_POSITIONS[0]),
-        ("r2", second_color, PANEL_B_DPPI_RATE_LABEL_POSITIONS[1]),
-    ):
-        ax.text(
-            label_x,
-            label_y,
-            label,
-            color=color,
-            ha="center",
-            va="center",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            fontweight="bold",
-        )
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.42)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(False)
-    ax.spines["bottom"].set_linewidth(0.45)
 
 
-def _draw_panel_b_dppi_turn_icon(
+def _draw_panel_d2_horizontal_arrow(
     ax: Any,
     *,
-    bounds: tuple[float, float, float, float],
-    trajectory_name: str,
-) -> None:
-    """Draw one small physical-turn W-track icon for the DPPI schematic."""
-    icon_ax = ax.inset_axes(bounds)
-    icon_ax.patch.set_visible(False)
-    icon_ax.set_zorder(8)
-    draw_w_track_schematic(
-        icon_ax,
-        trajectory_name=trajectory_name,
-        arrow_color=PANEL_TRAJECTORY_COLORS[trajectory_name],
-        track_linewidth=PANEL_B_DPPI_TURN_ICON_TRACK_LINEWIDTH,
-        trajectory_linewidth=PANEL_B_DPPI_TURN_ICON_TRAJECTORY_LINEWIDTH,
-        arrow_mutation_scale=PANEL_B_DPPI_TURN_ICON_ARROW_SCALE,
-    )
-
-
-def _add_centered_colored_text_fragments(
-    ax: Any,
-    *,
+    start_x: float,
+    end_x: float,
     y: float,
-    fragments: Sequence[tuple[str, str]],
-    fontsize: float,
 ) -> None:
-    """Draw text fragments centered as one line, allowing per-fragment colors."""
-    figure = ax.figure
-    figure.canvas.draw()
-    renderer = figure.canvas.get_renderer()
-    widths = []
-    scratch_texts = []
-    for text_value, _color in fragments:
-        scratch_text = ax.text(
-            0.0,
-            y,
-            text_value,
-            fontsize=fontsize,
-            ha="left",
-            va="top",
-            transform=ax.transAxes,
-            alpha=0.0,
-        )
-        scratch_texts.append(scratch_text)
-        widths.append(scratch_text.get_window_extent(renderer).width)
-    for scratch_text in scratch_texts:
-        scratch_text.remove()
-
-    axes_width = ax.get_window_extent(renderer).width
-    total_width_axes = sum(widths) / axes_width
-    x_position = 0.5 - total_width_axes / 2.0
-    for (text_value, color), width in zip(fragments, widths, strict=True):
-        ax.text(
-            x_position,
-            y,
-            text_value,
-            fontsize=fontsize,
-            color=color,
-            ha="left",
-            va="top",
-            transform=ax.transAxes,
-        )
-        x_position += width / axes_width
-
-
-def plot_panel_b_dppi_schematic(
-    ax: Any,
-    example: dict[str, Any],
-) -> None:
-    """Draw a compact schematic defining DPPI as max same-turn overlap."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-    trajectories = tuple(str(trajectory) for trajectory in example["trajectories"])
-    if len(trajectories) < 2:
-        ax.text(0.5, 0.5, "No example\ncurves", ha="center", va="center")
-        return
-    first_trajectory, second_trajectory = trajectories[:2]
-    curve_position = np.linspace(0.0, 1.0, 121)
-    first_rate = np.exp(-0.5 * ((curve_position - 0.44) / 0.075) ** 2)
-    second_rate = 0.92 * np.exp(-0.5 * ((curve_position - 0.57) / 0.075) ** 2)
-    ax.text(
-        PANEL_B_DPPI_TITLE_POSITION[0],
-        PANEL_B_DPPI_TITLE_POSITION[1],
-        "DPP index",
-        ha="center",
-        va="top",
-        fontsize=5.8,
-        fontweight="bold",
-    )
-    ax.text(
-        PANEL_B_DPPI_OVERLAP_DEFINITION_POSITION[0],
-        PANEL_B_DPPI_OVERLAP_DEFINITION_POSITION[1],
-        PANEL_B_DPPI_OVERLAP_DEFINITION,
-        ha="center",
-        va="top",
-        fontsize=4.7,
-        linespacing=0.88,
-    )
-    _add_centered_colored_text_fragments(
-        ax,
-        y=PANEL_B_DPPI_FORMULA_Y,
-        fragments=(
-            ("∫ ", PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR),
-            ("min(r1,r2)", PANEL_B_DPPI_MIN_OUTLINE_COLOR),
-            (" / ∫ ", PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR),
-            ("max(r1,r2)", PANEL_B_DPPI_MAX_OUTLINE_COLOR),
-        ),
-        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-    )
-    curve_ax = ax.inset_axes(PANEL_B_DPPI_CURVE_AXIS_BOUNDS)
-    _draw_overlap_curve_schematic(
-        curve_ax,
-        position=curve_position,
-        first_rate=first_rate,
-        second_rate=second_rate,
-        first_color=PANEL_B_DPPI_RATE_COLORS[0],
-        second_color=PANEL_B_DPPI_RATE_COLORS[1],
-    )
-    for trajectory_name, bounds in zip(
-        (first_trajectory, second_trajectory),
-        PANEL_B_DPPI_TURN_ICON_BOUNDS,
-        strict=True,
-    ):
-        _draw_panel_b_dppi_turn_icon(
-            curve_ax,
-            bounds=bounds,
-            trajectory_name=trajectory_name,
-        )
-
-    ax.text(
-        PANEL_B_DPPI_EQUATION_POSITION[0],
-        PANEL_B_DPPI_EQUATION_POSITION[1],
-        PANEL_B_DPPI_EQUATION,
-        ha="center",
-        va="center",
-        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-        linespacing=0.88,
-    )
-
-
-def _load_panel_b_stable_units_for_epoch(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    epoch: str,
-    epoch_type: str,
-    region: str,
-    min_stability_correlation: float,
-) -> Any:
-    """Return units with stable even-odd tuning in at least one DPP trajectory."""
-    import pandas as pd
-
-    path = get_stability_table_path(data_root, animal_name, date)
-    if not path.exists():
-        raise FileNotFoundError(
-            "Missing task-progression stability table. Expected "
-            f"{path}. Run `python -m v1ca1.task_progression.stability` "
-            "for this session first."
-        )
-    table = pd.read_parquet(path)
-    required_columns = (
-        "unit",
-        "region",
-        "epoch",
-        "trajectory_type",
-        "stability_correlation",
-    )
-    missing_columns = [column for column in required_columns if column not in table]
-    if missing_columns:
-        raise ValueError(
-            f"Tuning stability table {path} is missing columns {missing_columns!r}."
-        )
-
-    rows = table[
-        (table["region"].astype(str) == str(region))
-        & (table["epoch"].astype(str) == str(epoch))
-        & (
-            table["trajectory_type"]
-            .astype(str)
-            .isin(PANEL_B_TUNING_CORRELATION_TRAJECTORIES)
-        )
-    ].copy()
-    rows["unit"] = pd.to_numeric(rows["unit"], errors="coerce")
-    rows["stability_correlation"] = pd.to_numeric(
-        rows["stability_correlation"],
-        errors="coerce",
-    )
-    rows = rows[
-        np.isfinite(rows["unit"].to_numpy(dtype=float))
-        & np.isfinite(rows["stability_correlation"].to_numpy(dtype=float))
-        & (
-            rows["stability_correlation"].to_numpy(dtype=float)
-            >= float(min_stability_correlation)
-        )
-    ].copy()
-    stability_column = f"max_{epoch_type}_tuning_stability_correlation"
-    if rows.empty:
-        return pd.DataFrame(
-            columns=[
-                "animal_name",
-                "date",
-                "unit",
-                stability_column,
-            ]
-        )
-    rows["unit"] = rows["unit"].astype(int)
-    stable_units = (
-        rows.groupby("unit", as_index=False, observed=False)[
-            "stability_correlation"
-        ]
-        .max()
-        .rename(columns={"stability_correlation": stability_column})
-    )
-    return stable_units.assign(animal_name=animal_name, date=date)
-
-
-def filter_panel_b_overlap_by_even_odd_stability(
-    table: Any,
-    *,
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    min_stability_correlation: float,
-) -> Any:
-    """Keep Panel B units stable in at least one DPP trajectory in each epoch."""
-    import pandas as pd
-
-    if table is None or not len(table):
-        return table
-
-    stable_tables = []
-    for dataset in datasets:
-        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
-        resolved_light_epoch = get_light_epoch(animal_name, date, light_epoch)
-        resolved_dark_epoch = get_dark_epoch(animal_name, date, dark_epoch)
-        dark_stable = _load_panel_b_stable_units_for_epoch(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            epoch=resolved_dark_epoch,
-            epoch_type="dark",
-            region=region,
-            min_stability_correlation=min_stability_correlation,
-        )
-        light_stable = _load_panel_b_stable_units_for_epoch(
-            data_root,
-            animal_name=animal_name,
-            date=date,
-            epoch=resolved_light_epoch,
-            epoch_type="light",
-            region=region,
-            min_stability_correlation=min_stability_correlation,
-        )
-        stable_tables.append(
-            dark_stable.merge(
-                light_stable,
-                on=["animal_name", "date", "unit"],
-                how="inner",
-            )
-        )
-
-    if not stable_tables:
-        return table.iloc[0:0].copy()
-
-    stable_units = pd.concat(stable_tables, axis=0, ignore_index=True)
-    if stable_units.empty:
-        return table.iloc[0:0].copy()
-
-    filtered = table.copy()
-    filtered["unit"] = pd.to_numeric(filtered["unit"], errors="coerce")
-    filtered = filtered[np.isfinite(filtered["unit"].to_numpy(dtype=float))].copy()
-    filtered["unit"] = filtered["unit"].astype(int)
-    return filtered.merge(
-        stable_units,
-        on=["animal_name", "date", "unit"],
-        how="inner",
-    )
-
-
-def _format_panel_b_dppi_scatter_axes(ax: Any) -> None:
-    """Format Panel B DPPI scatter marginals for the 6 pt text floor."""
-    for child_ax in ax.child_axes:
-        if child_ax.get_xlabel() == "Dark DPP\noverlap":
-            child_ax.set_xlabel(
-                "Dark DPPI",
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-                labelpad=1.0,
-            )
-            child_ax.xaxis.set_label_coords(0.50, -0.18)
-            child_ax.set_ylabel(
-                "Light DPPI",
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-                labelpad=1.0,
-            )
-            child_ax.set_xticks(PANEL_B_SCATTER_MAIN_TICKS)
-            child_ax.set_yticks(PANEL_B_SCATTER_MAIN_TICKS)
-            child_ax.set_xticklabels(
-                PANEL_B_SCATTER_MAIN_TICK_LABELS,
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            )
-            child_ax.set_yticklabels(
-                PANEL_B_SCATTER_MAIN_TICK_LABELS,
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            )
-            child_ax.tick_params(labelsize=MIN_PUBLICATION_FONTSIZE_PT, pad=0.8)
-            for text in child_ax.texts:
-                text.set_fontsize(max(text.get_fontsize(), MIN_PUBLICATION_FONTSIZE_PT))
-        elif child_ax.get_xlabel() == "Frac.":
-            child_ax.set_xlabel(
-                "Frac.",
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-                labelpad=1.0,
-            )
-            child_ax.xaxis.set_label_coords(0.50, -0.18)
-            child_ax.set_xticks((0.0, 0.1))
-            child_ax.set_xticklabels(
-                ("0", "0.1"),
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            )
-            child_ax.tick_params(axis="x", labelbottom=True, bottom=True, pad=0.8)
-
-        if child_ax.get_ylabel() == "Frac.":
-            child_ax.set_ylabel(
-                "Frac.",
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-                labelpad=0.4,
-            )
-            child_ax.yaxis.set_label_coords(-0.103, 0.50)
-            child_ax.set_yticks((0.0, 0.1))
-            child_ax.set_yticklabels(
-                ("0", "0.1"),
-                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            )
-            child_ax.tick_params(axis="y", labelleft=True, left=True, pad=0.6)
-
-
-def plot_panel_b_dpp_overlap_with_schematic(
-    ax: Any,
-    overlap_table: Any,
-    *,
-    example: dict[str, Any],
-    low_threshold: float,
-    high_threshold: float,
-    show_grouped: bool = True,
-    show_scatter_linear_fit: bool = False,
-    show_scatter_r2: bool = False,
-    scatter_equal_aspect: bool = False,
-) -> None:
-    """Plot Figure 2 Panel B with DPPI schematic and overlap summaries."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-    schematic_bounds = (
-        PANEL_B_DPPI_SCHEMATIC_AXIS_BOUNDS
-        if show_grouped
-        else PANEL_B_DPPI_SCHEMATIC_WITHOUT_GROUP_AXIS_BOUNDS
-    )
-    schematic_ax = ax.inset_axes(schematic_bounds)
-    scatter_bounds = (
-        PANEL_B_SCATTER_AXIS_BOUNDS
-        if show_grouped
-        else PANEL_B_SCATTER_WITHOUT_GROUP_AXIS_BOUNDS
-    )
-    if show_grouped:
-        grouped_ax = ax.inset_axes(PANEL_B_GROUPED_AXIS_BOUNDS)
-    scatter_ax = ax.inset_axes(scatter_bounds)
-    plot_panel_b_dppi_schematic(schematic_ax, example)
-    if show_grouped:
-        plot_panel_b_dpp_overlap_grouped(
-            grouped_ax,
-            overlap_table,
-            low_threshold=low_threshold,
-            high_threshold=high_threshold,
-        )
-        for text in grouped_ax.texts:
-            if "> 0.5" in text.get_text():
-                text.set_text("")
-    plot_panel_b_dpp_overlap_scatter(
-        scatter_ax,
-        overlap_table,
-        title=None,
-        show_linear_fit=show_scatter_linear_fit,
-        show_r2_annotation=show_scatter_r2,
-        equal_aspect=scatter_equal_aspect,
-    )
-    _format_panel_b_dppi_scatter_axes(scatter_ax)
-    if show_grouped:
-        grouped_ax.set_title("")
-        grouped_ax.set_xlabel(
-            "Dark DPPI",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            labelpad=0.6,
-        )
-        grouped_ax.set_ylabel(
-            "Light DPPI",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-            labelpad=1.0,
-        )
-        low_threshold_label = f"{float(low_threshold):g}"
-        high_threshold_label = f"{float(high_threshold):g}"
-        grouped_labels = (
-            f"Low\n<{low_threshold_label}",
-            f"Mid\n{low_threshold_label}-{high_threshold_label}",
-            f"High\n>={high_threshold_label}",
-        )
-        grouped_ax.set_xticklabels(grouped_labels, fontsize=MIN_PUBLICATION_FONTSIZE_PT)
-        _remove_axis_tick_label_lines(grouped_ax, prefixes=("n=",))
-        grouped_ax.xaxis.set_label_coords(0.5, -0.26)
-        grouped_ax.tick_params(axis="x", pad=1.0)
-
-
-def plot_panel_c_cross_and_place_decoding(
-    ax: Any,
-    decoding_error_table: Any,
-) -> None:
-    """Plot Figure 2 Panel C as compact cross-path and place decoding."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-    cross_ax = ax.inset_axes(PANEL_C_CROSS_DECODING_AXIS_BOUNDS)
-    place_ax = ax.inset_axes(PANEL_C_PLACE_DECODING_AXIS_BOUNDS)
-    _plot_panel_e_cross_axis(cross_ax, decoding_error_table)
-    cross_ax.set_title("Cross-path\ndecoding", fontsize=5.8, pad=1.5)
-    _plot_panel_e_place_axis(place_ax, decoding_error_table, ylabel=None)
-    place_ax.set_title("Path-specific\nplace decoding", fontsize=5.8, pad=1.0)
-
-
-def _draw_panel_d_swap_schematic(
-    ax: Any,
-    *,
-    track_size: tuple[float, float] | None = None,
-    show_dark_track_labels: bool = False,
-    model_name: str,
-    model_labels: Mapping[str, str] | None = None,
-    prediction_label_fontsize: float = PANEL_C_PREDICTION_LABEL_FONTSIZE,
-) -> None:
-    """Draw Panel D swap schematic with a panel-C-like dark-scaffold row."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-    shared_model_label = (
-        "Dark scaffold\nmodel"
-        if str(model_name) == "task_segment_bump"
-        else f"{_panel_model_label(str(model_name), model_labels)}\nmodel"
-    )
-    def _bounds_from_center(
-        center_x: float,
-        center_y: float,
-        width: float,
-        height: float,
-    ) -> list[float]:
-        return [center_x - width / 2.0, center_y - height / 2.0, width, height]
-
-    light_bounds = {
-        "width": track_size[0] if track_size is not None else 0.38,
-        "height": track_size[1] if track_size is not None else 0.23,
-    }
-    dark_bounds = {
-        "width": track_size[0] if track_size is not None else 0.34,
-        "height": track_size[1] if track_size is not None else 0.21,
-    }
-    train_predict_midpoint_x = 0.5 * (
-        PANEL_D_TRAIN_TRACK_CENTER_X + PANEL_D_PREDICT_TRACK_CENTER_X
-    )
-
-    ax.text(
-        PANEL_D_TRAIN_TRACK_CENTER_X,
-        0.98,
-        "Train: AB",
-        ha="center",
-        va="top",
-        fontsize=5.8,
-    )
-    ax.text(
-        PANEL_D_PREDICT_TRACK_CENTER_X,
-        0.98,
-        "Predict: BA",
-        ha="center",
-        va="top",
-        fontsize=5.8,
-    )
-    ax.text(
-        PANEL_D_MODEL_LABEL_X,
-        PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
-        "Independent\nmodel",
-        ha="center",
-        va="center",
-        fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
-        fontweight="bold",
-    )
-    ax.text(
-        PANEL_D_MODEL_LABEL_X,
-        PANEL_D_SHARED_TRACK_CENTER_Y,
-        shared_model_label,
-        ha="center",
-        va="center",
-        fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
-        fontweight="bold",
-    )
-
-    _draw_panel_h_track(
-        ax.inset_axes(
-            _bounds_from_center(
-                PANEL_D_TRAIN_TRACK_CENTER_X,
-                PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
-                light_bounds["width"],
-                light_bounds["height"],
-            )
-        ),
-        track_kind="independent_light",
-        show_labels=True,
-        trajectory_name="center_to_left",
-        stimulus_layout="stim1",
-        highlighted_segments=(3,),
-        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
-        label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        region_fill_colors=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS["stim1"],
-        region_fill_alpha=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA,
-        show_place_field_blob=True,
-        place_field_colors=PANEL_D_LIGHT_PLACE_FIELD_COLORS,
-        place_field_blob_size_scale=PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
-    )
-    _draw_panel_h_track(
-        ax.inset_axes(
-            _bounds_from_center(
-                PANEL_D_PREDICT_TRACK_CENTER_X,
-                PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
-                light_bounds["width"],
-                light_bounds["height"],
-            )
-        ),
-        track_kind="independent_light",
-        show_labels=True,
-        trajectory_name="center_to_right",
-        stimulus_layout="stim2",
-        highlighted_segments=(3,),
-        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
-        label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        region_fill_colors=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS["stim2"],
-        region_fill_alpha=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA,
-        show_place_field_blob=True,
-        place_field_colors=PANEL_D_LIGHT_PLACE_FIELD_COLORS,
-        place_field_blob_size_scale=PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
-        place_field_arm="right_arm",
-    )
-    ax.text(
-        train_predict_midpoint_x,
-        PANEL_D_INDEPENDENT_TRACK_CENTER_Y,
-        "Visual landmarks\ndrive neural activity",
-        ha="center",
-        va="center",
-        fontsize=prediction_label_fontsize,
-        linespacing=0.95,
-    )
-
-    _draw_panel_h_track(
-        ax.inset_axes(
-            _bounds_from_center(
-                PANEL_D_SHARED_DARK_TRACK_CENTER_X,
-                PANEL_D_SHARED_TRACK_CENTER_Y,
-                dark_bounds["width"],
-                dark_bounds["height"],
-            )
-        ),
-        track_kind="dark",
-        show_labels=show_dark_track_labels,
-        trajectory_name="center_to_right",
-        stimulus_layout="stim2",
-        show_place_field_blob=True,
-        place_field_colors=PANEL_D_DARK_PLACE_FIELD_COLORS,
-        place_field_blob_size_scale=PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
-        place_field_arm="right_arm",
-    )
-    ax.text(
-        PANEL_D_SHARED_PLUS_X,
-        PANEL_D_SHARED_TRACK_CENTER_Y,
-        "+",
-        ha="center",
-        va="center",
-        fontsize=8.0,
-    )
-    _draw_panel_h_track(
-        ax.inset_axes(
-            _bounds_from_center(
-                PANEL_D_SHARED_SEGMENT_TRACK_CENTER_X,
-                PANEL_D_SHARED_TRACK_CENTER_Y,
-                light_bounds["width"],
-                light_bounds["height"],
-            )
-        ),
-        track_kind="segment_modulation",
-        show_labels=True,
-        trajectory_name="center_to_left",
-        stimulus_layout="stim1",
-        oval_regions=["left_arm"],
-        fill_oval_regions=False,
-        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
-        label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        segment_outline_colors=PANEL_D_CENTER_TO_LEFT_SEGMENT_OUTLINE_COLORS,
-        segment_outline_linewidths=PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS,
-    )
+    """Draw a short horizontal arrow in Panel D schematic coordinates."""
     ax.annotate(
         "",
-        xy=(
-            PANEL_D_SHARED_ARROW_X[1],
-            PANEL_D_SHARED_TRACK_CENTER_Y + PANEL_D_SHARED_ARROW_Y_OFFSET,
-        ),
-        xytext=(
-            PANEL_D_SHARED_ARROW_X[0],
-            PANEL_D_SHARED_TRACK_CENTER_Y + PANEL_D_SHARED_ARROW_Y_OFFSET,
-        ),
+        xy=(end_x, y),
+        xytext=(start_x, y),
         xycoords=ax.transAxes,
         textcoords=ax.transAxes,
         arrowprops={
             "arrowstyle": "-|>",
             "color": "black",
             "lw": 0.8,
-            "mutation_scale": 8.0,
+            "mutation_scale": 7.0,
             "shrinkA": 0,
             "shrinkB": 0,
         },
     )
-    _draw_panel_h_track(
-        ax.inset_axes(
-            _bounds_from_center(
-                PANEL_D_SHARED_LIGHT_TRACK_CENTER_X,
-                PANEL_D_SHARED_TRACK_CENTER_Y,
-                light_bounds["width"],
-                light_bounds["height"],
-            )
-        ),
+
+
+def draw_panel_d2_architecture_schematic(
+    ax: Any,
+    *,
+    show_dark_track_labels: bool = True,
+    track_size: tuple[float, float] = _figure_2.PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE,
+) -> None:
+    """Draw Panel D architecture with adjacent BA prediction icons."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    ax.patch.set_visible(False)
+    ax.set_zorder(1)
+
+    schematic_shift = _figure_2.PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
+    independent_y = (
+        _figure_2.PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y + schematic_shift
+        + PANEL_D2_INDEPENDENT_ROW_Y_OFFSET
+    )
+    shared_y = (
+        _figure_2.PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y
+        + schematic_shift
+        + PANEL_D2_SHARED_ROW_Y_OFFSET
+    )
+    field_label_y = _figure_2.PANEL_B_FIELD_LABEL_Y + schematic_shift
+    basis_label_y = (
+        _figure_2.PANEL_G_INDEPENDENT_BASIS_LABEL_Y
+        + schematic_shift
+        + PANEL_D2_BASIS_LABEL_Y_OFFSET
+    )
+    segment_label_y = shared_y + track_size[1] / 2.0 + PANEL_D2_SEGMENT_LABEL_GAP
+    cue_swap_arrow_start_x = (
+        PANEL_D2_LIGHT_TRACK_CENTER_X
+        + track_size[0] / 2.0
+        + PANEL_D2_CUE_SWAP_ARROW_MARGIN
+    )
+    cue_swap_arrow_end_x = (
+        PANEL_D2_PREDICT_TRACK_CENTER_X
+        - track_size[0] / 2.0
+        - PANEL_D2_CUE_SWAP_ARROW_MARGIN
+    )
+    text_kwargs = {"transform": ax.transAxes}
+
+    ax.text(
+        PANEL_D2_DARK_TRACK_CENTER_X,
+        field_label_y,
+        "Dark field",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+        **text_kwargs,
+    )
+    ax.text(
+        PANEL_D2_LIGHT_TRACK_CENTER_X,
+        field_label_y,
+        "Light field",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+        **text_kwargs,
+    )
+    ax.text(
+        PANEL_D2_PREDICT_TRACK_CENTER_X,
+        field_label_y + PANEL_D2_CUE_SWAP_LABEL_Y_OFFSET,
+        "Cue-swap\nprediction",
+        ha="center",
+        va="top",
+        fontsize=5.8,
+        **text_kwargs,
+    )
+    ax.text(
+        _figure_2.PANEL_D_MODEL_LABEL_X,
+        independent_y,
+        "Independent\nmodel",
+        ha="center",
+        va="center",
+        fontsize=_figure_2.PANEL_B_MODEL_LABEL_FONTSIZE,
+        fontweight="bold",
+        **text_kwargs,
+    )
+    ax.text(
+        _figure_2.PANEL_D_MODEL_LABEL_X,
+        shared_y,
+        "Dark scaffold\nmodel",
+        ha="center",
+        va="center",
+        fontsize=_figure_2.PANEL_B_MODEL_LABEL_FONTSIZE,
+        fontweight="bold",
+        **text_kwargs,
+    )
+    ax.text(
+        PANEL_D2_BASIS_ICON_CENTER_X,
+        basis_label_y,
+        _figure_2.PANEL_B_INDEPENDENT_BASIS_LABEL,
+        ha="center",
+        va="center",
+        fontsize=_figure_2.PANEL_B_COMPONENT_LABEL_FONTSIZE,
+        **text_kwargs,
+    )
+    ax.text(
+        PANEL_D2_SEGMENT_TRACK_CENTER_X,
+        segment_label_y,
+        PANEL_D2_SEGMENT_MODULATION_LABEL,
+        ha="center",
+        va="center",
+        fontsize=_figure_2.PANEL_B_COMPONENT_LABEL_FONTSIZE,
+        **text_kwargs,
+    )
+
+    independent_dark_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_DARK_TRACK_CENTER_X,
+        center_y=independent_y,
+        track_size=track_size,
+        track_kind="dark",
+        show_labels=show_dark_track_labels,
+        show_place_field_blob=True,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+    )
+    _apply_panel_d2_place_field_rate_gain(
+        independent_dark_ax,
+        PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
+    )
+    _set_panel_d2_place_field_alpha(
+        independent_dark_ax,
+        PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA,
+    )
+    _draw_panel_d2_basis_icon(
+        ax,
+        center_x=PANEL_D2_BASIS_ICON_CENTER_X,
+        center_y=independent_y,
+        scale=_figure_2.PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
+    )
+    independent_light_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_LIGHT_TRACK_CENTER_X,
+        center_y=independent_y,
+        track_size=track_size,
+        track_kind="independent_light",
+        show_labels=True,
+        trajectory_name="center_to_left",
+        stimulus_layout="stim1",
+        highlighted_segments=(3,),
+        label_fontsize=_figure_2.PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+        label_colors=_figure_2.PANEL_B_VISUAL_ICON_COLORS,
+        show_place_field_blob=True,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+    )
+    _apply_panel_d2_place_field_rate_gain(
+        independent_light_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+    )
+    _set_panel_d2_place_field_alpha(
+        independent_light_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA,
+    )
+    _draw_panel_d2_segment_arm_side_outlines(independent_light_ax)
+    independent_predict_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_PREDICT_TRACK_CENTER_X,
+        center_y=independent_y,
+        track_size=track_size,
+        track_kind="independent_light",
+        show_labels=True,
+        trajectory_name="center_to_right",
+        stimulus_layout="stim2",
+        highlighted_segments=(3,),
+        label_fontsize=_figure_2.PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+        label_colors=_figure_2.PANEL_B_VISUAL_ICON_COLORS,
+        show_place_field_blob=True,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+        place_field_arm="right_arm",
+    )
+    _apply_panel_d2_place_field_rate_gain(
+        independent_predict_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+    )
+    _set_panel_d2_place_field_alpha(
+        independent_predict_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA,
+    )
+    _draw_panel_d2_segment_arm_side_outlines(
+        independent_predict_ax,
+        arm_colors=PANEL_D2_DARK_SCAFFOLD_PREDICTION_ARM_SIDE_OUTLINE_COLORS,
+    )
+    _draw_panel_d2_horizontal_arrow(
+        ax,
+        start_x=cue_swap_arrow_start_x,
+        end_x=cue_swap_arrow_end_x,
+        y=independent_y,
+    )
+
+    shared_dark_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_DARK_TRACK_CENTER_X,
+        center_y=shared_y,
+        track_size=track_size,
+        track_kind="dark",
+        show_labels=show_dark_track_labels,
+        trajectory_name="center_to_right",
+        stimulus_layout="stim2",
+        show_place_field_blob=True,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+        place_field_arm="left_arm",
+    )
+    _apply_panel_d2_place_field_rate_gain(
+        shared_dark_ax,
+        PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
+    )
+    _set_panel_d2_place_field_alpha(
+        shared_dark_ax,
+        PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA,
+    )
+    ax.text(
+        PANEL_D2_SHARED_PLUS_X,
+        shared_y,
+        "+",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+        **text_kwargs,
+    )
+    segment_oval_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_SEGMENT_TRACK_CENTER_X,
+        center_y=shared_y,
+        track_size=track_size,
+        track_kind="segment_modulation",
+        show_labels=True,
+        trajectory_name="center_to_left",
+        stimulus_layout="stim1",
+        label_fontsize=_figure_2.PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+        label_colors=_figure_2.PANEL_B_VISUAL_ICON_COLORS,
+        segment_outline_colors={},
+        segment_outline_linewidths={},
+    )
+    _draw_panel_d2_segment_ovals(segment_oval_ax)
+    _draw_panel_d2_segment_arrows(segment_oval_ax)
+    _draw_panel_d2_segment_arm_side_outlines(segment_oval_ax)
+    ax.text(
+        PANEL_D2_EQUALS_X,
+        shared_y,
+        "=",
+        ha="center",
+        va="center",
+        fontsize=8.0,
+        **text_kwargs,
+    )
+    shared_light_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_LIGHT_TRACK_CENTER_X,
+        center_y=shared_y,
+        track_size=track_size,
+        track_kind="shared_light",
+        show_labels=True,
+        trajectory_name="center_to_left",
+        stimulus_layout="stim1",
+        label_fontsize=_figure_2.PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+        label_colors=_figure_2.PANEL_B_VISUAL_ICON_COLORS,
+        show_place_field_blob=True,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+    )
+    _apply_panel_d2_place_field_rate_gain(
+        shared_light_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+    )
+    _set_panel_d2_place_field_alpha(
+        shared_light_ax,
+        PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA,
+    )
+    _draw_panel_d2_segment_arm_side_outlines(shared_light_ax)
+    shared_predict_ax = _draw_panel_d2_track(
+        ax,
+        center_x=PANEL_D2_PREDICT_TRACK_CENTER_X,
+        center_y=shared_y,
+        track_size=track_size,
         track_kind="shared_light",
         show_labels=True,
         trajectory_name="center_to_right",
         stimulus_layout="stim2",
-        oval_regions=["right_arm"],
-        fill_oval_regions=False,
-        label_fontsize=PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
-        label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        region_fill_colors=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS["stim2"],
-        region_fill_alpha=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA,
+        label_fontsize=_figure_2.PANEL_D_SCHEMATIC_LABEL_FONTSIZE,
+        label_colors=_figure_2.PANEL_B_VISUAL_ICON_COLORS,
         show_place_field_blob=True,
-        place_field_colors=PANEL_D_DARK_PLACE_FIELD_COLORS,
-        place_field_blob_size_scale=PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
-        place_field_arm="right_arm",
-        segment_outline_colors=PANEL_E_RIGHT_ARM_SEGMENT_OUTLINE_COLORS,
-        segment_outline_linewidths=PANEL_E_RIGHT_ARM_SEGMENT_OUTLINE_LINEWIDTHS,
+        place_field_colors=PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_COLORS,
+        place_field_blob_size_scale=_figure_2.PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
+        place_field_arm="left_arm",
     )
-    ax.text(
-        train_predict_midpoint_x,
-        PANEL_D_SHARED_PREDICTION_LABEL_Y,
-        "Dark scaffold + visual gain\ndrive neural activity",
-        ha="center",
-        va="bottom",
-        fontsize=prediction_label_fontsize,
-        linespacing=0.95,
+    _apply_panel_d2_place_field_rate_gain(
+        shared_predict_ax,
+        PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN,
     )
-
-
-def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
-    """Return one held-out mean swapped-segment delta LL per unit."""
-    import pandas as pd
-
-    table = _filter_panel_h_heldout_delta(swap_delta_table)
-    if table is None or "delta_ll_bits_per_spike" not in table or not len(table):
-        return np.asarray([], dtype=float)
-
-    table = table.copy()
-    table["delta_ll_bits_per_spike"] = pd.to_numeric(
-        table["delta_ll_bits_per_spike"],
-        errors="coerce",
+    _set_panel_d2_place_field_alpha(
+        shared_predict_ax,
+        PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA,
     )
-    finite_mask = np.isfinite(table["delta_ll_bits_per_spike"].to_numpy(dtype=float))
-    table = table[finite_mask].copy()
-    if table.empty:
-        return np.asarray([], dtype=float)
-
-    if "trajectory" in table:
-        table = table[
-            table["trajectory"].astype(str).isin(PANEL_H_DELTA_TRAJECTORIES)
-        ].copy()
-    key_columns = [
-        column
-        for column in (
-            "animal_name",
-            "date",
-            "region",
-            "dark_epoch",
-            "unit",
-            "model_name",
-        )
-        if column in table
-    ]
-    if not key_columns:
-        values = table["delta_ll_bits_per_spike"].to_numpy(dtype=float)
-        return values[np.isfinite(values)]
-
-    grouped = table.groupby(key_columns, dropna=False)
-    if "trajectory" in table:
-        summary = grouped.agg(
-            mean_delta=("delta_ll_bits_per_spike", "mean"),
-            trajectory_count=("trajectory", lambda values: values.astype(str).nunique()),
-        )
-        summary = summary[
-            summary["trajectory_count"] >= len(PANEL_H_DELTA_TRAJECTORIES)
-        ]
-    else:
-        summary = grouped.agg(mean_delta=("delta_ll_bits_per_spike", "mean"))
-    values = summary["mean_delta"].to_numpy(dtype=float)
-    return values[np.isfinite(values)]
-
-
-def plot_panel_d_mean_swap_delta_axis(
-    ax: Any,
-    swap_delta_table: Any,
-    *,
-    model_name: str,
-    model_colors: Mapping[str, str] | None = None,
-    model_labels: Mapping[str, str] | None = None,
-) -> None:
-    """Plot mean held-out delta LL averaged over four trajectories."""
-    visual_color = _panel_model_color("visual", model_colors)
-    model_color = _panel_model_color(model_name, model_colors)
-    model_label = _panel_model_label(model_name, model_labels)
-    values = _mean_swap_delta_across_trajectories(swap_delta_table)
-    x_limits = PANEL_H_DELTA_X_LIMITS
-    bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
-
-    ax.axvspan(
-        x_limits[0],
-        0.0,
-        color=NEUTRAL_COLORS["dark_epoch_background"],
-        alpha=0.65,
-        linewidth=0,
-        zorder=0,
+    _draw_panel_d2_segment_arm_side_outlines(
+        shared_predict_ax,
+        arm_colors=PANEL_D2_DARK_SCAFFOLD_PREDICTION_ARM_SIDE_OUTLINE_COLORS,
     )
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=1)
-    if values.size:
-        ax.hist(
-            values,
-            bins=bin_edges,
-            weights=_fraction_histogram_weights(values),
-            color=model_color,
-            **EMPHASIS_HISTOGRAM_KWARGS,
-            zorder=2,
-        )
-        ax.text(
-            0.03,
-            0.97,
-            "Indep. better",
-            ha="left",
-            va="top",
-            fontsize=5.5,
-            color=visual_color,
-            transform=ax.transAxes,
-        )
-        ax.text(
-            PANEL_E_RIGHT_ANNOTATION_X,
-            0.97,
-            f"{model_label}\nbetter",
-            ha="left",
-            va="top",
-            fontsize=5.5,
-            color=model_color,
-            transform=ax.transAxes,
-        )
-        ax.text(
-            PANEL_E_RIGHT_SUMMARY_POSITION[0],
-            PANEL_E_RIGHT_SUMMARY_POSITION[1],
-            _format_delta_advantage_summary(values, include_median=False),
-            ha="right",
-            va="bottom",
-            fontsize=4.8,
-            color=model_color,
-            transform=ax.transAxes,
-        )
-        ax.text(
-            0.03,
-            0.06,
-            _format_cell_animal_count(
-                swap_delta_table,
-                value_column="delta_ll_bits_per_spike",
-            ),
-            ha="left",
-            va="bottom",
-            fontsize=4.8,
-            color="0.25",
-            transform=ax.transAxes,
-        )
-    else:
-        ax.text(0.5, 0.5, "No mean\nvalues", ha="center", va="center", fontsize=5.0)
-
-    ax.set_xlim(*x_limits)
-    ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
-    ax.set_ylabel("Fraction", fontsize=7, labelpad=2)
-    ax.set_xticks([-1.0, -0.5, 0.0, 0.5, 1.0])
-    ax.set_yticks([0.0, 0.1, 0.2])
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(labelsize=6.0, length=1.2, pad=0.8)
+    _draw_panel_d2_horizontal_arrow(
+        ax,
+        start_x=cue_swap_arrow_start_x,
+        end_x=cue_swap_arrow_end_x,
+        y=shared_y,
+    )
+    _draw_panel_d2_rate_colorbar(ax)
 
 
-def plot_panel_d_compact_swap_delta(
+def _plot_panel_d2_swap_results(
     ax: Any,
     swap_delta_table: Any,
     swap_examples: dict[str, Any] | Sequence[dict[str, Any]] | None,
@@ -1434,76 +911,61 @@ def plot_panel_d_compact_swap_delta(
     model_name: str,
     model_colors: Mapping[str, str] | None = None,
     model_labels: Mapping[str, str] | None = None,
+    show_example_xlabel: bool = True,
 ) -> None:
-    """Plot Figure 2 Panel E with three examples and one mean histogram."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-
-    schematic_ax = ax.inset_axes(PANEL_E_SCHEMATIC_AXIS_BOUNDS)
-    result_ax = ax.inset_axes(PANEL_E_DELTA_AXIS_BOUNDS)
-    result_ax.set_xlim(0.0, 1.0)
-    result_ax.set_ylim(0.0, 1.0)
-    result_ax.axis("off")
-
-    _draw_panel_d_swap_schematic(
-        schematic_ax,
-        track_size=PANEL_D_SCHEMATIC_TRACK_SIZE,
-        show_dark_track_labels=True,
-        model_name=model_name,
-        model_labels=model_labels,
-        prediction_label_fontsize=PANEL_C_PREDICTION_LABEL_FONTSIZE,
-    )
-
+    """Plot the three swap examples and mean-delta histogram."""
     examples = list(swap_examples.values()) if isinstance(swap_examples, dict) else list(
         swap_examples or []
     )
-    example_delta_label_positions = PANEL_C_EXAMPLE_DELTA_LABEL_POSITIONS
-    example_delta_label_vertical_alignments = (
-        PANEL_C_EXAMPLE_DELTA_LABEL_VERTICAL_ALIGNMENTS
-    )
-    for example_index, bounds in enumerate(PANEL_E_EXAMPLE_SLOT_BOUNDS):
-        example_ax = result_ax.inset_axes(bounds)
+    for example_index, bounds in enumerate(PANEL_D2_EXAMPLE_SLOT_BOUNDS):
+        example_ax = ax.inset_axes(bounds)
         example = examples[example_index] if example_index < len(examples) else None
-        _plot_panel_h_switched_segment_example(
+        _figure_2._plot_panel_h_switched_segment_example(
             example_ax,
             example,
             model_name=model_name,
             model_colors=model_colors,
             model_labels=model_labels,
             example_label=f"Example {example_index + 1}",
-            show_xlabel=example_index == 2,
-            show_ylabel=True,
+            show_xlabel=show_example_xlabel and example_index == 2,
+            show_ylabel=example_index != 1,
             show_legend=False,
-            show_xticklabels=example_index == 2,
-            icon_bounds=PANEL_E_EXAMPLE_ICON_BOUNDS,
+            show_xticklabels=True,
+            icon_bounds=PANEL_D2_EXAMPLE_ICON_BOUNDS,
             legend_loc="center left",
             legend_bbox_to_anchor=None,
-            delta_label_position=(
-                example_delta_label_positions[example_index]
-                if example_index < len(example_delta_label_positions)
-                else None
-            ),
-            delta_label_va=(
-                example_delta_label_vertical_alignments[example_index]
-                if example_index < len(example_delta_label_vertical_alignments)
-                else None
-            ),
         )
         example_ax.tick_params(labelsize=4.3)
-        for text in example_ax.texts:
+        for text in tuple(example_ax.texts):
             if text.get_text().startswith("ΔLL="):
-                text.set_fontsize(4.1)
-        _set_nested_legend_fontsize(example_ax, 3.9)
-        _replace_nested_text(
+                example_ax.title.set_text(
+                    f"Ex. {example_index + 1} ({text.get_text()})"
+                )
+                example_ax.title.set_x(PANEL_D2_EXAMPLE_HEADER_X)
+                text.remove()
+        _figure_2._set_nested_legend_fontsize(example_ax, 3.9)
+        _figure_2._replace_nested_text(
             example_ax,
             "Norm. path progression",
             "Norm.\npath progression",
-            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+            fontsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
         )
 
-    histogram_ax = result_ax.inset_axes(PANEL_E_MEAN_DELTA_AXIS_BOUNDS)
-    plot_panel_d_mean_swap_delta_axis(
+    legend_ax = ax.inset_axes(PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS)
+    legend_ax.axis("off")
+    _add_panel_d2_trace_legend(
+        legend_ax,
+        model_name=model_name,
+        model_colors=model_colors,
+        model_labels=model_labels,
+        loc="center",
+        bbox_to_anchor=(0.5, 0.5),
+        ncol=1,
+        fontsize=4.4,
+    )
+
+    histogram_ax = ax.inset_axes(PANEL_D2_HISTOGRAM_AXIS_BOUNDS)
+    _figure_2.plot_panel_d_mean_swap_delta_axis(
         histogram_ax,
         swap_delta_table,
         model_name=model_name,
@@ -1512,109 +974,134 @@ def plot_panel_d_compact_swap_delta(
     )
 
 
-def plot_panel_c_model_architecture_row(
+def _add_panel_d2_trace_legend(
     ax: Any,
-    examples: Sequence[dict[str, Any]],
+    *,
+    model_name: str,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
+    loc: str = "upper left",
+    bbox_to_anchor: tuple[float, float] | None = PANEL_D2_TRACE_LEGEND_ANCHOR,
+    ncol: int = 3,
+    fontsize: float = 3.6,
+) -> Any:
+    """Add a compact legend for the Panel D empirical and model traces."""
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D(
+            [0.0],
+            [0.0],
+            color=GLM_EMPIRICAL_COLOR,
+            linewidth=0.9,
+            label="Empirical",
+        ),
+        Line2D(
+            [0.0],
+            [0.0],
+            color=_figure_2._panel_model_color("visual", model_colors),
+            linewidth=0.8,
+            label="Independent",
+        ),
+        Line2D(
+            [0.0],
+            [0.0],
+            color=_figure_2._panel_model_color(model_name, model_colors),
+            linewidth=0.8,
+            label=_figure_2._panel_model_label(model_name, model_labels),
+        ),
+    ]
+    return ax.legend(
+        handles=handles,
+        frameon=False,
+        fontsize=fontsize,
+        handlelength=0.75,
+        handletextpad=0.25,
+        columnspacing=0.55,
+        loc=loc,
+        bbox_to_anchor=bbox_to_anchor,
+        borderaxespad=0.0,
+        ncol=ncol,
+    )
+
+
+def plot_panel_d2_architecture_with_swap_results(
+    ax: Any,
+    swap_delta_table: Any,
+    swap_examples: dict[str, Any] | Sequence[dict[str, Any]] | None,
+    *,
+    model_name: str,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
 ) -> None:
-    """Plot Figure 2 Panel D with schematics left and examples right."""
+    """Plot Figure 2 Panel D with the BA icons and swap results."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    schematic_ax = ax.inset_axes(PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS)
-    _plot_panel_g_architecture_schematic(
-        schematic_ax,
-        independent_track_center_y=(
-            PANEL_B_ALIGNED_INDEPENDENT_TRACK_CENTER_Y
-            + PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
-        ),
-        shared_track_center_y=(
-            PANEL_B_ALIGNED_SHARED_TRACK_CENTER_Y
-            + PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
-        ),
-        track_size=PANEL_C_SIDE_BY_SIDE_SCHEMATIC_TRACK_SIZE,
-        independent_basis_icon_scale=PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
-        independent_basis_label=PANEL_B_INDEPENDENT_BASIS_LABEL,
-        independent_basis_label_y=(
-            PANEL_G_INDEPENDENT_BASIS_LABEL_Y
-            + PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
-        ),
-        show_dark_track_labels=True,
-        field_label_y=(
-            PANEL_B_FIELD_LABEL_Y + PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
-        ),
-        model_label_x=PANEL_B_MODEL_LABEL_X,
-        model_label_fontsize=PANEL_B_MODEL_LABEL_FONTSIZE,
-        shared_model_label="Dark scaffold\nmodel",
-        component_label_fontsize=PANEL_B_COMPONENT_LABEL_FONTSIZE,
-        segment_modulation_label_y=(
-            PANEL_B_SEGMENT_MODULATION_LABEL_Y
-            + PANEL_D_LEFT_SCHEMATIC_BLOCK_VERTICAL_SHIFT
-        ),
-        segment_modulation_label=PANEL_B_SEGMENT_MODULATION_LABEL,
-        fill_oval_regions=False,
-        independent_light_region_fill_colors=(
-            PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS["stim1"]
-        ),
-        independent_light_region_fill_alpha=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA,
-        independent_light_label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        shared_light_region_fill_colors=(
-            PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_COLORS["stim1"]
-        ),
-        shared_light_region_fill_alpha=PANEL_D_INDEPENDENT_LIGHT_ARM_FILL_ALPHA,
-        shared_light_label_colors=PANEL_B_VISUAL_ICON_COLORS,
-        dark_basis_edge_color="white",
-        dark_basis_fill_color="none",
-        dark_basis_fill_alpha=1.0,
-        dark_basis_linewidth=0.30,
-        show_place_field_blobs=True,
-        independent_dark_place_field_colors=PANEL_D_DARK_PLACE_FIELD_COLORS,
-        independent_light_place_field_colors=PANEL_D_LIGHT_PLACE_FIELD_COLORS,
-        shared_dark_place_field_colors=PANEL_D_DARK_PLACE_FIELD_COLORS,
-        shared_light_place_field_colors=PANEL_D_DARK_PLACE_FIELD_COLORS,
-        place_field_blob_size_scale=PANEL_D_PLACE_FIELD_BLOB_SIZE_SCALE,
-        segment_gain_outline_colors=(
-            PANEL_D_CENTER_TO_LEFT_SEGMENT_OUTLINE_COLORS
-        ),
-        segment_gain_outline_linewidths=PANEL_D_SEGMENT_GAIN_OUTLINE_LINEWIDTHS,
-        segment_gain_label_colors=PANEL_B_VISUAL_ICON_COLORS,
+    schematic_ax = ax.inset_axes(PANEL_D2_SCHEMATIC_AXIS_BOUNDS)
+    result_ax = ax.inset_axes(PANEL_D2_RESULT_AXIS_BOUNDS)
+    result_ax.set_xlim(0.0, 1.0)
+    result_ax.set_ylim(0.0, 1.0)
+    result_ax.axis("off")
+
+    draw_panel_d2_architecture_schematic(schematic_ax)
+    _plot_panel_d2_swap_results(
+        result_ax,
+        swap_delta_table,
+        swap_examples,
+        model_name=model_name,
+        model_colors=model_colors,
+        model_labels=model_labels,
     )
 
-    example_ax = ax.inset_axes(PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS)
-    _plot_panel_g_example_columns(
-        example_ax,
-        examples,
-        field_y=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_Y,
-        field_height=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_HEIGHT,
-        icon_bounds=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ICON_BOUNDS,
-        xlabel_y=PANEL_C_SIDE_BY_SIDE_EXAMPLE_XLABEL_Y,
-        column_width=PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_WIDTH,
-        column_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_COLUMN_GAP,
-        plot_left_offset=PANEL_C_SIDE_BY_SIDE_EXAMPLE_PLOT_LEFT_OFFSET,
-        field_width=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_WIDTH,
-        field_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_FIELD_GAP,
-        layout="rows",
-        row_height=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_HEIGHT,
-        row_gap=PANEL_C_SIDE_BY_SIDE_EXAMPLE_ROW_GAP,
-        show_ylabels_for_all_examples=True,
-        show_epoch_titles=False,
-        show_light_yticklabels=False,
-        model_colors=PANEL_B_EXAMPLE_MODEL_COLORS_2_3,
-        model_labels=PANEL_B_EXAMPLE_MODEL_LABELS_2_3,
+
+def plot_panel_d2_swap_results_panel(
+    ax: Any,
+    swap_delta_table: Any,
+    swap_examples: dict[str, Any] | Sequence[dict[str, Any]] | None,
+    *,
+    model_name: str,
+    model_colors: Mapping[str, str] | None = None,
+    model_labels: Mapping[str, str] | None = None,
+) -> None:
+    """Plot the Figure 2 cue-swap prediction results as a standalone panel."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    _plot_panel_d2_swap_results(
+        ax,
+        swap_delta_table,
+        swap_examples,
+        model_name=model_name,
+        model_colors=model_colors,
+        model_labels=model_labels,
+        show_example_xlabel=True,
     )
-    _replace_nested_text(
-        example_ax,
-        "Norm. path progression",
-        "Norm. path progression",
-        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
+
+
+def plot_panel_d2_architecture_panel(
+    ax: Any,
+) -> None:
+    """Plot the Figure 2 model schematic as a standalone panel."""
+    draw_panel_d2_architecture_schematic(ax)
+
+
+def plot_panel_e2_decoding_panel(
+    ax: Any,
+    decoding_error_table: Any,
+) -> None:
+    """Plot the Figure 2 dark-light decoding comparison as a standalone panel."""
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+
+    _figure_2.plot_panel_c_cross_and_place_decoding(
+        ax,
+        decoding_error_table,
     )
-    _replace_nested_text(
-        example_ax,
-        "Norm. goal progression",
-        "Norm. path progression",
-        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
-    )
-    _set_nested_legend_fontsize(example_ax, 3.9)
+    format_panel_c2_decoding_axes(ax)
+    add_panel_c2_light_dark_brackets(ax)
 
 
 def make_figure_2(
@@ -1626,17 +1113,17 @@ def make_figure_2(
     light_epoch: str | None,
     dark_epoch: str | None,
     dpi: int,
-    position_bin_count: int = DEFAULT_POSITION_BIN_COUNT,
-    position_offset: int = DEFAULT_POSITION_OFFSET,
-    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    sigma_bins: float = DEFAULT_SIGMA_BINS,
+    position_bin_count: int = _figure_2.DEFAULT_POSITION_BIN_COUNT,
+    position_offset: int = _figure_2.DEFAULT_POSITION_OFFSET,
+    speed_threshold_cm_s: float = _figure_2.DEFAULT_SPEED_THRESHOLD_CM_S,
+    sigma_bins: float = _figure_2.DEFAULT_SIGMA_BINS,
     panel_example_cache_dir: Path | None = None,
     refresh_panel_example_cache: bool = False,
     dark_tuning_correlation_threshold: float = (
-        PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD
+        _figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD
     ),
     high_dark_tuning_correlation_threshold: float = (
-        PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
+        _figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
     ),
 ) -> Path:
     """Build and save Figure 2."""
@@ -1647,23 +1134,23 @@ def make_figure_2(
         if panel_example_cache_dir is None
         else Path(panel_example_cache_dir)
     )
-    quant_region = str(regions[0]) if regions else DEFAULT_REGIONS[0]
-    panel_glm_payload = load_panel_glm_data(
+    quant_region = str(regions[0]) if regions else _figure_2.DEFAULT_REGIONS[0]
+    panel_glm_payload = _figure_2.load_panel_glm_data(
         data_root=data_root,
         datasets=datasets,
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
         swap_delta_min_tuning_stability_correlation=(
-            PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
+            _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),
-        swap_model_name=PANEL_C_SWAP_MODEL_NAME,
-        swap_example_count=len(PANEL_C_SWAP_EXAMPLES),
-        swap_requested_examples=PANEL_C_SWAP_EXAMPLES,
-        dark_light_requested_examples=PANEL_C_DARK_LIGHT_EXAMPLES,
+        swap_model_name=_figure_2.PANEL_C_SWAP_MODEL_NAME,
+        swap_example_count=len(_figure_2.PANEL_C_SWAP_EXAMPLES),
+        swap_requested_examples=_figure_2.PANEL_C_SWAP_EXAMPLES,
+        dark_light_requested_examples=_figure_2.PANEL_C_DARK_LIGHT_EXAMPLES,
     )
     panel_a_examples = [
-        load_panel_a_example_data(
+        _figure_2.load_panel_a_example_data(
             data_root=data_root,
             animal_name=animal_name,
             date=date,
@@ -1680,17 +1167,17 @@ def make_figure_2(
             refresh_panel_example_cache=refresh_panel_example_cache,
         )
         for animal_name, date, region, unit_id, trajectories in (
-            FIGURE_2_PANEL_A_EXAMPLES
+            _figure_2.FIGURE_2_PANEL_A_EXAMPLES
         )
     ]
-    panel_b_overlap_table = load_panel_b_tuning_overlap_table(
+    panel_b_overlap_table = _figure_2.load_panel_b_tuning_overlap_table(
         data_root=data_root,
         datasets=datasets,
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
     )
-    panel_b_overlap_table = filter_panel_b_overlap_by_even_odd_stability(
+    panel_b_overlap_table = _figure_2.filter_panel_b_overlap_by_even_odd_stability(
         panel_b_overlap_table,
         data_root=data_root,
         datasets=datasets,
@@ -1698,10 +1185,10 @@ def make_figure_2(
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
         min_stability_correlation=(
-            PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
+            _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),
     )
-    panel_e_decoding_error_table = load_panel_e_decoding_error_table(
+    panel_e_decoding_error_table = _figure_2.load_panel_e_decoding_error_table(
         data_root=data_root,
         datasets=datasets,
         region=quant_region,
@@ -1714,114 +1201,136 @@ def make_figure_2(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
     )
-    fig.get_layout_engine().set(**CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS)
+    fig.get_layout_engine().set(
+        **_figure_2.CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS
+    )
     outer_grid = fig.add_gridspec(
-        nrows=4,
+        nrows=3,
         ncols=1,
         height_ratios=[
-            PANEL_A_SINGLE_ROW_HEIGHT_MM,
-            PANEL_BC_QUANT_ROW_HEIGHT_MM,
-            PANEL_D_ROW_HEIGHT_MM,
-            PANEL_E_ROW_HEIGHT_MM,
+            _figure_2.PANEL_A_SINGLE_ROW_HEIGHT_MM,
+            _figure_2.PANEL_BC_QUANT_ROW_HEIGHT_MM,
+            _figure_2.PANEL_D_ROW_HEIGHT_MM,
         ],
     )
     panel_a_axis = fig.add_subplot(outer_grid[0, 0])
     quant_grid = outer_grid[1, 0].subgridspec(
         nrows=1,
         ncols=2,
-        width_ratios=PANEL_BC_ROW_WIDTH_RATIOS,
-        wspace=PANEL_BC_ROW_WSPACE,
+        width_ratios=PANEL_B2C2_ROW_WIDTH_RATIOS,
+        wspace=PANEL_B2C2_ROW_WSPACE,
     )
     panel_b_axis = fig.add_subplot(quant_grid[0, 0])
     panel_c_axis = fig.add_subplot(quant_grid[0, 1])
-    panel_d_axis = fig.add_subplot(outer_grid[2, 0])
-    panel_e_axis = fig.add_subplot(outer_grid[3, 0])
-
-    plot_panel_a_examples_single_row(
-        panel_a_axis,
-        panel_a_examples,
+    bottom_grid = outer_grid[2, 0].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=PANEL_D2E2_ROW_WIDTH_RATIOS,
+        wspace=PANEL_D2E2_ROW_WSPACE,
     )
-    plot_panel_b_dpp_overlap_with_schematic(
+    panel_d_axis = fig.add_subplot(bottom_grid[0, 0])
+    panel_e_axis = fig.add_subplot(bottom_grid[0, 1])
+
+    plot_panel_a2_examples_single_row(panel_a_axis, panel_a_examples)
+    _figure_2.plot_panel_b_dpp_overlap_with_schematic(
         panel_b_axis,
         panel_b_overlap_table,
         example=panel_a_examples[0],
         low_threshold=dark_tuning_correlation_threshold,
         high_threshold=high_dark_tuning_correlation_threshold,
+        show_grouped=False,
+        show_scatter_linear_fit=True,
+        show_scatter_r2=True,
+        scatter_equal_aspect=True,
     )
-    plot_panel_c_cross_and_place_decoding(panel_c_axis, panel_e_decoding_error_table)
-    plot_panel_c_model_architecture_row(
+    _figure_2._replace_nested_text(
+        panel_b_axis,
+        "DPP index",
+        "DPP index (DPPI)",
+        fontsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
+    )
+    plot_panel_d2_architecture_panel(panel_c_axis)
+    plot_panel_d2_swap_results_panel(
         panel_d_axis,
-        panel_glm_payload["dark_light_examples"],
-    )
-    plot_panel_d_compact_swap_delta(
-        panel_e_axis,
         panel_glm_payload["swap_delta"],
         panel_glm_payload["swap_examples"],
-        model_name=PANEL_C_SWAP_MODEL_NAME,
-        model_colors=PANEL_C_SWAP_MODEL_COLORS_2_3,
-        model_labels=PANEL_C_SWAP_MODEL_LABELS_2_3,
+        model_name=_figure_2.PANEL_C_SWAP_MODEL_NAME,
+        model_colors=_figure_2.PANEL_C_SWAP_MODEL_COLORS_2_3,
+        model_labels=_figure_2.PANEL_C_SWAP_MODEL_LABELS_2_3,
+    )
+    plot_panel_e2_decoding_panel(
+        panel_e_axis,
+        panel_e_decoding_error_table,
     )
 
-    label_axis(panel_a_axis, "A", x=-0.02, y=PANEL_A_LABEL_Y)
+    label_axis(panel_a_axis, "A", x=-0.02, y=_figure_2.PANEL_A_LABEL_Y)
     panel_a_label = panel_a_axis.texts[-1]
     panel_a_axis.set_title(
         "Example DPP cells in dark and light",
         fontsize=8,
-        pad=PANEL_A_TITLE_PAD,
+        pad=_figure_2.PANEL_A_TITLE_PAD,
     )
-    label_axis(panel_b_axis, "B", x=-0.035, y=PANEL_B_LABEL_Y, va="baseline")
+    label_axis(panel_b_axis, "B", x=-0.035, y=_figure_2.PANEL_B_LABEL_Y, va="baseline")
     panel_b_label = panel_b_axis.texts[-1]
     panel_b_title = panel_b_axis.set_title(
         "Dark and light DPP coding",
         fontsize=8,
-        pad=PANEL_B_TITLE_PAD,
+        pad=_figure_2.PANEL_B_TITLE_PAD,
     )
-    label_axis(panel_c_axis, "C", x=-0.035, y=PANEL_B_LABEL_Y, va="baseline")
+    label_axis(panel_c_axis, "C", x=-0.035, y=_figure_2.PANEL_B_LABEL_Y, va="baseline")
     panel_c_label = panel_c_axis.texts[-1]
-    label_axis(panel_d_axis, "D", x=-0.02, y=PANEL_BC_LABEL_Y)
+    label_axis(panel_d_axis, "D", x=-0.02, y=_figure_2.PANEL_BC_LABEL_Y)
     panel_d_label = panel_d_axis.texts[-1]
-    label_axis(panel_e_axis, "E", x=-0.02, y=PANEL_BC_LABEL_Y)
+    label_axis(panel_e_axis, "E", x=-0.035, y=_figure_2.PANEL_BC_LABEL_Y)
     panel_e_label = panel_e_axis.texts[-1]
     panel_c_title = panel_c_axis.set_title(
-        "Dark and light decoding comparison",
-        fontsize=8,
-        pad=PANEL_B_TITLE_PAD,
-    )
-    panel_d_title = panel_d_axis.set_title(
         "Two models that relate dark and light activity",
         fontsize=8,
-        pad=PANEL_BC_TITLE_PAD,
+        pad=_figure_2.PANEL_B_TITLE_PAD,
+    )
+    panel_d_title = panel_d_axis.set_title(
+        "Dark and light cue-swap prediction comparison",
+        fontsize=8,
+        pad=_figure_2.PANEL_BC_TITLE_PAD,
     )
     panel_e_title = panel_e_axis.set_title(
-        "Predicting activity in held-out light epoch",
+        "Dark and light decoding comparison",
         fontsize=8,
-        pad=PANEL_BC_TITLE_PAD,
+        pad=_figure_2.PANEL_BC_TITLE_PAD,
     )
 
-    _raise_text_to_minimum_fontsize(fig, MIN_PUBLICATION_FONTSIZE_PT)
+    _figure_2._raise_text_to_minimum_fontsize(
+        fig,
+        _figure_2.MIN_PUBLICATION_FONTSIZE_PT,
+    )
     fig.canvas.draw()
     fig.set_layout_engine(None)
-    _set_axis_horizontal_bounds(
+    _figure_2._set_axis_horizontal_bounds(
         panel_a_axis,
-        left=PANEL_A_HORIZONTAL_AXIS_BOUNDS[0],
-        width=PANEL_A_HORIZONTAL_AXIS_BOUNDS[1],
+        left=_figure_2.PANEL_A_HORIZONTAL_AXIS_BOUNDS[0],
+        width=_figure_2.PANEL_A_HORIZONTAL_AXIS_BOUNDS[1],
     )
     panel_a_axis_height = panel_a_axis.get_position().height
-    _set_axis_height_preserving_top(panel_b_axis, panel_a_axis_height)
-    _set_axis_height_preserving_top(panel_c_axis, panel_a_axis_height)
-    _scale_axis_width_from_left(panel_b_axis, PANEL_B_HORIZONTAL_WIDTH_SCALE)
-    _shift_axis_horizontally(panel_e_axis, PANEL_E_HORIZONTAL_SHIFT)
-    _shift_axis_vertically(panel_e_axis, PANEL_E_VERTICAL_SHIFT)
+    _figure_2._set_axis_height_preserving_top(panel_b_axis, panel_a_axis_height)
+    _figure_2._set_axis_height_preserving_top(panel_c_axis, panel_a_axis_height)
+    _figure_2._scale_axis_width_from_left(
+        panel_b_axis,
+        _figure_2.PANEL_B_HORIZONTAL_WIDTH_SCALE,
+    )
     fig.canvas.draw()
-    _align_text_to_reference_display_x(panel_b_label, panel_a_label)
-    _align_text_to_reference_display_x(panel_d_label, panel_a_label)
-    _align_text_to_reference_display_x(panel_e_label, panel_a_label)
-    panel_e_title.set_position((0.5, panel_e_title.get_position()[1]))
-    _align_texts_to_reference_display_y((panel_e_title, panel_e_label))
-    _align_texts_to_reference_display_y((panel_d_title, panel_d_label))
-    _align_texts_to_reference_display_y(
+    _figure_2._align_text_to_reference_display_x(panel_b_label, panel_a_label)
+    _figure_2._align_text_to_reference_display_x(panel_d_label, panel_a_label)
+    _figure_2._align_texts_to_reference_display_y(
+        (panel_d_title, panel_d_label, panel_e_title, panel_e_label)
+    )
+    _align_text_tops_to_reference_display_y(
+        fig,
+        (panel_d_title, panel_d_label, panel_e_title, panel_e_label),
+    )
+    _figure_2._align_texts_to_reference_display_y(
         (panel_b_title, panel_b_label, panel_c_title, panel_c_label)
     )
+    _align_panel_b_top_histogram_label_to_scatter(fig, panel_b_axis)
 
     save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
@@ -1831,9 +1340,7 @@ def make_figure_2(
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Figure 2 generation."""
-    parser = argparse.ArgumentParser(
-        description="Generate Figure 2."
-    )
+    parser = argparse.ArgumentParser(description="Generate Figure 2.")
     parser.add_argument(
         "--data-root",
         type=Path,
@@ -1843,8 +1350,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory for figure output. Default: {DEFAULT_OUTPUT_DIR}",
+        default=_figure_2.DEFAULT_OUTPUT_DIR,
+        help=f"Directory for figure output. Default: {_figure_2.DEFAULT_OUTPUT_DIR}",
     )
     parser.add_argument(
         "--output-name",
@@ -1870,32 +1377,32 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dpp-index-threshold",
         dest="dark_tuning_correlation_threshold",
         type=float,
-        default=PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
+        default=_figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
         help=(
             "Dark tuning-correlation threshold for Panel B low/high grouping. "
-            f"Default: {PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD}"
+            f"Default: {_figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD}"
         ),
     )
     parser.add_argument(
         "--high-dark-tuning-correlation-threshold",
         type=float,
-        default=PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
+        default=_figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
         help=(
             "Upper dark tuning-correlation threshold for Panel B high group. "
-            f"Default: {PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD}"
+            f"Default: {_figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD}"
         ),
     )
     parser.add_argument(
         "--format",
         dest="output_format",
-        choices=FIGURE_FORMATS,
-        default=DEFAULT_OUTPUT_FORMAT,
-        help=f"Output format. Default: {DEFAULT_OUTPUT_FORMAT}",
+        choices=_figure_2.FIGURE_FORMATS,
+        default=_figure_2.DEFAULT_OUTPUT_FORMAT,
+        help=f"Output format. Default: {_figure_2.DEFAULT_OUTPUT_FORMAT}",
     )
     parser.add_argument(
         "--dataset",
         action="append",
-        type=parse_dataset_id,
+        type=_figure_2.parse_dataset_id,
         help=(
             "Animal/date data set to include as animal:date. May be repeated. "
             "Default: use v1ca1.paper_figures.datasets."
@@ -1907,7 +1414,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=REGIONS,
         help=(
             "Region to include. May be repeated. "
-            f"Default: {', '.join(DEFAULT_REGIONS)}."
+            f"Default: {', '.join(_figure_2.DEFAULT_REGIONS)}."
         ),
     )
     parser.add_argument("--light-epoch", default=None, help="Light run epoch.")
@@ -1915,32 +1422,35 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--position-bin-count",
         type=int,
-        default=DEFAULT_POSITION_BIN_COUNT,
+        default=_figure_2.DEFAULT_POSITION_BIN_COUNT,
         help=(
             "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {DEFAULT_POSITION_BIN_COUNT}"
+            f"Default: {_figure_2.DEFAULT_POSITION_BIN_COUNT}"
         ),
     )
     parser.add_argument(
         "--position-offset",
         type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore. Default: {DEFAULT_POSITION_OFFSET}",
+        default=_figure_2.DEFAULT_POSITION_OFFSET,
+        help=(
+            "Number of leading position samples to ignore. "
+            f"Default: {_figure_2.DEFAULT_POSITION_OFFSET}"
+        ),
     )
     parser.add_argument(
         "--speed-threshold-cm-s",
         type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
+        default=_figure_2.DEFAULT_SPEED_THRESHOLD_CM_S,
         help=(
             "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
+            f"Default: {_figure_2.DEFAULT_SPEED_THRESHOLD_CM_S}"
         ),
     )
     parser.add_argument(
         "--sigma-bins",
         type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
+        default=_figure_2.DEFAULT_SIGMA_BINS,
+        help=f"Gaussian smoothing width in bins. Default: {_figure_2.DEFAULT_SIGMA_BINS}",
     )
     parser.add_argument(
         "--dpi",
@@ -1955,8 +1465,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run Figure 2 generation."""
     args = parse_arguments(argv)
     datasets = args.dataset if args.dataset is not None else get_processed_datasets()
-    regions = tuple(args.region) if args.region is not None else DEFAULT_REGIONS
-    output_path = build_output_path(
+    regions = tuple(args.region) if args.region is not None else _figure_2.DEFAULT_REGIONS
+    output_path = _figure_2.build_output_path(
         args.output_dir,
         args.output_name,
         args.output_format,

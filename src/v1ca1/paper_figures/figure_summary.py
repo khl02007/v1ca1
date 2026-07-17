@@ -42,7 +42,7 @@ from v1ca1.paper_figures.figure_2 import (
     parse_dataset_id,
     plot_panel_b_dpp_overlap_scatter,
 )
-from v1ca1.paper_figures.old_fig3 import (
+from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     PANEL_A_DARK_EPOCH_BACKGROUND,
     PANEL_A_EPOCH_LABELS,

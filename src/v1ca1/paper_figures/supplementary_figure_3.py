@@ -24,6 +24,8 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import (
+    DEFAULT_FIGURE_WIDTH_MM as FIGURE_1_WIDTH_MM,
+    DEFAULT_HEATMAP_HEIGHT_MM,
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
     PANEL_D_HEATMAP_CMAP,
     align_panel_values_to_unit_order,
@@ -36,12 +38,9 @@ from v1ca1.paper_figures.figure_1 import (
     normalize_linear_position_by_trajectory,
     normalize_panel_values_per_trajectory,
 )
-from v1ca1.paper_figures.old_fig3 import (
-    DEFAULT_FIGURE_HEIGHT_MM as FIGURE_3_HEIGHT_MM,
-    DEFAULT_FIGURE_WIDTH_MM as FIGURE_3_WIDTH_MM,
+from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
-    DEFAULT_PANEL_AB_HEIGHT_MM,
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_REGIONS,
     DEFAULT_SIGMA_BINS,
@@ -79,14 +78,14 @@ from v1ca1.paper_figures.style import (
 
 
 DEFAULT_OUTPUT_NAME = "supplementary_figure_3"
-DEFAULT_FIGURE_WIDTH_MM = FIGURE_3_WIDTH_MM
+DEFAULT_FIGURE_WIDTH_MM = FIGURE_1_WIDTH_MM
 DEFAULT_SECTION_SPACER_MM = 10.0
 DEFAULT_BOTTOM_SECTION_SPACER_MM = 22.0
 PANEL_A_CV_PCA_SIZE_FRACTION = 0.40
 DEFAULT_REORDERED_HEATMAP_HEIGHT_MM = (
-    DEFAULT_PANEL_AB_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
+    DEFAULT_HEATMAP_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
 )
-DEFAULT_MOTOR_GRID_HEIGHT_MM = (FIGURE_3_HEIGHT_MM + 55.0) * 0.70
+DEFAULT_MOTOR_GRID_HEIGHT_MM = 121.1
 DEFAULT_MOTOR_SUMMARY_HEIGHT_MM = 35.0
 DEFAULT_FIGURE_HEIGHT_MM = (
     DEFAULT_REORDERED_HEATMAP_HEIGHT_MM

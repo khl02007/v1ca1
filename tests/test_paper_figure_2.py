@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import v1ca1.paper_figures._figure_2_base as figure_2_base_module
 import v1ca1.paper_figures.figure_2 as figure_2_module
-import v1ca1.paper_figures.figure_2_2 as figure_2_2_module
 import v1ca1.paper_figures.figure_2_common as figure_2_common_module
 from v1ca1.helper.plot_wtrack_schematic import get_w_track_geometry
 from v1ca1.paper_figures.figure_3 import (
@@ -43,7 +43,6 @@ from v1ca1.paper_figures.figure_2 import (
     load_panel_b_light_dpp_index_table,
     load_panel_b_light_tuning_stability_table,
     load_panel_b_tuning_correlation_table,
-    make_figure_2,
     parse_arguments,
     parse_dataset_id,
 )
@@ -472,7 +471,7 @@ def test_plot_panel_a_examples_single_row_draws_all_examples(
         calls.append((example, kwargs))
 
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "plot_panel_a_example",
         fake_plot_panel_a_example,
     )
@@ -818,7 +817,7 @@ def test_add_panel_d2_trace_legend_labels_all_prediction_traces() -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()
-    legend = figure_2_2_module._add_panel_d2_trace_legend(
+    legend = figure_2_module._add_panel_d2_trace_legend(
         ax,
         model_name=figure_2_module.PANEL_C_SWAP_MODEL_NAME,
         model_colors=figure_2_module.PANEL_C_SWAP_MODEL_COLORS_2_3,
@@ -831,7 +830,7 @@ def test_add_panel_d2_trace_legend_labels_all_prediction_traces() -> None:
         "Dark scaffold",
     ]
     assert [handle.get_color() for handle in legend.legend_handles] == [
-        figure_2_2_module.GLM_EMPIRICAL_COLOR,
+        figure_2_module.GLM_EMPIRICAL_COLOR,
         figure_2_module.PANEL_C_SWAP_MODEL_COLORS_2_3["visual"],
         figure_2_module.PANEL_C_SWAP_MODEL_COLORS_2_3[
             figure_2_module.PANEL_C_SWAP_MODEL_NAME
@@ -874,18 +873,18 @@ def test_panel_d2_swap_results_uses_left_example_grid_and_right_histogram(
         calls["histogram_axis"] = ax
 
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "_plot_panel_h_switched_segment_example",
         fake_plot_panel_h_switched_segment_example,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "plot_panel_d_mean_swap_delta_axis",
         fake_plot_panel_d_mean_swap_delta_axis,
     )
 
     fig, ax = plt.subplots()
-    figure_2_2_module._plot_panel_d2_swap_results(
+    figure_2_module._plot_panel_d2_swap_results(
         ax,
         swap_delta_table=None,
         swap_examples=[
@@ -913,7 +912,7 @@ def test_panel_d2_swap_results_uses_left_example_grid_and_right_histogram(
     example_axes = [example_axis for example_axis, _kwargs in example_calls]
     for example_axis, expected_bounds in zip(
         example_axes,
-        figure_2_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
+        figure_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
         strict=True,
     ):
         assert _relative_bounds(ax, example_axis) == pytest.approx(expected_bounds)
@@ -933,7 +932,7 @@ def test_panel_d2_swap_results_uses_left_example_grid_and_right_histogram(
         "Ex. 3 (ΔLL=0.91)",
     ]
     assert [example_axis.title.get_position()[0] for example_axis in example_axes] == (
-        pytest.approx([figure_2_2_module.PANEL_D2_EXAMPLE_HEADER_X] * 3)
+        pytest.approx([figure_2_module.PANEL_D2_EXAMPLE_HEADER_X] * 3)
     )
     assert not [
         text
@@ -954,24 +953,24 @@ def test_panel_d2_swap_results_uses_left_example_grid_and_right_histogram(
 
     histogram_axis = calls["histogram_axis"]
     assert _relative_bounds(ax, histogram_axis) == pytest.approx(
-        figure_2_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS
+        figure_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS
     )
     example_left = min(
         bounds[0]
         for bounds in (
-            *figure_2_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
-            figure_2_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS,
+            *figure_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
+            figure_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS,
         )
     )
     example_right = max(
         bounds[0] + bounds[2]
         for bounds in (
-            *figure_2_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
-            figure_2_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS,
+            *figure_2_module.PANEL_D2_EXAMPLE_SLOT_BOUNDS,
+            figure_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS,
         )
     )
-    histogram_left = figure_2_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS[0]
-    histogram_width = figure_2_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS[2]
+    histogram_left = figure_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS[0]
+    histogram_width = figure_2_module.PANEL_D2_HISTOGRAM_AXIS_BOUNDS[2]
     assert example_right < histogram_left
     assert histogram_left - example_right > 0.07
     assert (example_right - example_left) / histogram_width == pytest.approx(
@@ -987,7 +986,7 @@ def test_panel_d2_swap_results_uses_left_example_grid_and_right_histogram(
     assert len(legend_axes) == 1
     legend_axis = legend_axes[0]
     assert _relative_bounds(ax, legend_axis) == pytest.approx(
-        figure_2_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS
+        figure_2_module.PANEL_D2_TRACE_LEGEND_SLOT_BOUNDS
     )
     assert [text.get_text() for text in legend_axis.get_legend().get_texts()] == [
         "Empirical",
@@ -1015,13 +1014,13 @@ def test_plot_panel_d2_swap_results_panel_shows_third_example_xlabel(
         calls.update(kwargs)
 
     monkeypatch.setattr(
-        figure_2_2_module,
+        figure_2_module,
         "_plot_panel_d2_swap_results",
         fake_plot_panel_d2_swap_results,
     )
 
     fig, ax = plt.subplots()
-    figure_2_2_module.plot_panel_d2_swap_results_panel(
+    figure_2_module.plot_panel_d2_swap_results_panel(
         ax,
         swap_delta_table=None,
         swap_examples=[],
@@ -1043,14 +1042,14 @@ def test_add_panel_c2_light_dark_brackets_lowers_right_bracket() -> None:
     for axis in axes:
         axis.set_ylim(0.0, 1.0)
 
-    figure_2_2_module.add_panel_c2_light_dark_brackets(parent_ax)
+    figure_2_module.add_panel_c2_light_dark_brackets(parent_ax)
 
     left_bracket_y = max(axes[0].lines[0].get_ydata())
     right_bracket_y = max(axes[1].lines[0].get_ydata())
     assert right_bracket_y < left_bracket_y
     assert right_bracket_y == pytest.approx(
-        figure_2_2_module.PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION
-        + figure_2_2_module.DECODING_SIGNIFICANCE_BRACKET_HEIGHT
+        figure_2_module.PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION
+        + figure_2_module.DECODING_SIGNIFICANCE_BRACKET_HEIGHT
     )
     plt.close(fig)
 
@@ -1065,11 +1064,14 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()
-    figure_2_2_module.draw_panel_d2_architecture_schematic(ax)
+    figure_2_module.draw_panel_d2_architecture_schematic(ax)
     fig.canvas.draw()
 
     assert ax.get_zorder() > max(child_ax.get_zorder() for child_ax in ax.child_axes)
-    assert figure_2_2_module.PANEL_D2_SEGMENT_MODULATION_LABEL in {
+    assert figure_2_module.PANEL_D2_SEGMENT_MODULATION_LABEL == (
+        "Stimulus-specific\ngain modulation"
+    )
+    assert figure_2_module.PANEL_D2_SEGMENT_MODULATION_LABEL in {
         text.get_text() for text in ax.texts
     }
     assert figure_2_module.PANEL_B_SEGMENT_MODULATION_LABEL not in {
@@ -1082,6 +1084,30 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
     segment_oval_ax = ax.child_axes[5]
     shared_light_ax = ax.child_axes[6]
     shared_predict_ax = ax.child_axes[7]
+    rate_colorbar_ax = ax.child_axes[8]
+    assert rate_colorbar_ax.get_label() == (
+        figure_2_module.PANEL_D2_RATE_COLORBAR_AXIS_LABEL
+    )
+    assert rate_colorbar_ax.get_zorder() < ax.get_zorder()
+    assert rate_colorbar_ax._colorbar.mappable.cmap.name == (
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP
+    )
+    assert rate_colorbar_ax._colorbar.mappable.norm.gamma == pytest.approx(
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA
+    )
+    assert tuple(rate_colorbar_ax.get_xticks()) == pytest.approx((0.0, 1.0))
+    assert tuple(label.get_text() for label in rate_colorbar_ax.get_xticklabels()) == (
+        *figure_2_module.PANEL_D2_RATE_COLORBAR_ENDPOINT_LABELS,
+    )
+    assert rate_colorbar_ax.get_title() == figure_2_module.PANEL_D2_RATE_COLORBAR_LABEL
+    assert not rate_colorbar_ax.get_yticks().size
+    assert all(
+        text.get_fontsize() >= figure_2_module.PANEL_D2_RATE_COLORBAR_FONTSIZE
+        for text in (
+            rate_colorbar_ax.title,
+            *rate_colorbar_ax.get_xticklabels(),
+        )
+    )
     assert not [
         text
         for track_ax in (
@@ -1108,8 +1134,8 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
     }
     assert set(ovals_by_center_x) == {left_field_center_x, right_field_center_x}
     expected_oval_alphas = {
-        left_field_center_x: figure_2_2_module.PANEL_D2_SEGMENT_OVAL_ALPHAS[0],
-        right_field_center_x: figure_2_2_module.PANEL_D2_SEGMENT_OVAL_ALPHAS[1],
+        left_field_center_x: figure_2_module.PANEL_D2_SEGMENT_OVAL_ALPHAS[0],
+        right_field_center_x: figure_2_module.PANEL_D2_SEGMENT_OVAL_ALPHAS[1],
     }
     for center_x, fill_alpha in expected_oval_alphas.items():
         oval = ovals_by_center_x[center_x]
@@ -1119,13 +1145,13 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
         assert oval.width == pytest.approx(dims["corridor_w"] * 0.95)
         assert oval.height == pytest.approx(dims["y2"] - dims["y1"] + 0.25)
         assert oval.get_facecolor() == pytest.approx(
-            to_rgba(figure_2_2_module.PANEL_D2_SEGMENT_OVAL_FILL_COLOR, fill_alpha)
+            to_rgba(figure_2_module.PANEL_D2_SEGMENT_OVAL_FILL_COLOR, fill_alpha)
         )
         assert oval.get_edgecolor() == pytest.approx(
-            to_rgba(figure_2_2_module.PANEL_D2_SEGMENT_OVAL_EDGE_COLOR)
+            to_rgba(figure_2_module.PANEL_D2_SEGMENT_OVAL_EDGE_COLOR)
         )
         assert oval.get_linewidth() == pytest.approx(
-            figure_2_2_module.PANEL_D2_SEGMENT_OVAL_LINEWIDTH
+            figure_2_module.PANEL_D2_SEGMENT_OVAL_LINEWIDTH
         )
     arrow_annotations = [
         text
@@ -1144,7 +1170,7 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
     segment_arrow_length = (
         dims["y2"]
         - dims["y1"]
-        - 2.0 * figure_2_2_module.PANEL_D2_SEGMENT_ARROW_Y_MARGIN
+        - 2.0 * figure_2_module.PANEL_D2_SEGMENT_ARROW_Y_MARGIN
     )
     assert (
         arrow_by_label["_panel_d2_segment_arrow_up"].xy[1]
@@ -1164,15 +1190,15 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
     ) == pytest.approx(segment_arrow_length)
     assert all(
         text.arrow_patch.get_mutation_scale()
-        == pytest.approx(figure_2_2_module.PANEL_D2_SEGMENT_ARROW_MUTATION_SCALE)
+        == pytest.approx(figure_2_module.PANEL_D2_SEGMENT_ARROW_MUTATION_SCALE)
         for text in arrow_annotations
     )
     assert all(
         text.arrow_patch.get_linewidth()
-        == pytest.approx(figure_2_2_module.PANEL_D2_SEGMENT_ARROW_LINEWIDTH)
+        == pytest.approx(figure_2_module.PANEL_D2_SEGMENT_ARROW_LINEWIDTH)
         for text in arrow_annotations
     )
-    side_outline_gap = figure_2_2_module.PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_GAP
+    side_outline_gap = figure_2_module.PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_GAP
     expected_side_outlines = {
         "_panel_d2_segment_arm_side_outline_left_arm_left": (
             dims["x0"] - side_outline_gap,
@@ -1229,7 +1255,7 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
             assert list(line.get_ydata()) == pytest.approx([dims["y1"], dims["y2"]])
             assert to_rgba(line.get_color()) == pytest.approx(to_rgba(color))
             assert line.get_linewidth() == pytest.approx(
-                figure_2_2_module.PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_LINEWIDTH
+                figure_2_module.PANEL_D2_SEGMENT_ARM_SIDE_OUTLINE_LINEWIDTH
             )
     assert not [
         patch
@@ -1243,37 +1269,37 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
         if type(patch) is Rectangle
     ]
 
-    base_field_colors = figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS
-    assert figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP == "inferno"
+    base_field_colors = figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_BASE_COLORS
+    assert figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP == "inferno"
     assert base_field_colors == tuple(
         to_hex(
-            colormaps[figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP](
+            colormaps[figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP](
                 value
             )
         )
-        for value in figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLOR_VALUES
+        for value in figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLOR_VALUES
     )
-    assert figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_COLORS == (
+    assert figure_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_COLORS == (
         base_field_colors
     )
-    assert figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_COLORS == (
+    assert figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_COLORS == (
         base_field_colors
     )
-    assert figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS == (
+    assert figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_COLORS == (
         base_field_colors
     )
     assert (
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN
-        < figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN
-        < figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN
+        < figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN
+        < figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN
     )
-    assert 0.0 < figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA < 1.0
+    assert 0.0 < figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA < 1.0
 
     def _assert_rate_gain_colors(track_ax: object, gain: float) -> None:
         field_center_y = dims["y1"] + 1.45
         field_sigma = 0.58
-        cmap = colormaps[figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP]
-        gamma = figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA
+        cmap = colormaps[figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_COLORMAP]
+        gamma = figure_2_module.PANEL_D2_DARK_SCAFFOLD_FIELD_RATE_GAMMA
         for patch in track_ax.patches:
             if type(patch) is not Ellipse:
                 continue
@@ -1292,27 +1318,27 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
 
     _assert_rate_gain_colors(
         independent_dark_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
     )
     _assert_rate_gain_colors(
         shared_dark_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_RATE_GAIN,
     )
     _assert_rate_gain_colors(
         independent_light_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
     )
     _assert_rate_gain_colors(
         independent_predict_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
     )
     _assert_rate_gain_colors(
         shared_light_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_RATE_GAIN,
     )
     _assert_rate_gain_colors(
         shared_predict_ax,
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN,
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_RATE_GAIN,
     )
 
     independent_dark_fields = [
@@ -1391,33 +1417,33 @@ def test_panel_c2_dark_scaffold_segment_icon_uses_direction_arrows_and_left_fiel
         for patch in independent_light_fields
     ]
     assert [patch.get_alpha() for patch in independent_dark_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA]
         * len(independent_dark_fields)
     )
     assert [patch.get_alpha() for patch in independent_light_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
         * len(independent_light_fields)
     )
     assert [patch.get_alpha() for patch in independent_predict_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
         * len(independent_predict_fields)
     )
     assert [patch.get_alpha() for patch in shared_dark_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA]
         * len(shared_dark_fields)
     )
     assert [patch.get_alpha() for patch in shared_light_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA]
         * len(shared_light_fields)
     )
     assert [patch.get_alpha() for patch in shared_predict_fields] == pytest.approx(
-        [figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA]
+        [figure_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA]
         * len(shared_predict_fields)
     )
     assert (
-        figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA
-        == figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA
-        == figure_2_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA
+        figure_2_module.PANEL_D2_DARK_SCAFFOLD_LIGHT_FIELD_ALPHA
+        == figure_2_module.PANEL_D2_DARK_SCAFFOLD_DARK_FIELD_ALPHA
+        == figure_2_module.PANEL_D2_DARK_SCAFFOLD_PREDICTION_FIELD_ALPHA
         == pytest.approx(1.0)
     )
     plt.close(fig)
@@ -1481,7 +1507,7 @@ def test_panel_d_example_layout_requests_per_example_axis_labels(
             )
 
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "_plot_panel_g_example_columns",
         fake_plot_panel_g_example_columns,
     )
@@ -1572,10 +1598,10 @@ def test_panel_d_independent_light_icon_uses_figure_1b_arm_colors(
     from matplotlib.colors import to_rgba
     from matplotlib.patches import Circle, Ellipse, PathPatch, Rectangle
     import matplotlib.pyplot as plt
-    import v1ca1.paper_figures.old_fig3 as old_fig3_module
+    import v1ca1.paper_figures._dark_light as dark_light_module
 
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "_plot_panel_g_example_columns",
         lambda *_args, **_kwargs: None,
     )
@@ -1714,7 +1740,7 @@ def test_panel_d_independent_light_icon_uses_figure_1b_arm_colors(
             strict=True,
         ):
             x, y, width, height = expected_gain_bounds[region_name]
-            outset = old_fig3_module.PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET
+            outset = dark_light_module.PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET
             vertices = patch.get_path().vertices
             expected_vertices = (
                 x - outset,
@@ -1846,19 +1872,19 @@ def test_panel_d_independent_light_icon_uses_figure_1b_arm_colors(
     for bounds in (*panel_d_track_bounds.values(), *panel_e_track_bounds.values()):
         assert bounds[2:] == pytest.approx(expected_track_size)
     assert _center_x(panel_d_track_bounds["independent_dark"]) == pytest.approx(
-        old_fig3_module.PANEL_G_DARK_TRACK_CENTER_X
+        dark_light_module.PANEL_G_DARK_TRACK_CENTER_X
     )
     assert _center_x(panel_d_track_bounds["shared_dark"]) == pytest.approx(
-        old_fig3_module.PANEL_G_DARK_TRACK_CENTER_X
+        dark_light_module.PANEL_G_DARK_TRACK_CENTER_X
     )
     assert _center_x(panel_d_track_bounds["independent_light"]) == pytest.approx(
-        old_fig3_module.PANEL_G_LIGHT_TRACK_CENTER_X
+        dark_light_module.PANEL_G_LIGHT_TRACK_CENTER_X
     )
     assert _center_x(panel_d_track_bounds["shared_light"]) == pytest.approx(
-        old_fig3_module.PANEL_G_LIGHT_TRACK_CENTER_X
+        dark_light_module.PANEL_G_LIGHT_TRACK_CENTER_X
     )
     assert _center_x(panel_d_track_bounds["segment_gain"]) == pytest.approx(
-        old_fig3_module.PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X
+        dark_light_module.PANEL_G_SEGMENT_MODULATION_TRACK_CENTER_X
     )
     assert _center_x(panel_e_track_bounds["independent_train"]) == pytest.approx(
         _center_x(panel_d_track_bounds["independent_dark"])
@@ -1966,7 +1992,7 @@ def test_panel_d_independent_light_icon_uses_figure_1b_arm_colors(
             patch for patch in icon_ax.patches if isinstance(patch, PathPatch)
         )
         x, y, width, height = expected_bounds
-        outset = old_fig3_module.PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET
+        outset = dark_light_module.PANEL_G_SEGMENT_GAIN_OUTLINE_OUTSET
         expected_vertices = (
             x - outset,
             y - outset,
@@ -1989,7 +2015,7 @@ def test_panel_d_example_rows_layout_draws_four_requested_examples(
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import v1ca1.paper_figures.old_fig3 as old_fig3_module
+    import v1ca1.paper_figures._dark_light as dark_light_module
 
     field_calls = []
 
@@ -2013,17 +2039,17 @@ def test_panel_d_example_rows_layout_draws_four_requested_examples(
         )
 
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "draw_w_track_schematic",
         fake_draw_w_track_schematic,
     )
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "_panel_g_examples_y_max",
         fake_panel_g_examples_y_max,
     )
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "_plot_panel_g_example_field_axis",
         fake_plot_panel_g_example_field_axis,
     )
@@ -2033,7 +2059,7 @@ def test_panel_d_example_rows_layout_draws_four_requested_examples(
         for example_id in range(1, 5)
     ]
     fig, ax = plt.subplots()
-    old_fig3_module._plot_panel_g_example_columns(
+    dark_light_module._plot_panel_g_example_columns(
         ax,
         examples,
         layout="rows",
@@ -2063,7 +2089,7 @@ def test_panel_d_example_rows_layout_draws_four_requested_examples(
 def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import v1ca1.paper_figures.old_fig3 as old_fig3_module
+    import v1ca1.paper_figures._dark_light as dark_light_module
 
     calls = {}
 
@@ -2078,22 +2104,22 @@ def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
         return "swap-delta"
 
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "load_panel_h_swap_examples",
         fake_load_panel_h_swap_examples,
     )
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "load_panel_g_dark_light_glm_examples",
         fake_load_panel_g_dark_light_glm_examples,
     )
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "load_panel_h_swap_delta_table",
         fake_load_panel_h_swap_delta_table,
     )
 
-    old_fig3_module.load_panel_glm_data(
+    dark_light_module.load_panel_glm_data(
         data_root=Path("/analysis"),
         datasets=[("L14", "20240611", "08_r4")],
         region="v1",
@@ -2110,326 +2136,7 @@ def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
     )
 
 
-def test_make_figure_2_wires_current_panel_loaders_and_plotters(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import pandas as pd
-
-    calls: dict[str, object] = {}
-    real_plot_panel_b_dpp_overlap_with_schematic = (
-        figure_2_module.plot_panel_b_dpp_overlap_with_schematic
-    )
-
-    def fake_load_panel_glm_data(**kwargs: object) -> dict[str, object]:
-        calls["glm_kwargs"] = kwargs
-        return {
-            "dark_light_examples": ["model-example"],
-            "swap_delta": "swap-delta",
-            "swap_examples": ["swap-example"],
-        }
-
-    def fake_load_panel_a_example_data(**kwargs: object) -> dict[str, object]:
-        calls.setdefault("panel_a_loader_kwargs", []).append(kwargs)
-        return {
-            "animal_name": kwargs["animal_name"],
-            "unit_id": kwargs["unit_id"],
-            "trajectories": kwargs["trajectories"],
-        }
-
-    def fake_plot_panel_a_examples_single_row(
-        ax: object,
-        examples: object,
-    ) -> None:
-        calls["panel_a_examples"] = examples
-
-    def fake_load_panel_b_tuning_overlap_table(**kwargs: object) -> object:
-        calls["panel_b_loader_kwargs"] = kwargs
-        table = pd.DataFrame(
-            {
-                "similarity_dark": [0.10, 0.30, 0.50, 0.70, 0.90],
-                "similarity_light": [0.18, 0.34, 0.50, 0.66, 0.82],
-            }
-        )
-        calls["panel_b_loaded_table"] = table
-        return table
-
-    def fake_filter_panel_b_overlap_by_even_odd_stability(
-        table: object,
-        **kwargs: object,
-    ) -> object:
-        calls["panel_b_filter_input"] = table
-        calls["panel_b_filter_kwargs"] = kwargs
-        return table
-
-    def fake_plot_panel_b_dpp_overlap_with_schematic(
-        ax: object,
-        table: object,
-        **kwargs: object,
-    ) -> None:
-        calls["panel_b_table"] = table
-        calls["panel_b_plot_kwargs"] = kwargs
-        real_plot_panel_b_dpp_overlap_with_schematic(ax, table, **kwargs)
-
-    def fake_load_panel_e_decoding_error_table(**kwargs: object) -> str:
-        calls["panel_c_loader_kwargs"] = kwargs
-        return "panel-c-decoding"
-
-    def fake_plot_panel_c_cross_and_place_decoding(
-        ax: object,
-        table: object,
-    ) -> None:
-        calls["panel_c_table"] = table
-
-    def fake_plot_panel_c_model_architecture_row(
-        ax: object,
-        examples: object,
-    ) -> None:
-        calls["panel_d_examples"] = examples
-
-    def fake_plot_panel_d_compact_swap_delta(
-        ax: object,
-        swap_delta_table: object,
-        swap_examples: object,
-        **kwargs: object,
-    ) -> None:
-        calls["panel_e_delta"] = swap_delta_table
-        calls["panel_e_examples"] = swap_examples
-        calls["panel_e_kwargs"] = kwargs
-
-    def fake_save_figure(
-        figure: object,
-        output_path: Path,
-        dpi: int,
-        **kwargs: object,
-    ) -> Path:
-        figure.canvas.draw()
-        calls["figsize"] = figure.get_size_inches()
-        calls["output_path"] = output_path
-        calls["dpi"] = dpi
-        calls["save_kwargs"] = kwargs
-        calls["panel_labels"] = [
-            text.get_text()
-            for ax in figure.axes
-            for text in ax.texts
-            if text.get_fontweight() == "bold"
-        ]
-        calls["panel_label_display_positions"] = {
-            text.get_text(): text.get_transform().transform(text.get_position())
-            for ax in figure.axes
-            for text in ax.texts
-            if text.get_text() in {"A", "B", "C", "D", "E"}
-            and text.get_fontweight() == "bold"
-        }
-        calls["panel_label_vertical_alignments"] = {
-            text.get_text(): text.get_va()
-            for ax in figure.axes
-            for text in ax.texts
-            if text.get_text() in {"A", "B", "C", "D", "E"}
-            and text.get_fontweight() == "bold"
-        }
-        calls["title_display_positions"] = {
-            ax.get_title(): ax.title.get_transform().transform(ax.title.get_position())
-            for ax in figure.axes
-            if ax.get_title()
-        }
-        calls["titled_axis_bounds"] = {
-            ax.get_title(): ax.get_position().bounds
-            for ax in figure.axes
-            if ax.get_title()
-        }
-        return output_path
-
-    monkeypatch.setattr(
-        figure_2_module,
-        "load_panel_glm_data",
-        fake_load_panel_glm_data,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "load_panel_a_example_data",
-        fake_load_panel_a_example_data,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "plot_panel_a_examples_single_row",
-        fake_plot_panel_a_examples_single_row,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "load_panel_b_tuning_overlap_table",
-        fake_load_panel_b_tuning_overlap_table,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "filter_panel_b_overlap_by_even_odd_stability",
-        fake_filter_panel_b_overlap_by_even_odd_stability,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "plot_panel_b_dpp_overlap_with_schematic",
-        fake_plot_panel_b_dpp_overlap_with_schematic,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "load_panel_e_decoding_error_table",
-        fake_load_panel_e_decoding_error_table,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "plot_panel_c_cross_and_place_decoding",
-        fake_plot_panel_c_cross_and_place_decoding,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "plot_panel_c_model_architecture_row",
-        fake_plot_panel_c_model_architecture_row,
-    )
-    monkeypatch.setattr(
-        figure_2_module,
-        "plot_panel_d_compact_swap_delta",
-        fake_plot_panel_d_compact_swap_delta,
-    )
-    monkeypatch.setattr(figure_2_module, "save_figure", fake_save_figure)
-
-    output_path = tmp_path / "figure_2.svg"
-    saved_path = make_figure_2(
-        data_root=Path("/analysis"),
-        output_path=output_path,
-        datasets=[("L14", "20240611", "08_r4")],
-        regions=("v1",),
-        light_epoch=None,
-        dark_epoch=None,
-        dpi=300,
-    )
-
-    assert saved_path == output_path
-    assert calls["figsize"][0] == pytest.approx(FIGURE_3_WIDTH_MM / 25.4)
-    assert calls["figsize"][1] == pytest.approx(DEFAULT_FIGURE_HEIGHT_MM / 25.4)
-    assert calls["output_path"] == output_path
-    assert calls["dpi"] == 300
-    assert calls["save_kwargs"] == {"bbox_inches": None}
-    assert calls["panel_labels"] == ["A", "B", "C", "D", "E"]
-    label_positions = calls["panel_label_display_positions"]
-    assert label_positions["B"][0] == pytest.approx(label_positions["A"][0])
-    assert label_positions["D"][0] == pytest.approx(label_positions["A"][0])
-    assert label_positions["E"][0] == pytest.approx(label_positions["A"][0])
-    title_positions = calls["title_display_positions"]
-    assert calls["panel_label_vertical_alignments"]["B"] == "baseline"
-    assert calls["panel_label_vertical_alignments"]["C"] == "baseline"
-    panel_bc_title_y = title_positions["Dark and light DPP coding"][1]
-    assert label_positions["B"][1] == pytest.approx(panel_bc_title_y)
-    assert label_positions["C"][1] == pytest.approx(panel_bc_title_y)
-    assert title_positions["Dark and light decoding comparison"][1] == pytest.approx(
-        panel_bc_title_y
-    )
-    axis_bounds = calls["titled_axis_bounds"]
-    panel_a_bounds = axis_bounds["Example DPP cells in dark and light"]
-    assert panel_a_bounds[0] == pytest.approx(
-        figure_2_module.PANEL_A_HORIZONTAL_AXIS_BOUNDS[0]
-    )
-    assert panel_a_bounds[2] == pytest.approx(
-        figure_2_module.PANEL_A_HORIZONTAL_AXIS_BOUNDS[1]
-    )
-    panel_b_bounds = axis_bounds["Dark and light DPP coding"]
-    panel_c_bounds = axis_bounds["Dark and light decoding comparison"]
-    assert panel_b_bounds[2] / panel_c_bounds[2] == pytest.approx(2.0)
-    assert panel_b_bounds[0] + panel_b_bounds[2] < panel_c_bounds[0]
-    assert panel_b_bounds[3] == pytest.approx(panel_a_bounds[3])
-    assert panel_c_bounds[3] == pytest.approx(panel_a_bounds[3])
-    panel_d_bounds = axis_bounds["Two models that relate dark and light activity"]
-    panel_e_bounds = axis_bounds["Predicting activity in held-out light epoch"]
-    assert panel_d_bounds[3] == pytest.approx(panel_a_bounds[3])
-    assert panel_e_bounds[3] == pytest.approx(panel_a_bounds[3])
-
-    assert len(calls["panel_a_loader_kwargs"]) == 4
-    assert [
-        (
-            kwargs["animal_name"],
-            kwargs["date"],
-            kwargs["region"],
-            kwargs["unit_id"],
-            kwargs["trajectories"],
-        )
-        for kwargs in calls["panel_a_loader_kwargs"]
-    ] == [
-        ("L14", "20240611", "v1", 34, ("center_to_left", "right_to_center")),
-        ("L15", "20241121", "v1", 473, ("center_to_right", "left_to_center")),
-        ("L12", "20240421", "v1", 37, ("center_to_right", "left_to_center")),
-        ("L14", "20240611", "v1", 30, ("center_to_left", "right_to_center")),
-    ]
-    assert calls["panel_a_examples"] == [
-        {
-            "animal_name": "L14",
-            "unit_id": 34,
-            "trajectories": ("center_to_left", "right_to_center"),
-        },
-        {
-            "animal_name": "L15",
-            "unit_id": 473,
-            "trajectories": ("center_to_right", "left_to_center"),
-        },
-        {
-            "animal_name": "L12",
-            "unit_id": 37,
-            "trajectories": ("center_to_right", "left_to_center"),
-        },
-        {
-            "animal_name": "L14",
-            "unit_id": 30,
-            "trajectories": ("center_to_left", "right_to_center"),
-        },
-    ]
-
-    expected_loader_kwargs = {
-        "data_root": Path("/analysis"),
-        "datasets": [("L14", "20240611", "08_r4")],
-        "region": "v1",
-        "light_epoch": None,
-        "dark_epoch": None,
-    }
-    assert calls["panel_b_loader_kwargs"] == expected_loader_kwargs
-    assert calls["panel_b_filter_input"] is calls["panel_b_loaded_table"]
-    assert calls["panel_b_filter_kwargs"] == {
-        **expected_loader_kwargs,
-        "min_stability_correlation": pytest.approx(
-            PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
-        ),
-    }
-    assert calls["panel_b_table"] is calls["panel_b_loaded_table"]
-    assert calls["panel_b_plot_kwargs"] == {
-        "example": {
-            "animal_name": "L14",
-            "unit_id": 34,
-            "trajectories": ("center_to_left", "right_to_center"),
-        },
-        "low_threshold": PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-        "high_threshold": PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
-    }
-
-    assert calls["panel_c_loader_kwargs"] == expected_loader_kwargs
-    assert calls["panel_c_table"] == "panel-c-decoding"
-    assert calls["panel_d_examples"] == ["model-example"]
-    assert calls["panel_e_delta"] == "swap-delta"
-    assert calls["panel_e_examples"] == ["swap-example"]
-    assert calls["panel_e_kwargs"]["model_name"] == PANEL_C_SWAP_MODEL_NAME
-    assert set(calls["panel_e_kwargs"]["model_colors"]) == {
-        "visual",
-        PANEL_C_SWAP_MODEL_NAME,
-    }
-    assert set(calls["panel_e_kwargs"]["model_labels"]) == {PANEL_C_SWAP_MODEL_NAME}
-    assert calls["glm_kwargs"]["region"] == "v1"
-    assert calls["glm_kwargs"]["dark_light_requested_examples"] == (
-        PANEL_C_DARK_LIGHT_EXAMPLES
-    )
-    assert calls["glm_kwargs"][
-        "swap_delta_min_tuning_stability_correlation"
-    ] == pytest.approx(PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION)
-
-
-def test_make_figure_2_2_splits_decoding_panel_and_swaps_c_d_locations(
+def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2573,59 +2280,59 @@ def test_make_figure_2_2_splits_decoding_panel_and_swaps_c_d_locations(
         return output_path
 
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "load_panel_glm_data",
         fake_load_panel_glm_data,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "load_panel_a_example_data",
         fake_load_panel_a_example_data,
     )
     monkeypatch.setattr(
-        figure_2_2_module,
+        figure_2_module,
         "plot_panel_a2_examples_single_row",
         fake_plot_panel_a2_examples_single_row,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "load_panel_b_tuning_overlap_table",
         fake_load_panel_b_tuning_overlap_table,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "filter_panel_b_overlap_by_even_odd_stability",
         fake_filter_panel_b_overlap_by_even_odd_stability,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "plot_panel_b_dpp_overlap_with_schematic",
         fake_plot_panel_b_dpp_overlap_with_schematic,
     )
     monkeypatch.setattr(
-        figure_2_module,
+        figure_2_base_module,
         "load_panel_e_decoding_error_table",
         fake_load_panel_e_decoding_error_table,
     )
     monkeypatch.setattr(
-        figure_2_2_module,
+        figure_2_module,
         "plot_panel_d2_swap_results_panel",
         fake_plot_panel_d2_swap_results_panel,
     )
     monkeypatch.setattr(
-        figure_2_2_module,
+        figure_2_module,
         "plot_panel_d2_architecture_panel",
         fake_plot_panel_d2_architecture_panel,
     )
     monkeypatch.setattr(
-        figure_2_2_module,
+        figure_2_module,
         "plot_panel_e2_decoding_panel",
         fake_plot_panel_e2_decoding_panel,
     )
-    monkeypatch.setattr(figure_2_2_module, "save_figure", fake_save_figure)
+    monkeypatch.setattr(figure_2_module, "save_figure", fake_save_figure)
 
-    output_path = tmp_path / "figure_2_2.svg"
-    saved_path = figure_2_2_module.make_figure_2_2(
+    output_path = tmp_path / "figure_2.svg"
+    saved_path = figure_2_module.make_figure_2(
         data_root=Path("/analysis"),
         output_path=output_path,
         datasets=[("L14", "20240611", "08_r4")],
@@ -2637,7 +2344,7 @@ def test_make_figure_2_2_splits_decoding_panel_and_swaps_c_d_locations(
 
     assert saved_path == output_path
     assert calls["figsize"][0] == pytest.approx(
-        figure_2_2_module.DEFAULT_FIGURE_WIDTH_MM / 25.4
+        figure_2_module.DEFAULT_FIGURE_WIDTH_MM / 25.4
     )
     assert calls["output_path"] == output_path
     assert calls["save_kwargs"] == {"bbox_inches": None}

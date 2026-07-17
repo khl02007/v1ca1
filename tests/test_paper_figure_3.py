@@ -22,9 +22,15 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     NEURON_SCALE_BAR_COUNT,
+    PANEL_A_COLORBAR_LABELPAD,
     PANEL_ABC_HEADER_LABEL_X_OFFSETS,
+    PANEL_BC_SIGNIFICANT_UNIT_COLOR,
+    PANEL_C_GLM_SUMMARY_COLUMN_WIDTH,
     PANEL_D_DARK_ACTIVITY_COLORS,
+    PANEL_F_DPPI_HISTOGRAM_ALPHA,
+    PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
     add_aligned_panel_headers,
+    build_dark_active_dppi_reference_table,
     build_output_path,
     build_glm_dark_activity_devexp_table,
     build_dark_movement_firing_rate_cache_metadata,
@@ -33,6 +39,7 @@ from v1ca1.paper_figures.figure_3 import (
     build_panel_b_schematic_cache_metadata,
     build_panel_b_schematic_cache_path,
     build_ripple_modulation_output_stem,
+    compute_dark_active_dppi_mean_rank_permutation,
     compute_significance_distribution_comparison,
     draw_neuron_scale_bar,
     draw_ripple_glm_schematic,
@@ -81,12 +88,14 @@ from v1ca1.paper_figures.figure_3 import (
     plot_glm_analysis_panel,
     plot_glm_source_predictor_comparison_panel,
     plot_glm_offset_panel,
+    plot_dark_active_dppi_distribution_panel,
     plot_modulation_index_panel,
     plot_observed_predicted_panel,
     plot_peri_ripple_heatmap_panel,
     plot_ripple_decoding_comparison_panel,
     plot_ripple_lfp_panel,
     plot_top_ca1_xcorr_panel,
+    _align_axes_xaxis_baselines,
     _prediction_example_axis_limit,
 )
 
@@ -186,6 +195,33 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
         assert not label_text.get_window_extent(renderer).overlaps(
             title_text.get_window_extent(renderer)
         )
+    plt.close(fig)
+
+
+def test_align_axes_xaxis_baselines_preserves_target_tops() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, parent_axes = plt.subplots(1, 3)
+    reference_ax = parent_axes[0].inset_axes([0.1, 0.2, 0.8, 0.5])
+    target_axes = (
+        parent_axes[1].inset_axes([0.1, 0.3, 0.8, 0.5]),
+        parent_axes[2].inset_axes([0.1, 0.1, 0.8, 0.5]),
+    )
+    fig.canvas.draw()
+    target_tops = [axis.get_position().y1 for axis in target_axes]
+
+    _align_axes_xaxis_baselines(reference_ax, target_axes)
+    fig.canvas.draw()
+
+    reference_bottom = reference_ax.get_position().y0
+    assert [axis.get_position().y0 for axis in target_axes] == pytest.approx(
+        [reference_bottom] * len(target_axes)
+    )
+    assert [axis.get_position().y1 for axis in target_axes] == pytest.approx(
+        target_tops
+    )
     plt.close(fig)
 
 
@@ -479,7 +515,7 @@ def test_load_top_ca1_xcorr_panel_data_uses_shared_v1_order(tmp_path: Path) -> N
     assert np.allclose(payload["xcorr"][0, 0], xcorr[1, 1])
 
 
-def test_prepare_xcorr_payload_for_display_keeps_all_v1_cells() -> None:
+def test_prepare_xcorr_payload_for_display_selects_top_fraction_within_each_set() -> None:
     xcorr = np.ones((4, 6, 5), dtype=float)
     xcorr[0, 0, 2] = 9.0
     xcorr[0, 1, 2] = 8.0
@@ -497,12 +533,24 @@ def test_prepare_xcorr_payload_for_display_keeps_all_v1_cells() -> None:
     cropped = prepare_xcorr_payload_for_display(payload)
 
     assert cropped["ca1_unit_ids"].tolist() == [11, 10, 9]
-    assert cropped["v1_unit_ids"].tolist() == [101, 102, 103, 104, 105, 106]
-    assert cropped["v1_group_ca1_indices"].tolist() == [0, 0, 1, 1, 2, 2]
-    assert cropped["v1_group_boundaries"].tolist() == [2, 4]
+    assert cropped["v1_unit_ids"].tolist() == [101, 103, 105]
+    assert cropped["v1_group_ca1_indices"].tolist() == [0, 1, 2]
+    assert cropped["v1_group_boundaries"].tolist() == [1, 2]
+    assert cropped["v1_group_total_counts"].tolist() == [2, 2, 2]
+    assert cropped["v1_group_display_counts"].tolist() == [1, 1, 1]
+    assert cropped["v1_total_count"] == 6
+    assert cropped["v1_display_count"] == 3
+    assert cropped["v1_display_fraction"] == pytest.approx(1.0 / 3.0)
     assert cropped["v1_ordering"] == "shared_multi_example_partner_rank"
-    assert cropped["xcorr"].shape == (3, 6, 5)
-    np.testing.assert_allclose(cropped["xcorr"], xcorr[:3])
+    assert cropped["xcorr"].shape == (3, 3, 5)
+    np.testing.assert_allclose(cropped["xcorr"], xcorr[:3, [0, 2, 4]])
+
+    all_cells = prepare_xcorr_payload_for_display(payload, v1_fraction=1.0)
+    assert all_cells["v1_unit_ids"].tolist() == [101, 102, 103, 104, 105, 106]
+    assert all_cells["v1_group_ca1_indices"].tolist() == [0, 0, 1, 1, 2, 2]
+    assert all_cells["v1_group_boundaries"].tolist() == [2, 4]
+    assert all_cells["xcorr"].shape == (3, 6, 5)
+    np.testing.assert_allclose(all_cells["xcorr"], xcorr[:3])
 
 
 def test_plot_top_ca1_xcorr_panel_smooths_only_lag_and_marks_v1_groups() -> None:
@@ -520,6 +568,7 @@ def test_plot_top_ca1_xcorr_panel_smooths_only_lag_and_marks_v1_groups() -> None
         "display_vmax": 5.0,
         "v1_group_ca1_indices": np.array([0, 0, 1, 1]),
         "v1_group_boundaries": np.array([2]),
+        "v1_display_fraction": 1.0 / 3.0,
     }
 
     fig, ax = plt.subplots()
@@ -537,7 +586,11 @@ def test_plot_top_ca1_xcorr_panel_smooths_only_lag_and_marks_v1_groups() -> None
     ]
     assert len(horizontal_lines) == 1
     assert horizontal_lines[0].get_ydata()[0] == pytest.approx(2.0)
-    assert {text.get_text() for text in ax.texts} >= {"V1 sets", "1", "2"}
+    assert {text.get_text() for text in ax.texts} >= {
+        "V1 co-active sets",
+        "1",
+        "2",
+    }
     plt.close(fig)
 
 
@@ -872,6 +925,10 @@ def test_plot_epoch_ripple_heatmap_panel_can_expand_vertically() -> None:
     assert expanded_height > default_height
     assert len(default_ax.child_axes) == 4
     assert len(expanded_ax.child_axes) == 3
+    assert expanded_ax.child_axes[-1].get_ylabel() == "Norm. FR"
+    assert expanded_ax.child_axes[-1].yaxis.labelpad == pytest.approx(
+        PANEL_A_COLORBAR_LABELPAD
+    )
     plt.close(default_fig)
     plt.close(expanded_fig)
 
@@ -1403,6 +1460,199 @@ def test_compute_significance_distribution_comparison_uses_session_strata() -> N
     assert 0.0 < float(stats["p_value"]) <= 1.0
 
 
+def test_build_dark_active_dppi_reference_table_filters_to_finite_active_units() -> None:
+    dark_activity_table = pd.DataFrame(
+        {
+            "unit": [11, 12, 13, 14],
+            "dark_firing_rate_hz": [0.5, 0.8, 0.49, np.nan],
+        }
+    )
+    tuning_similarity_table = pd.DataFrame(
+        {
+            "unit": [11, 12, 13, 15],
+            "same_turn_tuning_similarity": [0.2, 0.8, 0.7, 0.9],
+            "tuning_source_path": ["a", "b", "c", "d"],
+        }
+    )
+
+    table = build_dark_active_dppi_reference_table(
+        dark_activity_table,
+        tuning_similarity_table,
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+    )
+
+    assert table["unit"].tolist() == [11, 12]
+    assert table["dark_firing_rate_hz"].tolist() == pytest.approx([0.5, 0.8])
+    assert table["same_turn_tuning_similarity"].tolist() == pytest.approx([0.2, 0.8])
+    assert table["animal_name"].tolist() == ["L14", "L14"]
+    assert table["date"].tolist() == ["20240611", "20240611"]
+    assert table["dark_epoch"].tolist() == ["08_r4", "08_r4"]
+
+
+def _make_dark_active_dppi_rank_payload() -> dict[str, object]:
+    """Return a portable 926-reference/473-selected rank-shift fixture."""
+    reference_values = np.linspace(0.0, 1.0, 926)
+    selected_indices = np.rint(np.linspace(46, 925, 473)).astype(int)
+    selected_values = reference_values[selected_indices]
+    return {
+        "dark_active_dppi_reference_table": pd.DataFrame(
+            {"same_turn_tuning_similarity": reference_values}
+        ),
+        "devexp_table": pd.DataFrame(
+            {
+                "epoch_type": ["light"] * selected_values.size,
+                "same_turn_tuning_similarity": selected_values,
+                "ripple_devexp_p_value": np.full(selected_values.size, 0.001),
+                "dark_firing_rate_hz": np.full(selected_values.size, 1.0),
+            }
+        ),
+        "dark_activity_threshold_hz": 0.5,
+    }
+
+
+def test_compute_dark_active_dppi_mean_rank_permutation_matches_rank_test() -> None:
+    from scipy.stats import mannwhitneyu, rankdata
+
+    payload = _make_dark_active_dppi_rank_payload()
+    stats = compute_dark_active_dppi_mean_rank_permutation(
+        payload,
+        n_permutations=25,
+        random_seed=1,
+    )
+
+    reference_values = np.asarray(
+        payload["dark_active_dppi_reference_table"]["same_turn_tuning_similarity"],
+        dtype=float,
+    )
+    selected_values = np.asarray(stats["selected_values"], dtype=float)
+    nonselected_values = np.asarray(stats["nonselected_values"], dtype=float)
+    reference_percentiles = (
+        rankdata(reference_values, method="average") - 0.5
+    ) / reference_values.size
+    expected_mean_percentile = float(
+        np.mean(reference_percentiles[np.isin(reference_values, selected_values)])
+    )
+    expected_comparison = mannwhitneyu(
+        selected_values,
+        nonselected_values,
+        alternative="greater",
+        method="asymptotic",
+    )
+    assert stats["n_reference"] == 926
+    assert stats["n_selected"] == 473
+    assert stats["n_nonselected"] == 453
+    assert stats["mean_reference_percentile"] == pytest.approx(
+        expected_mean_percentile
+    )
+    assert stats["auc_selected_vs_nonselected"] == pytest.approx(
+        expected_comparison.statistic / (473 * 453)
+    )
+    assert stats["p_value"] == pytest.approx(expected_comparison.pvalue)
+    assert np.asarray(stats["reference_values"]).shape == (926,)
+    assert np.asarray(stats["selected_values"]).shape == (473,)
+    assert np.asarray(stats["nonselected_values"]).shape == (453,)
+    assert np.asarray(stats["null_mean_percentiles"]).shape == (25,)
+    assert np.asarray(stats["null_auc_selected_vs_nonselected"]).shape == (25,)
+    np.testing.assert_allclose(
+        stats["null_auc_selected_vs_nonselected"],
+        (
+            926 * np.asarray(stats["null_mean_percentiles"], dtype=float)
+            - 0.5 * 473
+        )
+        / 453,
+    )
+    np.testing.assert_allclose(
+        np.sort(np.concatenate([selected_values, nonselected_values])),
+        reference_values,
+    )
+    assert 0.0 < float(stats["monte_carlo_p_value"]) <= 1.0
+
+
+def test_plot_dark_active_dppi_distribution_panel_shows_predictable_histogram() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    stats = plot_dark_active_dppi_distribution_panel(
+        ax,
+        _make_dark_active_dppi_rank_payload(),
+        n_permutations=25,
+        random_seed=1,
+    )
+
+    assert len(ax.child_axes) == 1
+    plot_ax = ax.child_axes[0]
+    assert len(plot_ax.child_axes) == 0
+    assert plot_ax.get_position().width == pytest.approx(
+        0.83 * ax.get_position().width
+    )
+    text_values = [text.get_text() for text in plot_ax.texts]
+    displayed_p_value = float(stats["monte_carlo_p_value"])
+    if displayed_p_value < 0.001:
+        expected_stars = "***"
+    elif displayed_p_value < 0.01:
+        expected_stars = "**"
+    elif displayed_p_value < 0.05:
+        expected_stars = "*"
+    else:
+        expected_stars = "n.s."
+    assert text_values == [expected_stars]
+    assert plot_ax.texts[0].get_transform() == plot_ax.transAxes
+    assert plot_ax.get_xlabel() == "Dark DPPI"
+    assert plot_ax.get_ylabel() == "Fraction of neurons"
+    assert plot_ax.get_xlim() == pytest.approx((0.0, 1.0))
+    assert plot_ax.get_ylim()[0] == pytest.approx(0.0)
+    assert plot_ax.get_legend() is None
+    assert not plot_ax.lines
+    assert len(plot_ax.patches) == (
+        len(PANEL_F_DPPI_HISTOGRAM_BIN_EDGES) - 1
+    )
+    selected_values = np.asarray(stats["selected_values"], dtype=float)
+    expected_counts, expected_edges = np.histogram(
+        selected_values,
+        bins=PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
+    )
+    np.testing.assert_allclose(
+        [patch.get_x() for patch in plot_ax.patches],
+        expected_edges[:-1],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        [patch.get_width() for patch in plot_ax.patches],
+        np.diff(expected_edges),
+    )
+    np.testing.assert_allclose(
+        [patch.get_height() for patch in plot_ax.patches],
+        expected_counts / selected_values.size,
+    )
+    assert sum(patch.get_height() for patch in plot_ax.patches) == pytest.approx(1.0)
+    expected_facecolor = to_rgba(
+        PANEL_BC_SIGNIFICANT_UNIT_COLOR,
+        PANEL_F_DPPI_HISTOGRAM_ALPHA,
+    )
+    assert all(
+        patch.get_facecolor() == pytest.approx(expected_facecolor)
+        for patch in plot_ax.patches
+    )
+    assert all(
+        patch.get_edgecolor()[-1] == pytest.approx(0.0)
+        for patch in plot_ax.patches
+    )
+    fig.canvas.draw()
+    text_artists = [
+        plot_ax.xaxis.label,
+        plot_ax.yaxis.label,
+        *plot_ax.texts,
+        *plot_ax.get_xticklabels(),
+        *plot_ax.get_yticklabels(),
+    ]
+    assert all(text.get_fontsize() >= 6.0 for text in text_artists)
+    plt.close(fig)
+
+
 def test_load_example_glm_prediction_selects_top_devexp_unit(tmp_path: Path) -> None:
     _write_ripple_glm_dataset(tmp_path)
 
@@ -1795,9 +2045,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
     )
     assert len(ax.child_axes) == 10
     assert [child.get_title() for child in ax.child_axes[1:4]] == [
-        "Example cell 1\n(Dev. exp. 0.33)",
-        "Example cell 2\n(Dev. exp. 0.24)",
-        "Example cell 3\n(Dev. exp. 0.27)",
+        "Example V1 cell 1\n(Dev. exp. 0.33)",
+        "Example V1 cell 2\n(Dev. exp. 0.24)",
+        "Example V1 cell 3\n(Dev. exp. 0.27)",
     ]
     assert ax.child_axes[3].get_xlabel() == "Actual count"
     assert all(len(child.artists) == 0 for child in ax.child_axes[1:4])
@@ -1848,6 +2098,15 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert max(example_heights) < 0.19
     assert min(example_gaps) > 0.08
     summary_positions = [child.get_position() for child in ax.child_axes[4:]]
+    summary_left = min(position.x0 for position in summary_positions)
+    summary_right = max(position.x1 for position in summary_positions)
+    assert (summary_right - summary_left) / parent_position.width == pytest.approx(
+        PANEL_C_GLM_SUMMARY_COLUMN_WIDTH
+    )
+    summary_gap = summary_left - max(
+        position.x1 for position in example_positions
+    )
+    assert summary_gap / parent_position.width > 0.05
     example_bottom = min(position.y0 for position in example_positions)
     summary_box_bottoms = [
         position.y0 for position in summary_positions[1::2]
@@ -1960,25 +2219,39 @@ def test_plot_helpers_draw_expected_axes() -> None:
     )
     assert devexp_box_line_max == pytest.approx(0.4)
     box_significance_markers = [
-        text for text in box_ax.texts if text.get_text() == "*"
+        text for text in box_ax.texts if text.get_text() == "***"
     ]
     assert len(box_significance_markers) == 1
     assert box_significance_markers[0].get_position()[0] > devexp_box_line_max
     assert box_significance_markers[0].get_position()[1] == pytest.approx(1.5)
+    assert box_significance_markers[0].get_rotation() == pytest.approx(90.0)
     box_bracket_lines = [
         line for line in box_ax.lines if len(line.get_xdata()) == 4
     ]
     assert box_bracket_lines
     assert min(box_bracket_lines[-1].get_xdata()) > devexp_box_line_max
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    box_marker_bounds = box_significance_markers[0].get_window_extent(renderer)
+    box_bracket_x = box_ax.transData.transform(
+        (max(box_bracket_lines[-1].get_xdata()), 1.5)
+    )[0]
+    box_bracket_mid_y = box_ax.transData.transform((0.0, 1.5))[1]
+    assert box_marker_bounds.x0 - box_bracket_x > 2.0
+    assert 0.5 * (box_marker_bounds.y0 + box_marker_bounds.y1) == pytest.approx(
+        box_bracket_mid_y,
+        abs=1.0,
+    )
     assert [text.get_text() for text in similarity_ax.texts] == ["median=0.80"]
     assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
     assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
     significance_markers = [
-        text for text in fraction_ax.texts if text.get_text() == "*"
+        text for text in fraction_ax.texts if text.get_text() == "***"
     ]
     assert len(significance_markers) == 1
-    assert significance_markers[0].get_position()[0] == pytest.approx(1.05)
+    assert significance_markers[0].get_position()[0] == pytest.approx(1.02)
     assert significance_markers[0].get_position()[1] == pytest.approx(1.5)
+    assert significance_markers[0].get_rotation() == pytest.approx(90.0)
     bracket_lines = [
         line for line in fraction_ax.lines if len(line.get_xdata()) == 4
     ]
@@ -1988,6 +2261,14 @@ def test_plot_helpers_draw_expected_axes() -> None:
         [0.975, 1.02, 1.02, 0.975],
     )
     np.testing.assert_allclose(bracket_lines[-1].get_ydata(), [1.0, 1.0, 2.0, 2.0])
+    fraction_marker_bounds = significance_markers[0].get_window_extent(renderer)
+    fraction_bracket_x = fraction_ax.transData.transform((1.02, 1.5))[0]
+    fraction_bracket_mid_y = fraction_ax.transData.transform((0.0, 1.5))[1]
+    assert fraction_marker_bounds.x0 - fraction_bracket_x > 2.0
+    assert 0.5 * (
+        fraction_marker_bounds.y0 + fraction_marker_bounds.y1
+    ) == pytest.approx(fraction_bracket_mid_y, abs=1.0)
+    assert box_ax.get_window_extent(renderer).x0 - fraction_marker_bounds.x1 > 1.0
     assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
     plt.close(fig)
 
@@ -2064,6 +2345,24 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(ax.child_axes) == 2
     assert ax.child_axes[0].get_title() == "CA1 0-200 ms -> V1 target window"
     assert ax.child_axes[1].get_xlabel() == "V1 target window (ms)"
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_behavior_association_panel(
+        ax,
+        association_payload,
+        include_similarity=False,
+    )
+    assert len(ax.child_axes) == 2
+    fraction_ax, box_ax = ax.child_axes
+    assert fraction_ax.get_xlabel() == "$p$<0.05\nfrac."
+    assert box_ax.get_xlabel() == "Dev.\nexplained"
+    assert all(child_axis.get_xlabel() != "Dark\nDPPI" for child_axis in ax.child_axes)
+    assert not any(
+        text.get_text().startswith("median=")
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
+    )
     plt.close(fig)
 
 

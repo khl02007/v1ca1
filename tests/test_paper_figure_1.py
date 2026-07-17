@@ -1037,7 +1037,7 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
     from matplotlib.colors import to_rgba
     from matplotlib.patches import Rectangle
     import matplotlib.pyplot as plt
-    import v1ca1.paper_figures.old_fig3 as old_fig3_module
+    import v1ca1.paper_figures._dark_light as dark_light_module
 
     load_calls: list[dict[str, object]] = []
 
@@ -1048,7 +1048,7 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
         return example
 
     monkeypatch.setattr(
-        old_fig3_module,
+        dark_light_module,
         "load_or_compute_panel_example_data",
         fake_load_or_compute_panel_example_data,
     )
@@ -1170,12 +1170,25 @@ def test_plot_dark_light_example_panel_uses_visual_condition_route_layout(
         for line in dark_epoch_icon_axis.lines
         if line.get_label().startswith("_panel_b_visual_icon_arm_side_outline_")
     ]
-    assert not [
-        text
-        for child_axis in ax.child_axes
-        for text in child_axis.texts
-        if text.get_text() in {"A", "B"}
-    ]
+    assert [text.get_text() for text in top_epoch_icon_axis.texts] == ["A", "B"]
+    assert [text.get_text() for text in second_epoch_icon_axis.texts] == ["B", "A"]
+    assert not dark_epoch_icon_axis.texts
+    for icon_axis in (top_epoch_icon_axis, second_epoch_icon_axis):
+        left_text, right_text = icon_axis.texts
+        assert left_text.get_position()[0] < dims["x0"]
+        assert right_text.get_position()[0] > dims["x5"]
+        assert dims["x0"] - left_text.get_position()[0] == pytest.approx(
+            figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+        )
+        assert right_text.get_position()[0] - dims["x5"] == pytest.approx(
+            figure_1_module.PANEL_B_VISUAL_ICON_LABEL_X_OFFSET
+        )
+        for text in icon_axis.texts:
+            assert to_rgba(text.get_color())[:3] == pytest.approx(
+                to_rgba(
+                    figure_1_module.PANEL_B_VISUAL_ICON_COLORS[text.get_text()]
+                )[:3]
+            )
     rate_axes = ax.child_axes[5::3]
     assert len(rate_axes) == 4
     assert all(rate_axis.get_xlabel() == "" for rate_axis in rate_axes)
@@ -1771,6 +1784,7 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     from matplotlib.colors import to_rgba
+    from matplotlib.offsetbox import AnnotationBbox
     from matplotlib.text import Annotation
     from matplotlib.patches import ConnectionPatch, Rectangle
     import matplotlib.pyplot as plt
@@ -1834,19 +1848,62 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
     assert to_rgba(arena_text_by_label["B"].get_color())[:3] == pytest.approx(
         to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
     )
+    arena_condition_texts = sorted(
+        (
+            text
+            for text in arena_ax.texts
+            if text.get_text() in {"A", "B", "Dark"}
+        ),
+        key=lambda text: text.get_position()[0],
+    )
+    assert [text.get_text() for text in arena_condition_texts] == [
+        "A",
+        "B",
+        "Dark",
+    ]
 
     visible_condition_text = [
         text for text in condition_ax.texts if text.get_text()
     ]
-    assert [text.get_text() for text in visible_condition_text] == [
-        *figure_1_module.TASK_DESIGN_PHASE_LABELS,
-        "Time",
+    assert [text.get_text() for text in visible_condition_text] == ["Time"]
+    phase_label_boxes = [
+        artist
+        for artist in condition_ax.artists
+        if isinstance(artist, AnnotationBbox)
     ]
-    phase_texts = visible_condition_text[:3]
-    assert [text.get_position()[1] for text in phase_texts] == pytest.approx(
+    assert len(phase_label_boxes) == 3
+    assert [label_box.xy[0] for label_box in phase_label_boxes] == pytest.approx(
+        [
+            bounds[0] + bounds[2] / 2.0
+            for bounds in figure_1_module.TASK_DESIGN_CONDITION_TRACK_BOUNDS
+        ]
+    )
+    assert [label_box.xy[1] for label_box in phase_label_boxes] == pytest.approx(
         [figure_1_module.TASK_DESIGN_PHASE_LABEL_Y] * 3
     )
-    time_text = visible_condition_text[-1]
+    phase_fragment_texts = [
+        [
+            text_area.get_children()[0]
+            for text_area in label_box.offsetbox.get_children()
+        ]
+        for label_box in phase_label_boxes
+    ]
+    assert [
+        "".join(text.get_text() for text in fragment_texts)
+        for fragment_texts in phase_fragment_texts
+    ] == list(figure_1_module.TASK_DESIGN_PHASE_LABELS)
+    expected_letter_colors = {
+        "A": to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3],
+        "B": to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3],
+    }
+    for fragment_texts in phase_fragment_texts[:2]:
+        for text in fragment_texts:
+            if text.get_text() in expected_letter_colors:
+                assert to_rgba(text.get_color())[:3] == pytest.approx(
+                    expected_letter_colors[text.get_text()]
+                )
+            assert text.get_fontsize() >= figure_1_module.MIN_FIGURE_1_FONTSIZE_PT
+    time_text = visible_condition_text[0]
     assert time_text.get_position()[1] == pytest.approx(
         figure_1_module.TASK_DESIGN_VISUAL_TIMELINE_ARROW_Y
         - figure_summary.SUMMARY_RUN_SLEEP_TIMELINE_TIME_LABEL_OFFSET
@@ -2162,9 +2219,9 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
         "C",
         "R",
         "Monitor locations",
-        "Dark",
         "A",
         "B",
+        "Dark",
     ]
     monitor_legend_text = ax.texts[3]
     assert monitor_legend_text.get_fontsize() == pytest.approx(5.8)
@@ -2186,12 +2243,16 @@ def test_draw_visual_stimuli_schematic_matches_reference_layout() -> None:
     assert all(
         patch.get_edgecolor()[3] > 0.0 for patch in yellow_monitor_rectangles
     )
-    assert screen_border_rectangles[1].get_edgecolor()[:3] == pytest.approx(
+    assert screen_border_rectangles[0].get_edgecolor()[:3] == pytest.approx(
         to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["A"])[:3]
     )
-    assert screen_border_rectangles[2].get_edgecolor()[:3] == pytest.approx(
+    assert screen_border_rectangles[1].get_edgecolor()[:3] == pytest.approx(
         to_rgba(figure_1_module.PANEL_B_VISUAL_ICON_COLORS["B"])[:3]
     )
+    screen_x_positions = [patch.get_x() for patch in screen_rectangles]
+    assert screen_x_positions == sorted(screen_x_positions)
+    assert dot_screen_rectangles[0].get_x() == pytest.approx(screen_x_positions[1])
+    assert black_screen_rectangles[0].get_x() == pytest.approx(screen_x_positions[2])
     assert not ax.axison
     center_wall_lines = [
         line

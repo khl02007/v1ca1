@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -67,6 +68,7 @@ PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT = 0.92
 PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH = 0.18
 PANEL_C_GLM_SCHEMATIC_BOTTOM_SHIFT = -0.060
 PANEL_C_GLM_SUMMARY_SCATTER_TOP = 0.835
+PANEL_C_GLM_SUMMARY_COLUMN_WIDTH = 0.26
 PANEL_D_COMPACT_SOURCE_LEFT = 0.14
 PANEL_D_COMPACT_SOURCE_RIGHT = 0.78
 PANEL_D_COMPACT_SOURCE_BOTTOM = 0.08
@@ -76,6 +78,7 @@ PANEL_A_EXPANDED_HEATMAP_BOTTOM = 0.025
 PANEL_A_EXPANDED_HEATMAP_TOP = 0.875
 PANEL_A_EXPANDED_HEATMAP_ROW_GAP = 0.030
 PANEL_A_COLORBAR_WIDTH = 0.018
+PANEL_A_COLORBAR_LABELPAD = 0.0
 PANEL_B_XCORR_COMPACT_HEATMAP_BOTTOM = PANEL_A_EXPANDED_HEATMAP_BOTTOM
 PANEL_B_XCORR_COMPACT_HEATMAP_TOP = (
     PANEL_B_XCORR_COMPACT_HEATMAP_BOTTOM
@@ -137,7 +140,7 @@ DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION = 5
 DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S = 0.150
 PANEL_B_SCHEMATIC_CACHE_VERSION = 4
 PANEL_B_XCORR_DISPLAY_CA1_UNITS = 3
-PANEL_B_XCORR_DISPLAY_V1_FRACTION = 1.0
+PANEL_B_XCORR_DISPLAY_V1_FRACTION = 1.0 / 3.0
 PANEL_B_XCORR_SMOOTH_SIGMA_BINS = 1.0
 PANEL_B_XCORR_GROUP_SEPARATOR_LINEWIDTH = 0.55
 DEFAULT_PANEL_B_PREDICTION_EXAMPLES = (
@@ -197,6 +200,16 @@ PANEL_D_DARK_ACTIVITY_COLORS = {
     "inactive": EPOCH_TYPE_COLORS["light"],
     "active": SCHEMATIC_COLORS["dark_basis"],
 }
+PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS = (
+    (0.02, 0.36),
+    (0.55, 0.34),
+    (0.0, 0.0),
+)
+PANEL_F_DPPI_NULL_PERMUTATIONS = 20_000
+PANEL_F_DPPI_NULL_RANDOM_SEED = 59
+PANEL_F_DPPI_HISTOGRAM_BIN_EDGES = np.linspace(0.0, 1.0, 11)
+PANEL_F_DPPI_HISTOGRAM_ALPHA = 0.65
+PANEL_F_DPPI_SIGNIFICANCE_POSITION = (0.12, 0.88)
 PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
 PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
 PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.2, 0.5)
@@ -1153,21 +1166,31 @@ def prepare_xcorr_payload_for_display(
     xcorr_values = np.asarray(payload["xcorr"], dtype=float)
     if xcorr_values.ndim != 3:
         raise ValueError(f"Expected xcorr array with 3 dimensions, got {xcorr_values.shape}.")
+    display_fraction = float(v1_fraction)
+    if not 0.0 < display_fraction <= 1.0:
+        raise ValueError("v1_fraction must be in the interval (0, 1].")
     n_display_ca1 = min(max(1, int(n_ca1_units)), xcorr_values.shape[0])
-    n_display_v1 = min(
-        xcorr_values.shape[1],
-        max(1, int(np.ceil(xcorr_values.shape[1] * float(v1_fraction)))),
-    )
     display_xcorr = xcorr_values[:n_display_ca1]
     partner_scores = _compute_xcorr_partner_scores(
         display_xcorr,
         np.asarray(payload["lag_s"], dtype=float),
     )
-    v1_order, v1_group_indices = _build_shared_v1_display_order(
+    (
+        v1_order,
+        v1_group_indices,
+        v1_group_total_counts,
+    ) = _build_shared_v1_display_order(
         partner_scores,
-        n_display_v1=n_display_v1,
+        v1_fraction=display_fraction,
     )
     group_boundaries = np.flatnonzero(np.diff(v1_group_indices) != 0) + 1
+    v1_group_display_counts = np.asarray(
+        [
+            np.sum(v1_group_indices == ca1_index)
+            for ca1_index in range(n_display_ca1)
+        ],
+        dtype=int,
+    )
 
     cropped_payload = dict(payload)
     cropped_payload["xcorr"] = display_xcorr[:, v1_order, :]
@@ -1175,6 +1198,11 @@ def prepare_xcorr_payload_for_display(
     cropped_payload["v1_unit_ids"] = np.asarray(payload["v1_unit_ids"])[v1_order]
     cropped_payload["v1_group_ca1_indices"] = v1_group_indices
     cropped_payload["v1_group_boundaries"] = group_boundaries
+    cropped_payload["v1_group_total_counts"] = v1_group_total_counts
+    cropped_payload["v1_group_display_counts"] = v1_group_display_counts
+    cropped_payload["v1_total_count"] = int(xcorr_values.shape[1])
+    cropped_payload["v1_display_count"] = int(v1_order.size)
+    cropped_payload["v1_display_fraction"] = display_fraction
     cropped_payload["v1_ordering"] = "shared_multi_example_partner_rank"
     return cropped_payload
 
@@ -1249,60 +1277,57 @@ def _descending_score_order(scores: np.ndarray, indices: np.ndarray) -> np.ndarr
 def _build_shared_v1_display_order(
     partner_scores: np.ndarray,
     *,
-    n_display_v1: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Select shared strong partners and group them by preferred CA1 example."""
+    v1_fraction: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select the top fraction within each preferred CA1 partner set."""
     scores = np.asarray(partner_scores, dtype=float)
     if scores.ndim != 2:
         raise ValueError(f"Expected partner scores with 2 dimensions, got {scores.shape}.")
     n_ca1, n_v1 = scores.shape
     if n_ca1 == 0 or n_v1 == 0:
         raise ValueError("Partner scores must include at least one CA1 and V1 unit.")
-    n_display = min(max(1, int(n_display_v1)), n_v1)
+    display_fraction = float(v1_fraction)
+    if not 0.0 < display_fraction <= 1.0:
+        raise ValueError("v1_fraction must be in the interval (0, 1].")
     ranks = _rank_xcorr_partner_scores(scores)
-
-    quota_base, quota_remainder = divmod(n_display, n_ca1)
-    selected = np.zeros(n_v1, dtype=bool)
     all_v1_indices = np.arange(n_v1, dtype=int)
-    for ca1_index in range(n_ca1):
-        quota = quota_base + int(ca1_index < quota_remainder)
-        ordered = _descending_score_order(scores[ca1_index], all_v1_indices)
-        selected[ordered[:quota]] = True
-
-    if int(np.sum(selected)) < n_display:
-        aggregate_rank = np.max(
-            np.where(np.isfinite(ranks), ranks, -np.inf),
-            axis=0,
-        )
-        remaining = all_v1_indices[~selected]
-        fill_order = _descending_score_order(aggregate_rank, remaining)
-        selected[fill_order[: n_display - int(np.sum(selected))]] = True
-
-    selected_indices = all_v1_indices[selected]
-    selected_ranks = np.where(
-        np.isfinite(ranks[:, selected_indices]),
-        ranks[:, selected_indices],
+    finite_ranks = np.where(
+        np.isfinite(ranks),
+        ranks,
         -np.inf,
     )
-    preferred_ca1 = np.argmax(selected_ranks, axis=0)
-    no_finite_rank = ~np.any(np.isfinite(ranks[:, selected_indices]), axis=0)
+    preferred_ca1 = np.argmax(finite_ranks, axis=0)
+    no_finite_rank = ~np.any(np.isfinite(ranks), axis=0)
     preferred_ca1[no_finite_rank] = -1
 
     ordered_groups = []
     group_indices = []
+    group_total_counts = np.zeros(n_ca1, dtype=int)
     for ca1_index in range(n_ca1):
-        group_rows = selected_indices[preferred_ca1 == ca1_index]
+        group_rows = all_v1_indices[preferred_ca1 == ca1_index]
+        group_total_counts[ca1_index] = int(group_rows.size)
         group_rows = _descending_score_order(scores[ca1_index], group_rows)
-        ordered_groups.append(group_rows)
-        group_indices.extend([ca1_index] * len(group_rows))
-    unassigned_rows = selected_indices[preferred_ca1 < 0]
+        n_group_display = min(
+            group_rows.size,
+            max(1, int(np.ceil(group_rows.size * display_fraction))),
+        )
+        displayed_rows = group_rows[:n_group_display]
+        ordered_groups.append(displayed_rows)
+        group_indices.extend([ca1_index] * len(displayed_rows))
+    unassigned_rows = all_v1_indices[preferred_ca1 < 0]
     if unassigned_rows.size:
-        ordered_groups.append(unassigned_rows)
-        group_indices.extend([-1] * len(unassigned_rows))
+        n_unassigned_display = max(
+            1,
+            int(np.ceil(unassigned_rows.size * display_fraction)),
+        )
+        displayed_unassigned = unassigned_rows[:n_unassigned_display]
+        ordered_groups.append(displayed_unassigned)
+        group_indices.extend([-1] * len(displayed_unassigned))
 
     return (
         np.concatenate(ordered_groups).astype(int, copy=False),
         np.asarray(group_indices, dtype=int),
+        group_total_counts,
     )
 
 
@@ -2614,6 +2639,79 @@ def build_glm_dark_activity_devexp_table(
     ]
 
 
+def build_dark_active_dppi_reference_table(
+    dark_activity_table: Any,
+    tuning_similarity_table: Any | None,
+    *,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+    dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+) -> Any:
+    """Return dark-active V1 cells with finite dark-epoch DPPI values."""
+    import pandas as pd
+
+    columns = [
+        "animal_name",
+        "date",
+        "unit",
+        "dark_epoch",
+        "dark_firing_rate_hz",
+        "same_turn_tuning_similarity",
+        "tuning_source_path",
+    ]
+    if tuning_similarity_table is None or not len(tuning_similarity_table):
+        return pd.DataFrame(columns=columns)
+
+    dark_rows = dark_activity_table.copy()
+    dark_rows["unit"] = pd.to_numeric(dark_rows["unit"], errors="coerce")
+    dark_rows["dark_firing_rate_hz"] = pd.to_numeric(
+        dark_rows["dark_firing_rate_hz"],
+        errors="coerce",
+    )
+    dark_rows = dark_rows[
+        np.isfinite(dark_rows["unit"].to_numpy(dtype=float))
+        & np.isfinite(dark_rows["dark_firing_rate_hz"].to_numpy(dtype=float))
+        & (
+            dark_rows["dark_firing_rate_hz"].to_numpy(dtype=float)
+            >= float(dark_activity_threshold_hz)
+        )
+    ].copy()
+    dark_rows["unit"] = dark_rows["unit"].astype(int)
+
+    tuning_rows = tuning_similarity_table.copy()
+    tuning_rows["unit"] = pd.to_numeric(tuning_rows["unit"], errors="coerce")
+    tuning_rows["same_turn_tuning_similarity"] = pd.to_numeric(
+        tuning_rows["same_turn_tuning_similarity"],
+        errors="coerce",
+    )
+    tuning_rows = tuning_rows[
+        np.isfinite(tuning_rows["unit"].to_numpy(dtype=float))
+        & np.isfinite(
+            tuning_rows["same_turn_tuning_similarity"].to_numpy(dtype=float)
+        )
+    ].copy()
+    tuning_rows["unit"] = tuning_rows["unit"].astype(int)
+
+    joined = dark_rows[["unit", "dark_firing_rate_hz"]].merge(
+        tuning_rows[
+            [
+                "unit",
+                "same_turn_tuning_similarity",
+                "tuning_source_path",
+            ]
+        ],
+        on="unit",
+        how="inner",
+    )
+    joined = joined.assign(
+        animal_name=str(animal_name),
+        date=str(date),
+        dark_epoch=str(dark_epoch),
+    )
+    return joined[columns]
+
+
 def _load_saved_place_tuning_curves(
     data_root: Path,
     *,
@@ -2831,6 +2929,7 @@ def load_glm_dark_activity_devexp_tables(
     import pandas as pd
 
     rows: list[Any] = []
+    dark_active_reference_rows: list[Any] = []
     missing_artifacts: list[dict[str, str]] = []
     selected_epoch_types = tuple(epoch_types)
 
@@ -2899,6 +2998,17 @@ def load_glm_dark_activity_devexp_tables(
             )
             tuning_similarity_table = None
 
+        dark_active_reference_rows.append(
+            build_dark_active_dppi_reference_table(
+                dark_activity_table,
+                tuning_similarity_table,
+                animal_name=animal_name,
+                date=date,
+                dark_epoch=dark_run_epoch,
+                dark_activity_threshold_hz=dark_activity_threshold_hz,
+            )
+        )
+
         for epoch_type in selected_epoch_types:
             if epoch_type not in epoch_ids:
                 raise ValueError(f"Unknown Figure 3 epoch type: {epoch_type!r}")
@@ -2948,8 +3058,14 @@ def load_glm_dark_activity_devexp_tables(
             )
 
     devexp_table = pd.concat(rows, axis=0, ignore_index=True) if rows else pd.DataFrame()
+    dark_active_reference_table = (
+        pd.concat(dark_active_reference_rows, axis=0, ignore_index=True)
+        if dark_active_reference_rows
+        else pd.DataFrame()
+    )
     return {
         "devexp_table": devexp_table,
+        "dark_active_dppi_reference_table": dark_active_reference_table,
         "missing_artifacts": missing_artifacts,
         "region": region,
         "dark_activity_threshold_hz": float(dark_activity_threshold_hz),
@@ -4130,7 +4246,11 @@ def plot_epoch_ripple_heatmap_panel(
         )
         colorbar = ax.figure.colorbar(image, cax=colorbar_ax, ticks=[0.0, 1.0])
         colorbar.ax.tick_params(labelsize=6, length=2, pad=1)
-        colorbar.set_label("Norm. FR", fontsize=6, labelpad=2)
+        colorbar.set_label(
+            "Norm. FR",
+            fontsize=6,
+            labelpad=PANEL_A_COLORBAR_LABELPAD,
+        )
 
 
 def plot_epoch_modulation_histogram_panel(
@@ -4377,10 +4497,11 @@ def plot_top_ca1_xcorr_panel(
         heatmap_ax.tick_params(axis="x", labelsize=6, length=1.4, pad=1)
         heatmap_ax.tick_params(axis="y", length=0)
 
+    v1_axis_label = "V1 co-active sets" if has_v1_groups else "V1"
     ax.text(
         0.022 if has_v1_groups else 0.035,
         bottom + 0.5 * (top - bottom),
-        "V1 sets" if has_v1_groups else "V1",
+        v1_axis_label,
         ha="center",
         va="center",
         rotation=90,
@@ -4565,7 +4686,7 @@ def _plot_compact_prediction_scatter_axis(
     ax.set_box_aspect(1.0)
     ax.set_title(
         (
-            f"Example cell {example_number}\n"
+            f"Example V1 cell {example_number}\n"
             f"(Dev. exp. {float(example['ripple_devexp_mean']):.2f})"
         ),
         fontsize=6,
@@ -4682,7 +4803,8 @@ def plot_glm_analysis_panel(
     column_width = (1.0 - 2.0 * column_gap) / 3.0
     schematic_left = 0.00
     prediction_left = schematic_left + column_width + column_gap
-    summary_left = prediction_left + column_width + column_gap
+    summary_width = PANEL_C_GLM_SUMMARY_COLUMN_WIDTH
+    summary_left = 1.0 - summary_width
     column_bottom = 0.045
     column_height = 0.88
 
@@ -4713,7 +4835,7 @@ def plot_glm_analysis_panel(
     y_max = max(2.0, float(np.nanmax(finite_neglog_p)) + 0.4) if finite_neglog_p.size else 2.0
 
     plot_left = summary_left
-    plot_right = summary_left + column_width
+    plot_right = summary_left + summary_width
     scatter_bottom = 0.38
     scatter_top = PANEL_C_GLM_SUMMARY_SCATTER_TOP
     box_bottom = column_bottom
@@ -5291,9 +5413,13 @@ def _draw_vertical_significance_bracket(
     y0: float,
     y1: float,
     arm_length: float,
-    star_offset: float,
+    marker_offset_points: float,
+    marker_text: str = "*",
+    marker_rotation: float = 0.0,
 ) -> None:
-    """Draw a vertical bracket and centered significance star in data coordinates."""
+    """Draw a vertical bracket and significance marker in data coordinates."""
+    from matplotlib.transforms import ScaledTranslation
+
     ax.plot(
         [x - arm_length, x, x, x - arm_length],
         [y0, y0, y1, y1],
@@ -5302,16 +5428,24 @@ def _draw_vertical_significance_bracket(
         clip_on=False,
         zorder=6,
     )
+    marker_transform = ax.transData + ScaledTranslation(
+        marker_offset_points / 72.0,
+        0.0,
+        ax.figure.dpi_scale_trans,
+    )
     ax.text(
-        x + star_offset,
+        x,
         0.5 * (y0 + y1),
-        "*",
-        ha="left",
+        marker_text,
+        ha="center",
         va="center",
+        rotation=marker_rotation,
+        rotation_mode="anchor",
         fontsize=7.0,
         color="black",
         clip_on=False,
         zorder=6,
+        transform=marker_transform,
     )
 
 
@@ -5433,7 +5567,9 @@ def _plot_dark_activity_devexp_boxplot(
             y0=1.0,
             y1=2.0,
             arm_length=0.025 * x_range,
-            star_offset=0.025 * x_range,
+            marker_offset_points=7.0,
+            marker_text="***",
+            marker_rotation=90.0,
         )
     ax.set_yticks([1.0, 2.0])
     if not show_y_ticklabels:
@@ -5463,6 +5599,8 @@ def _plot_dark_active_same_turn_similarity_histogram(
     title: str,
     tuning_similarity_metric: str = DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
     x_limits: tuple[float, float] | None = None,
+    median_text_position: tuple[float, float] = (0.96, 0.94),
+    median_text_horizontalalignment: str = "right",
 ) -> None:
     """Plot dark same-turn tuning similarity for dark-active GLM-significant units."""
     if x_limits is None:
@@ -5525,10 +5663,9 @@ def _plot_dark_active_same_turn_similarity_histogram(
                 zorder=4,
             )
             ax.text(
-                0.96,
-                0.94,
+                *median_text_position,
                 f"median={median_value:.2f}",
-                ha="right",
+                ha=median_text_horizontalalignment,
                 va="top",
                 fontsize=6,
                 transform=ax.transAxes,
@@ -5570,6 +5707,7 @@ def _plot_dark_activity_significant_composition(
     p_value_threshold: float,
     title: str,
     show_significance_marker: bool = True,
+    composition_label_x: float | None = None,
 ) -> None:
     """Plot dark activity composition among ripple-GLM significant cells."""
     import pandas as pd
@@ -5706,11 +5844,16 @@ def _plot_dark_activity_significant_composition(
                         zorder=5,
                     )
         for position, fraction, count in zip(positions, fractions, counts, strict=True):
-            label = f"n={count}"
+            label = (
+                f"{fraction:.2f}\nn={count}"
+                if np.isfinite(fraction)
+                else f"n={count}"
+            )
             label_x = 0.04
             label_ha = "left"
-            if np.isfinite(fraction):
-                label = f"{fraction:.2f}\n{label}"
+            if composition_label_x is not None:
+                label_x = composition_label_x
+            elif np.isfinite(fraction):
                 if fraction > 0.82:
                     label_x = max(0.05, fraction - 0.055)
                     label_ha = "right"
@@ -5723,6 +5866,12 @@ def _plot_dark_activity_significant_composition(
                 ha=label_ha,
                 va="center",
                 fontsize=6,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.85,
+                    "pad": 0.2,
+                },
             )
         if show_significance_marker and np.isfinite(fractions[1]):
             _draw_vertical_significance_bracket(
@@ -5731,7 +5880,9 @@ def _plot_dark_activity_significant_composition(
                 y0=1.0,
                 y1=2.0,
                 arm_length=0.045,
-                star_offset=0.030,
+                marker_offset_points=7.0,
+                marker_text="***",
+                marker_rotation=90.0,
             )
 
     ax.set_xlim(0.0, 1.0)
@@ -5753,8 +5904,19 @@ def plot_glm_behavior_association_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
     *,
+    epoch_types: Sequence[str] = PANEL_D_EPOCH_ORDER,
     show_note: bool = True,
     show_significance_marker: bool = True,
+    include_similarity: bool = True,
+    single_epoch_column_bounds: tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+    ]
+    | None = None,
+    composition_label_x: float | None = None,
+    similarity_median_text_position: tuple[float, float] = (0.96, 0.94),
+    similarity_median_text_horizontalalignment: str = "right",
 ) -> None:
     """Plot ripple-GLM deviance explained by dark activity group."""
     ax.set_xlim(0.0, 1.0)
@@ -5771,21 +5933,34 @@ def plot_glm_behavior_association_panel(
             DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
         )
     )
-    epoch_rows = tuple(PANEL_D_EPOCH_ORDER)
+    epoch_rows = tuple(str(epoch_type) for epoch_type in epoch_types)
     x_limits = PANEL_CD_DEVIANCE_EXPLAINED_LIMITS
 
     bottom = 0.17
     height = 0.72
     if len(epoch_rows) == 1:
+        if single_epoch_column_bounds is None:
+            single_epoch_column_bounds = (
+                (0.02, 0.24),
+                (0.31, 0.33),
+                (
+                    PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT,
+                    PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH,
+                ),
+            )
+        (fraction_left, fraction_width), (
+            devexp_left,
+            devexp_width,
+        ), (similarity_left, similarity_width) = single_epoch_column_bounds
         axis_layouts = [
             (
                 epoch_rows[0],
-                0.02,
-                0.24,
-                0.31,
-                0.33,
-                PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT,
-                PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH,
+                fraction_left,
+                fraction_width,
+                devexp_left,
+                devexp_width,
+                similarity_left,
+                similarity_width,
             )
         ]
     else:
@@ -5836,6 +6011,7 @@ def plot_glm_behavior_association_panel(
             p_value_threshold=PANEL_C_SIGNIFICANCE_P_VALUE,
             title="",
             show_significance_marker=show_significance_marker,
+            composition_label_x=composition_label_x,
         )
         devexp_ax = ax.inset_axes(
             [devexp_left, bottom, devexp_width, height]
@@ -5852,18 +6028,23 @@ def plot_glm_behavior_association_panel(
             show_y_ticklabels=False,
             show_significance_marker=show_significance_marker,
         )
-        similarity_ax = ax.inset_axes(
-            [similarity_left, bottom, similarity_width, height]
-        )
-        _plot_dark_active_same_turn_similarity_histogram(
-            similarity_ax,
-            table,
-            epoch_type=epoch_type,
-            dark_activity_threshold_hz=dark_activity_threshold_hz,
-            p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
-            title="",
-            tuning_similarity_metric=tuning_similarity_metric,
-        )
+        if include_similarity:
+            similarity_ax = ax.inset_axes(
+                [similarity_left, bottom, similarity_width, height]
+            )
+            _plot_dark_active_same_turn_similarity_histogram(
+                similarity_ax,
+                table,
+                epoch_type=epoch_type,
+                dark_activity_threshold_hz=dark_activity_threshold_hz,
+                p_value_threshold=PANEL_D_SIGNIFICANCE_P_VALUE,
+                title="",
+                tuning_similarity_metric=tuning_similarity_metric,
+                median_text_position=similarity_median_text_position,
+                median_text_horizontalalignment=(
+                    similarity_median_text_horizontalalignment
+                ),
+            )
     if show_note:
         ax.text(
             0.50,
@@ -5874,6 +6055,240 @@ def plot_glm_behavior_association_panel(
             fontsize=6,
             transform=ax.transAxes,
         )
+
+
+def _match_selected_values_to_reference(
+    reference_values: np.ndarray,
+    selected_values: np.ndarray,
+) -> np.ndarray:
+    """Return a mask matching the selected DPPI multiset within the reference."""
+    remaining = Counter(float(value) for value in selected_values)
+    selected_mask = np.zeros(reference_values.size, dtype=bool)
+    for index, value in enumerate(reference_values):
+        key = float(value)
+        if remaining[key] <= 0:
+            continue
+        selected_mask[index] = True
+        remaining[key] -= 1
+    if any(count > 0 for count in remaining.values()):
+        raise ValueError(
+            "Selected DPPI values are not contained in the reference population."
+        )
+    return selected_mask
+
+
+def _format_significance_stars(p_value: float) -> str:
+    """Return conventional significance stars for one finite p-value."""
+    if not np.isfinite(p_value):
+        return ""
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return "n.s."
+
+
+def compute_dark_active_dppi_mean_rank_permutation(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+) -> dict[str, Any]:
+    """Return a pooled mean-rank test for higher dark-epoch DPPI."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+
+    reference_table = payload.get("dark_active_dppi_reference_table")
+    devexp_table = payload.get("devexp_table")
+    empty_result = {
+        "n_reference": 0,
+        "n_selected": 0,
+        "n_nonselected": 0,
+        "mean_reference_percentile": float("nan"),
+        "auc_selected_vs_nonselected": float("nan"),
+        "p_value": float("nan"),
+        "monte_carlo_p_value": float("nan"),
+        "reference_values": np.asarray([], dtype=float),
+        "selected_values": np.asarray([], dtype=float),
+        "nonselected_values": np.asarray([], dtype=float),
+        "null_mean_percentiles": np.asarray([], dtype=float),
+        "null_auc_selected_vs_nonselected": np.asarray([], dtype=float),
+    }
+    if reference_table is None or devexp_table is None:
+        return empty_result
+    if not len(reference_table) or not len(devexp_table):
+        return empty_result
+
+    reference_values = np.asarray(
+        reference_table["same_turn_tuning_similarity"],
+        dtype=float,
+    )
+    reference_values = reference_values[np.isfinite(reference_values)]
+    epoch_rows = devexp_table[
+        devexp_table["epoch_type"].astype(str) == str(epoch_type)
+    ]
+    similarity_values = np.asarray(
+        epoch_rows["same_turn_tuning_similarity"],
+        dtype=float,
+    )
+    p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+    dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
+    dark_activity_threshold_hz = float(
+        payload.get(
+            "dark_activity_threshold_hz",
+            PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+        )
+    )
+    selected = (
+        np.isfinite(similarity_values)
+        & np.isfinite(p_values)
+        & np.isfinite(dark_rates_hz)
+        & (p_values < float(p_value_threshold))
+        & (dark_rates_hz >= dark_activity_threshold_hz)
+    )
+    selected_values = similarity_values[selected]
+    n_reference = int(reference_values.size)
+    n_selected = int(selected_values.size)
+    if n_selected == 0 or n_selected >= n_reference:
+        return {
+            **empty_result,
+            "n_reference": n_reference,
+            "n_selected": n_selected,
+            "n_nonselected": max(0, n_reference - n_selected),
+            "reference_values": reference_values,
+            "selected_values": selected_values,
+        }
+
+    from scipy.stats import mannwhitneyu, rankdata
+
+    selected_mask = _match_selected_values_to_reference(
+        reference_values,
+        selected_values,
+    )
+    selected_values = reference_values[selected_mask]
+    nonselected_values = reference_values[~selected_mask]
+    n_selected = int(selected_values.size)
+    n_nonselected = int(nonselected_values.size)
+    reference_ranks = rankdata(reference_values, method="average")
+    reference_percentiles = (
+        np.asarray(reference_ranks, dtype=float) - 0.5
+    ) / float(n_reference)
+    mean_reference_percentile = float(np.mean(reference_percentiles[selected_mask]))
+    rank_comparison = mannwhitneyu(
+        selected_values,
+        nonselected_values,
+        alternative="greater",
+        method="asymptotic",
+    )
+    auc_selected_vs_nonselected = float(
+        rank_comparison.statistic / float(n_selected * n_nonselected)
+    )
+    rng = np.random.default_rng(random_seed)
+    null_mean_percentiles = np.asarray(
+        [
+            np.mean(
+                rng.choice(
+                    reference_percentiles,
+                    size=n_selected,
+                    replace=False,
+                )
+            )
+            for _ in range(int(n_permutations))
+        ],
+        dtype=float,
+    )
+    monte_carlo_p_value = float(
+        (1.0 + np.sum(null_mean_percentiles >= mean_reference_percentile))
+        / (float(n_permutations) + 1.0)
+    )
+    null_auc_selected_vs_nonselected = (
+        n_reference * null_mean_percentiles - 0.5 * n_selected
+    ) / float(n_nonselected)
+
+    return {
+        "n_reference": n_reference,
+        "n_selected": n_selected,
+        "n_nonselected": n_nonselected,
+        "mean_reference_percentile": mean_reference_percentile,
+        "auc_selected_vs_nonselected": auc_selected_vs_nonselected,
+        "p_value": float(rank_comparison.pvalue),
+        "monte_carlo_p_value": monte_carlo_p_value,
+        "reference_values": reference_values,
+        "selected_values": selected_values,
+        "nonselected_values": nonselected_values,
+        "null_mean_percentiles": null_mean_percentiles,
+        "null_auc_selected_vs_nonselected": null_auc_selected_vs_nonselected,
+    }
+
+
+def plot_dark_active_dppi_distribution_panel(
+    ax: "Axes",
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+) -> dict[str, Any]:
+    """Plot predictable-neuron dark DPPI with rank-permutation significance."""
+    analysis = compute_dark_active_dppi_mean_rank_permutation(
+        payload,
+        epoch_type=epoch_type,
+        n_permutations=n_permutations,
+        random_seed=random_seed,
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    plot_ax = ax.inset_axes([0.14, 0.17, 0.83, 0.72])
+
+    selected_values = np.asarray(analysis["selected_values"], dtype=float)
+    if not selected_values.size:
+        plot_ax.text(
+            0.5,
+            0.5,
+            "No DPPI\ndistribution data",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=plot_ax.transAxes,
+        )
+        plot_ax.set_axis_off()
+        return analysis
+
+    plot_ax.hist(
+        selected_values,
+        bins=PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
+        weights=_fraction_histogram_weights(selected_values),
+        color=PANEL_BC_SIGNIFICANT_UNIT_COLOR,
+        alpha=PANEL_F_DPPI_HISTOGRAM_ALPHA,
+        edgecolor="none",
+        linewidth=0.0,
+        zorder=2,
+    )
+    displayed_p_value = float(analysis["monte_carlo_p_value"])
+    significance_stars = _format_significance_stars(displayed_p_value)
+    if significance_stars:
+        plot_ax.text(
+            *PANEL_F_DPPI_SIGNIFICANCE_POSITION,
+            significance_stars,
+            ha="left",
+            va="top",
+            fontsize=7,
+            transform=plot_ax.transAxes,
+        )
+    plot_ax.set_xlim(0.0, 1.0)
+    plot_ax.set_ylim(bottom=0.0)
+    plot_ax.set_xticks([0.0, 0.5, 1.0])
+    plot_ax.set_xlabel("Dark DPPI", fontsize=6, labelpad=1.0)
+    plot_ax.set_ylabel("Fraction of neurons", fontsize=6, labelpad=1.0)
+    plot_ax.spines["top"].set_visible(False)
+    plot_ax.spines["right"].set_visible(False)
+    plot_ax.tick_params(labelsize=6, length=1.5, pad=1)
+    return analysis
 
 
 def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
@@ -6035,7 +6450,11 @@ def plot_glm_source_predictor_comparison_panel(
     include_pooled: bool = True,
     compact_labels: bool = False,
     show_color_note: bool = True,
+    show_group_titles: bool = True,
     axis_limits: tuple[float, float] | None = None,
+    summary_location: str | None = None,
+    x_label_y: float = 0.035,
+    x_label: str = "Mean CA1 activity\ndev. explained",
 ) -> None:
     """Plot full CA1 vector GLM performance against mean CA1 activity."""
     import pandas as pd
@@ -6085,11 +6504,13 @@ def plot_glm_source_predictor_comparison_panel(
     right = PANEL_D_COMPACT_SOURCE_RIGHT if compact_labels else 0.985
     bottom = PANEL_D_COMPACT_SOURCE_BOTTOM if compact_labels else 0.20
     height = PANEL_D_COMPACT_SOURCE_HEIGHT if compact_labels else 0.70
+    if summary_location is None:
+        summary_location = "lower_right" if compact_labels else "upper_left"
     gap = 0.030
     width = (right - left - gap * (len(groups) - 1)) / len(groups)
     for index, (title, rows, pooled) in enumerate(groups):
         child_ax = ax.inset_axes([left + index * (width + gap), bottom, width, height])
-        child_title = "" if compact_labels else title
+        child_title = title if show_group_titles and not compact_labels else ""
         _plot_source_predictor_comparison_axis(
             child_ax,
             rows,
@@ -6097,7 +6518,7 @@ def plot_glm_source_predictor_comparison_panel(
             axis_limits=axis_limits,
             pooled=pooled,
             p_value_threshold=SIGNIFICANCE_P_VALUE,
-            summary_location="lower_right" if compact_labels else "upper_left",
+            summary_location=summary_location,
             summary_mode="n_only" if compact_labels else "full",
         )
         if compact_labels:
@@ -6110,8 +6531,8 @@ def plot_glm_source_predictor_comparison_panel(
     if not compact_labels:
         ax.text(
             0.52,
-            0.035,
-            "Mean CA1 activity\ndev. explained",
+            x_label_y,
+            x_label,
             ha="center",
             va="bottom",
             fontsize=6.0,
@@ -6248,6 +6669,22 @@ def add_aligned_panel_headers(
             multialignment="center",
             fontsize=fontsize,
             transform=fig.transFigure,
+        )
+
+
+def _align_axes_xaxis_baselines(
+    reference_ax: "Axes",
+    target_axes: Sequence["Axes"],
+) -> None:
+    """Align target x-axis baselines to one resolved reference axis."""
+    from matplotlib.transforms import Bbox
+
+    reference_bottom = reference_ax.get_position().y0
+    for target_ax in target_axes:
+        box = target_ax.get_position()
+        target_ax.set_axes_locator(None)
+        target_ax.set_position(
+            Bbox.from_extents(box.x0, reference_bottom, box.x1, box.y1)
         )
 
 
@@ -6409,15 +6846,20 @@ def make_figure_3(
         ncols=3,
         width_ratios=PANEL_BOTTOM_WIDTH_RATIOS,
     )
+    panel_f_grid = lower_grid[0, 2].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=(0.81, 1.19),
+        wspace=0.0,
+    )
     axes = [
         fig.add_subplot(outer_grid[0, 0]),
         fig.add_subplot(outer_grid[0, 1]),
         fig.add_subplot(outer_grid[0, 2]),
         fig.add_subplot(lower_grid[0, 0]),
         fig.add_subplot(lower_grid[0, 1]),
+        fig.add_subplot(panel_f_grid[0, 0]),
     ]
-    spacer_axis = fig.add_subplot(lower_grid[0, 2])
-    spacer_axis.axis("off")
 
     plot_epoch_ripple_heatmap_panel(
         axes[0],
@@ -6477,12 +6919,26 @@ def make_figure_3(
         axes[4],
         behavior_payload,
         show_note=False,
+        include_similarity=False,
+        single_epoch_column_bounds=PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS,
     )
-    panel_d_title = "Relationship to dark active DPP cells"
-    axes[4].set_title(panel_d_title, fontsize=7.2, pad=2)
+    panel_e_title = "Relationship to dark activity"
+    axes[4].set_title(panel_e_title, fontsize=7.2, pad=2)
+    plot_dark_active_dppi_distribution_panel(
+        axes[5],
+        behavior_payload,
+    )
+    panel_f_title = "Predictable-cell DPPI"
+    axes[5].set_title(panel_f_title, fontsize=7.2, pad=2)
 
     fig.canvas.draw()
     fig.set_constrained_layout(False)
+    if axes[3].child_axes:
+        _align_axes_xaxis_baselines(
+            axes[3].child_axes[0],
+            (*axes[4].child_axes, *axes[5].child_axes),
+        )
+        fig.canvas.draw()
     panel_a_box = axes[0].get_position()
     panel_d_box = axes[3].get_position()
     panel_a_label_x = (
@@ -6503,10 +6959,14 @@ def make_figure_3(
     )
     add_aligned_panel_headers(
         fig,
-        (axes[3], axes[4]),
-        labels=("D", "E"),
-        titles=("CA1 spike vector vs.\nmean CA1 activity", panel_d_title),
-        label_x_offsets=(panel_d_label_x_offset, -0.08),
+        (axes[3], axes[4], axes[5]),
+        labels=("D", "E", "F"),
+        titles=(
+            "CA1 spike vector vs.\nmean CA1 activity",
+            panel_e_title,
+            panel_f_title,
+        ),
+        label_x_offsets=(panel_d_label_x_offset, -0.08, -0.22),
         fontsize=7.2,
     )
 
@@ -6514,7 +6974,7 @@ def make_figure_3(
     plt.close(fig)
     for missing in behavior_payload["missing_artifacts"]:
         print(
-            "Panel E dark-activity missing "
+            "Panels E-F dark-activity missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
         )

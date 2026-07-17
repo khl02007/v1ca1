@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Generate old Figure 3 panels for light-epoch place fields."""
+"""Shared helpers for dark-light task-progression figures."""
 
 import argparse
 import hashlib
@@ -12,11 +12,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from v1ca1.helper.session import (
-    DEFAULT_DATA_ROOT,
     DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_SPEED_THRESHOLD_CM_S,
-    REGIONS,
     TRAJECTORY_TYPES,
     get_analysis_path,
 )
@@ -25,24 +23,16 @@ from v1ca1.helper.plot_wtrack_schematic import (
     trajectory_points,
 )
 from v1ca1.paper_figures.datasets import (
-    DEFAULT_DARK_EPOCH,
     DEFAULT_LIGHT_EPOCH,
     DatasetId,
     get_dataset_dark_epoch,
     get_dataset_light_epoch,
-    get_processed_datasets,
     make_dataset_id,
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import (
-    DEFAULT_HEATMAP_HEIGHT_MM,
-    DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
     DEFAULT_POSITION_BIN_COUNT,
-    DEFAULT_PANEL_E_WIDTH_FRACTION,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
-    HEATMAP_COLORBAR_PAD,
-    HEATMAP_COLORBAR_LABEL_FONTSIZE,
-    HEATMAP_COLORBAR_LABELPAD,
     HEATMAP_PATH_LABEL_OFFSET,
     PANEL_D_ACROSS_TRAJECTORY_FIRING_RATE_NORMALIZATION,
     PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
@@ -55,7 +45,6 @@ from v1ca1.paper_figures.figure_1 import (
     build_normalized_position_bins,
     build_pooled_panel_values,
     compute_dark_epoch_tuning_curves,
-    draw_neuron_scale_bar,
     draw_order_schematic,
     extract_unit_rate_curve,
     get_stability_table_path,
@@ -74,10 +63,7 @@ from v1ca1.paper_figures.style import (
     RASTER_TICK_KWARGS,
     SCHEMATIC_COLORS,
     TRAJECTORY_COLORS,
-    apply_paper_style,
-    figure_size,
     label_axis,
-    save_figure,
 )
 from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures.w_track_schematic import (
@@ -102,20 +88,9 @@ if TYPE_CHECKING:
 
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
-DEFAULT_OUTPUT_NAME = "old_fig3"
+LEGACY_CACHE_FIGURE_NAME = "old_fig3"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_REGIONS = ("v1",)
-DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_PANEL_AB_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
-DEFAULT_PANEL_DEF_HEIGHT_MM = 34.0
-DEFAULT_FIGURE_HEIGHT_MM = (
-    DEFAULT_PANEL_AB_HEIGHT_MM
-    + DEFAULT_PANEL_DEF_HEIGHT_MM
-)
-DEFAULT_PANEL_B_WIDTH_FRACTION = DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION
-DEFAULT_PANEL_A_WIDTH_FRACTION = DEFAULT_PANEL_E_WIDTH_FRACTION
-PANEL_DEF_WIDTH_RATIOS = (1.0, 1.0)
-PANEL_DEF_WSPACE = 0.14
 PANEL_DEF_AXIS_BOTTOM = 0.10
 PANEL_DEF_AXIS_HEIGHT = 0.60
 PANEL_GH_WIDTH_RATIOS = (0.4, 0.6)
@@ -146,9 +121,6 @@ PANEL_D_PLACE_DECODING_AXIS_BOUNDS = (
     PANEL_DEF_AXIS_HEIGHT,
 )
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
-PANEL_B_COLORBAR_PAD = HEATMAP_COLORBAR_PAD
-PANEL_B_NEURON_SCALE_BAR_X = 1.02
-PANEL_B_HORIZONTAL_SHIFT = 0.012
 PANEL_B_TRAJECTORY_TYPES = (
     "right_to_center",
     "center_to_left",
@@ -680,7 +652,7 @@ def build_panel_b_cache_metadata(
 
     metadata = {
         "cache_version": PANEL_B_CACHE_VERSION,
-        "figure": DEFAULT_OUTPUT_NAME,
+        "figure": LEGACY_CACHE_FIGURE_NAME,
         "panel": "B",
         "data_root": str(Path(data_root)),
         "region": str(region),
@@ -936,7 +908,7 @@ def build_panel_example_cache_metadata(
     """Return metadata that identifies one Panel A/C example-cell cache."""
     return {
         "cache_version": PANEL_EXAMPLE_CACHE_VERSION,
-        "figure": DEFAULT_OUTPUT_NAME,
+        "figure": LEGACY_CACHE_FIGURE_NAME,
         "panel": str(panel_name).upper(),
         "payload": "raster_positions_and_firing_rates",
         "data_root": str(Path(data_root)),
@@ -5946,308 +5918,3 @@ def plot_panel_h_swap_delta(
             delta_label_va=delta_label_vertical_alignment,
         )
 
-
-def make_figure_3(
-    *,
-    data_root: Path,
-    output_path: Path,
-    datasets: Sequence[DatasetId],
-    regions: Sequence[str],
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    position_bin_count: int,
-    position_offset: int,
-    speed_threshold_cm_s: float,
-    sigma_bins: float,
-    dpi: int,
-    panel_b_cache_dir: Path | None = None,
-    refresh_panel_b_cache: bool = False,
-) -> Path:
-    """Build and save old Figure 3."""
-    import matplotlib.pyplot as plt
-
-    panel_b_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_b_cache_dir is None
-        else Path(panel_b_cache_dir)
-    )
-    quant_region = str(regions[0]) if regions else DEFAULT_REGIONS[0]
-    panel_quant_payload = load_panel_quantification_data(
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-    )
-
-    apply_paper_style()
-    fig_height_mm = (
-        DEFAULT_PANEL_AB_HEIGHT_MM * max(len(regions), 1)
-    ) + DEFAULT_PANEL_DEF_HEIGHT_MM
-    fig = plt.figure(
-        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, fig_height_mm),
-        constrained_layout=True,
-    )
-    outer_grid = fig.add_gridspec(
-        nrows=2,
-        ncols=1,
-        height_ratios=[
-            DEFAULT_PANEL_AB_HEIGHT_MM * max(len(regions), 1),
-            DEFAULT_PANEL_DEF_HEIGHT_MM,
-        ],
-    )
-    panel_b = setup_light_heatmap_panel(
-        fig,
-        outer_grid[0, 0],
-        regions=regions,
-    )
-    bottom_grid = outer_grid[1, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_DEF_WIDTH_RATIOS,
-        wspace=PANEL_DEF_WSPACE,
-    )
-    panel_c_container_axis = fig.add_subplot(bottom_grid[0, 0])
-    panel_d_container_axis = fig.add_subplot(bottom_grid[0, 1])
-
-    colorbar = None
-    color_image = plot_light_heatmap_regions(
-        panel_b["heatmap_axes"],
-        data_root=data_root,
-        datasets=datasets,
-        regions=regions,
-        light_epoch=light_epoch,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
-        panel_b_cache_dir=panel_b_cache_dir,
-        refresh_panel_b_cache=refresh_panel_b_cache,
-    )
-    if color_image is not None:
-        colorbar = fig.colorbar(
-            color_image,
-            ax=panel_b["heatmap_axes"].ravel().tolist(),
-            shrink=0.24,
-            pad=PANEL_B_COLORBAR_PAD,
-            aspect=7,
-            ticks=[0.0, 1.0],
-        )
-        colorbar.ax.set_yticklabels(["0", "1"])
-        colorbar.ax.tick_params(length=2)
-        colorbar.set_label(
-            "Norm. FR",
-            rotation=90,
-            labelpad=HEATMAP_COLORBAR_LABELPAD,
-            fontsize=HEATMAP_COLORBAR_LABEL_FONTSIZE,
-        )
-    draw_neuron_scale_bar(
-        panel_b["heatmap_axes"][-1, -1],
-        x=PANEL_B_NEURON_SCALE_BAR_X,
-    )
-
-    plot_panel_c_vision_tuning_panel(
-        panel_c_container_axis,
-        panel_quant_payload["similarity"],
-        panel_quant_payload["decoding_error"],
-    )
-    plot_panel_d_route_place_panel(
-        panel_d_container_axis,
-        panel_quant_payload["encoding_delta"],
-        panel_quant_payload["decoding_error"],
-    )
-
-    fig.canvas.draw()
-    panel_b_axes = [
-        panel_b["corner_axis"],
-        *panel_b["tuning_schematic_axes"].ravel().tolist(),
-        *panel_b["order_schematic_axes"].ravel().tolist(),
-        *panel_b["heatmap_axes"].ravel().tolist(),
-    ]
-    if colorbar is not None:
-        panel_b_axes.append(colorbar.ax)
-    shift_axes_horizontally(panel_b_axes, PANEL_B_HORIZONTAL_SHIFT)
-    panel_ab_header_y = (
-        _axis_group_top_y(panel_b["tuning_schematic_axes"].ravel())
-        + PANEL_AB_HEADER_Y_OFFSET
-    )
-    _add_centered_axis_group_text_at_y(
-        fig,
-        panel_b["tuning_schematic_axes"].ravel(),
-        "Tuning",
-        y=panel_ab_header_y,
-        fontsize=8.0,
-    )
-    add_centered_axis_text(
-        fig,
-        panel_b["order_schematic_axes"],
-        "Order",
-        y_offset=-0.006,
-        rotation=90,
-    )
-    add_panel_b_path_progression_label(fig, panel_b["heatmap_axes"])
-    _add_panel_label_at_figure_y(
-        fig,
-        panel_b["corner_axis"],
-        "A",
-        x=-0.12,
-        y=panel_ab_header_y,
-    )
-    _add_panel_cd_label(panel_c_container_axis, "B")
-    _add_panel_cd_label(panel_d_container_axis, "C")
-    save_figure(fig, output_path, dpi=dpi)
-    plt.close(fig)
-    print(f"Saved old Figure 3 to {output_path}")
-    return output_path
-
-
-def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for old Figure 3 generation."""
-    parser = argparse.ArgumentParser(
-        description="Generate old Figure 3 light-epoch heatmaps and quantification panels."
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory for figure output. Default: {DEFAULT_OUTPUT_DIR}",
-    )
-    parser.add_argument(
-        "--output-name",
-        default=DEFAULT_OUTPUT_NAME,
-        help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
-    )
-    parser.add_argument(
-        "--panel-b-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for cached Panel B heatmap matrices. "
-            "Default: <output-dir>/cache."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-b-cache",
-        action="store_true",
-        help="Recompute Panel B and overwrite its cache even when a matching cache exists.",
-    )
-    parser.add_argument(
-        "--format",
-        dest="output_format",
-        choices=FIGURE_FORMATS,
-        default=DEFAULT_OUTPUT_FORMAT,
-        help=f"Output format. Default: {DEFAULT_OUTPUT_FORMAT}",
-    )
-    parser.add_argument(
-        "--dataset",
-        action="append",
-        type=parse_dataset_id,
-        help=(
-            "Animal/date data set to include as animal:date. May be repeated. "
-            "Default: use v1ca1.paper_figures.datasets."
-        ),
-    )
-    parser.add_argument(
-        "--region",
-        action="append",
-        choices=REGIONS,
-        help=(
-            "Region to include. May be repeated. "
-            f"Default: {', '.join(DEFAULT_REGIONS)}."
-        ),
-    )
-    parser.add_argument(
-        "--light-epoch",
-        default=None,
-        help=(
-            "Light run epoch for heatmaps and quantification panels. "
-            f"Default: registry value, currently {DEFAULT_LIGHT_EPOCH} unless overridden."
-        ),
-    )
-    parser.add_argument(
-        "--dark-epoch",
-        default=None,
-        help=(
-            "Dark run epoch for quantification panels. "
-            f"Default: registry value, currently {DEFAULT_DARK_EPOCH} unless overridden."
-        ),
-    )
-    parser.add_argument(
-        "--position-bin-count",
-        type=int,
-        default=DEFAULT_POSITION_BIN_COUNT,
-        help=(
-            "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {DEFAULT_POSITION_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=f"Number of leading position samples to ignore. Default: {DEFAULT_POSITION_OFFSET}",
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
-    )
-    parser.add_argument(
-        "--dpi",
-        type=int,
-        default=300,
-        help="Rasterization dpi for saved output. Default: 300",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    """Run old Figure 3 generation."""
-    args = parse_arguments(argv)
-    datasets = args.dataset if args.dataset is not None else get_processed_datasets()
-    regions = tuple(args.region) if args.region is not None else DEFAULT_REGIONS
-    output_path = build_output_path(
-        args.output_dir,
-        args.output_name,
-        args.output_format,
-    )
-    panel_b_cache_dir = (
-        args.panel_b_cache_dir
-        if args.panel_b_cache_dir is not None
-        else args.output_dir / "cache"
-    )
-    make_figure_3(
-        data_root=args.data_root,
-        output_path=output_path,
-        datasets=datasets,
-        regions=regions,
-        light_epoch=args.light_epoch,
-        dark_epoch=args.dark_epoch,
-        position_bin_count=args.position_bin_count,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
-        sigma_bins=args.sigma_bins,
-        dpi=args.dpi,
-        panel_b_cache_dir=panel_b_cache_dir,
-        refresh_panel_b_cache=args.refresh_panel_b_cache,
-    )
-
-
-if __name__ == "__main__":
-    main()

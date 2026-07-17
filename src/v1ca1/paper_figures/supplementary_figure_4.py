@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Generate Supplementary Figure 4 ripple-GLM scatter panels."""
+"""Generate Supplementary Figure 4 ripple-modulation and GLM panels."""
 
 import argparse
 from collections.abc import Sequence
@@ -13,24 +13,16 @@ from v1ca1.helper.session import DEFAULT_DATA_ROOT, get_analysis_path
 from v1ca1.paper_figures.datasets import (
     DatasetId,
     get_processed_datasets,
-    normalize_dataset_id,
     normalize_figure_epoch_dataset_id,
 )
 from v1ca1.paper_figures.figure_3 import (
     DEFAULT_FIGURE_CACHE_DIR,
-    DEFAULT_FIGURE_HEIGHT_MM as DEFAULT_FIGURE_4_PANEL_HEIGHT_MM,
     DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
     DEFAULT_REGIONS,
     DEFAULT_RIDGE_STRENGTH,
     DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     DEFAULT_RIPPLE_WINDOW_S,
-    DEFAULT_XCORR_BIN_SIZE_S,
-    DEFAULT_XCORR_DATASET,
-    DEFAULT_XCORR_DISPLAY_VMAX,
-    DEFAULT_XCORR_MAX_LAG_S,
-    DEFAULT_XCORR_STATE,
-    DEFAULT_XCORR_TOP_CA1_UNITS,
     FIGURE_FORMATS,
     PANEL_A_EPOCH_ORDER,
     MODEL_COLOR,
@@ -39,24 +31,22 @@ from v1ca1.paper_figures.figure_3 import (
     PANEL_C_SIGNIFICANCE_P_VALUE,
     PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S,
     PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S,
+    add_aligned_panel_headers,
     filter_epoch_payloads,
     get_ripple_glm_model_window_path,
     load_glm_dark_activity_devexp_tables,
     load_glm_epoch_summary_tables,
     load_glm_source_predictor_comparison_tables,
     load_pooled_ripple_heatmap_epoch_tables,
-    load_top_ca1_xcorr_panel_data,
     parse_dataset_id,
     plot_glm_behavior_association_panel,
     plot_glm_source_predictor_comparison_panel,
     plot_epoch_modulation_histogram_panel,
-    plot_top_ca1_xcorr_panel,
 )
 from v1ca1.paper_figures.style import (
     EPOCH_TYPE_COLORS,
     apply_paper_style,
     figure_size,
-    label_axis,
     save_figure,
 )
 
@@ -68,9 +58,7 @@ DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
 DEFAULT_OUTPUT_NAME = "supplementary_figure_4"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = 165.0
-DEFAULT_MODULATION_HISTOGRAM_PANEL_HEIGHT_MM = 34.0
-DEFAULT_XCORR_PANEL_HEIGHT_MM = 54.0
-DEFAULT_FIGURE_4_PANEL_GAP_MM = 5.0
+DEFAULT_FIGURE_HEIGHT_MM = 115.0
 DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM = 48.0
 DEFAULT_SECTION_HEADER_HEIGHT_MM = 8.0
 DEFAULT_DATASET_ROW_HEIGHT_MM = 13.0
@@ -87,9 +75,29 @@ DEFAULT_EPOCH_TYPES = ("light", "dark", "sleep")
 DEFAULT_PER_ANIMAL_EPOCH_TYPES = ("light",)
 DEFAULT_DARK_ACTIVITY_EPOCH_TYPES = ("light", "sleep")
 DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE = 0.05
-PANEL_C_EPOCH_ORDER = ("dark",)
+DARK_COUNTERPART_EPOCH_ORDER = ("dark",)
 PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
 PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.1, 0.3)
+PANEL_A_HISTOGRAM_BOTTOM = 0.20
+PANEL_A_HISTOGRAM_HEIGHT = 0.70
+PANEL_GRID_WIDTH_RATIOS = (3.0, 7.0)
+PANEL_GRID_HEIGHT_RATIOS = (1.0, 1.0)
+PANEL_GRID_WSPACE = 0.08
+PANEL_GRID_HSPACE = 0.08
+PANEL_D_SINGLE_EPOCH_COLUMN_BOUNDS = (
+    (0.02, 0.24),
+    (0.35, 0.27),
+    (0.77, 0.21),
+)
+PANEL_D_COMPOSITION_LABEL_X = 1.02
+PANEL_D_SIMILARITY_MEDIAN_TEXT_POSITION = (0.04, 0.94)
+PANEL_C_SOURCE_COMPARISON_X_LABEL = "Mean CA1 activity dev. explained"
+PANEL_D_X_LABELS = (
+    r"$p$<0.05 frac.",
+    "Dev. explained",
+    "Dark DPPI",
+)
+BOTTOM_ROW_HEADER_PAD = 6.0
 EPOCH_TYPE_LABELS = {
     "light": "Light",
     "dark": "Dark",
@@ -1273,10 +1281,10 @@ def plot_glm_scatter_box_panel(
 
     plot_left = 0.08
     plot_right = 0.98
-    scatter_bottom = 0.38
-    scatter_top = 0.94
-    box_bottom = 0.06
-    box_top = 0.29
+    scatter_bottom = 0.43
+    scatter_top = 0.89
+    box_bottom = 0.17
+    box_top = 0.36
     plot_gap = 0.030
     plot_width = (plot_right - plot_left - plot_gap * (len(epoch_tables) - 1)) / len(
         epoch_tables
@@ -1473,12 +1481,6 @@ def make_supplementary_figure_4(
     dark_epoch: str | None,
     sleep_epoch: str | None,
     ripple_threshold_zscore: float,
-    xcorr_dataset: DatasetId,
-    xcorr_state: str,
-    xcorr_top_ca1_units: int,
-    xcorr_bin_size_s: float,
-    xcorr_max_lag_s: float,
-    xcorr_display_vmax: float,
     ripple_selection_modes: Sequence[str],
     ripple_window_s: float,
     ridge_strength: float,
@@ -1499,22 +1501,13 @@ def make_supplementary_figure_4(
         sleep_epoch=sleep_epoch,
         ripple_threshold_zscore=ripple_threshold_zscore,
     )
-    xcorr_animal, xcorr_date, xcorr_epoch = normalize_dataset_id(xcorr_dataset)
-    xcorr_payload = load_top_ca1_xcorr_panel_data(
-        data_root,
-        animal_name=xcorr_animal,
-        date=xcorr_date,
-        epoch=xcorr_epoch,
-        state=xcorr_state,
-        top_n_ca1_units=xcorr_top_ca1_units,
-        bin_size_s=xcorr_bin_size_s,
-        max_lag_s=xcorr_max_lag_s,
-        display_vmax=xcorr_display_vmax,
-    )
     glm_epoch_tables = load_glm_epoch_summary_tables(
         data_root,
         datasets,
-        epoch_types=PANEL_C_EPOCH_ORDER,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+        sleep_epoch=sleep_epoch,
+        epoch_types=DARK_COUNTERPART_EPOCH_ORDER,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ripple_window_offset_s=ripple_window_offset_s,
@@ -1523,6 +1516,10 @@ def make_supplementary_figure_4(
     source_comparison_payload = load_glm_source_predictor_comparison_tables(
         data_root,
         datasets,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+        sleep_epoch=sleep_epoch,
+        epoch_types=DARK_COUNTERPART_EPOCH_ORDER,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ripple_window_offset_s=ripple_window_offset_s,
@@ -1531,6 +1528,10 @@ def make_supplementary_figure_4(
     behavior_payload = load_glm_dark_activity_devexp_tables(
         data_root,
         datasets,
+        light_epoch=light_epoch,
+        dark_epoch=dark_epoch,
+        sleep_epoch=sleep_epoch,
+        epoch_types=DARK_COUNTERPART_EPOCH_ORDER,
         ripple_selection=ripple_selection,
         ripple_window_s=ripple_window_s,
         ripple_window_offset_s=ripple_window_offset_s,
@@ -1538,71 +1539,49 @@ def make_supplementary_figure_4(
         dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
         refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
     )
-    panel_b_epoch_tables = filter_epoch_payloads(
-        glm_epoch_tables,
-        PANEL_C_EPOCH_ORDER,
-    )
     panel_a_epoch_tables = filter_epoch_payloads(
         heatmap_epoch_tables,
         PANEL_A_EPOCH_ORDER,
     )
+    panel_b_epoch_tables = filter_epoch_payloads(
+        glm_epoch_tables,
+        DARK_COUNTERPART_EPOCH_ORDER,
+    )
 
     apply_paper_style()
-    figure_height_mm = (
-        DEFAULT_MODULATION_HISTOGRAM_PANEL_HEIGHT_MM
-        + DEFAULT_FIGURE_4_PANEL_GAP_MM
-        + DEFAULT_XCORR_PANEL_HEIGHT_MM
-        + DEFAULT_FIGURE_4_PANEL_GAP_MM
-        + DEFAULT_FIGURE_4_PANEL_HEIGHT_MM
-    )
     fig = plt.figure(
-        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, figure_height_mm),
+        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=True,
     )
     outer_grid = fig.add_gridspec(
-        nrows=5,
-        ncols=1,
-        height_ratios=[
-            DEFAULT_MODULATION_HISTOGRAM_PANEL_HEIGHT_MM,
-            DEFAULT_FIGURE_4_PANEL_GAP_MM,
-            DEFAULT_XCORR_PANEL_HEIGHT_MM,
-            DEFAULT_FIGURE_4_PANEL_GAP_MM,
-            DEFAULT_FIGURE_4_PANEL_HEIGHT_MM,
-        ],
+        nrows=2,
+        ncols=2,
+        width_ratios=PANEL_GRID_WIDTH_RATIOS,
+        height_ratios=PANEL_GRID_HEIGHT_RATIOS,
+        wspace=PANEL_GRID_WSPACE,
+        hspace=PANEL_GRID_HSPACE,
     )
-    modulation_ax = fig.add_subplot(outer_grid[0])
+    modulation_ax = fig.add_subplot(outer_grid[0, 0])
+    panel_b_ax = fig.add_subplot(outer_grid[0, 1])
+    source_comparison_ax = fig.add_subplot(outer_grid[1, 0])
+    behavior_ax = fig.add_subplot(outer_grid[1, 1])
+
     plot_epoch_modulation_histogram_panel(
         modulation_ax,
         panel_a_epoch_tables,
         regions=regions,
+        bottom=PANEL_A_HISTOGRAM_BOTTOM,
+        height=PANEL_A_HISTOGRAM_HEIGHT,
     )
-    modulation_ax.set_title("Ripple modulation index", fontsize=8, pad=2)
-    label_axis(modulation_ax, "A", x=-0.01, y=1.01)
-    modulation_spacer_ax = fig.add_subplot(outer_grid[1])
-    modulation_spacer_ax.axis("off")
-
-    xcorr_ax = fig.add_subplot(outer_grid[2])
-    plot_top_ca1_xcorr_panel(xcorr_ax, xcorr_payload, lag_label_y=-0.025)
-    xcorr_ax.set_title("CA1-V1 cross correlation during ripples", fontsize=8, pad=2)
-    label_axis(xcorr_ax, "B", x=-0.01, y=1.01)
-    spacer_ax = fig.add_subplot(outer_grid[3])
-    spacer_ax.axis("off")
-
-    lower_grid = outer_grid[4].subgridspec(
-        nrows=2,
-        ncols=8,
-        height_ratios=[0.46, 0.54],
-    )
-    panel_b_ax = fig.add_subplot(lower_grid[:, :5])
-    source_comparison_ax = fig.add_subplot(lower_grid[0, 5:])
-    behavior_ax = fig.add_subplot(lower_grid[1, 5:])
+    modulation_ax.set_title("Ripple modulation index", fontsize=7.2, pad=2)
 
     plot_glm_scatter_box_panel(
         panel_b_ax,
         panel_b_epoch_tables,
     )
+    panel_b_title = "Predicting V1 activity during ripples with CA1 activity"
     panel_b_ax.set_title(
-        "Predicting V1 activity during ripples\nwith CA1 activity",
+        panel_b_title,
         fontsize=7.2,
         pad=2,
     )
@@ -1611,32 +1590,66 @@ def make_supplementary_figure_4(
         source_comparison_payload,
         include_per_animal=False,
         include_pooled=True,
-        compact_labels=True,
+        compact_labels=False,
         show_color_note=False,
+        show_group_titles=False,
         axis_limits=PANEL_C_SOURCE_COMPARISON_LIMITS,
+        summary_location="lower_right",
+        x_label_y=0.0,
+        x_label=PANEL_C_SOURCE_COMPARISON_X_LABEL,
     )
+    source_comparison_title = "CA1 spike vector vs.\nmean CA1 activity"
     source_comparison_ax.set_title(
-        "CA1 spike vector vs. mean CA1 activity",
+        source_comparison_title,
         fontsize=7.2,
-        pad=2,
+        pad=BOTTOM_ROW_HEADER_PAD,
     )
     plot_glm_behavior_association_panel(
         behavior_ax,
         behavior_payload,
+        epoch_types=DARK_COUNTERPART_EPOCH_ORDER,
         show_note=False,
         show_significance_marker=False,
+        single_epoch_column_bounds=PANEL_D_SINGLE_EPOCH_COLUMN_BOUNDS,
+        composition_label_x=PANEL_D_COMPOSITION_LABEL_X,
+        similarity_median_text_position=PANEL_D_SIMILARITY_MEDIAN_TEXT_POSITION,
+        similarity_median_text_horizontalalignment="left",
     )
+    for child_ax, x_label in zip(
+        behavior_ax.child_axes,
+        PANEL_D_X_LABELS,
+        strict=True,
+    ):
+        child_ax.xaxis.label.set_text(x_label)
     behavior_ax.set_title(
         "Relationship to dark-active DPP cells",
         fontsize=7.2,
-        pad=2,
+        pad=BOTTOM_ROW_HEADER_PAD,
     )
-    for ax, label in zip(
-        (panel_b_ax, source_comparison_ax, behavior_ax),
-        ("C", "D", "E"),
-        strict=True,
-    ):
-        label_axis(ax, label, x=-0.06, y=1.04)
+    fig.canvas.draw()
+    fig.set_layout_engine(None)
+    add_aligned_panel_headers(
+        fig,
+        (modulation_ax, panel_b_ax),
+        labels=("A", "B"),
+        titles=(
+            "Ripple modulation index",
+            panel_b_title,
+        ),
+        label_x_offsets=(-0.04, -0.04),
+        fontsize=7.2,
+    )
+    add_aligned_panel_headers(
+        fig,
+        (source_comparison_ax, behavior_ax),
+        labels=("C", "D"),
+        titles=(
+            source_comparison_title,
+            "Relationship to dark-active DPP cells",
+        ),
+        label_x_offsets=(-0.04, -0.04),
+        fontsize=7.2,
+    )
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
@@ -1657,16 +1670,10 @@ def make_supplementary_figure_4(
     return output_path
 
 
-def parse_arguments(
-    argv: Sequence[str] | None = None,
-    *,
-    default_output_name: str = DEFAULT_OUTPUT_NAME,
-    description: str = "Generate Supplementary Figure 4 ripple-GLM scatter panels.",
-    include_xcorr_options: bool = True,
-) -> argparse.Namespace:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Supplementary Figure 4 generation."""
     parser = argparse.ArgumentParser(
-        description=description
+        description="Generate Supplementary Figure 4 ripple-modulation and GLM panels."
     )
     parser.add_argument(
         "--data-root",
@@ -1682,8 +1689,8 @@ def parse_arguments(
     )
     parser.add_argument(
         "--output-name",
-        default=default_output_name,
-        help=f"Output basename without extension. Default: {default_output_name}",
+        default=DEFAULT_OUTPUT_NAME,
+        help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
     )
     parser.add_argument(
         "--format",
@@ -1722,7 +1729,7 @@ def parse_arguments(
         "--dark-epoch",
         default=None,
         help=(
-            "Dark run epoch for panel A. "
+            "Dark run epoch for panels A-D. "
             "Default: use each data set's registered dark epoch."
         ),
     )
@@ -1743,51 +1750,6 @@ def parse_arguments(
             f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE:g}"
         ),
     )
-    if include_xcorr_options:
-        parser.add_argument(
-            "--xcorr-dataset",
-            type=parse_dataset_id,
-            default=DEFAULT_XCORR_DATASET,
-            help=(
-                "Screen-xcorr data set for panel B. Format: animal:date:epoch. "
-                "Default: L15:20241121:02_r1."
-            ),
-        )
-        parser.add_argument(
-            "--xcorr-state",
-            default=DEFAULT_XCORR_STATE,
-            help=f"Screen-xcorr state for panel B. Default: {DEFAULT_XCORR_STATE}.",
-        )
-        parser.add_argument(
-            "--xcorr-top-ca1-units",
-            type=int,
-            default=DEFAULT_XCORR_TOP_CA1_UNITS,
-            help=(
-                "Number of top-ranked CA1 units to show in panel B. "
-                f"Default: {DEFAULT_XCORR_TOP_CA1_UNITS}."
-            ),
-        )
-        parser.add_argument(
-            "--xcorr-bin-size-s",
-            type=float,
-            default=DEFAULT_XCORR_BIN_SIZE_S,
-            help=f"Screen-xcorr bin size in seconds. Default: {DEFAULT_XCORR_BIN_SIZE_S:g}.",
-        )
-        parser.add_argument(
-            "--xcorr-max-lag-s",
-            type=float,
-            default=DEFAULT_XCORR_MAX_LAG_S,
-            help=f"Screen-xcorr maximum lag in seconds. Default: {DEFAULT_XCORR_MAX_LAG_S:g}.",
-        )
-        parser.add_argument(
-            "--xcorr-display-vmax",
-            type=float,
-            default=DEFAULT_XCORR_DISPLAY_VMAX,
-            help=(
-                "Panel B normalized-xcorr color maximum. "
-                f"Default: {DEFAULT_XCORR_DISPLAY_VMAX:g}."
-            ),
-        )
     parser.add_argument(
         "--ripple-selection",
         nargs="+",
@@ -1795,7 +1757,7 @@ def parse_arguments(
         default=list(DEFAULT_RIPPLE_SELECTION_MODES),
         help=(
             "Ripple-selection mode to plot. If multiple values are passed, "
-            "only the first is used for panels C-E. "
+            "only the first is used for panels B-D. "
             f"Default: {list(DEFAULT_RIPPLE_SELECTION_MODES)!r}"
         ),
     )
@@ -1819,7 +1781,7 @@ def parse_arguments(
         type=Path,
         default=DEFAULT_FIGURE_CACHE_DIR,
         help=(
-            "Directory for cached dark movement firing-rate tables used by panel E. "
+            "Directory for cached dark movement firing-rate tables used by panel D. "
             f"Default: {DEFAULT_FIGURE_CACHE_DIR}"
         ),
     )
@@ -1862,12 +1824,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         dark_epoch=args.dark_epoch,
         sleep_epoch=args.sleep_epoch,
         ripple_threshold_zscore=args.ripple_threshold_zscore,
-        xcorr_dataset=args.xcorr_dataset,
-        xcorr_state=args.xcorr_state,
-        xcorr_top_ca1_units=args.xcorr_top_ca1_units,
-        xcorr_bin_size_s=args.xcorr_bin_size_s,
-        xcorr_max_lag_s=args.xcorr_max_lag_s,
-        xcorr_display_vmax=args.xcorr_display_vmax,
         ripple_selection_modes=tuple(args.ripple_selection),
         ripple_window_s=args.ripple_window_s,
         ripple_window_offset_s=args.ripple_window_offset_s,
