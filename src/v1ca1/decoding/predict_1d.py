@@ -3,11 +3,10 @@ from __future__ import annotations
 """Predict full-W 1D RTC decoder posteriors across one run epoch.
 
 The script loads fold-specific classifiers produced by `v1ca1.decoding.fit_1d`,
-assigns every trimmed epoch time bin to exactly one cross-validation fold, and
-saves one combined NetCDF prediction result per requested region. Bins inside
-trajectory intervals inherit that trajectory's held-out fold, while bins
-between trajectories inherit the earlier trajectory's fold. When requested, V1
-prediction uses the same ripple GLM unit subset expected by fit.
+divides the trimmed epoch into contiguous cross-validation folds, and saves one
+combined NetCDF prediction result per requested region. Every time bin in each
+held-out fold is decoded in one call, including stationary periods. When
+requested, V1 prediction uses the same ripple GLM unit subset expected by fit.
 By default, RTC computes the acausal smoothed posterior; `--causal-only`
 skips that pass and writes the causal posterior output instead.
 """
@@ -27,21 +26,21 @@ from v1ca1.decoding._1d import (
     DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_POSITION_STD,
-    DEFAULT_RANDOM_STATE,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
+    CV_SCHEME,
     DISCRETE_VAR_CHOICES,
     POSTERIOR_KIND_ACAUSAL,
     POSTERIOR_KIND_CAUSAL,
     REGIONS,
     build_classifier_output_paths,
-    build_full_epoch_prediction_fold,
-    build_lapwise_cv,
+    build_contiguous_time_folds,
     build_prediction_output_paths,
     build_time_grid,
     build_unit_ids_by_region,
     compute_speed_on_time_grid,
+    count_trajectory_laps,
     concatenate_fold_results,
     figurl_output_path,
     get_analysis_path_for_session,
@@ -59,7 +58,6 @@ from v1ca1.decoding._1d import (
     require_existing_paths,
     select_regions,
     validate_classifier_place_fields,
-    validate_fold_count,
 )
 from v1ca1.helper.cuda import configure_cuda_visible_devices
 from v1ca1.helper.run_logging import write_run_log
@@ -458,6 +456,11 @@ def predict_region(
         fold_mask = fold_by_time == fold
         if not np.any(fold_mask):
             raise ValueError(f"Fold {fold} has no assigned prediction bins.")
+        fold_indices = np.flatnonzero(fold_mask)
+        if fold_indices.size > 1 and np.any(np.diff(fold_indices) != 1):
+            raise ValueError(
+                f"Fold {fold} prediction bins are not one contiguous time run."
+            )
 
         print(
             f"Predicting {region} fold {fold + 1}/{n_folds} with "
@@ -493,6 +496,7 @@ def load_saved_prediction_result(
     path: Path,
     *,
     time_grid: np.ndarray,
+    fold_by_time: np.ndarray,
     posterior_name: str,
 ) -> Any:
     """Load one existing prediction result and validate its time coordinate."""
@@ -516,6 +520,26 @@ def load_saved_prediction_result(
         raise ValueError(
             f"Saved prediction result {path} does not contain {posterior_name!r}. "
             "Check whether the file was produced with matching --causal-only."
+        )
+    if result.attrs.get("cv_scheme") != CV_SCHEME:
+        raise ValueError(
+            f"Saved prediction result {path} was not produced with "
+            f"cv_scheme={CV_SCHEME!r}. Rerun fit_1d and predict_1d."
+        )
+    expected_n_folds = int(np.unique(np.asarray(fold_by_time, dtype=int)).size)
+    if int(result.attrs.get("n_folds", -1)) != expected_n_folds:
+        raise ValueError(
+            f"Saved prediction result {path} does not record the expected "
+            f"n_folds={expected_n_folds}."
+        )
+    if "cv_fold" not in result:
+        raise ValueError(f"Saved prediction result {path} does not contain 'cv_fold'.")
+    saved_fold_by_time = np.asarray(result["cv_fold"], dtype=int)
+    expected_fold_by_time = np.asarray(fold_by_time, dtype=int)
+    if not np.array_equal(saved_fold_by_time, expected_fold_by_time):
+        raise ValueError(
+            f"Saved prediction result {path} has fold assignments that do not "
+            "match the current contiguous-time partition."
         )
     return result
 
@@ -556,7 +580,8 @@ def run(args: argparse.Namespace) -> None:
         regions=selected_regions,
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
+        time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         direction=args.direction,
         movement=args.movement,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -572,7 +597,8 @@ def run(args: argparse.Namespace) -> None:
         regions=selected_regions,
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
+        time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         direction=args.direction,
         movement=args.movement,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -590,7 +616,8 @@ def run(args: argparse.Namespace) -> None:
             regions=selected_regions,
             epoch=args.epoch,
             n_folds=args.n_folds,
-            random_state=args.random_state,
+            time_bin_size_s=args.time_bin_size_s,
+            position_offset=args.position_offset,
             direction=args.direction,
             movement=args.movement,
             speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -635,15 +662,16 @@ def run(args: argparse.Namespace) -> None:
         animal_name=args.animal_name,
         epoch=args.epoch,
     )
-    lap_counts = validate_fold_count(
-        session["trajectory_intervals"],
+    time_grid = build_time_grid(
+        session["timestamps_position"],
+        position_offset=args.position_offset,
+        time_bin_size_s=args.time_bin_size_s,
+    )
+    fold_by_time, fold_time_records = build_contiguous_time_folds(
+        time_grid,
         n_folds=args.n_folds,
     )
-    _train_intervals, _test_intervals, fold_interval_records = build_lapwise_cv(
-        session["trajectory_intervals"],
-        n_folds=args.n_folds,
-        random_state=args.random_state,
-    )
+    lap_counts = count_trajectory_laps(session["trajectory_intervals"])
     sortings = load_sortings(analysis_path, selected_regions)
     unit_ids_by_region, unit_selection_by_region = build_unit_ids_by_region(
         sortings=sortings,
@@ -654,11 +682,6 @@ def run(args: argparse.Namespace) -> None:
         v1_ripple_glm_devexp_threshold=args.v1_ripple_glm_devexp_threshold,
     )
 
-    time_grid = build_time_grid(
-        session["timestamps_position"],
-        position_offset=args.position_offset,
-        time_bin_size_s=args.time_bin_size_s,
-    )
     position_interp = interpolate_position_to_time(
         session["position"],
         session["timestamps_position"],
@@ -676,7 +699,6 @@ def run(args: argparse.Namespace) -> None:
         time_grid,
         position_offset=args.position_offset,
     )
-    fold_by_time = build_full_epoch_prediction_fold(time_grid, fold_interval_records)
     state_names = get_state_names(direction=args.direction, discrete_var=args.discrete_var)
 
     action_label = (
@@ -687,7 +709,7 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"{action_label} for {args.animal_name} {args.date} epoch {args.epoch}; "
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
-        f"random_state={args.random_state}, direction={args.direction}, "
+        f"cv_scheme={CV_SCHEME}, direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
         f" posterior={posterior_name}."
     )
@@ -699,6 +721,7 @@ def run(args: argparse.Namespace) -> None:
             combined_result = load_saved_prediction_result(
                 prediction_paths[region],
                 time_grid=time_grid,
+                fold_by_time=fold_by_time,
                 posterior_name=posterior_name,
             )
             spike_indicator = get_spike_indicator(
@@ -736,7 +759,7 @@ def run(args: argparse.Namespace) -> None:
                 "epoch": args.epoch,
                 "region": region,
                 "n_folds": int(args.n_folds),
-                "random_state": int(args.random_state),
+                "cv_scheme": CV_SCHEME,
                 "time_bin_size_s": float(args.time_bin_size_s),
                 "position_offset": int(args.position_offset),
                 "speed_threshold_cm_s": float(args.speed_threshold_cm_s),
@@ -767,7 +790,8 @@ def run(args: argparse.Namespace) -> None:
                 "unit_selection_source_path": str(
                     unit_selection_by_region[region].get("source_path", "")
                 ),
-                "prediction_scope": "full_trimmed_epoch_earlier_gap_fold",
+                "prediction_scope": "full_trimmed_epoch_contiguous_time_folds",
+                "fold_initialization": "classifier_default_uniform",
             }
         )
         output_path = prediction_paths[region]
@@ -810,7 +834,7 @@ def run(args: argparse.Namespace) -> None:
             "regions": list(selected_regions),
             "data_root": args.data_root,
             "n_folds": args.n_folds,
-            "random_state": args.random_state,
+            "cv_scheme": CV_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -846,7 +870,7 @@ def run(args: argparse.Namespace) -> None:
             "edge_order": edge_order,
             "edge_spacing": edge_spacing,
             "unit_selection_by_region": unit_selection_by_region,
-            "fold_interval_records": fold_interval_records,
+            "fold_time_records": fold_time_records,
             "classifier_paths": classifier_paths,
             "prediction_paths": prediction_paths,
             "saved_prediction_paths": saved_prediction_paths,
@@ -883,13 +907,7 @@ def parse_arguments() -> argparse.Namespace:
         "--n-folds",
         type=int,
         default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+        help=f"Number of contiguous-time cross-validation folds. Default: {DEFAULT_N_FOLDS}",
     )
     parser.add_argument(
         "--time-bin-size-s",

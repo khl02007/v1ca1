@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from v1ca1.decoding import predict_1d
 from v1ca1.decoding._1d import (
@@ -21,7 +22,8 @@ def test_causal_prediction_paths_have_distinct_suffix(tmp_path: Path) -> None:
         "regions": ("ca1",),
         "epoch": "02_r1",
         "n_folds": 5,
-        "random_state": 47,
+        "time_bin_size_s": 0.002,
+        "position_offset": 10,
         "direction": True,
         "movement": True,
         "speed_threshold_cm_s": 4.0,
@@ -44,6 +46,7 @@ def test_causal_prediction_paths_have_distinct_suffix(tmp_path: Path) -> None:
     )["ca1"]
 
     assert "_posterior_causal" not in acausal_path.name
+    assert "_cv_contiguous_time" in acausal_path.name
     assert causal_path.name.endswith("_posterior_causal.nc")
     assert causal_path != acausal_path
 
@@ -66,10 +69,11 @@ def test_predict_region_disables_acausal_pass_for_causal_only(
             )
             return {"time": kwargs["time"]}
 
+    expected_spikes = np.arange(12, dtype=np.uint8).reshape(6, 2)
     monkeypatch.setattr(
         predict_1d,
         "get_spike_indicator",
-        lambda *args, **kwargs: np.ones((4, 2), dtype=np.uint8),
+        lambda *args, **kwargs: expected_spikes.copy(),
     )
     monkeypatch.setattr(predict_1d, "load_classifier", lambda _path: FakeClassifier())
     monkeypatch.setattr(
@@ -90,19 +94,57 @@ def test_predict_region_disables_acausal_pass_for_causal_only(
             ("ca1", 0): Path("fold0.pkl"),
             ("ca1", 1): Path("fold1.pkl"),
         },
-        timestamps_ephys_all=np.arange(4, dtype=float),
-        time_grid=np.array([0.0, 0.002, 0.004, 0.006]),
+        timestamps_ephys_all=np.arange(6, dtype=float),
+        time_grid=np.array([0.0, 0.002, 0.004, 0.006, 0.008, 0.010]),
         unit_ids=[1, 2],
-        fold_by_time=np.array([0, 0, 1, 1]),
-        linear_position=np.arange(4, dtype=float),
-        speed=np.ones(4, dtype=float),
+        fold_by_time=np.array([0, 0, 0, 1, 1, 1]),
+        linear_position=np.arange(6, dtype=float),
+        speed=np.array([0.0, 5.0, 0.0, 5.0, 0.0, 5.0]),
         n_folds=2,
         state_names=["Continuous", "Fragmented"],
         causal_only=True,
     )
 
     assert len(result) == 2
-    assert spike_indicator.shape == (4, 2)
+    assert spike_indicator.shape == (6, 2)
     assert [call["is_compute_acausal"] for call in predict_calls] == [False, False]
     assert [call["use_gpu"] for call in predict_calls] == [True, True]
-    assert [call["spikes"].shape for call in predict_calls] == [(2, 2), (2, 2)]
+    assert [call["spikes"].shape for call in predict_calls] == [(3, 2), (3, 2)]
+    assert np.array_equal(predict_calls[0]["spikes"], expected_spikes[:3])
+    assert np.array_equal(predict_calls[1]["spikes"], expected_spikes[3:])
+    assert np.array_equal(
+        predict_calls[0]["time"],
+        np.array([0.0, 0.002, 0.004]),
+    )
+    assert np.array_equal(
+        predict_calls[1]["time"],
+        np.array([0.006, 0.008, 0.010]),
+    )
+
+
+def test_predict_region_rejects_noncontiguous_fold_labels(monkeypatch: Any) -> None:
+    """A fold must never compact separated time runs into one decoder call."""
+    monkeypatch.setattr(
+        predict_1d,
+        "get_spike_indicator",
+        lambda *args, **kwargs: np.ones((6, 2), dtype=np.uint8),
+    )
+
+    with pytest.raises(ValueError, match="contiguous"):
+        predict_1d.predict_region(
+            region="ca1",
+            sorting=object(),
+            classifier_paths={
+                ("ca1", 0): Path("fold0.pkl"),
+                ("ca1", 1): Path("fold1.pkl"),
+            },
+            timestamps_ephys_all=np.arange(6, dtype=float),
+            time_grid=np.arange(6, dtype=float) * 0.002,
+            unit_ids=[1, 2],
+            fold_by_time=np.array([0, 0, 1, 1, 0, 0]),
+            linear_position=np.arange(6, dtype=float),
+            speed=np.ones(6, dtype=float),
+            n_folds=2,
+            state_names=["Continuous", "Fragmented"],
+            causal_only=True,
+        )

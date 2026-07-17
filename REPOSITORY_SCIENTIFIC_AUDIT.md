@@ -5,13 +5,15 @@
 **Baseline commit:** `ed65b7d1cca64335c680e47d650cf15a55218096`  
 **Review target:** the current working tree, including its uncommitted paper-figure and test changes
 
+**Implementation update (2026-07-16):** F1 has been resolved by replacing shuffled lap-wise 1D decoder folds with deterministic contiguous-time folds. The remaining findings describe the audit baseline unless separately marked resolved.
+
 ## Executive summary
 
 This is a substantial, scientifically serious analysis repository for simultaneous V1 and CA1 recordings in freely moving rats during W-track behavior and sleep. The newer code has many good properties: explicit session paths, modern tabular and array formats, centralized task-coordinate construction, extensive argument and shape checks, train/test separation in several major models, unique run logs, and a large synthetic test suite. The current suite passes in full: **687 tests passed, 0 skipped, with 2 warnings**.
 
 I would nevertheless avoid treating every current output as publication-final until the highest-priority findings below are resolved or empirically shown not to affect the reported conclusions. The most consequential issues are:
 
-1. The full-epoch 1D decoder can run its state-space recursion across disjoint held-out time segments as though they were adjacent.
+1. **Resolved:** the full-epoch 1D decoder formerly ran its state-space recursion across disjoint held-out time segments as though they were adjacent.
 2. Ripple-event resume logic decides reuse from the presence of an epoch alone, not from detector parameters or input provenance; one output file can also mix epochs produced with different settings.
 3. Missing position support can be classified as immobility instead of unknown.
 4. Position video streams are assigned to epochs by container order rather than verified identity.
@@ -90,7 +92,7 @@ Important limits:
 
 | ID | Priority | Type | Finding | Main consequence |
 |---|---:|---|---|---|
-| F1 | P0 | Confirmed defect | 1D state recursion crosses disjoint prediction segments | Posterior estimates can depend on temporally remote bins and acausal smoothing can bridge gaps |
+| F1 | Resolved | Confirmed defect, fixed 2026-07-16 | 1D state recursion formerly crossed disjoint prediction segments | Replaced with independent contiguous-time fold predictions |
 | F2 | P0 | Confirmed defect | Ripple outputs are resumed by epoch presence, not configuration/provenance | Parameter changes can silently reuse old events; one parquet can mix detector settings |
 | F3 | P0 | Confirmed defect / data semantics | Missing position support becomes immobility | State labels and every speed-gated downstream analysis can be biased |
 | F4 | P0 | Latent integrity risk | Video streams are mapped to epochs by order | A reordered NWB container can silently relabel all position timestamps |
@@ -107,15 +109,13 @@ Important limits:
 
 ## Detailed correctness findings
 
-### F1 — 1D prediction joins separated segments into one state sequence
+### F1 — 1D prediction formerly joined separated segments into one state sequence
 
-**Evidence.** Lap-wise folds are assigned independently within trajectory types in [`build_lapwise_cv`](src/v1ca1/decoding/_1d.py#L912-L954). The full epoch then inherits those lap folds, including inter-lap periods, in [`build_full_epoch_prediction_fold`](src/v1ca1/decoding/_1d.py#L1004-L1039). A single fold will normally appear in multiple separated runs. [`predict_region`](src/v1ca1/decoding/predict_1d.py#L431-L489) compacts every row belonging to that fold and calls `classifier.predict(...)` once.
+**Status: resolved on 2026-07-16.** The original implementation assigned shuffled laps to folds, compacted separated held-out intervals, and passed each compacted fold through one state-space recursion. That allowed causal and acausal inference to bridge real temporal gaps.
 
-In the installed decoder, the `time` input is an output coordinate; the causal and acausal recursions operate along compacted row order. Therefore the last bin of one held-out segment becomes the predecessor of the first bin of a later segment. Acausal smoothing can cross the same gap in reverse.
+The active workflow now uses [`build_contiguous_time_folds`](src/v1ca1/decoding/_1d.py) to partition every decoder time bin into deterministic, exhaustive, non-overlapping contiguous chunks. [`build_fold_training_mask`](src/v1ca1/decoding/fit_1d.py) trains on eligible trajectory/movement bins outside the held-out chunk, while [`predict_region`](src/v1ca1/decoding/predict_1d.py) predicts every bin inside that chunk in one independent call. Each fold therefore begins from an explicitly configured uniform initial condition, and stationary inter-lap bins remain in the prediction.
 
-**Impact.** This is not merely a timestamp-labeling issue. The state transition prior and posterior are wrong at every discontinuity, and the error depends on shuffled fold ownership. The magnitude must be measured on saved results.
-
-**Recommendation.** Split each fold mask into maximal contiguous runs and call the classifier separately for each run, resetting the prior at every boundary. Concatenate only after prediction. Add a regression test with two separated segments whose posterior changes when an artificial bridge is inserted. Existing tests cover contiguous masks but not state resets.
+The shuffled lap-wise helpers and random-state CLI controls were removed. New artifacts carry a `cv_contiguous_time` path token and record `cv_scheme="contiguous_time"`, so historical lap-wise fits cannot be loaded silently. Regression tests verify contiguous exhaustive folds, movement-only default training masks, inclusion of stationary prediction bins, and rejection of noncontiguous fold assignments ([`test_decoding_1d.py`](tests/test_decoding_1d.py), [`test_predict_1d.py`](tests/test_predict_1d.py)).
 
 ### F2 — Ripple resume and overwrite semantics can mix scientific configurations
 
@@ -324,7 +324,7 @@ Move these scripts under an explicit `legacy` namespace or refactor them onto sh
 
 ### Phase 1 — Protect result validity
 
-1. Fix disjoint 1D prediction resets and the spike-bin edge construction; rerun affected posterior/error outputs.
+1. F1 is resolved. Fix the remaining 1D spike-bin edge construction, then regenerate the new contiguous-CV classifier, posterior, and error outputs.
 2. Make ripple event reuse configuration- and input-aware; prohibit mixed-provenance parquet files.
 3. Introduce valid/unknown position support and rerun movement, immobility, and speed-gated outputs where coverage is imperfect.
 4. Replace target-informed unit selection with fold-local or independent cohorts in dark/light and cross-trajectory transfer.

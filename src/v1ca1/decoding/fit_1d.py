@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-"""Fit full-W 1D RTC decoders with lap-wise cross-validation.
+"""Fit full-W 1D RTC decoders with contiguous-time cross-validation.
 
 The script loads one run epoch from the modern analysis directory layout,
 linearizes cleaned DLC head position on the animal-specific full W-track,
-builds shuffled lap-wise cross-validation folds from trajectory intervals, and
-fits one sorted-spikes RTC classifier per requested region and fold. Classifier
-objects are written with `SortedSpikesClassifier.save_model`. When requested,
-V1 fits use ripple GLM unit filtering by deviance-explained significance or a
-direct deviance-explained threshold. Run metadata are recorded under the session
-log directory.
+divides the decoder time grid into contiguous cross-validation folds, and fits
+one sorted-spikes RTC classifier per requested region and fold. Training uses
+trajectory bins outside the held-out fold, with the movement-speed filter
+enabled by default. Classifier objects are written with
+`SortedSpikesClassifier.save_model`. When requested, V1 fits use ripple GLM
+unit filtering by deviance-explained significance or a direct
+deviance-explained threshold. Run metadata are recorded under the session log
+directory.
 """
 
 import argparse
@@ -26,18 +28,20 @@ from v1ca1.decoding._1d import (
     DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_POSITION_STD,
-    DEFAULT_RANDOM_STATE,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
+    CV_SCHEME,
     DISCRETE_VAR_CHOICES,
     REGIONS,
     build_classifier_output_paths,
+    build_contiguous_time_folds,
+    build_trajectory_time_mask,
     build_unit_ids_by_region,
-    build_lapwise_cv,
     build_time_grid,
     build_decoder_state_models,
     compute_speed_on_time_grid,
+    count_trajectory_laps,
     get_analysis_path_for_session,
     get_fit_output_dir,
     get_spike_indicator,
@@ -48,12 +52,10 @@ from v1ca1.decoding._1d import (
     load_required_session_inputs,
     load_sortings,
     make_classifier,
-    make_interval_mask,
     preflight_no_existing,
     require_spiking_likelihood_kde_gpu,
     select_regions,
     validate_classifier_place_fields,
-    validate_fold_count,
 )
 from v1ca1.helper.cuda import configure_cuda_visible_devices
 from v1ca1.helper.run_logging import write_run_log
@@ -85,6 +87,38 @@ def validate_arguments(args: argparse.Namespace) -> None:
             raise ValueError("--v1-ripple-glm-devexp-threshold must be finite.")
 
 
+def build_fold_training_mask(
+    *,
+    fold_by_time: np.ndarray,
+    fold: int,
+    trajectory_mask: np.ndarray,
+    linear_position: np.ndarray,
+    speed: np.ndarray,
+    movement: bool,
+    speed_threshold_cm_s: float,
+) -> np.ndarray:
+    """Return eligible training bins outside one contiguous held-out fold."""
+    fold_array = np.asarray(fold_by_time, dtype=int)
+    trajectory_array = np.asarray(trajectory_mask, dtype=bool)
+    position_array = np.asarray(linear_position, dtype=float)
+    speed_array = np.asarray(speed, dtype=float)
+    expected_shape = fold_array.shape
+    if any(
+        array.shape != expected_shape
+        for array in (trajectory_array, position_array, speed_array)
+    ):
+        raise ValueError(
+            "fold_by_time, trajectory_mask, linear_position, and speed must "
+            "have matching shapes."
+        )
+
+    train_mask = trajectory_array & (fold_array != fold)
+    if movement:
+        train_mask &= speed_array > speed_threshold_cm_s
+    train_mask &= np.isfinite(position_array)
+    return train_mask
+
+
 def fit_region_classifiers(
     *,
     region: str,
@@ -94,7 +128,8 @@ def fit_region_classifiers(
     unit_ids: list[Any],
     linear_position: np.ndarray,
     speed: np.ndarray,
-    train_intervals_by_fold: dict[int, np.ndarray],
+    fold_by_time: np.ndarray,
+    trajectory_mask: np.ndarray,
     output_paths: dict[tuple[str, int], Path],
     n_folds: int,
     movement: bool,
@@ -130,16 +165,21 @@ def fit_region_classifiers(
 
     saved_paths: list[Path] = []
     for fold in range(n_folds):
-        train_mask = make_interval_mask(time_grid, train_intervals_by_fold[fold])
-        if movement:
-            train_mask &= speed > speed_threshold_cm_s
-        train_mask &= np.isfinite(linear_position)
+        train_mask = build_fold_training_mask(
+            fold_by_time=fold_by_time,
+            fold=fold,
+            trajectory_mask=trajectory_mask,
+            linear_position=linear_position,
+            speed=speed,
+            movement=movement,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+        )
 
         n_training_bins = int(np.sum(train_mask))
         if n_training_bins == 0:
             raise ValueError(
                 f"Fold {fold} for region {region!r} has no training bins after "
-                "lap, movement, and finite-position filtering."
+                "trajectory, movement, and finite-position filtering."
             )
 
         print(
@@ -202,7 +242,8 @@ def run(args: argparse.Namespace) -> None:
         regions=selected_regions,
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
+        time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         direction=args.direction,
         movement=args.movement,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -225,15 +266,20 @@ def run(args: argparse.Namespace) -> None:
         animal_name=args.animal_name,
         epoch=args.epoch,
     )
-    lap_counts = validate_fold_count(
-        session["trajectory_intervals"],
+    time_grid = build_time_grid(
+        session["timestamps_position"],
+        position_offset=args.position_offset,
+        time_bin_size_s=args.time_bin_size_s,
+    )
+    fold_by_time, fold_time_records = build_contiguous_time_folds(
+        time_grid,
         n_folds=args.n_folds,
     )
-    train_intervals_by_fold, test_intervals_by_fold, fold_interval_records = build_lapwise_cv(
+    trajectory_mask = build_trajectory_time_mask(
+        time_grid,
         session["trajectory_intervals"],
-        n_folds=args.n_folds,
-        random_state=args.random_state,
     )
+    lap_counts = count_trajectory_laps(session["trajectory_intervals"])
     sortings = load_sortings(analysis_path, selected_regions)
     unit_ids_by_region, unit_selection_by_region = build_unit_ids_by_region(
         sortings=sortings,
@@ -244,11 +290,6 @@ def run(args: argparse.Namespace) -> None:
         v1_ripple_glm_devexp_threshold=args.v1_ripple_glm_devexp_threshold,
     )
 
-    time_grid = build_time_grid(
-        session["timestamps_position"],
-        position_offset=args.position_offset,
-        time_bin_size_s=args.time_bin_size_s,
-    )
     position_interp = interpolate_position_to_time(
         session["position"],
         session["timestamps_position"],
@@ -270,7 +311,7 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"Fitting 1D decoder for {args.animal_name} {args.date} epoch {args.epoch}; "
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
-        f"random_state={args.random_state}, direction={args.direction}, "
+        f"cv_scheme={CV_SCHEME}, direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
     )
     saved_classifier_paths: list[Path] = []
@@ -284,7 +325,8 @@ def run(args: argparse.Namespace) -> None:
                 unit_ids=unit_ids_by_region[region],
                 linear_position=linear_position,
                 speed=speed,
-                train_intervals_by_fold=train_intervals_by_fold,
+                fold_by_time=fold_by_time,
+                trajectory_mask=trajectory_mask,
                 output_paths=output_paths,
                 n_folds=args.n_folds,
                 movement=args.movement,
@@ -310,7 +352,7 @@ def run(args: argparse.Namespace) -> None:
             "regions": list(selected_regions),
             "data_root": args.data_root,
             "n_folds": args.n_folds,
-            "random_state": args.random_state,
+            "cv_scheme": CV_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -341,15 +383,8 @@ def run(args: argparse.Namespace) -> None:
             "edge_order": edge_order,
             "edge_spacing": edge_spacing,
             "unit_selection_by_region": unit_selection_by_region,
-            "fold_interval_records": fold_interval_records,
-            "train_intervals_by_fold": {
-                fold: intervals.tolist()
-                for fold, intervals in train_intervals_by_fold.items()
-            },
-            "test_intervals_by_fold": {
-                fold: intervals.tolist()
-                for fold, intervals in test_intervals_by_fold.items()
-            },
+            "fold_time_records": fold_time_records,
+            "trajectory_bin_count": int(np.sum(trajectory_mask)),
             "saved_classifier_paths": saved_classifier_paths,
         },
     )
@@ -360,7 +395,7 @@ def run(args: argparse.Namespace) -> None:
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the 1D decoder fit."""
     parser = argparse.ArgumentParser(
-        description="Fit a full-W 1D RTC decoder with lap-wise cross-validation."
+        description="Fit a full-W 1D RTC decoder with contiguous-time cross-validation."
     )
     parser.add_argument("--animal-name", required=True, help="Animal name, e.g. L14.")
     parser.add_argument("--date", required=True, help="Session date in YYYYMMDD format.")
@@ -380,13 +415,7 @@ def parse_arguments() -> argparse.Namespace:
         "--n-folds",
         type=int,
         default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+        help=f"Number of contiguous-time cross-validation folds. Default: {DEFAULT_N_FOLDS}",
     )
     parser.add_argument(
         "--time-bin-size-s",

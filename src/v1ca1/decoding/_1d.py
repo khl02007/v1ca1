@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 from scipy import interpolate
-from sklearn.model_selection import KFold
 
 from v1ca1.helper.session import (
     DEFAULT_CLEAN_DLC_POSITION_DIRNAME,
@@ -39,7 +38,7 @@ from v1ca1.ripple.ripple_glm import (
 
 
 DEFAULT_N_FOLDS = 5
-DEFAULT_RANDOM_STATE = 47
+CV_SCHEME = "contiguous_time"
 DEFAULT_TIME_BIN_SIZE_S = 0.002
 DEFAULT_POSITION_STD = 4.0
 DEFAULT_PLACE_BIN_SIZE_CM = 2.0
@@ -128,7 +127,8 @@ def classifier_output_path(
     epoch: str,
     fold: int,
     n_folds: int,
-    random_state: int,
+    time_bin_size_s: float,
+    position_offset: int,
     direction: bool,
     movement: bool,
     speed_threshold_cm_s: float,
@@ -142,16 +142,17 @@ def classifier_output_path(
     """Return one classifier output path for the requested fit settings."""
     return output_dir / (
         f"classifier_{region}_{epoch}_1d"
-        f"_fold_{fold}_of_{n_folds}_cv"
-        f"_random_state_{random_state}"
-        f"_direction_{direction}"
-        f"_movement_{movement}"
-        f"_speed_threshold_cm_s_{speed_threshold_cm_s}"
-        f"_position_std_{position_std}"
-        f"_discrete_var_{discrete_var}"
-        f"_place_bin_size_{place_bin_size}"
-        f"_movement_var_{movement_var}"
-        f"_branch_gap_cm_{branch_gap_cm}"
+        f"_fold_{fold}_of_{n_folds}_cv_{CV_SCHEME}"
+        f"_tb_{time_bin_size_s}"
+        f"_offset_{position_offset}"
+        f"_dir_{direction}"
+        f"_mov_{movement}"
+        f"_speed_{speed_threshold_cm_s}"
+        f"_pstd_{position_std}"
+        f"_disc_{discrete_var}"
+        f"_pbin_{place_bin_size}"
+        f"_mvar_{movement_var}"
+        f"_gap_{branch_gap_cm}"
         f"{format_unit_selection_path_suffix(unit_selection_label)}"
         ".pkl"
     )
@@ -163,7 +164,8 @@ def build_classifier_output_paths(
     regions: tuple[str, ...],
     epoch: str,
     n_folds: int,
-    random_state: int,
+    time_bin_size_s: float,
+    position_offset: int,
     direction: bool,
     movement: bool,
     speed_threshold_cm_s: float,
@@ -182,7 +184,8 @@ def build_classifier_output_paths(
             epoch=epoch,
             fold=fold,
             n_folds=n_folds,
-            random_state=random_state,
+            time_bin_size_s=time_bin_size_s,
+            position_offset=position_offset,
             direction=direction,
             movement=movement,
             speed_threshold_cm_s=speed_threshold_cm_s,
@@ -204,7 +207,8 @@ def prediction_output_path(
     region: str,
     epoch: str,
     n_folds: int,
-    random_state: int,
+    time_bin_size_s: float,
+    position_offset: int,
     direction: bool,
     movement: bool,
     speed_threshold_cm_s: float,
@@ -219,16 +223,18 @@ def prediction_output_path(
     """Return the combined prediction result path for one region."""
     return output_dir / (
         f"results_{region}_{epoch}_1d_cv"
+        f"_{CV_SCHEME}"
         f"_folds_{n_folds}"
-        f"_random_state_{random_state}"
-        f"_direction_{direction}"
-        f"_movement_{movement}"
-        f"_speed_threshold_cm_s_{speed_threshold_cm_s}"
-        f"_position_std_{position_std}"
-        f"_discrete_var_{discrete_var}"
-        f"_place_bin_size_{place_bin_size}"
-        f"_movement_var_{movement_var}"
-        f"_branch_gap_cm_{branch_gap_cm}"
+        f"_tb_{time_bin_size_s}"
+        f"_offset_{position_offset}"
+        f"_dir_{direction}"
+        f"_mov_{movement}"
+        f"_speed_{speed_threshold_cm_s}"
+        f"_pstd_{position_std}"
+        f"_disc_{discrete_var}"
+        f"_pbin_{place_bin_size}"
+        f"_mvar_{movement_var}"
+        f"_gap_{branch_gap_cm}"
         f"{format_unit_selection_path_suffix(unit_selection_label)}"
         f"{format_prediction_posterior_path_suffix(posterior_kind)}"
         ".nc"
@@ -241,7 +247,8 @@ def build_prediction_output_paths(
     regions: tuple[str, ...],
     epoch: str,
     n_folds: int,
-    random_state: int,
+    time_bin_size_s: float,
+    position_offset: int,
     direction: bool,
     movement: bool,
     speed_threshold_cm_s: float,
@@ -260,7 +267,8 @@ def build_prediction_output_paths(
             region=region,
             epoch=epoch,
             n_folds=n_folds,
-            random_state=random_state,
+            time_bin_size_s=time_bin_size_s,
+            position_offset=position_offset,
             direction=direction,
             movement=movement,
             speed_threshold_cm_s=speed_threshold_cm_s,
@@ -282,7 +290,8 @@ def figurl_output_path(
     regions: tuple[str, ...],
     epoch: str,
     n_folds: int,
-    random_state: int,
+    time_bin_size_s: float,
+    position_offset: int,
     direction: bool,
     movement: bool,
     speed_threshold_cm_s: float,
@@ -298,16 +307,18 @@ def figurl_output_path(
     region_label = "_".join(regions)
     return output_dir / "figurl" / (
         f"view_url_{region_label}_{epoch}_1d_cv"
+        f"_{CV_SCHEME}"
         f"_folds_{n_folds}"
-        f"_random_state_{random_state}"
-        f"_direction_{direction}"
-        f"_movement_{movement}"
-        f"_speed_threshold_cm_s_{speed_threshold_cm_s}"
-        f"_position_std_{position_std}"
-        f"_discrete_var_{discrete_var}"
-        f"_place_bin_size_{place_bin_size}"
-        f"_movement_var_{movement_var}"
-        f"_branch_gap_cm_{branch_gap_cm}"
+        f"_tb_{time_bin_size_s}"
+        f"_offset_{position_offset}"
+        f"_dir_{direction}"
+        f"_mov_{movement}"
+        f"_speed_{speed_threshold_cm_s}"
+        f"_pstd_{position_std}"
+        f"_disc_{discrete_var}"
+        f"_pbin_{place_bin_size}"
+        f"_mvar_{movement_var}"
+        f"_gap_{branch_gap_cm}"
         f"{format_unit_selection_path_suffix(unit_selection_label)}"
         f"{format_prediction_posterior_path_suffix(posterior_kind)}"
         ".txt"
@@ -875,122 +886,16 @@ def intervalset_to_arrays(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
     return starts[order], ends[order]
 
 
-def validate_fold_count(
+def count_trajectory_laps(
     trajectory_intervals: dict[str, Any],
-    *,
-    n_folds: int,
 ) -> dict[str, int]:
-    """Validate that every trajectory type supports the requested fold count."""
-    lap_counts: dict[str, int] = {}
-    for trajectory_type in TRAJECTORY_TYPES:
-        starts, _ends = intervalset_to_arrays(trajectory_intervals[trajectory_type])
-        lap_counts[trajectory_type] = int(starts.size)
-        if starts.size < n_folds:
-            raise ValueError(
-                f"Trajectory {trajectory_type!r} has {starts.size} laps, but "
-                f"--n-folds={n_folds} requires at least {n_folds} laps per trajectory."
-            )
-    return lap_counts
-
-
-def combine_interval_chunks(
-    starts: list[np.ndarray],
-    ends: list[np.ndarray],
-) -> np.ndarray:
-    """Combine interval chunks into one sorted `(n, 2)` array."""
-    start_chunks = [np.asarray(chunk, dtype=float) for chunk in starts if chunk.size]
-    end_chunks = [np.asarray(chunk, dtype=float) for chunk in ends if chunk.size]
-    if not start_chunks:
-        return np.empty((0, 2), dtype=float)
-
-    start_array = np.concatenate(start_chunks)
-    end_array = np.concatenate(end_chunks)
-    order = np.argsort(start_array)
-    return np.column_stack((start_array[order], end_array[order]))
-
-
-def build_lapwise_cv(
-    trajectory_intervals: dict[str, Any],
-    *,
-    n_folds: int,
-    random_state: int,
-) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], list[dict[str, Any]]]:
-    """Build shuffled lap-wise CV intervals and per-lap fold ownership records."""
-    validate_fold_count(trajectory_intervals, n_folds=n_folds)
-
-    train_starts: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
-    train_ends: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
-    test_starts: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
-    test_ends: dict[int, list[np.ndarray]] = {fold: [] for fold in range(n_folds)}
-    fold_interval_records: list[dict[str, Any]] = []
-
-    for trajectory_type in TRAJECTORY_TYPES:
-        starts, ends = intervalset_to_arrays(trajectory_intervals[trajectory_type])
-        splitter = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-        for fold, (train_idx, test_idx) in enumerate(splitter.split(np.arange(starts.size))):
-            train_starts[fold].append(starts[train_idx])
-            train_ends[fold].append(ends[train_idx])
-            test_starts[fold].append(starts[test_idx])
-            test_ends[fold].append(ends[test_idx])
-            for lap_index in test_idx:
-                fold_interval_records.append(
-                    {
-                        "start": float(starts[lap_index]),
-                        "end": float(ends[lap_index]),
-                        "trajectory_type": trajectory_type,
-                        "fold": int(fold),
-                    }
-                )
-
-    train_intervals = {
-        fold: combine_interval_chunks(train_starts[fold], train_ends[fold])
-        for fold in range(n_folds)
+    """Return the number of laps available for each trajectory type."""
+    return {
+        trajectory_type: int(
+            intervalset_to_arrays(trajectory_intervals[trajectory_type])[0].size
+        )
+        for trajectory_type in TRAJECTORY_TYPES
     }
-    test_intervals = {
-        fold: combine_interval_chunks(test_starts[fold], test_ends[fold])
-        for fold in range(n_folds)
-    }
-    sorted_records = validate_non_overlapping_fold_intervals(fold_interval_records)
-    return train_intervals, test_intervals, sorted_records
-
-
-def build_lapwise_train_test_intervals(
-    trajectory_intervals: dict[str, Any],
-    *,
-    n_folds: int,
-    random_state: int,
-) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
-    """Build shuffled lap-wise train/test intervals pooled across trajectories."""
-    train_intervals, test_intervals, _records = build_lapwise_cv(
-        trajectory_intervals,
-        n_folds=n_folds,
-        random_state=random_state,
-    )
-    return train_intervals, test_intervals
-
-
-def validate_non_overlapping_fold_intervals(
-    fold_interval_records: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Return chronologically sorted fold records, failing on invalid overlaps."""
-    if not fold_interval_records:
-        raise ValueError("No trajectory intervals were available for fold assignment.")
-
-    sorted_records = sorted(fold_interval_records, key=lambda record: record["start"])
-    previous_record: dict[str, Any] | None = None
-    for record in sorted_records:
-        if record["end"] <= record["start"]:
-            raise ValueError(
-                "Trajectory interval end time must be after start time. "
-                f"Got {record!r}."
-            )
-        if previous_record is not None and record["start"] < previous_record["end"]:
-            raise ValueError(
-                "Trajectory intervals overlap, so prediction fold ownership is ambiguous. "
-                f"Previous interval: {previous_record!r}; current interval: {record!r}."
-            )
-        previous_record = record
-    return sorted_records
 
 
 def make_interval_mask(time_grid: np.ndarray, intervals: np.ndarray) -> np.ndarray:
@@ -1001,42 +906,66 @@ def make_interval_mask(time_grid: np.ndarray, intervals: np.ndarray) -> np.ndarr
     return mask
 
 
-def build_full_epoch_prediction_fold(
+def build_trajectory_time_mask(
     time_grid: np.ndarray,
-    fold_interval_records: list[dict[str, Any]],
+    trajectory_intervals: dict[str, Any],
 ) -> np.ndarray:
-    """Assign every trimmed epoch time bin to exactly one prediction fold.
+    """Return bins inside any trajectory interval on the decoder time grid."""
+    trajectory_mask = np.zeros(np.asarray(time_grid).shape, dtype=bool)
+    for trajectory_type in TRAJECTORY_TYPES:
+        starts, ends = intervalset_to_arrays(trajectory_intervals[trajectory_type])
+        if np.any(ends <= starts):
+            raise ValueError(
+                f"Trajectory {trajectory_type!r} has an interval whose end time "
+                "is not after its start time."
+            )
+        trajectory_mask |= make_interval_mask(
+            time_grid,
+            np.column_stack((starts, ends)),
+        )
+    return trajectory_mask
 
-    Bins inside a trajectory interval inherit that trajectory interval's fold.
-    Bins between trajectories inherit the earlier trajectory's fold. Bins
-    before the first trajectory inherit the first fold, and bins after the last
-    trajectory inherit the last fold.
-    """
-    sorted_records = validate_non_overlapping_fold_intervals(fold_interval_records)
+
+def build_contiguous_time_folds(
+    time_grid: np.ndarray,
+    *,
+    n_folds: int,
+) -> tuple[np.ndarray, list[dict[str, int | float]]]:
+    """Split a decoder time grid into exhaustive contiguous CV folds."""
     time_array = np.asarray(time_grid, dtype=float)
     if time_array.ndim != 1 or time_array.size == 0:
         raise ValueError("time_grid must be a non-empty one-dimensional array.")
+    if not np.all(np.isfinite(time_array)):
+        raise ValueError("time_grid must contain only finite values.")
     if time_array.size > 1 and np.any(np.diff(time_array) <= 0):
         raise ValueError("time_grid must be strictly increasing.")
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least 2.")
+    if n_folds > time_array.size:
+        raise ValueError(
+            f"n_folds={n_folds} exceeds the {time_array.size} available time bins."
+        )
 
     fold_by_time = np.full(time_array.shape, -1, dtype=int)
-    for index, record in enumerate(sorted_records):
-        fold = int(record["fold"])
-        start_time = float(record["start"])
-        end_time = float(record["end"])
-        if index == 0:
-            fold_by_time[time_array <= start_time] = fold
-        fold_by_time[(time_array > start_time) & (time_array <= end_time)] = fold
-
-        if index + 1 < len(sorted_records):
-            next_start_time = float(sorted_records[index + 1]["start"])
-            fold_by_time[(time_array > end_time) & (time_array <= next_start_time)] = fold
-        else:
-            fold_by_time[time_array > end_time] = fold
+    fold_records: list[dict[str, int | float]] = []
+    for fold, indices in enumerate(np.array_split(np.arange(time_array.size), n_folds)):
+        fold_by_time[indices] = fold
+        start_index = int(indices[0])
+        stop_index = int(indices[-1]) + 1
+        fold_records.append(
+            {
+                "fold": int(fold),
+                "start_index": start_index,
+                "stop_index_exclusive": stop_index,
+                "start_time_s": float(time_array[start_index]),
+                "end_time_s": float(time_array[stop_index - 1]),
+                "n_time_bins": int(indices.size),
+            }
+        )
 
     if np.any(fold_by_time < 0):
         raise ValueError("Could not assign every time bin to a prediction fold.")
-    return fold_by_time
+    return fold_by_time, fold_records
 
 
 def get_trajectory_direction(linear_position: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1168,6 +1097,7 @@ def make_classifier(
         environments=environment,
         continuous_transition_types=continuous_transition_types,
         observation_models=observation_models,
+        initial_conditions_type=rtc.UniformInitialConditions(),
         sorted_spikes_algorithm="spiking_likelihood_kde_gpu",
         sorted_spikes_algorithm_params={
             "position_std": position_std,

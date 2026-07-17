@@ -24,13 +24,14 @@ from v1ca1.decoding._1d import (
     DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_POSITION_STD,
-    DEFAULT_RANDOM_STATE,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
+    CV_SCHEME,
     DISCRETE_VAR_CHOICES,
     REGIONS,
     build_classifier_output_paths,
+    build_contiguous_time_folds,
     build_prediction_output_paths,
     build_time_grid,
     get_analysis_path_for_session,
@@ -180,8 +181,8 @@ def build_region_output_paths(
     figure_output_dir: Path,
     epoch: str,
     n_folds: int,
-    random_state: int,
     time_bin_size_s: float,
+    position_offset: int,
     speed_threshold_cm_s: float,
     position_std: float,
     place_bin_size: float,
@@ -201,9 +202,9 @@ def build_region_output_paths(
             (
                 region,
                 epoch,
-                f"cv{n_folds}",
-                f"rs{random_state}",
+                f"cv{n_folds}_{CV_SCHEME}",
                 f"tb{format_compact_path_value(time_bin_size_s)}",
+                f"offset{position_offset}",
                 f"spd{format_compact_path_value(speed_threshold_cm_s)}",
                 f"std{format_compact_path_value(position_std)}",
                 f"pb{format_compact_path_value(place_bin_size)}",
@@ -271,6 +272,7 @@ def validate_prediction_dataset(
     *,
     prediction_path: Path,
     time_grid: np.ndarray,
+    n_folds: int,
 ) -> None:
     """Validate one prediction dataset against expected coordinates."""
     required_variables = (
@@ -300,6 +302,26 @@ def validate_prediction_dataset(
             f"Prediction output {prediction_path} does not match the current time grid. "
             "Check --time-bin-size-s, --position-offset, --animal-name, --date, "
             "and --epoch."
+        )
+    if dataset.attrs.get("cv_scheme") != CV_SCHEME:
+        raise ValueError(
+            f"Prediction output {prediction_path} was not produced with "
+            f"cv_scheme={CV_SCHEME!r}. Rerun fit_1d and predict_1d."
+        )
+    if int(dataset.attrs.get("n_folds", -1)) != n_folds:
+        raise ValueError(
+            f"Prediction output {prediction_path} does not record the expected "
+            f"n_folds={n_folds}."
+        )
+    expected_fold_by_time, _fold_records = build_contiguous_time_folds(
+        expected_time,
+        n_folds=n_folds,
+    )
+    predicted_fold_by_time = np.asarray(dataset["cv_fold"], dtype=int)
+    if not np.array_equal(predicted_fold_by_time, expected_fold_by_time):
+        raise ValueError(
+            f"Prediction output {prediction_path} has fold assignments that do not "
+            "match the current contiguous-time partition."
         )
 
 
@@ -931,6 +953,7 @@ def process_region(
     epoch: str,
     unit_selection_label: str,
     time_grid: np.ndarray,
+    n_folds: int,
     head_position: np.ndarray,
     head_direction: np.ndarray,
     trajectory_samples: dict[str, np.ndarray],
@@ -950,6 +973,7 @@ def process_region(
             dataset,
             prediction_path=prediction_path,
             time_grid=time_grid,
+            n_folds=n_folds,
         )
         environment_positions = validate_environment_matches_prediction(
             environment,
@@ -1076,7 +1100,8 @@ def run(args: argparse.Namespace) -> None:
         regions=selected_regions,
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
+        time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         direction=args.direction,
         movement=args.movement,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -1096,7 +1121,8 @@ def run(args: argparse.Namespace) -> None:
         regions=selected_regions,
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
+        time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         direction=args.direction,
         movement=args.movement,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
@@ -1113,8 +1139,8 @@ def run(args: argparse.Namespace) -> None:
         figure_output_dir=get_error_figure_dir(analysis_path),
         epoch=args.epoch,
         n_folds=args.n_folds,
-        random_state=args.random_state,
         time_bin_size_s=args.time_bin_size_s,
+        position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
         position_std=args.position_std,
         place_bin_size=args.place_bin_size,
@@ -1196,6 +1222,7 @@ def run(args: argparse.Namespace) -> None:
             epoch=args.epoch,
             unit_selection_label=unit_selection_label,
             time_grid=time_grid,
+            n_folds=args.n_folds,
             head_position=head_position,
             head_direction=head_direction,
             trajectory_samples=trajectory_samples,
@@ -1221,7 +1248,7 @@ def run(args: argparse.Namespace) -> None:
             "regions": list(selected_regions),
             "data_root": args.data_root,
             "n_folds": args.n_folds,
-            "random_state": args.random_state,
+            "cv_scheme": CV_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
@@ -1277,13 +1304,7 @@ def parse_arguments() -> argparse.Namespace:
         "--n-folds",
         type=int,
         default=DEFAULT_N_FOLDS,
-        help=f"Number of shuffled lap-wise cross-validation folds. Default: {DEFAULT_N_FOLDS}",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help=f"Random seed used for shuffled lap-wise folds. Default: {DEFAULT_RANDOM_STATE}",
+        help=f"Number of contiguous-time cross-validation folds. Default: {DEFAULT_N_FOLDS}",
     )
     parser.add_argument(
         "--time-bin-size-s",
