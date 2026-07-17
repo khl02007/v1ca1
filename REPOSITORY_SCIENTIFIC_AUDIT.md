@@ -99,7 +99,7 @@ Important limits:
 | F5 | P0/P1 | Confirmed selection leakage | Target-condition data select neurons before transfer CV | Held-out performance and the evaluated cell cohort are optimistically conditioned |
 | F6 | P0/P1 | Methodological risk | Figure inference pools neurons across four animals | P-values can be much too small because within-animal dependence is ignored |
 | F7 | P1 | Confirmed defect | Ripple-decoding null concatenates unequal-length response blocks | Null rows no longer align with design rows by ripple |
-| F8 | P1 | Confirmed defect | 1D spike binning always leaves the final output row empty | Systematic endpoint misalignment and a slightly incorrect requested bin width |
+| F8 | Resolved | Confirmed defect, fixed 2026-07-16 | 1D spike binning formerly left the final output row empty | Replaced with explicit fixed-width edges and center coordinates |
 | F9 | P1 | Confirmed defect / reproducibility | Mutual-information shuffles have no seed | Corrected MI changes across runs and cannot be reconstructed from logs |
 | F10 | P1 | Confirmed analysis mismatch | Cross-trajectory encoding fills source-curve gaps with a target-derived rate | The nominal source model partly uses target training data in unsupported bins |
 | F11 | P1 | Integrity / multiplicity | Broad NPZ fallback and uncorrected ripple-unit significance | Stale data can be selected silently; false-positive families are undefined |
@@ -181,13 +181,13 @@ If ripple A has 3 bins and ripple B has 7, placing B's response first assigns th
 
 **Recommendation.** Use fixed-length windows, shuffle only among equal-length blocks, or map a source ripple into a destination block with a documented length-preserving resampling rule. Add an unequal-length regression test that verifies every destination ripple receives exactly one complete, aligned null block.
 
-### F8 — The 1D spike indicator has an endpoint/bin-count defect
+### F8 — The 1D spike indicator formerly had an endpoint/bin-count defect
 
-**Evidence.** [`build_time_grid`](src/v1ca1/decoding/_1d.py#L730-L751) uses `ceil` and then `linspace`, so the actual interval is not exactly the requested `time_bin_size_s`. [`get_spike_indicator`](src/v1ca1/decoding/_1d.py#L754-L779) digitizes against only `time_array[1:-1]` but requests `N` output rows. `np.digitize` can therefore produce only indices `0` through `N-2`; the final row is always zero.
+**Status: resolved on 2026-07-16.** The old time grid used `ceil` with `linspace`, so its intervals were not necessarily the requested width. The spike indicator then padded `N-1` real intervals to `N` rows, leaving the final row empty.
 
-**Impact.** At minimum there is a systematic empty endpoint row and an inaccurate stored bin size. This also complicates alignment among spike counts, interpolated position, and posterior time coordinates.
+The active workflow now uses [`build_time_bins`](src/v1ca1/decoding/_1d.py) to construct explicit `N+1` fixed-width edges and `N` center coordinates. [`get_spike_indicator`](src/v1ca1/decoding/_1d.py) counts spikes against those edges with one output row per center. Position, speed, folds, posterior coordinates, and error calculations use the centers; only a final incomplete interval shorter than one requested bin is omitted.
 
-**Recommendation.** Construct explicit `N+1` bin edges and `N` centers, then use the same edges for spike counts and coordinates. Store the actual bin width and add tests with spikes in the first, interior, and final bins.
+Classifier, prediction, Figurl, and decoding-error paths now carry `binning_edges_centers_v1`, and prediction NetCDF metadata are validated before reuse. Regression tests cover exact widths, the first and final edges, interior boundaries, count conservation, a populated final bin, empty unit selections, invalid grids, and path versioning ([`test_decoding_1d.py`](tests/test_decoding_1d.py), [`test_predict_1d.py`](tests/test_predict_1d.py)).
 
 ### F9 — Corrected mutual information is not reproducible
 

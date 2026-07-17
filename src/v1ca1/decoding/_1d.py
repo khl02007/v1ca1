@@ -39,6 +39,7 @@ from v1ca1.ripple.ripple_glm import (
 
 DEFAULT_N_FOLDS = 5
 CV_SCHEME = "contiguous_time"
+BINNING_SCHEME = "edges_centers_v1"
 DEFAULT_TIME_BIN_SIZE_S = 0.002
 DEFAULT_POSITION_STD = 4.0
 DEFAULT_PLACE_BIN_SIZE_CM = 2.0
@@ -144,6 +145,7 @@ def classifier_output_path(
         f"classifier_{region}_{epoch}_1d"
         f"_fold_{fold}_of_{n_folds}_cv_{CV_SCHEME}"
         f"_tb_{time_bin_size_s}"
+        f"_binning_{BINNING_SCHEME}"
         f"_offset_{position_offset}"
         f"_dir_{direction}"
         f"_mov_{movement}"
@@ -226,6 +228,7 @@ def prediction_output_path(
         f"_{CV_SCHEME}"
         f"_folds_{n_folds}"
         f"_tb_{time_bin_size_s}"
+        f"_binning_{BINNING_SCHEME}"
         f"_offset_{position_offset}"
         f"_dir_{direction}"
         f"_mov_{movement}"
@@ -310,6 +313,7 @@ def figurl_output_path(
         f"_{CV_SCHEME}"
         f"_folds_{n_folds}"
         f"_tb_{time_bin_size_s}"
+        f"_binning_{BINNING_SCHEME}"
         f"_offset_{position_offset}"
         f"_dir_{direction}"
         f"_mov_{movement}"
@@ -738,55 +742,87 @@ def get_analysis_path_for_session(
     return get_analysis_path(animal_name=animal_name, date=date, data_root=data_root)
 
 
-def build_time_grid(
+def build_time_bins(
     timestamps_position: np.ndarray,
     *,
     position_offset: int,
     time_bin_size_s: float,
-) -> np.ndarray:
-    """Return the uniform decoder time grid for one epoch."""
-    if timestamps_position.size <= position_offset:
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return exact-width decoder bin edges and center coordinates."""
+    timestamp_array = np.asarray(timestamps_position, dtype=float)
+    if timestamp_array.ndim != 1:
+        raise ValueError("Position timestamps must be one-dimensional.")
+    if position_offset < 0:
+        raise ValueError("Position offset must be non-negative.")
+    if timestamp_array.size <= position_offset:
         raise ValueError(
             "Position offset removes all timestamp samples. "
-            f"timestamp count: {timestamps_position.size}, position_offset: {position_offset}"
+            f"timestamp count: {timestamp_array.size}, position_offset: {position_offset}"
         )
+    time_bin_size_s = float(time_bin_size_s)
+    if not np.isfinite(time_bin_size_s) or time_bin_size_s <= 0:
+        raise ValueError("Time bin size must be positive and finite.")
 
-    trimmed_timestamps = np.asarray(timestamps_position[position_offset:], dtype=float)
+    trimmed_timestamps = timestamp_array[position_offset:]
+    if not np.all(np.isfinite(trimmed_timestamps)):
+        raise ValueError("Trimmed position timestamps must be finite.")
+    if trimmed_timestamps.size > 1 and np.any(np.diff(trimmed_timestamps) <= 0):
+        raise ValueError("Trimmed position timestamps must be strictly increasing.")
     start_time = float(trimmed_timestamps[0])
     end_time = float(trimmed_timestamps[-1])
     if end_time <= start_time:
         raise ValueError("Trimmed position timestamps must span a positive duration.")
 
-    sampling_rate = 1.0 / float(time_bin_size_s)
-    n_samples = int(np.ceil((end_time - start_time) * sampling_rate)) + 1
-    return np.linspace(start_time, end_time, n_samples)
+    duration = end_time - start_time
+    n_bins = int(np.floor(duration / time_bin_size_s))
+    # Endpoint subtraction can land a few ULPs below an exact bin multiple.
+    # Include the next edge only when it is indistinguishable from the endpoint.
+    next_edge = start_time + (n_bins + 1) * time_bin_size_s
+    edge_tolerance = 8.0 * np.finfo(float).eps * max(
+        1.0,
+        abs(start_time),
+        abs(end_time),
+        abs(next_edge),
+    )
+    if next_edge <= end_time + edge_tolerance:
+        n_bins += 1
+    if n_bins < 1:
+        raise ValueError(
+            "Trimmed position timestamps do not span one complete time bin."
+        )
+    time_bin_edges = start_time + time_bin_size_s * np.arange(n_bins + 1)
+    time_grid = time_bin_edges[:-1] + time_bin_size_s / 2.0
+    return time_bin_edges, time_grid
 
 
 def get_spike_indicator(
     sorting: Any,
     *,
     timestamps_ephys_all: np.ndarray,
-    time_grid: np.ndarray,
+    time_bin_edges: np.ndarray,
     unit_ids: list[Any] | None = None,
 ) -> np.ndarray:
-    """Bin one sorting extractor's spike trains onto the requested time grid."""
+    """Count one sorting extractor's spikes between explicit time-bin edges."""
     spike_indicator: list[np.ndarray] = []
     all_timestamps = np.asarray(timestamps_ephys_all, dtype=float)
-    time_array = np.asarray(time_grid, dtype=float)
+    edge_array = np.asarray(time_bin_edges, dtype=float)
+    if edge_array.ndim != 1:
+        raise ValueError("Time-bin edges must be one-dimensional.")
+    if edge_array.size < 2:
+        raise ValueError("Time-bin edges must contain at least two values.")
+    if not np.all(np.isfinite(edge_array)):
+        raise ValueError("Time-bin edges must be finite.")
+    if np.any(np.diff(edge_array) <= 0):
+        raise ValueError("Time-bin edges must be strictly increasing.")
 
     selected_unit_ids = list(sorting.get_unit_ids()) if unit_ids is None else unit_ids
     for unit_id in selected_unit_ids:
         spike_indices = np.asarray(sorting.get_unit_spike_train(unit_id), dtype=int)
         spike_times = all_timestamps[spike_indices]
-        spike_times = spike_times[(spike_times > time_array[0]) & (spike_times <= time_array[-1])]
-        spike_indicator.append(
-            np.bincount(
-                np.digitize(spike_times, time_array[1:-1]),
-                minlength=time_array.shape[0],
-            )
-        )
+        spike_counts, _ = np.histogram(spike_times, bins=edge_array)
+        spike_indicator.append(spike_counts)
     if not spike_indicator:
-        return np.zeros((time_array.shape[0], 0), dtype=float)
+        return np.zeros((edge_array.size - 1, 0), dtype=float)
     return np.asarray(spike_indicator, dtype=float).T
 
 

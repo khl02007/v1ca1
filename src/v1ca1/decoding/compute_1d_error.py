@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from v1ca1.decoding._1d import (
+    BINNING_SCHEME,
     DEFAULT_BRANCH_GAP_CM,
     DEFAULT_DATA_ROOT,
     DEFAULT_MOVEMENT_VAR,
@@ -33,7 +34,7 @@ from v1ca1.decoding._1d import (
     build_classifier_output_paths,
     build_contiguous_time_folds,
     build_prediction_output_paths,
-    build_time_grid,
+    build_time_bins,
     get_analysis_path_for_session,
     get_fit_output_dir,
     get_predict_output_dir,
@@ -204,6 +205,7 @@ def build_region_output_paths(
                 epoch,
                 f"cv{n_folds}_{CV_SCHEME}",
                 f"tb{format_compact_path_value(time_bin_size_s)}",
+                f"binning_{BINNING_SCHEME}",
                 f"offset{position_offset}",
                 f"spd{format_compact_path_value(speed_threshold_cm_s)}",
                 f"std{format_compact_path_value(position_std)}",
@@ -307,6 +309,11 @@ def validate_prediction_dataset(
         raise ValueError(
             f"Prediction output {prediction_path} was not produced with "
             f"cv_scheme={CV_SCHEME!r}. Rerun fit_1d and predict_1d."
+        )
+    if dataset.attrs.get("binning_scheme") != BINNING_SCHEME:
+        raise ValueError(
+            f"Prediction output {prediction_path} was not produced with "
+            f"binning_scheme={BINNING_SCHEME!r}. Rerun fit_1d and predict_1d."
         )
     if int(dataset.attrs.get("n_folds", -1)) != n_folds:
         raise ValueError(
@@ -1171,7 +1178,8 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"Computing 1D ahead/behind error for {args.animal_name} {args.date} "
         f"epoch {args.epoch}; regions={list(selected_regions)}, "
-        f"unit_selection={unit_selection_label}, position_bin_size_cm={position_bin_size_cm}."
+        f"binning_scheme={BINNING_SCHEME}, unit_selection={unit_selection_label}, "
+        f"position_bin_size_cm={position_bin_size_cm}."
     )
 
     session = load_required_session_inputs(
@@ -1185,7 +1193,7 @@ def run(args: argparse.Namespace) -> None:
     if args.epoch not in body_position_by_epoch:
         raise ValueError(f"Cleaned DLC position parquet does not contain epoch {args.epoch!r}.")
 
-    time_grid = build_time_grid(
+    _time_bin_edges, time_grid = build_time_bins(
         session["timestamps_position"],
         position_offset=args.position_offset,
         time_bin_size_s=args.time_bin_size_s,
@@ -1249,6 +1257,7 @@ def run(args: argparse.Namespace) -> None:
             "data_root": args.data_root,
             "n_folds": args.n_folds,
             "cv_scheme": CV_SCHEME,
+            "binning_scheme": BINNING_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,

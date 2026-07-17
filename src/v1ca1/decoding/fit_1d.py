@@ -31,6 +31,7 @@ from v1ca1.decoding._1d import (
     DEFAULT_SPEED_THRESHOLD_CM_S,
     DEFAULT_TIME_BIN_SIZE_S,
     DEFAULT_V1_RIPPLE_GLM_P_VALUE_THRESHOLD,
+    BINNING_SCHEME,
     CV_SCHEME,
     DISCRETE_VAR_CHOICES,
     REGIONS,
@@ -38,7 +39,7 @@ from v1ca1.decoding._1d import (
     build_contiguous_time_folds,
     build_trajectory_time_mask,
     build_unit_ids_by_region,
-    build_time_grid,
+    build_time_bins,
     build_decoder_state_models,
     compute_speed_on_time_grid,
     count_trajectory_laps,
@@ -124,6 +125,7 @@ def fit_region_classifiers(
     region: str,
     sorting: Any,
     timestamps_ephys_all: np.ndarray,
+    time_bin_edges: np.ndarray,
     time_grid: np.ndarray,
     unit_ids: list[Any],
     linear_position: np.ndarray,
@@ -147,9 +149,13 @@ def fit_region_classifiers(
     spike_indicator = get_spike_indicator(
         sorting,
         timestamps_ephys_all=timestamps_ephys_all,
-        time_grid=time_grid,
+        time_bin_edges=time_bin_edges,
         unit_ids=unit_ids,
     )
+    if spike_indicator.shape[0] != time_grid.size:
+        raise ValueError(
+            "Spike counts and decoder bin centers must have matching lengths."
+        )
     if spike_indicator.shape[1] == 0:
         raise ValueError(f"Region {region!r} has no units to fit.")
 
@@ -266,7 +272,7 @@ def run(args: argparse.Namespace) -> None:
         animal_name=args.animal_name,
         epoch=args.epoch,
     )
-    time_grid = build_time_grid(
+    time_bin_edges, time_grid = build_time_bins(
         session["timestamps_position"],
         position_offset=args.position_offset,
         time_bin_size_s=args.time_bin_size_s,
@@ -311,7 +317,8 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"Fitting 1D decoder for {args.animal_name} {args.date} epoch {args.epoch}; "
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
-        f"cv_scheme={CV_SCHEME}, direction={args.direction}, "
+        f"cv_scheme={CV_SCHEME}, binning_scheme={BINNING_SCHEME}, "
+        f"direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
     )
     saved_classifier_paths: list[Path] = []
@@ -321,6 +328,7 @@ def run(args: argparse.Namespace) -> None:
                 region=region,
                 sorting=sortings[region],
                 timestamps_ephys_all=session["timestamps_ephys_all"],
+                time_bin_edges=time_bin_edges,
                 time_grid=time_grid,
                 unit_ids=unit_ids_by_region[region],
                 linear_position=linear_position,
@@ -353,6 +361,7 @@ def run(args: argparse.Namespace) -> None:
             "data_root": args.data_root,
             "n_folds": args.n_folds,
             "cv_scheme": CV_SCHEME,
+            "binning_scheme": BINNING_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,

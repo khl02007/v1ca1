@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from v1ca1.decoding._1d import (
+    BINNING_SCHEME,
     DEFAULT_BRANCH_GAP_CM,
     DEFAULT_DATA_ROOT,
     DEFAULT_MOVEMENT_VAR,
@@ -37,7 +38,7 @@ from v1ca1.decoding._1d import (
     build_classifier_output_paths,
     build_contiguous_time_folds,
     build_prediction_output_paths,
-    build_time_grid,
+    build_time_bins,
     build_unit_ids_by_region,
     compute_speed_on_time_grid,
     count_trajectory_laps,
@@ -237,21 +238,23 @@ def make_raster_view(
     *,
     sorting: Any,
     timestamps_ephys_all: np.ndarray,
-    time_grid: np.ndarray,
+    time_bin_edges: np.ndarray,
     unit_ids: list[Any] | None = None,
 ) -> Any:
     """Return a raster view for spikes inside the decoded time span."""
     import sortingview.views as vv
 
     plot_items = []
-    start_time = float(time_grid[0])
-    end_time = float(time_grid[-1])
+    start_time = float(time_bin_edges[0])
+    end_time = float(time_bin_edges[-1])
     all_timestamps = np.asarray(timestamps_ephys_all, dtype=float)
     selected_unit_ids = list(sorting.get_unit_ids()) if unit_ids is None else unit_ids
     for unit_id in selected_unit_ids:
         spike_indices = np.asarray(sorting.get_unit_spike_train(unit_id), dtype=int)
         spike_times = all_timestamps[spike_indices]
-        spike_times = spike_times[(spike_times > start_time) & (spike_times <= end_time)]
+        spike_times = spike_times[
+            (spike_times >= start_time) & (spike_times <= end_time)
+        ]
         if spike_times.size:
             plot_items.append(
                 vv.RasterPlotItem(
@@ -268,6 +271,7 @@ def make_region_figurl_panel(
     results: Any,
     sorting: Any,
     timestamps_ephys_all: np.ndarray,
+    time_bin_edges: np.ndarray,
     time_grid: np.ndarray,
     unit_ids: list[Any],
     linear_position: np.ndarray,
@@ -308,7 +312,7 @@ def make_region_figurl_panel(
                 make_raster_view(
                     sorting=sorting,
                     timestamps_ephys_all=timestamps_ephys_all,
-                    time_grid=time_grid,
+                    time_bin_edges=time_bin_edges,
                     unit_ids=unit_ids,
                 ),
                 stretch=1,
@@ -325,6 +329,7 @@ def make_combined_figurl_view(
     results_by_region: dict[str, Any],
     sortings: dict[str, Any],
     timestamps_ephys_all: np.ndarray,
+    time_bin_edges: np.ndarray,
     time_grid: np.ndarray,
     unit_ids_by_region: dict[str, list[Any]],
     linear_position: np.ndarray,
@@ -342,6 +347,7 @@ def make_combined_figurl_view(
             results=results_by_region[region],
             sorting=sortings[region],
             timestamps_ephys_all=timestamps_ephys_all,
+            time_bin_edges=time_bin_edges,
             time_grid=time_grid,
             unit_ids=unit_ids_by_region[region],
             linear_position=linear_position,
@@ -378,6 +384,7 @@ def save_figurl(
     results_by_region: dict[str, Any],
     sortings: dict[str, Any],
     timestamps_ephys_all: np.ndarray,
+    time_bin_edges: np.ndarray,
     time_grid: np.ndarray,
     unit_ids_by_region: dict[str, list[Any]],
     linear_position: np.ndarray,
@@ -388,7 +395,8 @@ def save_figurl(
 ) -> Path:
     """Create and save one combined figurl URL."""
     os.environ.setdefault("KACHERY_ZONE", "franklab.default")
-    figurl_time_zero = float(time_grid[0])
+    figurl_time_zero = float(time_bin_edges[0])
+    figurl_time_bin_edges = np.asarray(time_bin_edges, dtype=float) - figurl_time_zero
     figurl_time_grid = np.asarray(time_grid, dtype=float) - figurl_time_zero
     figurl_timestamps_ephys_all = (
         np.asarray(timestamps_ephys_all, dtype=float) - figurl_time_zero
@@ -402,6 +410,7 @@ def save_figurl(
         results_by_region=figurl_results_by_region,
         sortings=sortings,
         timestamps_ephys_all=figurl_timestamps_ephys_all,
+        time_bin_edges=figurl_time_bin_edges,
         time_grid=figurl_time_grid,
         unit_ids_by_region=unit_ids_by_region,
         linear_position=linear_position,
@@ -432,6 +441,7 @@ def predict_region(
     sorting: Any,
     classifier_paths: dict[tuple[str, int], Path],
     timestamps_ephys_all: np.ndarray,
+    time_bin_edges: np.ndarray,
     time_grid: np.ndarray,
     unit_ids: list[Any],
     fold_by_time: np.ndarray,
@@ -445,9 +455,13 @@ def predict_region(
     spike_indicator = get_spike_indicator(
         sorting,
         timestamps_ephys_all=timestamps_ephys_all,
-        time_grid=time_grid,
+        time_bin_edges=time_bin_edges,
         unit_ids=unit_ids,
     )
+    if spike_indicator.shape[0] != time_grid.size:
+        raise ValueError(
+            "Spike counts and decoder bin centers must have matching lengths."
+        )
     if spike_indicator.shape[1] == 0:
         raise ValueError(f"Region {region!r} has no units to predict.")
 
@@ -525,6 +539,11 @@ def load_saved_prediction_result(
         raise ValueError(
             f"Saved prediction result {path} was not produced with "
             f"cv_scheme={CV_SCHEME!r}. Rerun fit_1d and predict_1d."
+        )
+    if result.attrs.get("binning_scheme") != BINNING_SCHEME:
+        raise ValueError(
+            f"Saved prediction result {path} was not produced with "
+            f"binning_scheme={BINNING_SCHEME!r}. Rerun fit_1d and predict_1d."
         )
     expected_n_folds = int(np.unique(np.asarray(fold_by_time, dtype=int)).size)
     if int(result.attrs.get("n_folds", -1)) != expected_n_folds:
@@ -662,7 +681,7 @@ def run(args: argparse.Namespace) -> None:
         animal_name=args.animal_name,
         epoch=args.epoch,
     )
-    time_grid = build_time_grid(
+    time_bin_edges, time_grid = build_time_bins(
         session["timestamps_position"],
         position_offset=args.position_offset,
         time_bin_size_s=args.time_bin_size_s,
@@ -709,7 +728,8 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"{action_label} for {args.animal_name} {args.date} epoch {args.epoch}; "
         f"regions={list(selected_regions)}, n_folds={args.n_folds}, "
-        f"cv_scheme={CV_SCHEME}, direction={args.direction}, "
+        f"cv_scheme={CV_SCHEME}, binning_scheme={BINNING_SCHEME}, "
+        f"direction={args.direction}, "
         f"movement={args.movement}, unit_selection={unit_selection_label}."
         f" posterior={posterior_name}."
     )
@@ -727,9 +747,13 @@ def run(args: argparse.Namespace) -> None:
             spike_indicator = get_spike_indicator(
                 sortings[region],
                 timestamps_ephys_all=session["timestamps_ephys_all"],
-                time_grid=time_grid,
+                time_bin_edges=time_bin_edges,
                 unit_ids=unit_ids_by_region[region],
             )
+            if spike_indicator.shape[0] != time_grid.size:
+                raise ValueError(
+                    "Spike counts and decoder bin centers must have matching lengths."
+                )
             results_by_region[region] = combined_result
             spike_indicator_by_region[region] = spike_indicator
             print(
@@ -743,6 +767,7 @@ def run(args: argparse.Namespace) -> None:
             sorting=sortings[region],
             classifier_paths=classifier_paths,
             timestamps_ephys_all=session["timestamps_ephys_all"],
+            time_bin_edges=time_bin_edges,
             time_grid=time_grid,
             unit_ids=unit_ids_by_region[region],
             fold_by_time=fold_by_time,
@@ -760,7 +785,11 @@ def run(args: argparse.Namespace) -> None:
                 "region": region,
                 "n_folds": int(args.n_folds),
                 "cv_scheme": CV_SCHEME,
+                "binning_scheme": BINNING_SCHEME,
                 "time_bin_size_s": float(args.time_bin_size_s),
+                "time_coordinate": "bin_center",
+                "time_bin_start_edge_s": float(time_bin_edges[0]),
+                "time_bin_end_edge_s": float(time_bin_edges[-1]),
                 "position_offset": int(args.position_offset),
                 "speed_threshold_cm_s": float(args.speed_threshold_cm_s),
                 "position_std": float(args.position_std),
@@ -815,6 +844,7 @@ def run(args: argparse.Namespace) -> None:
             results_by_region=results_by_region,
             sortings=sortings,
             timestamps_ephys_all=session["timestamps_ephys_all"],
+            time_bin_edges=time_bin_edges,
             time_grid=time_grid,
             unit_ids_by_region=unit_ids_by_region,
             linear_position=linear_position,
@@ -835,6 +865,7 @@ def run(args: argparse.Namespace) -> None:
             "data_root": args.data_root,
             "n_folds": args.n_folds,
             "cv_scheme": CV_SCHEME,
+            "binning_scheme": BINNING_SCHEME,
             "time_bin_size_s": args.time_bin_size_s,
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
