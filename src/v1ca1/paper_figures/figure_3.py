@@ -61,7 +61,7 @@ DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_FIGURE_HEIGHT_MM = 110.0
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
 PANEL_ABC_WIDTH_RATIOS = (1.0, 1.0, 2.0)
-PANEL_BOTTOM_WIDTH_RATIOS = (1.0, 2.0, 2.0)
+PANEL_BOTTOM_WIDTH_RATIOS = (1.0, 4.0)
 PANEL_ABC_HEADER_LABEL_X_OFFSETS = (-0.18, -0.08, 0.0)
 PANEL_D_XLABEL_Y = -0.22
 PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT = 0.92
@@ -72,7 +72,7 @@ PANEL_C_GLM_SUMMARY_COLUMN_WIDTH = 0.26
 PANEL_D_COMPACT_SOURCE_LEFT = 0.14
 PANEL_D_COMPACT_SOURCE_RIGHT = 0.78
 PANEL_D_COMPACT_SOURCE_BOTTOM = 0.08
-PANEL_D_COMPACT_SOURCE_HEIGHT = 0.56
+PANEL_D_COMPACT_SOURCE_HEIGHT = 0.75
 PANEL_D_SOURCE_COMPARISON_TICKS = (-0.2, 0.0, 0.25, 0.5)
 PANEL_A_EXPANDED_HEATMAP_BOTTOM = 0.025
 PANEL_A_EXPANDED_HEATMAP_TOP = 0.875
@@ -201,15 +201,17 @@ PANEL_D_DARK_ACTIVITY_COLORS = {
     "active": SCHEMATIC_COLORS["dark_basis"],
 }
 PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS = (
-    (0.02, 0.36),
-    (0.55, 0.34),
+    (0.02, 0.20),
+    (0.26, 0.21),
     (0.0, 0.0),
 )
+PANEL_E_WIDTH_FRACTION = 0.60
+PANEL_E_DPPI_AXIS_BOUNDS = (0.65, 0.17, 0.25, 0.72)
 PANEL_F_DPPI_NULL_PERMUTATIONS = 20_000
 PANEL_F_DPPI_NULL_RANDOM_SEED = 59
 PANEL_F_DPPI_HISTOGRAM_BIN_EDGES = np.linspace(0.0, 1.0, 11)
 PANEL_F_DPPI_HISTOGRAM_ALPHA = 0.65
-PANEL_F_DPPI_SIGNIFICANCE_POSITION = (0.12, 0.88)
+PANEL_E_DPPI_SIGNIFICANCE_GAP_POINTS = 2.0
 PANEL_CD_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
 PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.5)
 PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.2, 0.5)
@@ -4988,7 +4990,10 @@ def plot_glm_analysis_panel(
         box_ax.set_ylim(0.45, 2.55)
         box_ax.set_yticks([1, 2])
         if index == 0:
-            box_ax.set_yticklabels(["n.s.", ""], fontsize=6)
+            box_ax.set_yticklabels(
+                ["n.s.", rf"$p$<{PANEL_C_SIGNIFICANCE_P_VALUE:g}"],
+                fontsize=6,
+            )
         else:
             box_ax.set_yticklabels([])
         if index == len(epoch_tables) - 1:
@@ -5720,6 +5725,7 @@ def _plot_dark_activity_significant_composition(
     fractions = [np.nan, np.nan]
     counts = [0, 0]
     total_significant_count = 0
+    bar_height = 0.58
     if table is None or len(table) == 0:
         ax.text(0.5, 0.5, "No GLM\nunits", ha="center", va="center", fontsize=6, transform=ax.transAxes)
     else:
@@ -5746,7 +5752,7 @@ def _plot_dark_activity_significant_composition(
         ax.barh(
             positions,
             widths,
-            height=0.58,
+            height=bar_height,
             color=colors,
             edgecolor=colors,
             linewidth=0.65,
@@ -5844,35 +5850,42 @@ def _plot_dark_activity_significant_composition(
                         zorder=5,
                     )
         for position, fraction, count in zip(positions, fractions, counts, strict=True):
-            label = (
-                f"{fraction:.2f}\nn={count}"
-                if np.isfinite(fraction)
-                else f"n={count}"
-            )
-            label_x = 0.04
-            label_ha = "left"
             if composition_label_x is not None:
-                label_x = composition_label_x
+                label = (
+                    f"{fraction:.2f}\nn={count}"
+                    if np.isfinite(fraction)
+                    else f"n={count}"
+                )
+                ax.text(
+                    composition_label_x,
+                    position,
+                    label,
+                    ha="left",
+                    va="center",
+                    fontsize=6,
+                )
             elif np.isfinite(fraction):
-                if fraction > 0.82:
-                    label_x = max(0.05, fraction - 0.055)
-                    label_ha = "right"
-                else:
-                    label_x = min(0.98, fraction + 0.05)
-            ax.text(
-                label_x,
-                position,
-                label,
-                ha=label_ha,
-                va="center",
-                fontsize=6,
-                bbox={
-                    "facecolor": "white",
-                    "edgecolor": "none",
-                    "alpha": 0.85,
-                    "pad": 0.2,
-                },
-            )
+                is_upper_bar = position > float(np.mean(positions))
+                vertical_direction = 1.0 if is_upper_bar else -1.0
+                ax.annotate(
+                    f"{fraction:.2f}, n={count}",
+                    xy=(fraction, position + vertical_direction * bar_height / 2.0),
+                    xytext=(0.0, vertical_direction),
+                    textcoords="offset points",
+                    ha="right" if fraction > 0.5 else "left",
+                    va="bottom" if is_upper_bar else "top",
+                    fontsize=6,
+                    annotation_clip=False,
+                )
+            else:
+                ax.text(
+                    0.04,
+                    position,
+                    f"n={count}",
+                    ha="left",
+                    va="center",
+                    fontsize=6,
+                )
         if show_significance_marker and np.isfinite(fractions[1]):
             _draw_vertical_significance_bracket(
                 ax,
@@ -5915,6 +5928,7 @@ def plot_glm_behavior_association_panel(
     ]
     | None = None,
     composition_label_x: float | None = None,
+    single_line_axis_labels: bool = False,
     similarity_median_text_position: tuple[float, float] = (0.96, 0.94),
     similarity_median_text_horizontalalignment: str = "right",
 ) -> None:
@@ -6013,6 +6027,10 @@ def plot_glm_behavior_association_panel(
             show_significance_marker=show_significance_marker,
             composition_label_x=composition_label_x,
         )
+        if single_line_axis_labels:
+            fraction_ax.set_xlabel(
+                f"$p$<{PANEL_C_SIGNIFICANCE_P_VALUE:g} frac."
+            )
         devexp_ax = ax.inset_axes(
             [devexp_left, bottom, devexp_width, height]
         )
@@ -6028,6 +6046,8 @@ def plot_glm_behavior_association_panel(
             show_y_ticklabels=False,
             show_significance_marker=show_significance_marker,
         )
+        if single_line_axis_labels:
+            devexp_ax.set_xlabel("Dev. explained")
         if include_similarity:
             similarity_ax = ax.inset_axes(
                 [similarity_left, bottom, similarity_width, height]
@@ -6232,6 +6252,7 @@ def plot_dark_active_dppi_distribution_panel(
     epoch_type: str = "light",
     n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
     random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+    axis_bounds: tuple[float, float, float, float] = (0.14, 0.17, 0.83, 0.72),
 ) -> dict[str, Any]:
     """Plot predictable-neuron dark DPPI with rank-permutation significance."""
     analysis = compute_dark_active_dppi_mean_rank_permutation(
@@ -6243,7 +6264,7 @@ def plot_dark_active_dppi_distribution_panel(
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    plot_ax = ax.inset_axes([0.14, 0.17, 0.83, 0.72])
+    plot_ax = ax.inset_axes(axis_bounds)
 
     selected_values = np.asarray(analysis["selected_values"], dtype=float)
     if not selected_values.size:
@@ -6259,7 +6280,7 @@ def plot_dark_active_dppi_distribution_panel(
         plot_ax.set_axis_off()
         return analysis
 
-    plot_ax.hist(
+    histogram_values, histogram_edges, _patches = plot_ax.hist(
         selected_values,
         bins=PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
         weights=_fraction_histogram_weights(selected_values),
@@ -6272,23 +6293,63 @@ def plot_dark_active_dppi_distribution_panel(
     displayed_p_value = float(analysis["monte_carlo_p_value"])
     significance_stars = _format_significance_stars(displayed_p_value)
     if significance_stars:
+        from matplotlib.transforms import ScaledTranslation
+
+        histogram_counts, _count_edges = np.histogram(
+            selected_values,
+            bins=PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
+        )
+        peak_index = int(np.argmax(histogram_counts))
+        peak_left = float(histogram_edges[peak_index])
+        peak_height = float(histogram_values[peak_index])
+        significance_transform = plot_ax.transData + ScaledTranslation(
+            -PANEL_E_DPPI_SIGNIFICANCE_GAP_POINTS / 72.0,
+            0.0,
+            plot_ax.figure.dpi_scale_trans,
+        )
         plot_ax.text(
-            *PANEL_F_DPPI_SIGNIFICANCE_POSITION,
+            peak_left,
+            peak_height,
             significance_stars,
-            ha="left",
+            ha="right",
             va="top",
             fontsize=7,
-            transform=plot_ax.transAxes,
+            transform=significance_transform,
         )
     plot_ax.set_xlim(0.0, 1.0)
     plot_ax.set_ylim(bottom=0.0)
     plot_ax.set_xticks([0.0, 0.5, 1.0])
     plot_ax.set_xlabel("Dark DPPI", fontsize=6, labelpad=1.0)
-    plot_ax.set_ylabel("Fraction of neurons", fontsize=6, labelpad=1.0)
+    plot_ax.set_ylabel("Fraction", fontsize=6, labelpad=1.0)
     plot_ax.spines["top"].set_visible(False)
     plot_ax.spines["right"].set_visible(False)
     plot_ax.tick_params(labelsize=6, length=1.5, pad=1)
     return analysis
+
+
+def plot_glm_dark_epoch_properties_panel(
+    ax: "Axes",
+    payload: Mapping[str, Any],
+    *,
+    n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+) -> dict[str, Any]:
+    """Plot dark activity and DPPI properties of ripple-predictable V1 cells."""
+    plot_glm_behavior_association_panel(
+        ax,
+        payload,
+        show_note=False,
+        include_similarity=False,
+        single_epoch_column_bounds=PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS,
+        single_line_axis_labels=True,
+    )
+    return plot_dark_active_dppi_distribution_panel(
+        ax,
+        payload,
+        n_permutations=n_permutations,
+        random_seed=random_seed,
+        axis_bounds=PANEL_E_DPPI_AXIS_BOUNDS,
+    )
 
 
 def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
@@ -6688,6 +6749,25 @@ def _align_axes_xaxis_baselines(
         )
 
 
+def _align_xaxis_labels_to_reference(
+    reference_ax: "Axes",
+    target_axes: Sequence["Axes"],
+) -> None:
+    """Align target x-axis labels to the reference label in display space."""
+    reference_label = reference_ax.xaxis.label
+    reference_display_y = reference_label.get_transform().transform(
+        reference_label.get_position()
+    )[1]
+    for target_ax in target_axes:
+        target_label = target_ax.xaxis.label
+        target_transform = target_label.get_transform()
+        target_display_x = target_transform.transform(target_label.get_position())[0]
+        aligned_position = target_transform.inverted().transform(
+            (target_display_x, reference_display_y)
+        )
+        target_label.set_position(aligned_position)
+
+
 def make_figure_3(
     *,
     data_root: Path,
@@ -6843,13 +6923,13 @@ def make_figure_3(
     )
     lower_grid = outer_grid[1, :].subgridspec(
         nrows=1,
-        ncols=3,
+        ncols=2,
         width_ratios=PANEL_BOTTOM_WIDTH_RATIOS,
     )
-    panel_f_grid = lower_grid[0, 2].subgridspec(
+    panel_e_grid = lower_grid[0, 1].subgridspec(
         nrows=1,
         ncols=2,
-        width_ratios=(0.81, 1.19),
+        width_ratios=(PANEL_E_WIDTH_FRACTION, 1.0 - PANEL_E_WIDTH_FRACTION),
         wspace=0.0,
     )
     axes = [
@@ -6857,8 +6937,7 @@ def make_figure_3(
         fig.add_subplot(outer_grid[0, 1]),
         fig.add_subplot(outer_grid[0, 2]),
         fig.add_subplot(lower_grid[0, 0]),
-        fig.add_subplot(lower_grid[0, 1]),
-        fig.add_subplot(panel_f_grid[0, 0]),
+        fig.add_subplot(panel_e_grid[0, 0]),
     ]
 
     plot_epoch_ripple_heatmap_panel(
@@ -6897,11 +6976,8 @@ def make_figure_3(
         ripple_trace=ripple_schematic_trace,
         prediction_examples=panel_b_prediction_examples,
     )
-    axes[2].set_title(
-        "Predicting V1 activity during ripples\nwith CA1 activity",
-        fontsize=7.2,
-        pad=2,
-    )
+    panel_c_title = "Predicting V1 activity during ripples with CA1 activity"
+    axes[2].set_title(panel_c_title, fontsize=7.2, pad=2)
     plot_glm_source_predictor_comparison_panel(
         axes[3],
         source_comparison_payload,
@@ -6915,28 +6991,22 @@ def make_figure_3(
         fontsize=7.2,
         pad=2,
     )
-    plot_glm_behavior_association_panel(
-        axes[4],
-        behavior_payload,
-        show_note=False,
-        include_similarity=False,
-        single_epoch_column_bounds=PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS,
-    )
-    panel_e_title = "Relationship to dark activity"
+    plot_glm_dark_epoch_properties_panel(axes[4], behavior_payload)
+    panel_e_title = "Relationship to dark-active DPP coding"
     axes[4].set_title(panel_e_title, fontsize=7.2, pad=2)
-    plot_dark_active_dppi_distribution_panel(
-        axes[5],
-        behavior_payload,
-    )
-    panel_f_title = "Predictable-cell DPPI"
-    axes[5].set_title(panel_f_title, fontsize=7.2, pad=2)
 
     fig.canvas.draw()
     fig.set_constrained_layout(False)
     if axes[3].child_axes:
         _align_axes_xaxis_baselines(
             axes[3].child_axes[0],
-            (*axes[4].child_axes, *axes[5].child_axes),
+            axes[4].child_axes,
+        )
+        fig.canvas.draw()
+    if len(axes[4].child_axes) >= 3:
+        _align_xaxis_labels_to_reference(
+            axes[4].child_axes[2],
+            axes[4].child_axes[:2],
         )
         fig.canvas.draw()
     panel_a_box = axes[0].get_position()
@@ -6952,21 +7022,23 @@ def make_figure_3(
         titles=(
             "Ripple-triggered\nmean firing rates",
             "CA1-V1 correlogram\nduring ripples",
-            "Predicting V1 activity during ripples\nwith CA1 activity",
+            panel_c_title,
         ),
         label_x_offsets=PANEL_ABC_HEADER_LABEL_X_OFFSETS,
         fontsize=7.2,
     )
     add_aligned_panel_headers(
         fig,
-        (axes[3], axes[4], axes[5]),
-        labels=("D", "E", "F"),
+        (axes[3], axes[4]),
+        labels=("D", "E"),
         titles=(
             "CA1 spike vector vs.\nmean CA1 activity",
             panel_e_title,
-            panel_f_title,
         ),
-        label_x_offsets=(panel_d_label_x_offset, -0.08, -0.22),
+        label_x_offsets=(
+            panel_d_label_x_offset,
+            -0.04 / PANEL_E_WIDTH_FRACTION,
+        ),
         fontsize=7.2,
     )
 
@@ -6974,7 +7046,7 @@ def make_figure_3(
     plt.close(fig)
     for missing in behavior_payload["missing_artifacts"]:
         print(
-            "Panels E-F dark-activity missing "
+            "Panel E dark-activity missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']}: {missing['path']}"
         )

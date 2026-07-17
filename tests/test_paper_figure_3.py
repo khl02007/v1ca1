@@ -85,6 +85,7 @@ from v1ca1.paper_figures.figure_3 import (
     plot_epoch_modulation_histogram_panel,
     plot_epoch_ripple_heatmap_panel,
     plot_glm_behavior_association_panel,
+    plot_glm_dark_epoch_properties_panel,
     plot_glm_analysis_panel,
     plot_glm_source_predictor_comparison_panel,
     plot_glm_offset_panel,
@@ -96,6 +97,7 @@ from v1ca1.paper_figures.figure_3 import (
     plot_ripple_lfp_panel,
     plot_top_ca1_xcorr_panel,
     _align_axes_xaxis_baselines,
+    _align_xaxis_labels_to_reference,
     _prediction_example_axis_limit,
 )
 
@@ -1600,9 +1602,8 @@ def test_plot_dark_active_dppi_distribution_panel_shows_predictable_histogram() 
     else:
         expected_stars = "n.s."
     assert text_values == [expected_stars]
-    assert plot_ax.texts[0].get_transform() == plot_ax.transAxes
     assert plot_ax.get_xlabel() == "Dark DPPI"
-    assert plot_ax.get_ylabel() == "Fraction of neurons"
+    assert plot_ax.get_ylabel() == "Fraction"
     assert plot_ax.get_xlim() == pytest.approx((0.0, 1.0))
     assert plot_ax.get_ylim()[0] == pytest.approx(0.0)
     assert plot_ax.get_legend() is None
@@ -1615,6 +1616,14 @@ def test_plot_dark_active_dppi_distribution_panel_shows_predictable_histogram() 
         selected_values,
         bins=PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
     )
+    expected_fractions = expected_counts / selected_values.size
+    peak_index = int(np.argmax(expected_fractions))
+    significance_text = plot_ax.texts[0]
+    assert significance_text.get_position() == pytest.approx(
+        (expected_edges[peak_index], expected_fractions[peak_index])
+    )
+    assert significance_text.get_ha() == "right"
+    assert significance_text.get_va() == "top"
     np.testing.assert_allclose(
         [patch.get_x() for patch in plot_ax.patches],
         expected_edges[:-1],
@@ -1642,6 +1651,12 @@ def test_plot_dark_active_dppi_distribution_panel_shows_predictable_histogram() 
         for patch in plot_ax.patches
     )
     fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    significance_bounds = significance_text.get_window_extent(renderer)
+    peak_bounds = plot_ax.patches[peak_index].get_window_extent(renderer)
+    significance_gap = peak_bounds.x0 - significance_bounds.x1
+    assert significance_gap == pytest.approx(2.0 * fig.dpi / 72.0, abs=1.0)
+    assert significance_bounds.y1 == pytest.approx(peak_bounds.y1, abs=1.0)
     text_artists = [
         plot_ax.xaxis.label,
         plot_ax.yaxis.label,
@@ -1874,6 +1889,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
                 ],
             }
         ),
+        "dark_active_dppi_reference_table": pd.DataFrame(
+            {"same_turn_tuning_similarity": [0.1, 0.3, 0.7, 0.9]}
+        ),
         "missing_artifacts": [],
         "dark_activity_threshold_hz": 0.5,
     }
@@ -2012,7 +2030,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert len(axes[2, 2].child_axes[2].patches) == 2
     assert [tick.get_text() for tick in axes[2, 2].child_axes[2].get_yticklabels()] == [
         "n.s.",
-        "",
+        "$p$<0.05",
     ]
     assert (
         axes[2, 2].child_axes[1].get_ylabel()
@@ -2243,8 +2261,19 @@ def test_plot_helpers_draw_expected_axes() -> None:
         abs=1.0,
     )
     assert [text.get_text() for text in similarity_ax.texts] == ["median=0.80"]
-    assert any(text.get_text() == "0.33\nn=1" for text in fraction_ax.texts)
-    assert any(text.get_text() == "0.67\nn=2" for text in fraction_ax.texts)
+    composition_labels = [
+        text
+        for text in fraction_ax.texts
+        if text.get_text() in {"0.33, n=1", "0.67, n=2"}
+    ]
+    assert {text.get_text() for text in composition_labels} == {
+        "0.33, n=1",
+        "0.67, n=2",
+    }
+    for label, bar in zip(composition_labels, fraction_ax.patches, strict=True):
+        assert not label.get_window_extent(renderer).overlaps(
+            bar.get_window_extent(renderer)
+        )
     significance_markers = [
         text for text in fraction_ax.texts if text.get_text() == "***"
     ]
@@ -2270,6 +2299,47 @@ def test_plot_helpers_draw_expected_axes() -> None:
     ) == pytest.approx(fraction_bracket_mid_y, abs=1.0)
     assert box_ax.get_window_extent(renderer).x0 - fraction_marker_bounds.x1 > 1.0
     assert all(tick.get_text() == "" for tick in box_ax.get_yticklabels())
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    plot_glm_dark_epoch_properties_panel(
+        ax,
+        association_payload,
+        n_permutations=25,
+        random_seed=1,
+    )
+    assert len(ax.child_axes) == 3
+    fraction_ax, box_ax, dppi_ax = ax.child_axes
+    assert fraction_ax.get_xlabel() == "$p$<0.05 frac."
+    assert box_ax.get_xlabel() == "Dev. explained"
+    assert dppi_ax.get_xlabel() == "Dark DPPI"
+    assert dppi_ax.get_ylabel() == "Fraction"
+    fig.canvas.draw()
+    _align_xaxis_labels_to_reference(dppi_ax, (fraction_ax, box_ax))
+    fig.canvas.draw()
+    parent_position = ax.get_position()
+    fraction_position = fraction_ax.get_position()
+    box_position = box_ax.get_position()
+    dppi_position = dppi_ax.get_position()
+    x_label_display_y = [
+        child_axis.xaxis.label.get_transform().transform(
+            child_axis.xaxis.label.get_position()
+        )[1]
+        for child_axis in (fraction_ax, box_ax, dppi_ax)
+    ]
+    e1_e2_gap = (
+        box_position.x0 - fraction_position.x1
+    ) / parent_position.width
+    e2_e3_gap = (dppi_position.x0 - box_position.x1) / parent_position.width
+    assert e1_e2_gap == pytest.approx(0.04)
+    assert e2_e3_gap == pytest.approx(0.18)
+    assert e1_e2_gap < e2_e3_gap
+    assert fraction_position.y0 == pytest.approx(box_position.y0)
+    assert fraction_position.y1 == pytest.approx(box_position.y1)
+    assert x_label_display_y == pytest.approx(
+        [x_label_display_y[-1]] * 3,
+        abs=1.0,
+    )
     plt.close(fig)
 
     fig, ax = plt.subplots()
@@ -2313,8 +2383,12 @@ def test_plot_helpers_draw_expected_axes() -> None:
     fig.canvas.draw()
     parent_position = ax.get_position()
     child_position = ax.child_axes[0].get_position()
+    compact_child_bottom = (
+        child_position.y0 - parent_position.y0
+    ) / parent_position.height
     compact_child_top = (child_position.y1 - parent_position.y0) / parent_position.height
-    assert compact_child_top < 0.75
+    assert compact_child_bottom == pytest.approx(0.08)
+    assert compact_child_top == pytest.approx(0.83)
     assert ax.child_axes[0].get_xlabel() == "Mean CA1\ndev. explained"
     assert ax.child_axes[0].get_ylabel() == "CA1 vector\ndev. explained"
     np.testing.assert_allclose(ax.child_axes[0].get_xticks(), ax.child_axes[0].get_yticks())
