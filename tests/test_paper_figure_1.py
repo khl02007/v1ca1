@@ -39,7 +39,6 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_SCHEMATIC_Y,
     DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
     DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
-    DECODING_SIGNIFICANCE_BRACKETS,
     DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
     DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
     DECODING_TRAIN_LABEL_Y,
@@ -48,6 +47,7 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_YLABEL_FONTSIZE,
     DECODING_YLABEL_X,
     DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
+    ENCODING_COMPARISON_BIN_SIZE_S,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
     ENCODING_MIN_TUNING_STABILITY_CORRELATION,
@@ -64,6 +64,7 @@ from v1ca1.paper_figures.figure_1 import (
     MOVEMENT_AXIS_Y,
     MOTOR_DELTA_METRIC,
     MOTOR_MIN_TUNING_STABILITY_CORRELATION,
+    MOTOR_NESTED_CV_CONFIG_TOKEN,
     MOTOR_NESTED_CV_RELATIVE_DIR,
     NEURON_SCALE_BAR_COUNT,
     PANEL_DARK_LIGHT_RASTER_BACKGROUND_ALPHA,
@@ -127,6 +128,7 @@ from v1ca1.paper_figures.figure_1 import (
     build_output_path,
     build_unit_keys,
     build_zero_including_histogram_bins,
+    compute_tuning_curve_peak_positions,
     draw_panel_a_assets,
     draw_behavior_task_design_panel,
     draw_panel_a_anatomy_assets,
@@ -139,6 +141,7 @@ from v1ca1.paper_figures.figure_1 import (
     filter_datasets_by_animals,
     filter_tuning_curve_units,
     format_place_bin_size_token,
+    format_time_bin_size_token,
     get_cross_trajectory_decoding_tsd_paths,
     get_decoding_comparison_dir,
     get_dark_epoch,
@@ -164,7 +167,9 @@ from v1ca1.paper_figures.figure_1 import (
     plot_stability_panel,
     save_panel_d_cache,
     load_panel_d_cache,
+    load_panel_d_cache_full_payload,
     load_panel_d_cache_payload,
+    load_panel_d_order_peak_positions,
     load_panel_d_ordered_unit_keys,
     save_panel_e_cache,
     load_panel_e_cache,
@@ -245,6 +250,21 @@ def test_build_normalized_position_bins_spans_zero_to_one() -> None:
     assert np.allclose(bins, [0.0, 0.25, 0.5, 0.75, 1.0])
 
 
+def test_compute_tuning_curve_peak_positions_preserves_ties() -> None:
+    peaks = compute_tuning_curve_peak_positions(
+        np.asarray(
+            [
+                [0.0, 1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [np.nan, 0.0, 2.0, 1.0],
+            ]
+        )
+    )
+
+    assert peaks[[0, 2]] == pytest.approx([1.5, 2.0])
+    assert np.isnan(peaks[1])
+
+
 def test_panel_d_cache_path_is_descriptive() -> None:
     metadata = build_panel_d_cache_metadata(
         data_root=Path("/analysis"),
@@ -280,7 +300,7 @@ def test_panel_d_cache_path_is_descriptive() -> None:
         "paper_figures/output/cache/"
         "figure_1_panel_d_v1_dark08_r4_datasets-L14-20240611-08_r4"
         "_orienttask_progression_minmovefr0p5_minstab0p5"
-        "_posbins100_offset5_speed4_sigma1p5_cachev6.npz"
+        "_posbins100_offset5_speed4_sigma1p5_cachev7.npz"
     )
 
 
@@ -306,6 +326,10 @@ def test_panel_d_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
         order_trajectory: np.asarray([f"unit-{index}"], dtype=str)
         for index, order_trajectory in enumerate(PANEL_D_TRAJECTORY_TYPES)
     }
+    ordered_peak_positions_by_trajectory = {
+        order_trajectory: np.asarray([float(index)], dtype=float)
+        for index, order_trajectory in enumerate(PANEL_D_TRAJECTORY_TYPES)
+    }
     cache_path = build_panel_d_cache_path(tmp_path, metadata)
 
     save_panel_d_cache(
@@ -313,18 +337,30 @@ def test_panel_d_cache_roundtrip_validates_metadata(tmp_path: Path) -> None:
         panels,
         metadata,
         ordered_unit_keys_by_trajectory=ordered_unit_keys_by_trajectory,
+        ordered_peak_positions_by_trajectory=(
+            ordered_peak_positions_by_trajectory
+        ),
     )
     loaded = load_panel_d_cache(cache_path, metadata)
+    loaded_full_payload = load_panel_d_cache_full_payload(cache_path, metadata)
     loaded_payload = load_panel_d_cache_payload(cache_path, metadata)
     loaded_unit_keys = load_panel_d_ordered_unit_keys(cache_path, metadata)
+    loaded_peak_positions = load_panel_d_order_peak_positions(
+        cache_path,
+        metadata,
+    )
 
     assert loaded is not None
+    assert loaded_full_payload is not None
     assert loaded_payload is not None
     assert loaded_unit_keys is not None
+    assert loaded_peak_positions is not None
     for key, expected in panels.items():
         assert np.array_equal(loaded[key], expected)
     for key, expected in ordered_unit_keys_by_trajectory.items():
         assert np.array_equal(loaded_unit_keys[key], expected)
+    for key, expected in ordered_peak_positions_by_trajectory.items():
+        assert np.array_equal(loaded_peak_positions[key], expected)
 
     stale_metadata = dict(metadata)
     stale_metadata["position_bin_count"] = 4
@@ -711,13 +747,30 @@ def test_load_dark_epoch_stability_table_filters_dark_epoch_and_regions(tmp_path
     assert table["epoch"].tolist() == ["10_r5"]
 
 
-def test_find_motor_nested_cv_path_prefers_zscore_output(tmp_path: Path) -> None:
+def test_find_motor_nested_cv_path_uses_configured_zscore_output(
+    tmp_path: Path,
+) -> None:
     data_dir = get_motor_nested_cv_dir(tmp_path, "L14", "20240611")
     data_dir.mkdir(parents=True)
-    spline_path = data_dir / "v1_08_r4_nested_lapcv_bin0p05s_spline.nc"
-    zscore_path = data_dir / "v1_08_r4_nested_lapcv_bin0p05s_zscore.nc"
-    spline_path.write_text("spline", encoding="utf-8")
-    zscore_path.write_text("zscore", encoding="utf-8")
+    configured_path = data_dir / (
+        f"v1_08_r4_nested_lapcv_{MOTOR_NESTED_CV_CONFIG_TOKEN}.nc"
+    )
+    matched_spline_path = data_dir / (
+        "v1_08_r4_nested_lapcv_bin0p05s_spbin2-8cmn3_order4_gpgap15cm_"
+        "spline_outer5_inner3_ridge0p1-1em06n6.nc"
+    )
+    legacy_zscore_path = data_dir / (
+        "v1_08_r4_nested_lapcv_bin0p05s_tp40_zscore_"
+        "outer5_inner3_ridge0p1-1em06n6.nc"
+    )
+    legacy_spline_path = data_dir / (
+        "v1_08_r4_nested_lapcv_bin0p05s_tp40_spline_"
+        "outer5_inner3_ridge0p1-1em06n6.nc"
+    )
+    configured_path.write_text("configured zscore", encoding="utf-8")
+    matched_spline_path.write_text("matched spline", encoding="utf-8")
+    legacy_zscore_path.write_text("legacy zscore", encoding="utf-8")
+    legacy_spline_path.write_text("legacy spline", encoding="utf-8")
 
     path = find_motor_nested_cv_path(
         data_root=tmp_path,
@@ -727,7 +780,30 @@ def test_find_motor_nested_cv_path_prefers_zscore_output(tmp_path: Path) -> None
         epoch="08_r4",
     )
 
-    assert path == zscore_path
+    assert path == configured_path
+
+
+def test_find_motor_nested_cv_path_does_not_fall_back(
+    tmp_path: Path,
+) -> None:
+    data_dir = get_motor_nested_cv_dir(tmp_path, "L14", "20240611")
+    data_dir.mkdir(parents=True)
+    for filename in (
+        "v1_08_r4_nested_lapcv_bin0p05s_spbin2-8cmn3_order4_gpgap15cm_"
+        "spline_outer5_inner3_ridge0p1-1em06n6.nc",
+        "v1_08_r4_nested_lapcv_bin0p05s_tp40_zscore_"
+        "outer5_inner3_ridge0p1-1em06n6.nc",
+    ):
+        (data_dir / filename).write_text("decoy", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match=MOTOR_NESTED_CV_CONFIG_TOKEN):
+        find_motor_nested_cv_path(
+            data_root=tmp_path,
+            animal_name="L14",
+            date="20240611",
+            region="v1",
+            epoch="08_r4",
+        )
 
 
 def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
@@ -738,7 +814,9 @@ def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
 
     data_dir = get_motor_nested_cv_dir(tmp_path, "L14", "20240611")
     data_dir.mkdir(parents=True)
-    path = data_dir / "v1_08_r4_nested_lapcv_bin0p05s_zscore.nc"
+    path = data_dir / (
+        f"v1_08_r4_nested_lapcv_{MOTOR_NESTED_CV_CONFIG_TOKEN}.nc"
+    )
     xr.Dataset(
         data_vars={
             "pooled_delta_bits_per_spike": (
@@ -783,6 +861,7 @@ def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
     assert table["delta_log_likelihood_bits_per_spike"].tolist() == pytest.approx(
         [0.1]
     )
+    assert table["source_path"].tolist() == [str(path)]
 
 
 def test_format_place_bin_size_token_matches_encoding_filename_token() -> None:
@@ -790,13 +869,22 @@ def test_format_place_bin_size_token_matches_encoding_filename_token() -> None:
     assert format_place_bin_size_token(2.5) == "placebin2p5cm"
 
 
-def test_find_encoding_summary_path_prefers_placebin_output(tmp_path: Path) -> None:
+def test_format_time_bin_size_token_matches_encoding_filename_token() -> None:
+    assert format_time_bin_size_token(0.05) == "bin0p05s"
+
+
+def test_find_encoding_summary_path_uses_matching_time_bin_output(
+    tmp_path: Path,
+) -> None:
     data_dir = get_encoding_comparison_dir(tmp_path, "L14", "20240611")
     data_dir.mkdir(parents=True)
-    legacy_path = data_dir / "v1_08_r4_cv5_encoding_summary.parquet"
     placebin_path = data_dir / "v1_08_r4_cv5_placebin4cm_encoding_summary.parquet"
-    legacy_path.write_text("legacy", encoding="utf-8")
     placebin_path.write_text("placebin", encoding="utf-8")
+    timebin_path = (
+        data_dir
+        / "v1_08_r4_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
+    )
+    timebin_path.write_text("timebin", encoding="utf-8")
 
     path = find_encoding_summary_path(
         data_root=tmp_path,
@@ -804,10 +892,32 @@ def test_find_encoding_summary_path_prefers_placebin_output(tmp_path: Path) -> N
         date="20240611",
         region="v1",
         epoch="08_r4",
+        bin_size_s=0.05,
         place_bin_size_cm=4.0,
     )
 
-    assert path == placebin_path
+    assert path == timebin_path
+
+
+def test_find_encoding_summary_path_does_not_fall_back_to_untagged_output(
+    tmp_path: Path,
+) -> None:
+    data_dir = get_encoding_comparison_dir(tmp_path, "L14", "20240611")
+    data_dir.mkdir(parents=True)
+    (
+        data_dir / "v1_08_r4_cv5_placebin4cm_encoding_summary.parquet"
+    ).write_text("placebin", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match=r"--bin-size-s 0\.05"):
+        find_encoding_summary_path(
+            data_root=tmp_path,
+            animal_name="L14",
+            date="20240611",
+            region="v1",
+            epoch="08_r4",
+            bin_size_s=0.05,
+            place_bin_size_cm=4.0,
+        )
 
 
 def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_columns(
@@ -817,7 +927,10 @@ def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_column
 
     data_dir = get_encoding_comparison_dir(tmp_path, "L14", "20240611")
     data_dir.mkdir(parents=True)
-    path = data_dir / "v1_08_r4_cv5_placebin4cm_encoding_summary.parquet"
+    path = (
+        data_dir
+        / "v1_08_r4_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
+    )
     pd.DataFrame(
         {
             "n_spikes": [100, 100],
@@ -917,6 +1030,329 @@ def test_load_decoding_absolute_error_table_reads_sample_level_npz(
     assert table["decoding_trajectory"].tolist() == ["right_to_center"] * 3
 
 
+def test_build_decoding_trial_error_table_uses_half_open_trial_intervals(
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    nap = pytest.importorskip("pynapple")
+
+    comparison = (
+        "same_turn_cross_arm",
+        "Same turn\ncross arm",
+        "same_turn_cross_arm",
+        (("center_to_left", "right_to_center"),),
+    )
+    analysis_path = tmp_path / "L14" / "20240611"
+    analysis_path.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "start": [0.0, 3.0],
+            "end": [2.0, 4.0],
+            "epoch": ["08_r4", "08_r4"],
+            "trajectory_type": ["right_to_center", "right_to_center"],
+        }
+    ).to_parquet(analysis_path / "trajectory_times.parquet")
+    true_path, decoded_path = get_cross_trajectory_decoding_tsd_paths(
+        data_root=tmp_path,
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="08_r4",
+        transfer_family="same_turn_cross_arm",
+        encoding_trajectory="center_to_left",
+        decoding_trajectory="right_to_center",
+    )
+    true_path.parent.mkdir(parents=True)
+    sample_times = np.asarray([0.0, 0.5, 1.5, 2.0, 3.0, 3.5, 4.0])
+    nap.Tsd(
+        t=sample_times,
+        d=np.zeros(sample_times.size),
+        time_units="s",
+    ).save(true_path)
+    nap.Tsd(
+        t=sample_times,
+        d=np.asarray([0.1, 0.3, 0.9, 99.0, 0.4, 0.8, 99.0]),
+        time_units="s",
+    ).save(decoded_path)
+
+    table = figure_1_module.build_decoding_trial_error_table(
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        comparisons=(comparison,),
+    )
+
+    assert table["trial_index"].tolist() == [0, 1]
+    assert table["trial_start"].tolist() == pytest.approx([0.0, 3.0])
+    assert table["trial_end"].tolist() == pytest.approx([2.0, 4.0])
+    assert table["n_samples"].tolist() == [3, 2]
+    assert table["trial_median_absolute_error"].tolist() == pytest.approx(
+        [0.3, 0.6]
+    )
+    assert table["comparison"].tolist() == ["same_turn_cross_arm"] * 2
+    assert table["decoding_trajectory"].tolist() == ["right_to_center"] * 2
+
+
+def test_stratified_median_permutation_test_uses_plus_one_correction() -> None:
+    pd = pytest.importorskip("pandas")
+
+    trial_table = pd.DataFrame(
+        {
+            "comparison": ["a", "a", "b", "b", "a", "b"],
+            "decoding_trajectory": ["path_1"] * 4 + ["path_2"] * 2,
+            "trial_median_absolute_error": [0.0, 2.0, 10.0, 12.0, 20.0, 30.0],
+        }
+    )
+
+    class FixedPermutationRng:
+        def __init__(self) -> None:
+            self._orders = iter(
+                (
+                    np.asarray([0, 2, 1, 3]),
+                    np.asarray([0, 1]),
+                    np.asarray([1, 3, 0, 2]),
+                    np.asarray([1, 0]),
+                )
+            )
+            self.permuted_sizes: list[int] = []
+
+        def permutation(self, size: int) -> np.ndarray:
+            self.permuted_sizes.append(int(size))
+            order = next(self._orders)
+            assert order.size == size
+            return order
+
+    rng = FixedPermutationRng()
+    result = figure_1_module.stratified_median_permutation_test(
+        trial_table,
+        "a",
+        "b",
+        n_permutations=2,
+        rng=rng,
+    )
+
+    assert result["median_difference"] == pytest.approx(-10.0)
+    assert result["p_two_sided"] == pytest.approx(1.0 / 3.0)
+    assert rng.permuted_sizes == [4, 2, 4, 2]
+
+
+def test_stratified_median_permutation_test_is_seed_deterministic() -> None:
+    pd = pytest.importorskip("pandas")
+
+    trial_table = pd.DataFrame(
+        {
+            "comparison": ["a", "a", "b", "b"] * 2,
+            "decoding_trajectory": ["path_1"] * 4 + ["path_2"] * 4,
+            "trial_median_absolute_error": [
+                0.0,
+                1.0,
+                4.0,
+                5.0,
+                1.0,
+                2.0,
+                6.0,
+                7.0,
+            ],
+        }
+    )
+
+    first = figure_1_module.stratified_median_permutation_test(
+        trial_table,
+        "a",
+        "b",
+        n_permutations=50,
+        rng=np.random.default_rng(17),
+    )
+    second = figure_1_module.stratified_median_permutation_test(
+        trial_table,
+        "a",
+        "b",
+        n_permutations=50,
+        rng=np.random.default_rng(17),
+    )
+
+    assert first == second
+
+
+def _build_complete_decoding_trial_error_table() -> object:
+    """Return synthetic trial errors covering every Figure 1 decoding path."""
+    pd = pytest.importorskip("pandas")
+
+    comparison_offsets = {
+        "same_turn_cross_arm": 0.1,
+        "opposite_turn_same_arm": 0.3,
+        "same_inbound_outbound_cross_arm": 0.4,
+    }
+    records = []
+    for animal_offset, animal_name in enumerate(("L15", "L14")):
+        for comparison, comparison_offset in comparison_offsets.items():
+            for trajectory_index, decoding_trajectory in enumerate(
+                figure_1_module.TRAJECTORY_TYPES
+            ):
+                records.append(
+                    {
+                        "animal_name": animal_name,
+                        "comparison": comparison,
+                        "decoding_trajectory": decoding_trajectory,
+                        "trial_median_absolute_error": (
+                            comparison_offset
+                            + 0.01 * animal_offset
+                            + 0.001 * trajectory_index
+                        ),
+                    }
+                )
+    return pd.DataFrame.from_records(records)
+
+
+def test_compute_decoding_permutation_tests_uses_one_seeded_rng_in_fixed_order() -> None:
+    pd = pytest.importorskip("pandas")
+    trial_table = _build_complete_decoding_trial_error_table()
+    n_permutations = 11
+    seed = 23
+
+    results = figure_1_module.compute_decoding_permutation_tests(
+        trial_table,
+        n_permutations=n_permutations,
+        seed=seed,
+    )
+    repeated_results = figure_1_module.compute_decoding_permutation_tests(
+        trial_table,
+        n_permutations=n_permutations,
+        seed=seed,
+    )
+
+    assert results["animal_name"].tolist() == ["L14", "L14", "L15", "L15"]
+    assert list(
+        zip(
+            results["comparison_a"],
+            results["comparison_b"],
+            strict=True,
+        )
+    ) == [
+        (comparison_a, comparison_b)
+        for _animal_name in ("L14", "L15")
+        for comparison_a, comparison_b, _y in (
+            figure_1_module.DECODING_SIGNIFICANCE_CONTRASTS
+        )
+    ]
+    pd.testing.assert_frame_equal(results, repeated_results)
+
+    rng = np.random.default_rng(seed)
+    expected_records = []
+    for animal_name in ("L14", "L15"):
+        animal_table = trial_table.loc[
+            trial_table["animal_name"].astype(str) == animal_name
+        ]
+        for comparison_a, comparison_b, _y in (
+            figure_1_module.DECODING_SIGNIFICANCE_CONTRASTS
+        ):
+            expected_records.append(
+                {
+                    "animal_name": animal_name,
+                    "comparison_a": comparison_a,
+                    "comparison_b": comparison_b,
+                    **figure_1_module.stratified_median_permutation_test(
+                        animal_table,
+                        comparison_a,
+                        comparison_b,
+                        n_permutations=n_permutations,
+                        rng=rng,
+                    ),
+                }
+            )
+    expected = pd.DataFrame.from_records(expected_records).loc[
+        :,
+        results.columns,
+    ]
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_compute_decoding_permutation_tests_rejects_incomplete_path_coverage() -> None:
+    trial_table = _build_complete_decoding_trial_error_table()
+    incomplete = trial_table.loc[
+        trial_table["decoding_trajectory"].astype(str) != "right_to_center"
+    ]
+
+    with pytest.raises(ValueError, match="Incomplete decoding-trajectory coverage"):
+        figure_1_module.compute_decoding_permutation_tests(
+            incomplete,
+            n_permutations=2,
+            seed=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("p_value", "expected"),
+    (
+        (0.00001, "****"),
+        (0.0005, "***"),
+        (0.005, "**"),
+        (0.02, "*"),
+        (0.2, "n.s."),
+    ),
+)
+def test_significance_stars_converts_p_values(
+    p_value: float,
+    expected: str,
+) -> None:
+    assert figure_1_module.significance_stars(p_value) == expected
+
+
+def test_build_decoding_significance_brackets_uses_maximum_animal_p_value() -> None:
+    pd = pytest.importorskip("pandas")
+
+    results = pd.DataFrame(
+        {
+            "animal_name": ["L14", "L15"],
+            "comparison_a": ["same_turn_cross_arm"] * 2,
+            "comparison_b": ["opposite_turn_same_arm"] * 2,
+            "median_difference": [-0.2, -0.1],
+            "p_two_sided": [0.00001, 0.007],
+        }
+    )
+
+    brackets = figure_1_module.build_decoding_significance_brackets(
+        results,
+        animal_names=("L14", "L15"),
+        contrasts=(
+            (
+                "same_turn_cross_arm",
+                "opposite_turn_same_arm",
+                0.5,
+            ),
+        ),
+    )
+
+    assert brackets == ((1.0, 2.0, 0.5, "**"),)
+
+
+def test_build_decoding_significance_brackets_requires_expected_direction() -> None:
+    pd = pytest.importorskip("pandas")
+
+    results = pd.DataFrame(
+        {
+            "animal_name": ["L14", "L15"],
+            "comparison_a": ["same_turn_cross_arm"] * 2,
+            "comparison_b": ["opposite_turn_same_arm"] * 2,
+            "median_difference": [-0.2, 0.1],
+            "p_two_sided": [0.00001, 0.00001],
+        }
+    )
+
+    with pytest.raises(ValueError, match="direction|negative|lower"):
+        figure_1_module.build_decoding_significance_brackets(
+            results,
+            animal_names=("L14", "L15"),
+            contrasts=(
+                (
+                    "same_turn_cross_arm",
+                    "opposite_turn_same_arm",
+                    0.5,
+                ),
+            ),
+        )
+
+
 def test_build_unit_keys_disambiguates_sessions_and_regions() -> None:
     unit_keys = build_unit_keys(
         animal_name="L14",
@@ -939,6 +1375,15 @@ def test_default_region_is_v1() -> None:
     assert args.refresh_panel_d_cache is False
     assert args.panel_e_cache_dir is None
     assert args.refresh_panel_e_cache is False
+    assert args.encoding_bin_size_s == pytest.approx(ENCODING_COMPARISON_BIN_SIZE_S)
+    assert (
+        args.decoding_n_permutations
+        == figure_1_module.DECODING_PERMUTATION_COUNT
+    )
+    assert (
+        args.decoding_permutation_seed
+        == figure_1_module.DECODING_PERMUTATION_SEED
+    )
 
 
 def test_default_figure_width_fits_letter_page_with_one_inch_margins() -> None:
@@ -2682,8 +3127,16 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
                 }
                 for value in (0.1, 0.2, 0.4)
             )
+    significance_brackets = (
+        (1.0, 2.0, 0.500, "***"),
+        (1.0, 3.0, 0.635, "n.s."),
+    )
     fig, ax = plt.subplots()
-    plot_decoding_error_panel(ax, pd.DataFrame(rows))
+    plot_decoding_error_panel(
+        ax,
+        pd.DataFrame(rows),
+        significance_brackets=significance_brackets,
+    )
 
     plot_ax = ax.child_axes[0]
     schematic_axes = ax.child_axes[1:]
@@ -2704,13 +3157,15 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
         text.get_fontsize() == pytest.approx(DECODING_XTICK_LABEL_FONTSIZE)
         for text in plot_ax.get_xticklabels()
     )
-    assert len(plot_ax.lines) == len(DECODING_SIGNIFICANCE_BRACKETS)
+    assert len(plot_ax.lines) == len(significance_brackets)
     assert len(plot_ax.collections) == 2
     median_texts = [
         text for text in plot_ax.texts if text.get_text().startswith("med. ")
     ]
     significance_texts = [
-        text for text in plot_ax.texts if text.get_text() in {"****", "**"}
+        text
+        for text in plot_ax.texts
+        if text.get_text() in {bracket[-1] for bracket in significance_brackets}
     ]
     assert [text.get_text() for text in median_texts] == [
         "med. 0.20",
@@ -2741,7 +3196,7 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
     assert [text.get_position()[1] for text in median_texts] == pytest.approx(
         [0.2, 0.2, 0.2]
     )
-    assert [text.get_text() for text in significance_texts] == ["****", "**"]
+    assert [text.get_text() for text in significance_texts] == ["***", "n.s."]
     assert all(
         text.get_fontsize() == pytest.approx(DECODING_SIGNIFICANCE_LABEL_FONTSIZE)
         for text in significance_texts
@@ -2757,7 +3212,7 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
     assert [text.get_position()[0] for text in significance_texts] == pytest.approx(
         [
             (x_start + x_stop) / 2.0
-            for x_start, x_stop, _y, _label in DECODING_SIGNIFICANCE_BRACKETS
+            for x_start, x_stop, _y, _label in significance_brackets
         ]
     )
     assert [text.get_position()[1] for text in significance_texts] == pytest.approx(
@@ -2765,12 +3220,12 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
             y
             + DECODING_SIGNIFICANCE_BRACKET_HEIGHT
             + DECODING_SIGNIFICANCE_LABEL_Y_OFFSET
-            for _x_start, _x_stop, y, _label in DECODING_SIGNIFICANCE_BRACKETS
+            for _x_start, _x_stop, y, _label in significance_brackets
         ]
     )
     for line, (x_start, x_stop, y, _label) in zip(
         plot_ax.lines,
-        DECODING_SIGNIFICANCE_BRACKETS,
+        significance_brackets,
         strict=True,
     ):
         assert line.get_xdata() == pytest.approx([x_start, x_start, x_stop, x_stop])
@@ -2820,4 +3275,133 @@ def test_plot_decoding_error_panel_draws_median_iqr_and_example_schematics() -> 
         "opposite_turn_same_arm": "left_to_center",
         "same_inbound_outbound_cross_arm": "center_to_right",
     }
+    plt.close(fig)
+
+
+def test_plot_decoding_error_panel_defaults_to_no_significance_brackets() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    plot_decoding_error_panel(
+        ax,
+        pd.DataFrame(
+            {
+                "comparison": ["same_turn_cross_arm"],
+                "absolute_error": [0.2],
+            }
+        ),
+    )
+
+    plot_ax = ax.child_axes[0]
+    assert len(plot_ax.lines) == 0
+    assert [text.get_text() for text in plot_ax.texts] == ["med. 0.20"]
+    plt.close(fig)
+
+
+def test_plot_decoding_error_panel_uses_requested_region_color() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    plot_decoding_error_panel(
+        ax,
+        pd.DataFrame(
+            {
+                "comparison": ["same_turn_cross_arm"],
+                "absolute_error": [0.2],
+            }
+        ),
+        region="ca1",
+        show_median_labels=False,
+        xtick_label_fontsize=4.0,
+    )
+
+    plot_ax = ax.child_axes[0]
+    scatter = plot_ax.collections[1]
+    assert tuple(scatter.get_facecolors()[0]) == pytest.approx(
+        to_rgba(figure_1_module.REGION_COLORS["ca1"])
+    )
+    assert not plot_ax.texts
+    assert all(
+        label.get_fontsize() == pytest.approx(4.0)
+        for label in plot_ax.get_xticklabels()
+    )
+    plt.close(fig)
+
+
+def test_plot_decoding_error_panel_offsets_multiple_regions_and_adds_legend() -> None:
+    pd = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import to_rgba
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for region, values in (
+        ("v1", (0.1, 0.2, 0.4)),
+        ("ca1", (0.2, 0.3, 0.5)),
+    ):
+        for comparison, _label, _family, _pairs in (
+            DECODING_CROSS_TRAJECTORY_COMPARISONS
+        ):
+            rows.extend(
+                {
+                    "region": region,
+                    "comparison": comparison,
+                    "absolute_error": value,
+                }
+                for value in values
+            )
+
+    fig, ax = plt.subplots()
+    plot_decoding_error_panel(
+        ax,
+        pd.DataFrame.from_records(rows),
+        regions=("v1", "ca1"),
+        show_region_legend=True,
+        show_median_labels=False,
+    )
+
+    plot_ax = ax.child_axes[0]
+    v1_scatter = plot_ax.collections[1]
+    ca1_scatter = plot_ax.collections[3]
+    offset = figure_1_module.DECODING_REGION_POSITION_OFFSET
+    np.testing.assert_allclose(
+        np.asarray(v1_scatter.get_offsets()[:, 0], dtype=float),
+        np.arange(1.0, 4.0) - offset,
+    )
+    np.testing.assert_allclose(
+        np.asarray(ca1_scatter.get_offsets()[:, 0], dtype=float),
+        np.arange(1.0, 4.0) + offset,
+    )
+    np.testing.assert_allclose(
+        np.asarray(v1_scatter.get_offsets()[:, 1], dtype=float),
+        np.full(3, 0.2),
+    )
+    np.testing.assert_allclose(
+        np.asarray(ca1_scatter.get_offsets()[:, 1], dtype=float),
+        np.full(3, 0.3),
+    )
+    assert plot_ax.collections[0].get_segments()[0][:, 1] == pytest.approx(
+        [0.15, 0.30]
+    )
+    assert plot_ax.collections[2].get_segments()[0][:, 1] == pytest.approx(
+        [0.25, 0.40]
+    )
+    assert tuple(v1_scatter.get_facecolors()[0]) == pytest.approx(
+        to_rgba(figure_1_module.REGION_COLORS["v1"])
+    )
+    assert tuple(ca1_scatter.get_facecolors()[0]) == pytest.approx(
+        to_rgba(figure_1_module.REGION_COLORS["ca1"])
+    )
+    assert [text.get_text() for text in plot_ax.get_legend().get_texts()] == [
+        "V1",
+        "CA1",
+    ]
     plt.close(fig)

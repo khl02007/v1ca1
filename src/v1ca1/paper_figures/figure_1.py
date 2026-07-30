@@ -25,6 +25,8 @@ from v1ca1.helper.session import (
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     TRAJECTORY_TYPES,
+    get_analysis_path,
+    load_trajectory_intervals,
 )
 from v1ca1.helper.plot_wtrack_schematic import get_w_track_geometry
 from v1ca1.helper.wtrack import get_wtrack_total_length
@@ -138,8 +140,8 @@ PANEL_D_FIRING_RATE_NORMALIZATION = PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZA
 PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
 PANEL_D_MIN_TUNING_STABILITY_CORRELATION = 0.5
 PANEL_D_CACHE_PREFIX = "figure_1_panel_d"
-PANEL_D_CACHE_VERSION = 6
-PANEL_D_ACROSS_TRAJECTORY_CACHE_VERSION = 4
+PANEL_D_CACHE_VERSION = 7
+PANEL_D_ACROSS_TRAJECTORY_CACHE_VERSION = 5
 PANEL_D_CACHE_METADATA_KEY = "__metadata__"
 PANEL_D_CACHE_DATASET_TOKEN_LIMIT = 96
 PANEL_E_CACHE_PREFIX = "figure_1_panel_e"
@@ -246,11 +248,15 @@ STABILITY_TABLE_RELATIVE_PATH = (
 MOTOR_NESTED_CV_RELATIVE_DIR = Path("task_progression") / "motor" / "nested_lap_cv"
 MOTOR_DELTA_METRIC = "dll_motor_tp_vs_motor_bits_per_spike"
 MOTOR_DELTA_REGION = "v1"
-MOTOR_PREFERRED_FILENAME_TOKEN = "_zscore_"
+MOTOR_NESTED_CV_CONFIG_TOKEN = (
+    "bin0p05s_spbin2-8cmn3_order4_gpgap15cm_"
+    "zscore_outer5_inner3_ridge0p1-1em06n6"
+)
 MOTOR_MIN_TUNING_STABILITY_CORRELATION = 0.5
 ENCODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "encoding_comparison"
 ENCODING_COMPARISON_REGION = "v1"
 ENCODING_COMPARISON_N_FOLDS = 5
+ENCODING_COMPARISON_BIN_SIZE_S = 0.05
 ENCODING_COMPARISON_PLACE_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
 ENCODING_COMPARISON_MIN_SPIKES = 0
 ENCODING_MIN_TUNING_STABILITY_CORRELATION = 0.5
@@ -325,9 +331,13 @@ DECODING_YLABEL_X = -0.16
 DECODING_XTICK_LABEL_FONTSIZE = 5.6
 DECODING_MEDIAN_LABEL_FONTSIZE = 4.8
 DECODING_MEDIAN_LABEL_X_OFFSET = 0.09
-DECODING_SIGNIFICANCE_BRACKETS = (
-    (1.0, 2.0, 0.500, "****"),
-    (1.0, 3.0, 0.635, "**"),
+DECODING_REGION_POSITION_OFFSET = 0.10
+DECODING_REGION_LEGEND_FONTSIZE = 5.0
+DECODING_PERMUTATION_COUNT = 100_000
+DECODING_PERMUTATION_SEED = 20260703
+DECODING_SIGNIFICANCE_CONTRASTS = (
+    ("same_turn_cross_arm", "opposite_turn_same_arm", 0.500),
+    ("same_turn_cross_arm", "same_inbound_outbound_cross_arm", 0.635),
 )
 DECODING_SIGNIFICANCE_BRACKET_HEIGHT = 0.016
 DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH = 0.6
@@ -382,6 +392,34 @@ DECODING_ABSOLUTE_ERROR_TABLE_COLUMNS = (
     "absolute_error",
     "true_path",
     "decoded_path",
+)
+DECODING_TRIAL_ERROR_TABLE_COLUMNS = (
+    "animal_name",
+    "date",
+    "epoch",
+    "region",
+    "comparison",
+    "comparison_label",
+    "transfer_family",
+    "encoding_trajectory",
+    "decoding_trajectory",
+    "trial_index",
+    "trial_start",
+    "trial_end",
+    "trial_median_absolute_error",
+    "n_samples",
+    "true_path",
+    "decoded_path",
+)
+DECODING_PERMUTATION_RESULT_COLUMNS = (
+    "animal_name",
+    "comparison_a",
+    "comparison_b",
+    "median_difference",
+    "p_two_sided",
+    "p_less",
+    "p_greater",
+    "n_permutations",
 )
 CYCLE_TRAJECTORY_LAYOUT = (
     ("left_to_center", (0.59, 0.60, 0.39, 0.39)),
@@ -970,6 +1008,13 @@ def format_place_bin_size_token(place_bin_size_cm: float) -> str:
     return f"placebin{_format_float_token(place_bin_size_cm)}cm"
 
 
+def format_time_bin_size_token(bin_size_s: float) -> str:
+    """Return the filename token for one temporal-bin-size setting."""
+    if not np.isfinite(bin_size_s) or bin_size_s <= 0:
+        raise ValueError("bin_size_s must be positive and finite.")
+    return f"bin{_format_float_token(bin_size_s)}s"
+
+
 def get_encoding_comparison_dir(data_root: Path, animal_name: str, date: str) -> Path:
     """Return the saved task-progression encoding-comparison directory."""
     return Path(data_root) / animal_name / date / ENCODING_COMPARISON_RELATIVE_DIR
@@ -988,23 +1033,20 @@ def find_motor_nested_cv_path(
     region: str,
     epoch: str,
 ) -> Path:
-    """Return the preferred motor nested-CV output path for one session epoch."""
+    """Return the configured motor nested-CV output path for one session epoch."""
     data_dir = get_motor_nested_cv_dir(data_root, animal_name, date)
-    candidates = sorted(data_dir.glob(f"{region}_{epoch}_nested_lapcv_*.nc"))
-    if not candidates:
+    path = data_dir / (
+        f"{region}_{epoch}_nested_lapcv_{MOTOR_NESTED_CV_CONFIG_TOKEN}.nc"
+    )
+    if not path.exists():
         raise FileNotFoundError(
-            "Missing task-progression motor nested-CV output. Expected a file "
-            f"matching {data_dir / f'{region}_{epoch}_nested_lapcv_*.nc'}. "
+            "Missing configured task-progression motor nested-CV output. "
+            f"Expected {path}. "
             "Run `python -m v1ca1.task_progression.motor "
-            f"--animal-name {animal_name} --date {date} --region {region} "
-            f"--epoch {epoch}` first."
+            f"--animal-name {animal_name} --date {date} --regions {region} "
+            f"--epochs {epoch} --motor-feature-mode zscore` first."
         )
-
-    preferred = [
-        path for path in candidates if MOTOR_PREFERRED_FILENAME_TOKEN in path.name
-    ]
-    candidates = preferred if preferred else candidates
-    return max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
+    return path
 
 
 def find_encoding_summary_path(
@@ -1015,24 +1057,26 @@ def find_encoding_summary_path(
     region: str,
     epoch: str,
     n_folds: int = ENCODING_COMPARISON_N_FOLDS,
+    bin_size_s: float = ENCODING_COMPARISON_BIN_SIZE_S,
     place_bin_size_cm: float = ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
 ) -> Path:
     """Return the preferred encoding-comparison summary table path."""
     data_dir = get_encoding_comparison_dir(data_root, animal_name, date)
+    time_bin_token = format_time_bin_size_token(bin_size_s)
     place_bin_token = format_place_bin_size_token(place_bin_size_cm)
-    candidates = (
-        data_dir / f"{region}_{epoch}_cv{n_folds}_{place_bin_token}_encoding_summary.parquet",
-        data_dir / f"{region}_{epoch}_cv{n_folds}_encoding_summary.parquet",
+    path = data_dir / (
+        f"{region}_{epoch}_cv{n_folds}_{time_bin_token}_{place_bin_token}"
+        "_encoding_summary.parquet"
     )
-    for path in candidates:
-        if path.exists():
-            return path
+    if path.exists():
+        return path
     raise FileNotFoundError(
         "Missing task-progression encoding-comparison summary. Expected "
-        f"{candidates[0]} or legacy file {candidates[1]}. Run "
+        f"{path}. Run "
         "`python -m v1ca1.task_progression.encoding_comparison "
         f"--animal-name {animal_name} --date {date} --dark-epoch {epoch} "
-        f"--regions {region} --place-bin-size-cm {place_bin_size_cm}` first."
+        f"--regions {region} --bin-size-s {bin_size_s} "
+        f"--place-bin-size-cm {place_bin_size_cm}` first."
     )
 
 
@@ -1132,6 +1176,471 @@ def load_decoding_absolute_error_table(
     if not tables:
         return pd.DataFrame(columns=DECODING_ABSOLUTE_ERROR_TABLE_COLUMNS)
     return pd.concat(tables, axis=0, ignore_index=True)
+
+
+def _align_absolute_error_with_times(
+    true_tsd: Any,
+    decoded_tsd: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return decoded timestamps and finite aligned absolute errors."""
+    if len(np.asarray(decoded_tsd.t)) == 0 or len(np.asarray(true_tsd.t)) == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    support = true_tsd.time_support.intersect(decoded_tsd.time_support)
+    true_restricted = true_tsd.restrict(support)
+    decoded_restricted = decoded_tsd.restrict(support)
+    true_at_decoded = true_restricted.interpolate(
+        decoded_restricted,
+        ep=support,
+        left=np.nan,
+        right=np.nan,
+    )
+    timestamps = np.asarray(decoded_restricted.t, dtype=float)
+    true_values = np.asarray(true_at_decoded.d, dtype=float)
+    decoded_values = np.asarray(decoded_restricted.d, dtype=float)
+    valid = (
+        np.isfinite(timestamps)
+        & np.isfinite(true_values)
+        & np.isfinite(decoded_values)
+    )
+    return (
+        timestamps[valid],
+        np.abs(decoded_values[valid] - true_values[valid]),
+    )
+
+
+def _intervalset_to_arrays(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted start and end arrays for one interval set."""
+    starts = np.asarray(intervals.start, dtype=float).ravel()
+    ends = np.asarray(intervals.end, dtype=float).ravel()
+    if starts.shape != ends.shape:
+        raise ValueError(
+            "Trajectory interval starts and ends have mismatched shapes: "
+            f"{starts.shape} vs {ends.shape}."
+        )
+    if starts.size == 0:
+        return starts, ends
+    order = np.argsort(starts)
+    return starts[order], ends[order]
+
+
+def build_decoding_trial_error_table(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str = DECODING_COMPARISON_REGION,
+    comparisons: Sequence[
+        tuple[str, str, str, Sequence[tuple[str, str]]]
+    ] = DECODING_CROSS_TRAJECTORY_COMPARISONS,
+) -> Any:
+    """Build lap-level median decoding errors for Figure 1 inference."""
+    import pandas as pd
+
+    records = []
+    for dataset in datasets:
+        animal_name, date, epoch = normalize_dataset_id(dataset)
+        analysis_path = get_analysis_path(animal_name, date, Path(data_root))
+        trajectory_intervals, _source = load_trajectory_intervals(
+            analysis_path,
+            [epoch],
+        )
+        if epoch not in trajectory_intervals:
+            raise ValueError(
+                f"Trajectory intervals do not contain epoch {epoch!r} for "
+                f"{animal_name} {date}."
+            )
+
+        for comparison, label, transfer_family, trajectory_pairs in comparisons:
+            for encoding_trajectory, decoding_trajectory in trajectory_pairs:
+                if decoding_trajectory not in trajectory_intervals[epoch]:
+                    raise ValueError(
+                        "Trajectory intervals do not contain decoding trajectory "
+                        f"{decoding_trajectory!r} for {animal_name} {date} {epoch}."
+                    )
+                true_path, decoded_path = get_cross_trajectory_decoding_tsd_paths(
+                    data_root=data_root,
+                    animal_name=animal_name,
+                    date=date,
+                    region=region,
+                    epoch=epoch,
+                    transfer_family=transfer_family,
+                    encoding_trajectory=encoding_trajectory,
+                    decoding_trajectory=decoding_trajectory,
+                )
+                missing_paths = [
+                    path for path in (true_path, decoded_path) if not path.exists()
+                ]
+                if missing_paths:
+                    raise FileNotFoundError(
+                        "Missing task-progression decoding-comparison output. "
+                        f"Expected {missing_paths[0]}. Run "
+                        "`python -m v1ca1.task_progression.decoding_comparison "
+                        f"--animal-name {animal_name} --date {date} "
+                        f"--dark-epoch {epoch} --regions {region}` first."
+                    )
+
+                true_tsd = _load_tsd_npz(true_path)
+                decoded_tsd = _load_tsd_npz(decoded_path)
+                timestamps, absolute_error = _align_absolute_error_with_times(
+                    true_tsd,
+                    decoded_tsd,
+                )
+                starts, ends = _intervalset_to_arrays(
+                    trajectory_intervals[epoch][decoding_trajectory]
+                )
+                for trial_index, (start, end) in enumerate(
+                    zip(starts, ends, strict=True)
+                ):
+                    in_trial = (timestamps >= start) & (timestamps < end)
+                    values = absolute_error[in_trial]
+                    values = values[np.isfinite(values)]
+                    if values.size == 0:
+                        continue
+                    records.append(
+                        {
+                            "animal_name": animal_name,
+                            "date": date,
+                            "epoch": epoch,
+                            "region": region,
+                            "comparison": comparison,
+                            "comparison_label": label,
+                            "transfer_family": transfer_family,
+                            "encoding_trajectory": encoding_trajectory,
+                            "decoding_trajectory": decoding_trajectory,
+                            "trial_index": int(trial_index),
+                            "trial_start": float(start),
+                            "trial_end": float(end),
+                            "trial_median_absolute_error": float(
+                                np.median(values)
+                            ),
+                            "n_samples": int(values.size),
+                            "true_path": str(true_path),
+                            "decoded_path": str(decoded_path),
+                        }
+                    )
+
+    return pd.DataFrame.from_records(
+        records,
+        columns=DECODING_TRIAL_ERROR_TABLE_COLUMNS,
+    )
+
+
+def stratified_median_permutation_test(
+    trial_table: Any,
+    comparison_a: str,
+    comparison_b: str,
+    *,
+    n_permutations: int,
+    rng: Any,
+) -> dict[str, float | int]:
+    """Compare lap medians after shuffling labels within decoding paths."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+
+    required_columns = {
+        "comparison",
+        "decoding_trajectory",
+        "trial_median_absolute_error",
+    }
+    missing_columns = required_columns.difference(trial_table.columns)
+    if missing_columns:
+        raise ValueError(
+            "Trial-error table is missing required columns: "
+            f"{sorted(missing_columns)!r}."
+        )
+
+    comparison_values = trial_table["comparison"].astype(str)
+    value_column = "trial_median_absolute_error"
+    values_a = np.asarray(
+        trial_table.loc[comparison_values == comparison_a, value_column],
+        dtype=float,
+    )
+    values_b = np.asarray(
+        trial_table.loc[comparison_values == comparison_b, value_column],
+        dtype=float,
+    )
+    values_a = values_a[np.isfinite(values_a)]
+    values_b = values_b[np.isfinite(values_b)]
+    if values_a.size == 0 or values_b.size == 0:
+        raise ValueError(
+            "Both decoding comparisons must contain finite trial-level errors: "
+            f"{comparison_a!r} has {values_a.size}, "
+            f"{comparison_b!r} has {values_b.size}."
+        )
+
+    observed = float(np.median(values_a) - np.median(values_b))
+    selected = trial_table.loc[
+        comparison_values.isin((comparison_a, comparison_b))
+    ]
+    strata = []
+    for decoding_trajectory, trajectory_table in selected.groupby(
+        "decoding_trajectory",
+        sort=False,
+    ):
+        trajectory_comparisons = trajectory_table["comparison"].astype(str)
+        stratum_a = np.asarray(
+            trajectory_table.loc[
+                trajectory_comparisons == comparison_a,
+                value_column,
+            ],
+            dtype=float,
+        )
+        stratum_b = np.asarray(
+            trajectory_table.loc[
+                trajectory_comparisons == comparison_b,
+                value_column,
+            ],
+            dtype=float,
+        )
+        stratum_a = stratum_a[np.isfinite(stratum_a)]
+        stratum_b = stratum_b[np.isfinite(stratum_b)]
+        if stratum_a.size == 0 or stratum_b.size == 0:
+            raise ValueError(
+                "Both decoding comparisons must contain finite trials in "
+                f"stratum {decoding_trajectory!r}: {comparison_a!r} has "
+                f"{stratum_a.size}, {comparison_b!r} has {stratum_b.size}."
+            )
+        strata.append(
+            (
+                np.concatenate((stratum_a, stratum_b)),
+                int(stratum_a.size),
+                int(stratum_b.size),
+            )
+        )
+    if not strata:
+        raise ValueError("No decoding-trajectory strata were available.")
+
+    null_differences = np.empty(n_permutations, dtype=float)
+    for permutation_index in range(n_permutations):
+        permuted_a = []
+        permuted_b = []
+        for values, n_a, n_b in strata:
+            order = rng.permutation(values.size)
+            permuted_a.append(values[order[:n_a]])
+            permuted_b.append(values[order[n_a : n_a + n_b]])
+        null_differences[permutation_index] = float(
+            np.median(np.concatenate(permuted_a))
+            - np.median(np.concatenate(permuted_b))
+        )
+
+    p_two_sided = (
+        np.count_nonzero(np.abs(null_differences) >= abs(observed)) + 1.0
+    ) / (n_permutations + 1.0)
+    p_less = (
+        np.count_nonzero(null_differences <= observed) + 1.0
+    ) / (n_permutations + 1.0)
+    p_greater = (
+        np.count_nonzero(null_differences >= observed) + 1.0
+    ) / (n_permutations + 1.0)
+    return {
+        "median_difference": observed,
+        "p_two_sided": float(p_two_sided),
+        "p_less": float(p_less),
+        "p_greater": float(p_greater),
+        "n_permutations": int(n_permutations),
+    }
+
+
+def compute_decoding_permutation_tests(
+    trial_table: Any,
+    *,
+    contrasts: Sequence[tuple[str, str, float]] = DECODING_SIGNIFICANCE_CONTRASTS,
+    n_permutations: int = DECODING_PERMUTATION_COUNT,
+    seed: int = DECODING_PERMUTATION_SEED,
+) -> Any:
+    """Run Figure 1's planned permutation tests separately per animal."""
+    import pandas as pd
+
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if seed < 0:
+        raise ValueError("seed must be non-negative.")
+    if "animal_name" not in trial_table.columns:
+        raise ValueError("Trial-error table is missing required column 'animal_name'.")
+
+    comparison_strata = {
+        comparison: {
+            decoding_trajectory
+            for (
+                candidate_comparison,
+                _label,
+                _transfer_family,
+                trajectory_pairs,
+            ) in DECODING_CROSS_TRAJECTORY_COMPARISONS
+            if candidate_comparison == comparison
+            for _encoding_trajectory, decoding_trajectory in trajectory_pairs
+        }
+        for comparison_a, comparison_b, _y in contrasts
+        for comparison in (comparison_a, comparison_b)
+    }
+    rng = np.random.default_rng(seed)
+    records = []
+    for animal_name, animal_table in trial_table.groupby(
+        "animal_name",
+        sort=True,
+    ):
+        for comparison_a, comparison_b, _y in contrasts:
+            selected = animal_table.loc[
+                animal_table["comparison"].astype(str).isin(
+                    (comparison_a, comparison_b)
+                )
+            ]
+            observed_strata = set(
+                selected["decoding_trajectory"].astype(str).unique()
+            )
+            expected_strata = comparison_strata.get(
+                comparison_a,
+                set(),
+            ) | comparison_strata.get(comparison_b, set())
+            if observed_strata != expected_strata:
+                raise ValueError(
+                    "Incomplete decoding-trajectory coverage for "
+                    f"{animal_name} contrast {comparison_a!r} vs "
+                    f"{comparison_b!r}: expected "
+                    f"{sorted(expected_strata)!r}, observed "
+                    f"{sorted(observed_strata)!r}."
+                )
+            result = stratified_median_permutation_test(
+                animal_table,
+                comparison_a,
+                comparison_b,
+                n_permutations=n_permutations,
+                rng=rng,
+            )
+            records.append(
+                {
+                    "animal_name": str(animal_name),
+                    "comparison_a": comparison_a,
+                    "comparison_b": comparison_b,
+                    **result,
+                }
+            )
+
+    return pd.DataFrame.from_records(
+        records,
+        columns=DECODING_PERMUTATION_RESULT_COLUMNS,
+    )
+
+
+def significance_stars(p_value: float) -> str:
+    """Return the Figure 1 significance label for one two-sided p-value."""
+    if not np.isfinite(p_value) or p_value < 0.0 or p_value > 1.0:
+        raise ValueError("p_value must be finite and between 0 and 1.")
+    if p_value < 0.0001:
+        return "****"
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return "n.s."
+
+
+def build_decoding_significance_brackets(
+    per_animal_results: Any,
+    *,
+    animal_names: Sequence[str] = PANEL_H_DECODING_ANIMALS,
+    contrasts: Sequence[tuple[str, str, float]] = DECODING_SIGNIFICANCE_CONTRASTS,
+) -> tuple[tuple[float, float, float, str], ...]:
+    """Aggregate per-animal tests into conservative Figure 1 brackets."""
+    required_columns = {
+        "animal_name",
+        "comparison_a",
+        "comparison_b",
+        "median_difference",
+        "p_two_sided",
+    }
+    missing_columns = required_columns.difference(per_animal_results.columns)
+    if missing_columns:
+        raise ValueError(
+            "Permutation-test table is missing required columns: "
+            f"{sorted(missing_columns)!r}."
+        )
+
+    expected_animals = tuple(str(animal_name) for animal_name in animal_names)
+    if not expected_animals or len(set(expected_animals)) != len(expected_animals):
+        raise ValueError("animal_names must contain unique animal identifiers.")
+    observed_animals = set(per_animal_results["animal_name"].astype(str))
+    if observed_animals != set(expected_animals):
+        raise ValueError(
+            "Permutation-test animals do not match Figure 1 animals: "
+            f"expected {sorted(expected_animals)!r}, "
+            f"observed {sorted(observed_animals)!r}."
+        )
+
+    comparison_positions = {
+        comparison: float(index)
+        for index, (comparison, _label, _family, _pairs) in enumerate(
+            DECODING_CROSS_TRAJECTORY_COMPARISONS,
+            start=1,
+        )
+    }
+    brackets = []
+    result_animals = per_animal_results["animal_name"].astype(str)
+    result_comparison_a = per_animal_results["comparison_a"].astype(str)
+    result_comparison_b = per_animal_results["comparison_b"].astype(str)
+    for comparison_a, comparison_b, y in contrasts:
+        if (
+            comparison_a not in comparison_positions
+            or comparison_b not in comparison_positions
+        ):
+            raise ValueError(
+                "Significance contrast references a comparison that is not "
+                f"plotted: {comparison_a!r} vs {comparison_b!r}."
+            )
+        contrast_results = per_animal_results.loc[
+            (result_comparison_a == comparison_a)
+            & (result_comparison_b == comparison_b)
+            & result_animals.isin(expected_animals)
+        ]
+        contrast_animals = contrast_results["animal_name"].astype(str)
+        counts = contrast_animals.value_counts()
+        if (
+            set(contrast_animals) != set(expected_animals)
+            or len(contrast_results) != len(expected_animals)
+            or not np.all(counts.to_numpy(dtype=int) == 1)
+        ):
+            raise ValueError(
+                "Expected exactly one permutation result per Figure 1 animal "
+                f"for {comparison_a!r} vs {comparison_b!r}."
+            )
+        p_values = np.asarray(
+            contrast_results["p_two_sided"],
+            dtype=float,
+        )
+        median_differences = np.asarray(
+            contrast_results["median_difference"],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(p_values)) or np.any(
+            (p_values < 0.0) | (p_values > 1.0)
+        ):
+            raise ValueError(
+                "Permutation results contain invalid two-sided p-values for "
+                f"{comparison_a!r} vs {comparison_b!r}."
+            )
+        if not np.all(np.isfinite(median_differences)) or np.any(
+            median_differences >= 0.0
+        ):
+            raise ValueError(
+                "Figure 1 expects comparison A to have lower median trial "
+                f"errors for every animal in {comparison_a!r} vs "
+                f"{comparison_b!r}."
+            )
+
+        aggregate_p_value = float(np.max(p_values))
+        x_a = comparison_positions[comparison_a]
+        x_b = comparison_positions[comparison_b]
+        brackets.append(
+            (
+                min(x_a, x_b),
+                max(x_a, x_b),
+                float(y),
+                significance_stars(aggregate_p_value),
+            )
+        )
+    return tuple(brackets)
 
 
 def filter_datasets_by_animals(
@@ -1261,6 +1770,7 @@ def load_encoding_delta_table(
     datasets: Sequence[DatasetId],
     region: str = ENCODING_COMPARISON_REGION,
     n_folds: int = ENCODING_COMPARISON_N_FOLDS,
+    bin_size_s: float = ENCODING_COMPARISON_BIN_SIZE_S,
     place_bin_size_cm: float = ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
     min_spikes: int = ENCODING_COMPARISON_MIN_SPIKES,
     min_tuning_stability_correlation: float | None = (
@@ -1293,6 +1803,7 @@ def load_encoding_delta_table(
             region=region,
             epoch=epoch,
             n_folds=n_folds,
+            bin_size_s=bin_size_s,
             place_bin_size_cm=place_bin_size_cm,
         )
         table = pd.read_parquet(summary_path)
@@ -1360,6 +1871,30 @@ def has_plottable_values(values: np.ndarray) -> bool:
     """Return whether one matrix contains positive finite values."""
     values = np.asarray(values, dtype=float)
     return bool(values.size and np.isfinite(values).any() and np.nanmax(values) > 0)
+
+
+def compute_tuning_curve_peak_positions(values: np.ndarray) -> np.ndarray:
+    """Return midpoint peak bins for finite, non-flat tuning curves."""
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 2:
+        raise ValueError(f"Expected a 2D tuning matrix, got shape {values.shape}.")
+
+    peak_positions = np.full(values.shape[0], np.nan, dtype=float)
+    for row_index, row_values in enumerate(values):
+        finite = np.isfinite(row_values)
+        if np.count_nonzero(finite) < 2:
+            continue
+        finite_values = row_values[finite]
+        minimum = float(np.min(finite_values))
+        maximum = float(np.max(finite_values))
+        if np.isclose(minimum, maximum):
+            continue
+        peak_bins = np.flatnonzero(
+            finite & np.isclose(row_values, maximum, rtol=1e-10, atol=1e-12)
+        )
+        if peak_bins.size:
+            peak_positions[row_index] = float(np.mean(peak_bins))
+    return peak_positions
 
 
 def extract_tuning_curve_arrays(tuning_curve: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -2020,14 +2555,18 @@ def normalize_panel_values_per_trajectory(values: np.ndarray) -> np.ndarray:
     return normalized
 
 
-def build_pooled_panel_values_and_unit_order(
+def _build_pooled_panel_values_order_and_peaks(
     curve_sets: Sequence[dict[str, Any]],
     *,
     position_bin_count: int,
     trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
     firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
-) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
-    """Return normalized pooled heatmaps and their row unit keys."""
+) -> tuple[
+    dict[tuple[str, str], np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+]:
+    """Return pooled heatmaps, row unit keys, and aligned odd-lap peaks."""
     trajectory_types = tuple(trajectory_types)
     if firing_rate_normalization not in {
         PANEL_D_PER_TRAJECTORY_FIRING_RATE_NORMALIZATION,
@@ -2072,6 +2611,7 @@ def build_pooled_panel_values_and_unit_order(
 
     panels: dict[tuple[str, str], np.ndarray] = {}
     ordered_unit_keys_by_trajectory: dict[str, np.ndarray] = {}
+    ordered_peak_positions_by_trajectory: dict[str, np.ndarray] = {}
     for order_trajectory in trajectory_types:
         reference_units = _concatenate_unit_parts(odd_units_by_trajectory[order_trajectory])
         order_values = _concatenate_value_parts(
@@ -2084,6 +2624,10 @@ def build_pooled_panel_values_and_unit_order(
             unit_order = np.asarray([], dtype=int)
         ordered_unit_keys_by_trajectory[order_trajectory] = (
             reference_units[unit_order] if unit_order.size else reference_units
+        )
+        peak_positions = compute_tuning_curve_peak_positions(order_values)
+        ordered_peak_positions_by_trajectory[order_trajectory] = (
+            peak_positions[unit_order] if unit_order.size else peak_positions
         )
 
         sorted_values_by_plot_trajectory: dict[str, np.ndarray] = {}
@@ -2127,7 +2671,30 @@ def build_pooled_panel_values_and_unit_order(
             panels[(order_trajectory, plot_trajectory)] = (
                 normalized_values_by_plot_trajectory[plot_trajectory]
             )
-    return panels, ordered_unit_keys_by_trajectory
+    return (
+        panels,
+        ordered_unit_keys_by_trajectory,
+        ordered_peak_positions_by_trajectory,
+    )
+
+
+def build_pooled_panel_values_and_unit_order(
+    curve_sets: Sequence[dict[str, Any]],
+    *,
+    position_bin_count: int,
+    trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+    """Return normalized pooled heatmaps and their row unit keys."""
+    panels, ordered_unit_keys, _ordered_peak_positions = (
+        _build_pooled_panel_values_order_and_peaks(
+            curve_sets,
+            position_bin_count=position_bin_count,
+            trajectory_types=trajectory_types,
+            firing_rate_normalization=firing_rate_normalization,
+        )
+    )
+    return panels, ordered_unit_keys
 
 
 def build_pooled_panel_values(
@@ -2321,11 +2888,17 @@ def _panel_d_cache_unit_order_array_name(order_trajectory: str) -> str:
     return f"unit_order__{order_trajectory}"
 
 
+def _panel_d_cache_order_peak_array_name(order_trajectory: str) -> str:
+    """Return the array name for one Panel D aligned odd-lap peak vector."""
+    return f"order_peak_position__{order_trajectory}"
+
+
 def save_panel_d_cache(
     cache_path: Path,
     panels: dict[tuple[str, str], np.ndarray],
     metadata: dict[str, Any],
     ordered_unit_keys_by_trajectory: dict[str, np.ndarray] | None = None,
+    ordered_peak_positions_by_trajectory: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Write one Panel D heatmap cache as compressed NumPy arrays."""
     cache_path = Path(cache_path)
@@ -2344,14 +2917,23 @@ def save_panel_d_cache(
                 ordered_unit_keys_by_trajectory[order_trajectory],
                 dtype=str,
             )
+        if ordered_peak_positions_by_trajectory is not None:
+            payload[_panel_d_cache_order_peak_array_name(order_trajectory)] = np.asarray(
+                ordered_peak_positions_by_trajectory[order_trajectory],
+                dtype=float,
+            )
     np.savez_compressed(cache_path, **payload)
 
 
-def load_panel_d_cache_payload(
+def load_panel_d_cache_full_payload(
     cache_path: Path,
     expected_metadata: dict[str, Any],
-) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]] | None:
-    """Return cached Panel D heatmaps and row unit keys when metadata matches."""
+) -> tuple[
+    dict[tuple[str, str], np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+] | None:
+    """Return cached heatmaps, row keys, and odd peaks when metadata matches."""
     cache_path = Path(cache_path)
     if not cache_path.exists():
         return None
@@ -2376,6 +2958,7 @@ def load_panel_d_cache_payload(
                         dtype=float,
                     )
             ordered_unit_keys_by_trajectory = {}
+            ordered_peak_positions_by_trajectory = {}
             for order_trajectory in trajectory_types:
                 array_name = _panel_d_cache_unit_order_array_name(order_trajectory)
                 if array_name in data.files:
@@ -2383,10 +2966,36 @@ def load_panel_d_cache_payload(
                         data[array_name],
                         dtype=str,
                     )
-            return panels, ordered_unit_keys_by_trajectory
+                peak_array_name = _panel_d_cache_order_peak_array_name(
+                    order_trajectory
+                )
+                if peak_array_name in data.files:
+                    ordered_peak_positions_by_trajectory[order_trajectory] = (
+                        np.asarray(
+                            data[peak_array_name],
+                            dtype=float,
+                        )
+                    )
+            return (
+                panels,
+                ordered_unit_keys_by_trajectory,
+                ordered_peak_positions_by_trajectory,
+            )
     except Exception as exc:
         print(f"Ignoring unreadable Panel D cache at {cache_path}: {exc}")
         return None
+
+
+def load_panel_d_cache_payload(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]] | None:
+    """Return cached Panel D heatmaps and row unit keys when metadata matches."""
+    payload = load_panel_d_cache_full_payload(cache_path, expected_metadata)
+    if payload is None:
+        return None
+    panels, ordered_unit_keys, _ordered_peak_positions = payload
+    return panels, ordered_unit_keys
 
 
 def load_panel_d_cache(
@@ -2416,7 +3025,25 @@ def load_panel_d_ordered_unit_keys(
     return ordered_unit_keys_by_trajectory
 
 
-def load_or_compute_panel_d_heatmap_payload(
+def load_panel_d_order_peak_positions(
+    cache_path: Path,
+    expected_metadata: dict[str, Any],
+) -> dict[str, np.ndarray] | None:
+    """Return cached Panel D odd-lap peak positions when metadata matches."""
+    payload = load_panel_d_cache_full_payload(cache_path, expected_metadata)
+    if payload is None:
+        return None
+    _panels, _ordered_unit_keys, ordered_peak_positions = payload
+    trajectory_types = _panel_d_metadata_trajectory_types(expected_metadata)
+    if any(
+        trajectory not in ordered_peak_positions
+        for trajectory in trajectory_types
+    ):
+        return None
+    return ordered_peak_positions
+
+
+def load_or_compute_panel_d_heatmap_full_payload(
     *,
     data_root: Path,
     datasets: Sequence[DatasetId],
@@ -2433,8 +3060,13 @@ def load_or_compute_panel_d_heatmap_payload(
         PANEL_D_MIN_TUNING_STABILITY_CORRELATION
     ),
     require_ordered_unit_keys: bool = False,
-) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
-    """Load or compute Panel D heatmaps and their row unit keys."""
+    require_order_peak_positions: bool = False,
+) -> tuple[
+    dict[tuple[str, str], np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+]:
+    """Load or compute Panel D heatmaps, row keys, and odd-lap peak positions."""
     metadata = build_panel_d_cache_metadata(
         data_root=data_root,
         datasets=datasets,
@@ -2453,17 +3085,35 @@ def load_or_compute_panel_d_heatmap_payload(
         else None
     )
     if cache_path is not None and not refresh_panel_d_cache:
-        cached_payload = load_panel_d_cache_payload(cache_path, metadata)
+        cached_payload = load_panel_d_cache_full_payload(cache_path, metadata)
         if cached_payload is not None:
-            panels, ordered_unit_keys_by_trajectory = cached_payload
+            (
+                panels,
+                ordered_unit_keys_by_trajectory,
+                ordered_peak_positions_by_trajectory,
+            ) = cached_payload
             trajectory_types = _panel_d_metadata_trajectory_types(metadata)
             has_unit_order = all(
                 trajectory in ordered_unit_keys_by_trajectory
                 for trajectory in trajectory_types
             )
-            if has_unit_order or not require_ordered_unit_keys:
+            has_order_peaks = all(
+                trajectory in ordered_peak_positions_by_trajectory
+                for trajectory in trajectory_types
+            )
+            if (
+                (has_unit_order or not require_ordered_unit_keys)
+                and (
+                    has_order_peaks
+                    or not require_order_peak_positions
+                )
+            ):
                 print(f"Loaded Panel D cache from {cache_path}.")
-                return panels, ordered_unit_keys_by_trajectory
+                return (
+                    panels,
+                    ordered_unit_keys_by_trajectory,
+                    ordered_peak_positions_by_trajectory,
+                )
 
     print(f"Building pooled dark-epoch heatmap for region {region}.")
     curve_sets = []
@@ -2487,7 +3137,11 @@ def load_or_compute_panel_d_heatmap_payload(
             )
         )
 
-    panels, ordered_unit_keys_by_trajectory = build_pooled_panel_values_and_unit_order(
+    (
+        panels,
+        ordered_unit_keys_by_trajectory,
+        ordered_peak_positions_by_trajectory,
+    ) = _build_pooled_panel_values_order_and_peaks(
         curve_sets,
         position_bin_count=position_bin_count,
         trajectory_types=PANEL_D_TRAJECTORY_TYPES,
@@ -2499,9 +3153,55 @@ def load_or_compute_panel_d_heatmap_payload(
             panels,
             metadata,
             ordered_unit_keys_by_trajectory=ordered_unit_keys_by_trajectory,
+            ordered_peak_positions_by_trajectory=(
+                ordered_peak_positions_by_trajectory
+            ),
         )
         print(f"Saved Panel D cache to {cache_path}.")
-    return panels, ordered_unit_keys_by_trajectory
+    return (
+        panels,
+        ordered_unit_keys_by_trajectory,
+        ordered_peak_positions_by_trajectory,
+    )
+
+
+def load_or_compute_panel_d_heatmap_payload(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    position_bin_count: int,
+    position_offset: int,
+    speed_threshold_cm_s: float,
+    sigma_bins: float,
+    panel_d_cache_dir: Path | None,
+    refresh_panel_d_cache: bool,
+    firing_rate_normalization: str = PANEL_D_FIRING_RATE_NORMALIZATION,
+    min_movement_firing_rate_hz: float | None = PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    min_tuning_stability_correlation: float | None = (
+        PANEL_D_MIN_TUNING_STABILITY_CORRELATION
+    ),
+    require_ordered_unit_keys: bool = False,
+) -> tuple[dict[tuple[str, str], np.ndarray], dict[str, np.ndarray]]:
+    """Load or compute Panel D heatmaps and their row unit keys."""
+    panels, ordered_unit_keys, _ordered_peak_positions = (
+        load_or_compute_panel_d_heatmap_full_payload(
+            data_root=data_root,
+            datasets=datasets,
+            region=region,
+            position_bin_count=position_bin_count,
+            position_offset=position_offset,
+            speed_threshold_cm_s=speed_threshold_cm_s,
+            sigma_bins=sigma_bins,
+            panel_d_cache_dir=panel_d_cache_dir,
+            refresh_panel_d_cache=refresh_panel_d_cache,
+            firing_rate_normalization=firing_rate_normalization,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
+            min_tuning_stability_correlation=min_tuning_stability_correlation,
+            require_ordered_unit_keys=require_ordered_unit_keys,
+        )
+    )
+    return panels, ordered_unit_keys
 
 
 def load_or_compute_panel_d_heatmap_panels(
@@ -3993,9 +4693,9 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
 def add_decoding_significance_brackets(
     ax: "Axes",
     *,
-    brackets: Sequence[tuple[float, float, float, str]] = DECODING_SIGNIFICANCE_BRACKETS,
+    brackets: Sequence[tuple[float, float, float, str]] = (),
 ) -> None:
-    """Draw planned significance brackets above Panel G decoding summaries."""
+    """Draw data-derived significance brackets above Panel G summaries."""
     x_min, x_max = ax.get_xlim()
     y_min, y_max = ax.get_ylim()
     for x_start, x_stop, y, label in brackets:
@@ -4030,8 +4730,25 @@ def plot_decoding_error_panel(
     comparisons: Sequence[
         tuple[str, str, str, Sequence[tuple[str, str]]]
     ] = DECODING_CROSS_TRAJECTORY_COMPARISONS,
+    significance_brackets: Sequence[tuple[float, float, float, str]] = (),
+    region: str = DECODING_COMPARISON_REGION,
+    regions: Sequence[str] | None = None,
+    region_position_offset: float = DECODING_REGION_POSITION_OFFSET,
+    show_region_legend: bool = False,
+    show_median_labels: bool = True,
+    xtick_label_fontsize: float = DECODING_XTICK_LABEL_FONTSIZE,
 ) -> None:
-    """Plot pooled median and IQR cross-trajectory decoding errors."""
+    """Plot sample summaries with separately computed lap-level inference."""
+    plot_regions = (str(region),) if regions is None else tuple(map(str, regions))
+    if not plot_regions or len(set(plot_regions)) != len(plot_regions):
+        raise ValueError("regions must contain unique region names.")
+    if not np.isfinite(region_position_offset) or region_position_offset < 0:
+        raise ValueError("region_position_offset must be finite and non-negative.")
+    if len(plot_regions) > 1 and "region" not in decoding_error_table.columns:
+        raise ValueError(
+            "A multi-region decoding plot requires a 'region' table column."
+        )
+
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -4039,34 +4756,58 @@ def plot_decoding_error_panel(
     plot_ax = ax.inset_axes([0.0, 0.0, 1.0, 1.0])
     positions = np.arange(1, len(comparisons) + 1, dtype=float)
     labels = [label for _comparison, label, _family, _pairs in comparisons]
-    plot_table = decoding_error_table.copy()
-    medians = []
-    q25_values = []
-    q75_values = []
-    plot_positions = []
-    for position, (comparison, _label, _family, _pairs) in zip(
-        positions,
-        comparisons,
+    if len(plot_regions) == 1:
+        region_offsets = np.zeros(1, dtype=float)
+    else:
+        region_offsets = np.linspace(
+            -region_position_offset,
+            region_position_offset,
+            len(plot_regions),
+        )
+
+    plotted_any = False
+    plotted_region_count = 0
+    for plot_region, position_offset in zip(
+        plot_regions,
+        region_offsets,
         strict=True,
     ):
-        values = np.asarray(
-            plot_table.loc[
-                plot_table["comparison"].astype(str) == comparison,
-                "absolute_error",
-            ],
-            dtype=float,
-        )
-        values = values[np.isfinite(values)]
-        if values.size == 0:
-            continue
-        medians.append(float(np.median(values)))
-        q25_values.append(float(np.quantile(values, 0.25)))
-        q75_values.append(float(np.quantile(values, 0.75)))
-        plot_positions.append(float(position))
+        plot_table = decoding_error_table.copy()
+        if "region" in plot_table.columns:
+            plot_table = plot_table.loc[
+                plot_table["region"].astype(str) == plot_region
+            ]
+        medians = []
+        q25_values = []
+        q75_values = []
+        plot_positions = []
+        base_plot_positions = []
+        for position, (comparison, _label, _family, _pairs) in zip(
+            positions,
+            comparisons,
+            strict=True,
+        ):
+            values = np.asarray(
+                plot_table.loc[
+                    plot_table["comparison"].astype(str) == comparison,
+                    "absolute_error",
+                ],
+                dtype=float,
+            )
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            medians.append(float(np.median(values)))
+            q25_values.append(float(np.quantile(values, 0.25)))
+            q75_values.append(float(np.quantile(values, 0.75)))
+            plot_positions.append(float(position + position_offset))
+            base_plot_positions.append(float(position))
 
-    plotted_any = bool(medians)
-    if plotted_any:
-        color = REGION_COLORS.get(DECODING_COMPARISON_REGION, REGION_COLORS["v1"])
+        if not medians:
+            continue
+        plotted_any = True
+        plotted_region_count += 1
+        color = REGION_COLORS.get(plot_region, REGION_COLORS["v1"])
         plot_ax.vlines(
             plot_positions,
             q25_values,
@@ -4083,29 +4824,35 @@ def plot_decoding_error_panel(
             s=14,
             edgecolors="black",
             linewidths=0.3,
+            label=plot_region.upper() if show_region_legend else None,
             zorder=4,
         )
-        for position, median in zip(
-            plot_positions,
-            medians,
-            strict=True,
-        ):
-            is_last_position = np.isclose(position, positions[-1])
-            median_label_offset = (
-                -DECODING_MEDIAN_LABEL_X_OFFSET
-                if is_last_position
-                else DECODING_MEDIAN_LABEL_X_OFFSET
-            )
-            plot_ax.text(
-                position + median_label_offset,
-                median,
-                f"med. {median:.2f}",
-                ha="right" if is_last_position else "left",
-                va="center",
-                fontsize=DECODING_MEDIAN_LABEL_FONTSIZE,
-                color="0.20",
-                zorder=5,
-            )
+        if show_median_labels:
+            for base_position, plot_position, median in zip(
+                base_plot_positions,
+                plot_positions,
+                medians,
+                strict=True,
+            ):
+                is_last_position = np.isclose(
+                    base_position,
+                    positions[-1],
+                )
+                median_label_offset = (
+                    -DECODING_MEDIAN_LABEL_X_OFFSET
+                    if is_last_position
+                    else DECODING_MEDIAN_LABEL_X_OFFSET
+                )
+                plot_ax.text(
+                    plot_position + median_label_offset,
+                    median,
+                    f"med. {median:.2f}",
+                    ha="right" if is_last_position else "left",
+                    va="center",
+                    fontsize=DECODING_MEDIAN_LABEL_FONTSIZE,
+                    color="0.20",
+                    zorder=5,
+                )
 
     if not plotted_any:
         plot_ax.text(
@@ -4118,7 +4865,7 @@ def plot_decoding_error_panel(
         )
 
     plot_ax.set_xticks(positions)
-    plot_ax.set_xticklabels(labels, fontsize=DECODING_XTICK_LABEL_FONTSIZE)
+    plot_ax.set_xticklabels(labels, fontsize=xtick_label_fontsize)
     plot_ax.set_xlim(0.5, len(comparisons) + 0.5)
     plot_ax.set_ylim(0.0, 0.72)
     plot_ax.set_ylabel(
@@ -4131,8 +4878,20 @@ def plot_decoding_error_panel(
     plot_ax.spines["right"].set_visible(False)
     plot_ax.tick_params(axis="y", labelsize=7, length=2, pad=1)
     plot_ax.tick_params(axis="x", length=0, pad=1)
-    if plotted_any:
-        add_decoding_significance_brackets(plot_ax)
+    if show_region_legend and plotted_region_count:
+        plot_ax.legend(
+            loc="upper right",
+            frameon=False,
+            fontsize=DECODING_REGION_LEGEND_FONTSIZE,
+            borderpad=0.1,
+            handletextpad=0.3,
+            labelspacing=0.2,
+        )
+    if plotted_any and significance_brackets:
+        add_decoding_significance_brackets(
+            plot_ax,
+            brackets=significance_brackets,
+        )
 
     train_center = DECODING_TRAIN_SCHEMATIC_CENTER_X
     ax.text(
@@ -4919,8 +5678,11 @@ def make_figure_1(
     position_offset: int,
     speed_threshold_cm_s: float,
     sigma_bins: float,
+    encoding_bin_size_s: float,
     encoding_place_bin_size_cm: float,
     dpi: int,
+    decoding_n_permutations: int = DECODING_PERMUTATION_COUNT,
+    decoding_permutation_seed: int = DECODING_PERMUTATION_SEED,
     panel_d_cache_dir: Path | None = None,
     refresh_panel_d_cache: bool = False,
     panel_e_cache_dir: Path | None = None,
@@ -4931,6 +5693,10 @@ def make_figure_1(
     """Build and save Figure 1."""
     import matplotlib.pyplot as plt
 
+    if decoding_n_permutations <= 0:
+        raise ValueError("decoding_n_permutations must be positive.")
+    if decoding_permutation_seed < 0:
+        raise ValueError("decoding_permutation_seed must be non-negative.")
     panel_d_cache_dir = (
         Path(output_path).parent / "cache"
         if panel_d_cache_dir is None
@@ -5069,16 +5835,50 @@ def make_figure_1(
         data_root=data_root,
         datasets=datasets,
         region=ENCODING_COMPARISON_REGION,
+        bin_size_s=encoding_bin_size_s,
         place_bin_size_cm=encoding_place_bin_size_cm,
     )
     plot_encoding_delta_panel(panel_g_plot_axis, encoding_delta_table)
     panel_g_axis.set_title("Comparison to alternative codes", fontsize=8, pad=2)
+    decoding_datasets = filter_datasets_by_animals(
+        datasets,
+        PANEL_H_DECODING_ANIMALS,
+    )
+    decoding_dataset_animals = [
+        animal_name for animal_name, _date, _epoch in decoding_datasets
+    ]
+    if (
+        len(decoding_datasets) != len(PANEL_H_DECODING_ANIMALS)
+        or set(decoding_dataset_animals) != set(PANEL_H_DECODING_ANIMALS)
+    ):
+        raise ValueError(
+            "Figure 1 decoding inference requires exactly one data set for "
+            f"each animal {PANEL_H_DECODING_ANIMALS!r}; received "
+            f"{decoding_datasets!r}."
+        )
     decoding_error_table = load_decoding_absolute_error_table(
         data_root=data_root,
-        datasets=filter_datasets_by_animals(datasets, PANEL_H_DECODING_ANIMALS),
+        datasets=decoding_datasets,
         region=DECODING_COMPARISON_REGION,
     )
-    plot_decoding_error_panel(panel_h_plot_axis, decoding_error_table)
+    decoding_trial_error_table = build_decoding_trial_error_table(
+        data_root=data_root,
+        datasets=decoding_datasets,
+        region=DECODING_COMPARISON_REGION,
+    )
+    decoding_permutation_results = compute_decoding_permutation_tests(
+        decoding_trial_error_table,
+        n_permutations=decoding_n_permutations,
+        seed=decoding_permutation_seed,
+    )
+    decoding_significance_brackets = build_decoding_significance_brackets(
+        decoding_permutation_results,
+    )
+    plot_decoding_error_panel(
+        panel_h_plot_axis,
+        decoding_error_table,
+        significance_brackets=decoding_significance_brackets,
+    )
     panel_h_axis.set_title(PANEL_G_TITLE, fontsize=8, pad=2)
 
     axes = np.asarray(
@@ -5373,12 +6173,39 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
     )
     parser.add_argument(
+        "--encoding-bin-size-s",
+        type=float,
+        default=ENCODING_COMPARISON_BIN_SIZE_S,
+        help=(
+            "Time-bin size used to find encoding-comparison summary files. "
+            f"Default: {ENCODING_COMPARISON_BIN_SIZE_S}"
+        ),
+    )
+    parser.add_argument(
         "--encoding-place-bin-size-cm",
         type=float,
         default=ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
         help=(
             "Place-bin size used to find encoding-comparison summary files. "
             f"Default: {ENCODING_COMPARISON_PLACE_BIN_SIZE_CM}"
+        ),
+    )
+    parser.add_argument(
+        "--decoding-n-permutations",
+        type=int,
+        default=DECODING_PERMUTATION_COUNT,
+        help=(
+            "Label permutations used for Figure 1 decoding inference. "
+            f"Default: {DECODING_PERMUTATION_COUNT}"
+        ),
+    )
+    parser.add_argument(
+        "--decoding-permutation-seed",
+        type=int,
+        default=DECODING_PERMUTATION_SEED,
+        help=(
+            "Random seed used for Figure 1 decoding inference. "
+            f"Default: {DECODING_PERMUTATION_SEED}"
         ),
     )
     parser.add_argument(
@@ -5425,8 +6252,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
         sigma_bins=args.sigma_bins,
+        encoding_bin_size_s=args.encoding_bin_size_s,
         encoding_place_bin_size_cm=args.encoding_place_bin_size_cm,
         dpi=args.dpi,
+        decoding_n_permutations=args.decoding_n_permutations,
+        decoding_permutation_seed=args.decoding_permutation_seed,
         panel_d_cache_dir=panel_d_cache_dir,
         refresh_panel_d_cache=args.refresh_panel_d_cache,
         panel_e_cache_dir=panel_e_cache_dir,

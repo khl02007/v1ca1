@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from matplotlib import colormaps
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import PowerNorm, to_hex
@@ -16,23 +17,46 @@ from v1ca1.helper.plot_wtrack_schematic import (
     draw_large_ovals,
     get_w_track_geometry,
 )
-from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
+from v1ca1.helper.session import (
+    DEFAULT_DATA_ROOT,
+    REGIONS,
+    TRAJECTORY_TYPES,
+    get_analysis_path,
+    load_trajectory_intervals,
+)
+from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures import _figure_2_base as _figure_2
-from v1ca1.paper_figures.datasets import DatasetId, get_processed_datasets
+from v1ca1.paper_figures.datasets import (
+    DatasetId,
+    get_processed_datasets,
+    normalize_dataset_id,
+)
 from v1ca1.paper_figures.figure_1 import (
+    DECODING_PERMUTATION_COUNT,
+    DECODING_PERMUTATION_SEED,
     DECODING_SIGNIFICANCE_BRACKET_HEIGHT,
     DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH,
     DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
     DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
+    _align_absolute_error_with_times,
+    _intervalset_to_arrays,
+    significance_stars,
+    stratified_median_permutation_test,
 )
 from v1ca1.paper_figures._dark_light import (
     GLM_EMPIRICAL_COLOR,
+    PANEL_E_CROSS_COMPARISONS,
+    PANEL_E_PLACE_MODEL_NAME,
     PANEL_G_INDEPENDENT_BASIS_ICON_BOTTOM,
     PANEL_G_INDEPENDENT_BASIS_ICON_HEIGHT,
     PANEL_G_INDEPENDENT_BASIS_ICON_TOP,
     PANEL_G_INDEPENDENT_BASIS_ICON_WIDTH,
+    _load_decoding_tsd,
     _draw_panel_g_basis_icon,
     _draw_panel_h_track,
+    build_panel_quant_epoch_specs,
+    get_cross_trajectory_decoding_tsd_paths,
+    get_within_epoch_decoding_tsd_paths,
 )
 from v1ca1.paper_figures.style import (
     apply_paper_style,
@@ -57,8 +81,41 @@ PANEL_D2E2_ROW_WSPACE = 0.050
 PANEL_C2_SIGNIFICANCE_BRACKET_X = (1.0, 2.0)
 PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION = 0.82
 PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION = 0.68
-PANEL_C2_SIGNIFICANCE_LABEL = "*"
 PANEL_C2_ERROR_AXIS_LABEL = "|Norm. error|"
+PANEL_E_DECODING_ANALYSES = ("cross_trajectory", "place")
+PANEL_E_EXPECTED_MEDIAN_DIFFERENCE_SIGNS = {
+    "cross_trajectory": 1.0,
+    "place": -1.0,
+}
+PANEL_E_TRIAL_ERROR_TABLE_COLUMNS = (
+    "animal_name",
+    "date",
+    "epoch_type",
+    "epoch",
+    "region",
+    "analysis",
+    "comparison",
+    "comparison_label",
+    "transfer_family",
+    "encoding_trajectory",
+    "decoding_trajectory",
+    "trial_index",
+    "trial_start",
+    "trial_end",
+    "trial_median_absolute_error",
+    "n_samples",
+    "true_path",
+    "decoded_path",
+)
+PANEL_E_PERMUTATION_RESULT_COLUMNS = (
+    "animal_name",
+    "analysis",
+    "median_difference",
+    "p_two_sided",
+    "p_less",
+    "p_greater",
+    "n_permutations",
+)
 PANEL_A2_SINGLE_ROW_SCHEMATIC_AXIS_LEFT = -0.055
 PANEL_D2_SCHEMATIC_AXIS_BOUNDS = _figure_2.PANEL_C_SIDE_BY_SIDE_SCHEMATIC_BOUNDS
 PANEL_D2_RESULT_AXIS_BOUNDS = _figure_2.PANEL_C_SIDE_BY_SIDE_EXAMPLE_BOUNDS
@@ -246,12 +303,380 @@ def _align_panel_b_top_histogram_label_to_scatter(
     )
 
 
+def _append_panel_e_trial_errors(
+    records: list[dict[str, Any]],
+    *,
+    timestamps: np.ndarray,
+    absolute_error: np.ndarray,
+    intervals: Any,
+    animal_name: str,
+    date: str,
+    epoch_type: str,
+    epoch: str,
+    region: str,
+    analysis: str,
+    comparison: str,
+    comparison_label: str,
+    transfer_family: str,
+    encoding_trajectory: str | None,
+    decoding_trajectory: str,
+    true_path: Path,
+    decoded_path: Path,
+) -> None:
+    """Append one normalized median decoding error per finite lap."""
+    starts, ends = _intervalset_to_arrays(intervals)
+    for trial_index, (start, end) in enumerate(zip(starts, ends, strict=True)):
+        in_trial = (timestamps >= start) & (timestamps < end)
+        values = absolute_error[in_trial]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        records.append(
+            {
+                "animal_name": animal_name,
+                "date": date,
+                "epoch_type": epoch_type,
+                "epoch": epoch,
+                "region": region,
+                "analysis": analysis,
+                "comparison": comparison,
+                "comparison_label": comparison_label,
+                "transfer_family": transfer_family,
+                "encoding_trajectory": encoding_trajectory,
+                "decoding_trajectory": decoding_trajectory,
+                "trial_index": int(trial_index),
+                "trial_start": float(start),
+                "trial_end": float(end),
+                "trial_median_absolute_error": float(np.median(values)),
+                "n_samples": int(values.size),
+                "true_path": str(true_path),
+                "decoded_path": str(decoded_path),
+            }
+        )
+
+
+def build_panel_e_decoding_trial_error_table(
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    region: str,
+    light_epoch: str | None,
+    dark_epoch: str | None,
+    comparisons: Sequence[
+        tuple[str, str, str, Sequence[tuple[str, str]]]
+    ] = PANEL_E_CROSS_COMPARISONS,
+) -> Any:
+    """Build lap-level normalized decoding errors for Figure 2E inference."""
+    import pandas as pd
+
+    records: list[dict[str, Any]] = []
+    for dataset in datasets:
+        animal_name, date, _dataset_dark_epoch = normalize_dataset_id(dataset)
+        epoch_specs = build_panel_quant_epoch_specs(
+            animal_name,
+            date,
+            light_epoch=light_epoch,
+            dark_epoch=dark_epoch,
+        )
+        epochs = [epoch for _epoch_type, epoch in epoch_specs]
+        if len(set(epochs)) != len(epochs):
+            raise ValueError(
+                "Figure 2E decoding inference requires distinct Light and Dark "
+                f"epochs for {animal_name} {date}; received {epochs!r}."
+            )
+        analysis_path = get_analysis_path(animal_name, date, Path(data_root))
+        trajectory_intervals, _source = load_trajectory_intervals(
+            analysis_path,
+            epochs,
+        )
+        place_normalization = float(get_wtrack_total_length(animal_name))
+        if not np.isfinite(place_normalization) or place_normalization <= 0.0:
+            raise ValueError(
+                "W-track length must be positive and finite for Figure 2E "
+                f"place decoding; got {place_normalization!r} for {animal_name}."
+            )
+
+        for epoch_type, epoch in epoch_specs:
+            if epoch not in trajectory_intervals:
+                raise ValueError(
+                    f"Trajectory intervals do not contain epoch {epoch!r} for "
+                    f"{animal_name} {date}."
+                )
+            epoch_intervals = trajectory_intervals[epoch]
+
+            true_place_path, decoded_place_path = (
+                get_within_epoch_decoding_tsd_paths(
+                    data_root,
+                    animal_name=animal_name,
+                    date=date,
+                    region=region,
+                    epoch=epoch,
+                    model_name=PANEL_E_PLACE_MODEL_NAME,
+                )
+            )
+            true_place = _load_decoding_tsd(true_place_path)
+            decoded_place = _load_decoding_tsd(decoded_place_path)
+            place_timestamps, place_absolute_error = (
+                _align_absolute_error_with_times(
+                    true_place,
+                    decoded_place,
+                )
+            )
+            place_absolute_error = place_absolute_error / place_normalization
+            for decoding_trajectory in TRAJECTORY_TYPES:
+                if decoding_trajectory not in epoch_intervals:
+                    raise ValueError(
+                        "Trajectory intervals do not contain decoding trajectory "
+                        f"{decoding_trajectory!r} for {animal_name} {date} {epoch}."
+                    )
+                _append_panel_e_trial_errors(
+                    records,
+                    timestamps=place_timestamps,
+                    absolute_error=place_absolute_error,
+                    intervals=epoch_intervals[decoding_trajectory],
+                    animal_name=animal_name,
+                    date=date,
+                    epoch_type=epoch_type,
+                    epoch=epoch,
+                    region=region,
+                    analysis="place",
+                    comparison="place",
+                    comparison_label="Place",
+                    transfer_family="within_epoch",
+                    encoding_trajectory=None,
+                    decoding_trajectory=decoding_trajectory,
+                    true_path=true_place_path,
+                    decoded_path=decoded_place_path,
+                )
+
+            for (
+                comparison,
+                comparison_label,
+                transfer_family,
+                trajectory_pairs,
+            ) in comparisons:
+                for encoding_trajectory, decoding_trajectory in trajectory_pairs:
+                    if decoding_trajectory not in epoch_intervals:
+                        raise ValueError(
+                            "Trajectory intervals do not contain decoding "
+                            f"trajectory {decoding_trajectory!r} for "
+                            f"{animal_name} {date} {epoch}."
+                        )
+                    true_cross_path, decoded_cross_path = (
+                        get_cross_trajectory_decoding_tsd_paths(
+                            data_root,
+                            animal_name=animal_name,
+                            date=date,
+                            region=region,
+                            epoch=epoch,
+                            transfer_family=transfer_family,
+                            encoding_trajectory=encoding_trajectory,
+                            decoding_trajectory=decoding_trajectory,
+                        )
+                    )
+                    true_cross = _load_decoding_tsd(true_cross_path)
+                    decoded_cross = _load_decoding_tsd(decoded_cross_path)
+                    cross_timestamps, cross_absolute_error = (
+                        _align_absolute_error_with_times(
+                            true_cross,
+                            decoded_cross,
+                        )
+                    )
+                    _append_panel_e_trial_errors(
+                        records,
+                        timestamps=cross_timestamps,
+                        absolute_error=cross_absolute_error,
+                        intervals=epoch_intervals[decoding_trajectory],
+                        animal_name=animal_name,
+                        date=date,
+                        epoch_type=epoch_type,
+                        epoch=epoch,
+                        region=region,
+                        analysis="cross_trajectory",
+                        comparison=comparison,
+                        comparison_label=comparison_label,
+                        transfer_family=transfer_family,
+                        encoding_trajectory=encoding_trajectory,
+                        decoding_trajectory=decoding_trajectory,
+                        true_path=true_cross_path,
+                        decoded_path=decoded_cross_path,
+                    )
+
+    return pd.DataFrame.from_records(
+        records,
+        columns=PANEL_E_TRIAL_ERROR_TABLE_COLUMNS,
+    )
+
+
+def compute_panel_e_decoding_permutation_tests(
+    trial_table: Any,
+    *,
+    n_permutations: int = DECODING_PERMUTATION_COUNT,
+    seed: int = DECODING_PERMUTATION_SEED,
+) -> Any:
+    """Run Figure 1G's stratified median shuffle for each Figure 2E analysis."""
+    import pandas as pd
+
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if seed < 0:
+        raise ValueError("seed must be non-negative.")
+    required_columns = {
+        "animal_name",
+        "date",
+        "epoch_type",
+        "analysis",
+        "decoding_trajectory",
+        "trial_median_absolute_error",
+    }
+    missing_columns = required_columns.difference(trial_table.columns)
+    if missing_columns:
+        raise ValueError(
+            "Figure 2E trial-error table is missing required columns: "
+            f"{sorted(missing_columns)!r}."
+        )
+
+    rng = np.random.default_rng(seed)
+    expected_trajectories = set(TRAJECTORY_TYPES)
+    records = []
+    for animal_name, animal_table in trial_table.groupby(
+        "animal_name",
+        sort=True,
+    ):
+        animal_dates = set(animal_table["date"].astype(str))
+        if len(animal_dates) != 1:
+            raise ValueError(
+                "Figure 2E decoding inference requires exactly one session per "
+                f"animal; {animal_name} has dates {sorted(animal_dates)!r}."
+            )
+        for analysis in PANEL_E_DECODING_ANALYSES:
+            analysis_table = animal_table.loc[
+                animal_table["analysis"].astype(str) == analysis
+            ].copy()
+            for epoch_type in ("light", "dark"):
+                epoch_table = analysis_table.loc[
+                    analysis_table["epoch_type"].astype(str) == epoch_type
+                ]
+                observed_trajectories = set(
+                    epoch_table["decoding_trajectory"].astype(str)
+                )
+                if observed_trajectories != expected_trajectories:
+                    raise ValueError(
+                        "Incomplete Figure 2E decoding-trajectory coverage for "
+                        f"{animal_name} {analysis!r} {epoch_type!r}: expected "
+                        f"{sorted(expected_trajectories)!r}, observed "
+                        f"{sorted(observed_trajectories)!r}."
+                    )
+
+            test_table = analysis_table.copy()
+            test_table["comparison"] = test_table["epoch_type"].astype(str)
+            result = stratified_median_permutation_test(
+                test_table,
+                "light",
+                "dark",
+                n_permutations=n_permutations,
+                rng=rng,
+            )
+            records.append(
+                {
+                    "animal_name": str(animal_name),
+                    "analysis": analysis,
+                    **result,
+                }
+            )
+
+    return pd.DataFrame.from_records(
+        records,
+        columns=PANEL_E_PERMUTATION_RESULT_COLUMNS,
+    )
+
+
+def build_panel_e_decoding_significance_labels(
+    per_animal_results: Any,
+    *,
+    animal_names: Sequence[str],
+) -> tuple[str, str]:
+    """Return conservative data-derived labels for Figure 2E's two brackets."""
+    required_columns = {
+        "animal_name",
+        "analysis",
+        "median_difference",
+        "p_two_sided",
+    }
+    missing_columns = required_columns.difference(per_animal_results.columns)
+    if missing_columns:
+        raise ValueError(
+            "Figure 2E permutation-test table is missing required columns: "
+            f"{sorted(missing_columns)!r}."
+        )
+
+    expected_animals = tuple(str(animal_name) for animal_name in animal_names)
+    if not expected_animals or len(set(expected_animals)) != len(expected_animals):
+        raise ValueError("animal_names must contain unique animal identifiers.")
+    result_animals = per_animal_results["animal_name"].astype(str)
+    observed_animals = set(result_animals)
+    if observed_animals != set(expected_animals):
+        raise ValueError(
+            "Permutation-test animals do not match Figure 2E animals: "
+            f"expected {sorted(expected_animals)!r}, "
+            f"observed {sorted(observed_animals)!r}."
+        )
+
+    result_analyses = per_animal_results["analysis"].astype(str)
+    labels = []
+    for analysis in PANEL_E_DECODING_ANALYSES:
+        analysis_results = per_animal_results.loc[
+            (result_analyses == analysis)
+            & result_animals.isin(expected_animals)
+        ]
+        analysis_animals = analysis_results["animal_name"].astype(str)
+        counts = analysis_animals.value_counts()
+        if (
+            set(analysis_animals) != set(expected_animals)
+            or len(analysis_results) != len(expected_animals)
+            or not np.all(counts.to_numpy(dtype=int) == 1)
+        ):
+            raise ValueError(
+                "Expected exactly one Figure 2E permutation result per animal "
+                f"for analysis {analysis!r}."
+            )
+        p_values = np.asarray(
+            analysis_results["p_two_sided"],
+            dtype=float,
+        )
+        median_differences = np.asarray(
+            analysis_results["median_difference"],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(p_values)) or np.any(
+            (p_values < 0.0) | (p_values > 1.0)
+        ):
+            raise ValueError(
+                "Figure 2E permutation results contain invalid two-sided "
+                f"p-values for analysis {analysis!r}."
+            )
+        expected_sign = PANEL_E_EXPECTED_MEDIAN_DIFFERENCE_SIGNS[analysis]
+        if not np.all(np.isfinite(median_differences)) or np.any(
+            expected_sign * median_differences <= 0.0
+        ):
+            expected_direction = "higher" if expected_sign > 0.0 else "lower"
+            raise ValueError(
+                "Figure 2E expects Light to have "
+                f"{expected_direction} median trial errors than Dark for every "
+                f"animal in analysis {analysis!r}."
+            )
+        labels.append(significance_stars(float(np.max(p_values))))
+
+    return labels[0], labels[1]
+
+
 def _add_panel_c2_light_dark_bracket(
     ax: Any,
+    label: str,
     *,
     y_fraction: float = PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION,
 ) -> None:
-    """Draw the Figure 2 Panel C light-dark significance bracket."""
+    """Draw one data-derived Figure 2E light-dark significance bracket."""
     x_start, x_stop = PANEL_C2_SIGNIFICANCE_BRACKET_X
     y_min, y_max = ax.get_ylim()
     y_span = y_max - y_min
@@ -271,7 +696,7 @@ def _add_panel_c2_light_dark_bracket(
     ax.text(
         (x_start + x_stop) / 2.0,
         y_top + DECODING_SIGNIFICANCE_LABEL_Y_OFFSET,
-        PANEL_C2_SIGNIFICANCE_LABEL,
+        str(label),
         ha="center",
         va="bottom",
         fontsize=DECODING_SIGNIFICANCE_LABEL_FONTSIZE,
@@ -281,18 +706,28 @@ def _add_panel_c2_light_dark_bracket(
     )
 
 
-def add_panel_c2_light_dark_brackets(panel_c_axis: Any) -> None:
-    """Add light-dark significance brackets to the two Panel C summary axes."""
+def add_panel_c2_light_dark_brackets(
+    panel_c_axis: Any,
+    labels: Sequence[str],
+) -> None:
+    """Add data-derived light-dark brackets to the two Figure 2E axes."""
+    if len(labels) != 2:
+        raise ValueError("Figure 2E requires exactly two significance labels.")
     y_fractions = (
         PANEL_C2_SIGNIFICANCE_BRACKET_Y_FRACTION,
         PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION,
     )
-    for child_axis, y_fraction in zip(
+    for child_axis, label, y_fraction in zip(
         panel_c_axis.child_axes[:2],
+        labels,
         y_fractions,
-        strict=False,
+        strict=True,
     ):
-        _add_panel_c2_light_dark_bracket(child_axis, y_fraction=y_fraction)
+        _add_panel_c2_light_dark_bracket(
+            child_axis,
+            label,
+            y_fraction=y_fraction,
+        )
 
 
 def format_panel_c2_decoding_axes(panel_c_axis: Any) -> None:
@@ -1090,6 +1525,8 @@ def plot_panel_d2_architecture_panel(
 def plot_panel_e2_decoding_panel(
     ax: Any,
     decoding_error_table: Any,
+    *,
+    significance_labels: Sequence[str] = (),
 ) -> None:
     """Plot the Figure 2 dark-light decoding comparison as a standalone panel."""
     ax.set_xlim(0.0, 1.0)
@@ -1101,7 +1538,8 @@ def plot_panel_e2_decoding_panel(
         decoding_error_table,
     )
     format_panel_c2_decoding_axes(ax)
-    add_panel_c2_light_dark_brackets(ax)
+    if significance_labels:
+        add_panel_c2_light_dark_brackets(ax, significance_labels)
 
 
 def make_figure_2(
@@ -1125,9 +1563,32 @@ def make_figure_2(
     high_dark_tuning_correlation_threshold: float = (
         _figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
     ),
+    decoding_n_permutations: int = DECODING_PERMUTATION_COUNT,
+    decoding_permutation_seed: int = DECODING_PERMUTATION_SEED,
 ) -> Path:
     """Build and save Figure 2."""
     import matplotlib.pyplot as plt
+
+    if decoding_n_permutations <= 0:
+        raise ValueError("decoding_n_permutations must be positive.")
+    if decoding_permutation_seed < 0:
+        raise ValueError("decoding_permutation_seed must be non-negative.")
+    normalized_datasets = [
+        normalize_dataset_id(dataset)
+        for dataset in datasets
+    ]
+    decoding_animal_names = tuple(
+        animal_name
+        for animal_name, _date, _epoch in normalized_datasets
+    )
+    if (
+        not decoding_animal_names
+        or len(set(decoding_animal_names)) != len(decoding_animal_names)
+    ):
+        raise ValueError(
+            "Figure 2E decoding inference requires exactly one data set per "
+            f"animal; received {normalized_datasets!r}."
+        )
 
     panel_example_cache_dir = (
         Path(output_path).parent / "cache"
@@ -1195,6 +1656,24 @@ def make_figure_2(
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
     )
+    panel_e_decoding_trial_error_table = (
+        build_panel_e_decoding_trial_error_table(
+            data_root=data_root,
+            datasets=datasets,
+            region=quant_region,
+            light_epoch=light_epoch,
+            dark_epoch=dark_epoch,
+        )
+    )
+    panel_e_permutation_results = compute_panel_e_decoding_permutation_tests(
+        panel_e_decoding_trial_error_table,
+        n_permutations=decoding_n_permutations,
+        seed=decoding_permutation_seed,
+    )
+    panel_e_significance_labels = build_panel_e_decoding_significance_labels(
+        panel_e_permutation_results,
+        animal_names=decoding_animal_names,
+    )
 
     apply_paper_style()
     fig = plt.figure(
@@ -1261,6 +1740,7 @@ def make_figure_2(
     plot_panel_e2_decoding_panel(
         panel_e_axis,
         panel_e_decoding_error_table,
+        significance_labels=panel_e_significance_labels,
     )
 
     label_axis(panel_a_axis, "A", x=-0.02, y=_figure_2.PANEL_A_LABEL_Y)
@@ -1453,6 +1933,24 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"Gaussian smoothing width in bins. Default: {_figure_2.DEFAULT_SIGMA_BINS}",
     )
     parser.add_argument(
+        "--decoding-n-permutations",
+        type=int,
+        default=DECODING_PERMUTATION_COUNT,
+        help=(
+            "Label permutations used for Figure 2E decoding inference. "
+            f"Default: {DECODING_PERMUTATION_COUNT}"
+        ),
+    )
+    parser.add_argument(
+        "--decoding-permutation-seed",
+        type=int,
+        default=DECODING_PERMUTATION_SEED,
+        help=(
+            "Random seed used for Figure 2E decoding inference. "
+            f"Default: {DECODING_PERMUTATION_SEED}"
+        ),
+    )
+    parser.add_argument(
         "--dpi",
         type=int,
         default=300,
@@ -1494,6 +1992,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         high_dark_tuning_correlation_threshold=(
             args.high_dark_tuning_correlation_threshold
         ),
+        decoding_n_permutations=args.decoding_n_permutations,
+        decoding_permutation_seed=args.decoding_permutation_seed,
     )
 
 

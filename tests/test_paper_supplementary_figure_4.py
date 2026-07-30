@@ -564,10 +564,11 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
         fake_load_behavior_tables,
     )
 
-    def fake_save_figure(figure, output_path: Path, dpi: int):
+    def fake_save_figure(figure, output_path: Path, dpi: int, **kwargs):
         figure.canvas.draw()
         calls["output_path"] = output_path
         calls["dpi"] = dpi
+        calls["save_kwargs"] = kwargs
         calls["figure_size_inches"] = tuple(figure.get_size_inches())
         parent_axes = figure.axes[:4]
         calls["parent_bounds"] = [axis.get_position().bounds for axis in parent_axes]
@@ -619,6 +620,11 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
                 "CA1 spike vector vs.\nmean CA1 activity",
                 "Relationship to dark-active DPP cells",
             }
+        }
+        calls["header_fontsizes"] = {
+            text.get_text(): text.get_fontsize()
+            for text in figure.texts
+            if text.get_text() in calls["header_bounds"]
         }
         source_child_axis = parent_axes[2].child_axes[0]
         calls["source_summary_texts"] = [
@@ -682,6 +688,7 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
     assert saved_path == output_path
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
+    assert calls["save_kwargs"] == {"bbox_inches": None}
     assert calls["heatmap_kwargs"]["ripple_threshold_zscore"] == 2.0
     assert calls["heatmap_kwargs"]["light_epoch"] == "02_override"
     assert calls["heatmap_kwargs"]["dark_epoch"] == "08_override"
@@ -710,16 +717,25 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
     ]
     assert panel_a_bounds[1] > panel_c_bounds[1]
     assert panel_b_bounds[1] > panel_d_bounds[1]
-    assert panel_a_bounds[0] == pytest.approx(panel_c_bounds[0])
-    assert panel_b_bounds[0] == pytest.approx(panel_d_bounds[0])
-    assert panel_b_bounds[2] > 2.0 * panel_a_bounds[2]
+    assert panel_a_bounds[0] < panel_b_bounds[0]
+    assert panel_c_bounds[0] < panel_d_bounds[0]
+    assert panel_a_bounds[2] > panel_c_bounds[2]
+    assert panel_b_bounds[2] < panel_d_bounds[2]
+    assert panel_b_bounds[2] > panel_a_bounds[2]
+    assert panel_a_bounds[2] * DEFAULT_FIGURE_WIDTH_MM >= 50.0
+    assert panel_b_bounds[2] * DEFAULT_FIGURE_WIDTH_MM <= 100.0
     assert panel_d_bounds[2] > 2.0 * panel_c_bounds[2]
 
     top_row_height = min(panel_a_bounds[3], panel_b_bounds[3])
     bottom_row_height = min(panel_c_bounds[3], panel_d_bounds[3])
     assert panel_a_bounds[3] == pytest.approx(panel_b_bounds[3])
     assert panel_c_bounds[3] == pytest.approx(panel_d_bounds[3])
-    assert top_row_height == pytest.approx(bottom_row_height)
+    assert top_row_height * DEFAULT_FIGURE_HEIGHT_MM >= 45.0
+    assert bottom_row_height * DEFAULT_FIGURE_HEIGHT_MM >= 40.0
+    assert top_row_height == pytest.approx(
+        bottom_row_height,
+        abs=1.0 / DEFAULT_FIGURE_HEIGHT_MM,
+    )
     top_row_bottom = min(panel_a_bounds[1], panel_b_bounds[1])
     bottom_row_top = max(
         panel_c_bounds[1] + panel_c_bounds[3],
@@ -741,22 +757,25 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
     panel_data_envelopes = [
         vertical_envelope(child_bounds) for child_bounds in calls["child_bounds"]
     ]
-    one_mm_figure_fraction = 1.0 / DEFAULT_FIGURE_HEIGHT_MM
-    panel_a_data_height = panel_data_envelopes[0][1] - panel_data_envelopes[0][0]
-    panel_b_data_height = panel_data_envelopes[1][1] - panel_data_envelopes[1][0]
-    panel_c_data_height = panel_data_envelopes[2][1] - panel_data_envelopes[2][0]
-    panel_d_data_height = panel_data_envelopes[3][1] - panel_data_envelopes[3][0]
-    assert panel_a_data_height == pytest.approx(
-        panel_c_data_height,
-        abs=one_mm_figure_fraction,
+    panel_data_heights_mm = [
+        (top - bottom) * DEFAULT_FIGURE_HEIGHT_MM
+        for bottom, top in panel_data_envelopes
+    ]
+    assert all(
+        height_mm >= 25.0
+        for height_mm in panel_data_heights_mm
     )
-    assert panel_b_data_height == pytest.approx(
-        panel_d_data_height,
-        abs=one_mm_figure_fraction,
-    )
+    assert max(panel_data_heights_mm) - min(panel_data_heights_mm) <= 2.0
 
     source_bounds = calls["child_bounds"][2]
+    panel_b_child_bounds = calls["child_bounds"][1]
     behavior_bounds = calls["child_bounds"][3]
+    assert len(panel_b_child_bounds) == 2
+    panel_b_child_widths_mm = [
+        child_bounds[2] * DEFAULT_FIGURE_WIDTH_MM
+        for child_bounds in panel_b_child_bounds
+    ]
+    assert min(panel_b_child_widths_mm) >= 80.0
     assert len(source_bounds) == 1
     assert len(behavior_bounds) == 3
     source_width_mm = source_bounds[0][2] * DEFAULT_FIGURE_WIDTH_MM
@@ -811,8 +830,21 @@ def test_make_supplementary_figure_4_saves_glm_summary_panels(
         )
         assert header_bottom - child_data_top >= minimum_header_gap_px
 
+    assert calls["header_fontsizes"] == pytest.approx(
+        {
+            "A": 8.0,
+            "B": 8.0,
+            "C": 8.0,
+            "D": 8.0,
+            "Ripple modulation index": 7.2,
+            "Predicting V1 activity during ripples with CA1 activity": 7.2,
+            "CA1 spike vector vs.\nmean CA1 activity": 7.2,
+            "Relationship to dark-active DPP cells": 7.2,
+        }
+    )
+
     assert calls["source_summary_texts"] == [
-        ("n=1\nfrac vector>mean=1.00", (0.97, 0.05), "right", "bottom")
+        ("n=2\nfrac vector>mean=1.00", (0.97, 0.05), "right", "bottom")
     ]
     assert calls["source_x_label_texts"] == [((0.52, 0.0), "center")]
     assert [label for label, _position in calls["behavior_x_labels"]] == [

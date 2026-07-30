@@ -199,7 +199,7 @@ def test_format_delta_histogram_stats_reports_fraction_mean_and_median() -> None
     assert "Median: -0.050" in text
 
 
-def test_parse_arguments_accepts_place_bin_size(
+def test_parse_arguments_accepts_time_and_place_bin_sizes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _reload_encoding_module()
@@ -214,6 +214,8 @@ def test_parse_arguments_accepts_place_bin_size(
             "20240611",
             "--dark-epoch",
             "run2",
+            "--bin-size-s",
+            "0.05",
             "--place-bin-size-cm",
             "2.5",
         ],
@@ -221,7 +223,39 @@ def test_parse_arguments_accepts_place_bin_size(
 
     args = module.parse_arguments()
 
+    assert args.bin_size_s == 0.05
     assert args.place_bin_size_cm == 2.5
+
+
+def test_format_encoding_binning_token_includes_time_and_place_bins() -> None:
+    module = _reload_encoding_module()
+
+    assert module.format_time_bin_size_token(0.02) == "bin0p02s"
+    assert module.format_time_bin_size_token(0.05) == "bin0p05s"
+    assert (
+        module.format_encoding_binning_token(
+            bin_size_s=0.05,
+            place_bin_size_cm=2.5,
+        )
+        == "bin0p05s_placebin2p5cm"
+    )
+    assert module.format_encoding_binning_token(
+        bin_size_s=0.02,
+        place_bin_size_cm=4.0,
+    ) != module.format_encoding_binning_token(
+        bin_size_s=0.05,
+        place_bin_size_cm=4.0,
+    )
+
+
+@pytest.mark.parametrize("bin_size_s", [0.0, -0.01, np.nan, np.inf])
+def test_format_time_bin_size_token_rejects_invalid_values(
+    bin_size_s: float,
+) -> None:
+    module = _reload_encoding_module()
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        module.format_time_bin_size_token(bin_size_s)
 
 
 def test_parse_arguments_uses_region_firing_rate_threshold_defaults(
@@ -269,7 +303,7 @@ def test_empty_cv_by_model_has_required_models() -> None:
     assert table.index.name == "unit"
 
 
-def test_save_paths_include_place_bin_size_token(tmp_path) -> None:
+def test_save_paths_include_time_and_place_bin_size_tokens(tmp_path) -> None:
     module = _reload_encoding_module()
     table = _FakeParquetTable()
 
@@ -277,6 +311,7 @@ def test_save_paths_include_place_bin_size_token(tmp_path) -> None:
         {"v1": {"run1": table}},
         data_dir=tmp_path,
         n_folds=5,
+        bin_size_s=0.05,
         place_bin_size_cm=2.5,
     )
     comparison_paths = module.save_comparison_tables(
@@ -284,22 +319,54 @@ def test_save_paths_include_place_bin_size_token(tmp_path) -> None:
         data_dir=tmp_path,
         dark_epoch="run2",
         n_folds=5,
+        bin_size_s=0.05,
         place_bin_size_cm=2.5,
     )
     cross_paths = module.save_tp_cross_trajectory_tables(
         {"v1": {"run1": table}},
         data_dir=tmp_path,
         n_folds=5,
+        bin_size_s=0.05,
         place_bin_size_cm=2.5,
     )
 
     assert epoch_paths == [
-        tmp_path / "v1_run1_cv5_placebin2p5cm_encoding_summary.parquet"
+        tmp_path / "v1_run1_cv5_bin0p05s_placebin2p5cm_encoding_summary.parquet"
     ]
     assert comparison_paths == [
-        tmp_path / "v1_run1_run2_cv5_placebin2p5cm_encoding_comparison.parquet"
+        tmp_path
+        / "v1_run1_run2_cv5_bin0p05s_placebin2p5cm_encoding_comparison.parquet"
     ]
     assert cross_paths == [
-        tmp_path / "v1_run1_cv5_placebin2p5cm_tp_cross_trajectory_encoding.parquet"
+        tmp_path
+        / "v1_run1_cv5_bin0p05s_placebin2p5cm_tp_cross_trajectory_encoding.parquet"
     ]
     assert table.saved_paths == epoch_paths + comparison_paths + cross_paths
+
+
+def test_epoch_save_paths_do_not_collide_across_time_bin_sizes(tmp_path) -> None:
+    module = _reload_encoding_module()
+    table = _FakeParquetTable()
+
+    paths_20_ms = module.save_epoch_tables(
+        {"v1": {"run1": table}},
+        data_dir=tmp_path,
+        n_folds=5,
+        bin_size_s=0.02,
+        place_bin_size_cm=4.0,
+    )
+    paths_50_ms = module.save_epoch_tables(
+        {"v1": {"run1": table}},
+        data_dir=tmp_path,
+        n_folds=5,
+        bin_size_s=0.05,
+        place_bin_size_cm=4.0,
+    )
+
+    assert paths_20_ms == [
+        tmp_path / "v1_run1_cv5_bin0p02s_placebin4cm_encoding_summary.parquet"
+    ]
+    assert paths_50_ms == [
+        tmp_path / "v1_run1_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
+    ]
+    assert paths_20_ms != paths_50_ms

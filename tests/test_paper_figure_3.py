@@ -22,15 +22,19 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     NEURON_SCALE_BAR_COUNT,
+    NONSIGNIFICANT_COLOR,
     PANEL_A_COLORBAR_LABELPAD,
     PANEL_ABC_HEADER_LABEL_X_OFFSETS,
     PANEL_BC_SIGNIFICANT_UNIT_COLOR,
     PANEL_C_GLM_SUMMARY_COLUMN_WIDTH,
+    PANEL_C_SOURCE_COMPARISON_COLOR,
     PANEL_D_DARK_ACTIVITY_COLORS,
+    _format_significance_stars,
     PANEL_F_DPPI_HISTOGRAM_ALPHA,
     PANEL_F_DPPI_HISTOGRAM_BIN_EDGES,
     add_aligned_panel_headers,
     build_dark_active_dppi_reference_table,
+    build_dark_activity_reference_table,
     build_output_path,
     build_glm_dark_activity_devexp_table,
     build_dark_movement_firing_rate_cache_metadata,
@@ -40,7 +44,10 @@ from v1ca1.paper_figures.figure_3 import (
     build_panel_b_schematic_cache_path,
     build_ripple_modulation_output_stem,
     compute_dark_active_dppi_mean_rank_permutation,
+    compute_dark_activity_devexp_median_permutation,
+    compute_dark_activity_significance_fraction_permutation,
     compute_significance_distribution_comparison,
+    compute_source_predictor_paired_sign_test,
     draw_neuron_scale_bar,
     draw_ripple_glm_schematic,
     format_glm_model_window_suffix,
@@ -76,6 +83,7 @@ from v1ca1.paper_figures.figure_3 import (
     load_ripple_count_table,
     load_ripple_glm_summary_table,
     load_top_ca1_xcorr_panel_data,
+    normalize_heatmap_rows,
     save_dark_movement_firing_rate_cache,
     save_panel_b_schematic_cache,
     parse_arguments,
@@ -699,6 +707,23 @@ def test_build_peri_ripple_heatmap_payload_preserves_time_matrix() -> None:
     assert np.allclose(payload["mean_rate_hz"], [[1.0, 2.0], [4.0, 3.0]])
 
 
+def test_normalize_heatmap_rows_displays_finite_zero_rows_at_zero() -> None:
+    normalized = normalize_heatmap_rows(
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 2.0, 4.0],
+                [np.nan, np.nan, np.nan],
+                [0.0, np.nan, 0.0],
+            ]
+        )
+    )
+
+    np.testing.assert_array_equal(normalized[0], [0.0, 0.0, 0.0])
+    np.testing.assert_allclose(normalized[1], [0.25, 0.5, 1.0])
+    assert np.isnan(normalized[2:]).all()
+
+
 def test_build_peri_ripple_heatmap_payload_keeps_sessions_separate() -> None:
     table = pd.DataFrame(
         {
@@ -878,6 +903,51 @@ def test_plot_epoch_ripple_heatmap_panel_scales_region_height_by_unit_count() ->
     v1_height = ax.child_axes[0].get_position().height
     ca1_height = ax.child_axes[1].get_position().height
     assert v1_height / ca1_height == pytest.approx(3.0)
+    plt.close(fig)
+
+
+def test_plot_epoch_ripple_heatmap_panel_orders_rows_by_modulation_index() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    firing_rate_table = pd.DataFrame(
+        {
+            "region": ["v1"] * 6,
+            "unit_id": [1, 1, 2, 2, 3, 3],
+            "time_s": [-0.02, 0.0] * 3,
+            "mean_rate_hz": [1.0, 2.0, 3.0, 1.0, 0.0, 0.0],
+        }
+    )
+    summary_table = pd.DataFrame(
+        {
+            "region": ["v1", "v1", "v1"],
+            "unit_id": [1, 2, 3],
+            "ripple_modulation_index": [-0.5, 0.8, np.nan],
+        }
+    )
+    epoch_tables = [
+        {
+            "epoch_type": "light",
+            "label": "Light run",
+            "epoch": "02_r1",
+            "firing_rate_table": firing_rate_table,
+            "summary_table": summary_table,
+        }
+    ]
+
+    fig, ax = plt.subplots()
+    plot_epoch_ripple_heatmap_panel(
+        ax,
+        epoch_tables,
+        regions=("v1",),
+        show_modulation_histogram=False,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(ax.child_axes[0].images[0].get_array()),
+        [[1.0, 1.0 / 3.0], [0.5, 1.0], [0.0, 0.0]],
+    )
     plt.close(fig)
 
 
@@ -1352,6 +1422,272 @@ def test_build_glm_dark_activity_devexp_table_splits_dark_activity(
     assert table["dark_activity_group"].tolist() == ["Dark inactive", "Dark active"]
     assert table["dark_active"].tolist() == [False, True]
     assert np.allclose(table["dark_firing_rate_hz"], [0.2, 0.8])
+
+
+def test_build_dark_activity_reference_table_keeps_finite_units() -> None:
+    table = build_dark_activity_reference_table(
+        pd.DataFrame(
+            {
+                "unit": [11, 12, 13, 14],
+                "dark_firing_rate_hz": [0.49, 0.5, np.nan, 0.8],
+            }
+        ),
+        animal_name="L14",
+        date="20240611",
+        dark_epoch="08_r4",
+    )
+
+    assert table["unit"].tolist() == [11, 12, 14]
+    assert table["dark_active"].tolist() == [False, True, True]
+    assert table["dark_activity_group"].tolist() == [
+        "Dark inactive",
+        "Dark active",
+        "Dark active",
+    ]
+    assert table["animal_name"].tolist() == ["L14"] * 3
+    assert table["date"].tolist() == ["20240611"] * 3
+    assert table["dark_epoch"].tolist() == ["08_r4"] * 3
+
+
+def _make_dark_activity_fraction_test_payload() -> dict[str, object]:
+    """Return an all-cell reference with missing and boundary GLM cases."""
+    return {
+        "dark_activity_reference_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA"] * 8,
+                "date": ["20240101"] * 8,
+                "unit": np.arange(1, 9),
+                "dark_firing_rate_hz": [
+                    0.1,
+                    0.2,
+                    0.49,
+                    np.nan,
+                    0.5,
+                    0.8,
+                    1.2,
+                    2.0,
+                ],
+            }
+        ),
+        "devexp_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA"] * 5,
+                "date": ["20240101"] * 5,
+                "unit": [1, 2, 5, 6, 7],
+                "epoch_type": ["light"] * 5,
+                "ripple_devexp_p_value": [0.01, 0.20, 0.049999, 0.001, 0.05],
+            }
+        ),
+        "dark_activity_threshold_hz": 0.5,
+    }
+
+
+def test_dark_activity_fraction_permutation_uses_all_cell_reference() -> None:
+    stats = compute_dark_activity_significance_fraction_permutation(
+        _make_dark_activity_fraction_test_payload(),
+        n_permutations=25,
+        random_seed=20260710,
+    )
+
+    assert stats["n_total"] == 7
+    assert stats["n_inactive"] == 3
+    assert stats["n_active"] == 4
+    assert stats["n_significant"] == 3
+    assert stats["n_inactive_significant"] == 1
+    assert stats["n_active_significant"] == 2
+    assert stats["n_missing_glm_result"] == 2
+    assert stats["inactive_significant_fraction"] == pytest.approx(1.0 / 3.0)
+    assert stats["active_significant_fraction"] == pytest.approx(0.5)
+    assert stats["significant_fraction_difference"] == pytest.approx(1.0 / 6.0)
+    assert stats["extreme_count"] == 15
+    assert stats["p_value"] == pytest.approx(16.0 / 26.0)
+    assert stats["exact_hypergeometric_p_value"] == pytest.approx(22.0 / 35.0)
+    assert stats["missing_glm_policy"] == "count_as_not_glm_positive"
+    assert stats["dark_activity_threshold_hz"] == pytest.approx(0.5)
+    assert stats["dark_activity_threshold_inclusive"] is True
+    assert stats["per_dataset"] == [
+        {
+            "animal_name": "RatA",
+            "date": "20240101",
+            "n_active": 4,
+            "n_inactive": 3,
+            "n_active_significant": 2,
+            "n_inactive_significant": 1,
+            "active_significant_fraction": 0.5,
+            "inactive_significant_fraction": 1.0 / 3.0,
+        }
+    ]
+
+
+def test_dark_activity_fraction_permutation_handles_zero_positive_cells() -> None:
+    payload = _make_dark_activity_fraction_test_payload()
+    payload["devexp_table"] = payload["devexp_table"].assign(
+        ripple_devexp_p_value=0.5
+    )
+
+    stats = compute_dark_activity_significance_fraction_permutation(
+        payload,
+        n_permutations=7,
+        random_seed=1,
+    )
+
+    assert stats["n_significant"] == 0
+    assert stats["inactive_significant_fraction"] == pytest.approx(0.0)
+    assert stats["active_significant_fraction"] == pytest.approx(0.0)
+    assert stats["extreme_count"] == 7
+    assert stats["p_value"] == pytest.approx(1.0)
+    assert stats["exact_hypergeometric_p_value"] == pytest.approx(1.0)
+
+
+def test_dark_activity_devexp_permutation_filters_and_repeats() -> None:
+    table = pd.DataFrame(
+        {
+            "animal_name": ["RatA"] * 12,
+            "date": ["20240101"] * 12,
+            "epoch_type": ["light"] * 11 + ["dark"],
+            "ripple_devexp_mean": [
+                0.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                100.0,
+                np.nan,
+                100.0,
+                100.0,
+            ],
+            "ripple_devexp_p_value": [0.01] * 8
+            + [0.2, 0.01, 0.01, 0.01],
+            "dark_firing_rate_hz": [0.1] * 4
+            + [0.5] * 6
+            + [np.nan, 0.8],
+        }
+    )
+    payload = {
+        "devexp_table": table,
+        "dark_activity_threshold_hz": 0.5,
+    }
+    first = compute_dark_activity_devexp_median_permutation(
+        payload,
+        n_permutations=31,
+        random_seed=4,
+        batch_size=7,
+    )
+    second = compute_dark_activity_devexp_median_permutation(
+        payload,
+        n_permutations=31,
+        random_seed=4,
+        batch_size=7,
+    )
+
+    assert first["n_inactive"] == 4
+    assert first["n_active"] == 4
+    assert first["median_inactive"] == pytest.approx(1.5)
+    assert first["median_active"] == pytest.approx(5.5)
+    assert first["median_difference"] == pytest.approx(4.0)
+    assert first["p_value"] == pytest.approx(
+        (int(first["extreme_count"]) + 1.0) / 32.0
+    )
+    assert first == second
+
+    tied_payload = {
+        "devexp_table": pd.DataFrame(
+            {
+                "epoch_type": ["light"] * 4,
+                "ripple_devexp_mean": [0.5] * 4,
+                "ripple_devexp_p_value": [0.01] * 4,
+                "dark_firing_rate_hz": [0.1, 0.2, 0.5, 0.8],
+            }
+        ),
+        "dark_activity_threshold_hz": 0.5,
+    }
+    tied = compute_dark_activity_devexp_median_permutation(
+        tied_payload,
+        n_permutations=7,
+        random_seed=1,
+        batch_size=3,
+    )
+    assert tied["extreme_count"] == 7
+    assert tied["p_value"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("p_value", "expected"),
+    [
+        (np.nan, ""),
+        (0.05, "n.s."),
+        (np.nextafter(0.05, 0.0), "*"),
+        (0.01, "*"),
+        (np.nextafter(0.01, 0.0), "**"),
+        (0.001, "**"),
+        (np.nextafter(0.001, 0.0), "***"),
+    ],
+)
+def test_format_significance_stars_uses_conventional_thresholds(
+    p_value: float,
+    expected: str,
+) -> None:
+    assert _format_significance_stars(p_value) == expected
+
+
+def test_source_predictor_paired_sign_test_uses_all_finite_pairs() -> None:
+    table = pd.DataFrame(
+        {
+            "mean_activity_devexp_mean": [0.0] * 6,
+            "vector_devexp_mean": [1.0, 2.0, -1.0, 0.0, np.nan, np.inf],
+            "vector_devexp_p_value": [0.9, 0.8, 0.7, 0.6, 0.01, 0.001],
+        }
+    )
+
+    result = compute_source_predictor_paired_sign_test(table)
+
+    assert result["test_name"] == "exact_paired_sign_test"
+    assert result["alternative"] == "vector_greater_than_mean_activity"
+    assert result["unit_of_analysis"] == "v1_unit"
+    assert result["tie_rule"] == "exact_zero_delta_excluded"
+    assert result["n_input_pairs"] == 6
+    assert result["n_finite_pairs"] == 4
+    assert result["n_nonfinite_pairs"] == 2
+    assert result["n_vector_greater"] == 2
+    assert result["n_mean_activity_greater"] == 1
+    assert result["n_ties"] == 1
+    assert result["n_tested"] == 3
+    assert result["fraction_vector_greater"] == pytest.approx(2.0 / 3.0)
+    assert result["median_delta_vector_minus_mean"] == pytest.approx(0.5)
+    assert result["p_value"] == pytest.approx(0.5)
+
+    changed_p_values = table.assign(vector_devexp_p_value=0.001)
+    assert compute_source_predictor_paired_sign_test(changed_p_values) == result
+
+
+def test_source_predictor_paired_sign_test_is_exact_and_handles_no_testable_pairs() -> None:
+    result = compute_source_predictor_paired_sign_test(
+        pd.DataFrame(
+            {
+                "mean_activity_devexp_mean": np.zeros(10),
+                "vector_devexp_mean": [1.0] * 8 + [-1.0] * 2,
+            }
+        )
+    )
+    assert result["p_value"] == pytest.approx(56.0 / 1024.0)
+
+    tied = compute_source_predictor_paired_sign_test(
+        pd.DataFrame(
+            {
+                "mean_activity_devexp_mean": [0.1, 0.2],
+                "vector_devexp_mean": [0.1, 0.2],
+            }
+        )
+    )
+    assert tied["n_finite_pairs"] == 2
+    assert tied["n_ties"] == 2
+    assert tied["n_tested"] == 0
+    assert np.isnan(tied["fraction_vector_greater"])
+    assert np.isnan(tied["p_value"])
+    assert _format_significance_stars(float(tied["p_value"])) == ""
 
 
 def _write_decoding_comparison_summary_table(
@@ -1845,6 +2181,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
                     "sleep",
                     "sleep",
                 ],
+                "unit": [1, 2, 3, 4, 1, 4, 1, 4],
                 "dark_firing_rate_hz": [0.2, 0.4, 0.8, 9.0, 0.2, 8.0, 0.3, 12.0],
                 "same_turn_tuning_similarity": [
                     0.2,
@@ -1887,6 +2224,14 @@ def test_plot_helpers_draw_expected_axes() -> None:
                     "20240101",
                     "20240102",
                 ],
+            }
+        ),
+        "dark_activity_reference_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA", "RatA", "RatB", "RatB"],
+                "date": ["20240101", "20240101", "20240102", "20240102"],
+                "unit": [1, 3, 2, 4],
+                "dark_firing_rate_hz": [0.2, 0.8, 0.4, 9.0],
             }
         ),
         "dark_active_dppi_reference_table": pd.DataFrame(
@@ -2144,8 +2489,41 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert ax.child_axes[4].get_ylabel() == "-log10 p from shuffle"
     plt.close(fig)
 
+    activity_statistics_by_epoch = {
+        "light": {
+            "devexp": {"p_value": 0.02},
+            "significant_fraction": {
+                "n_total": 4,
+                "n_inactive": 2,
+                "n_active": 2,
+                "n_inactive_significant": 1,
+                "n_active_significant": 2,
+                "inactive_significant_fraction": 0.5,
+                "active_significant_fraction": 1.0,
+                "p_value": 0.0005,
+                "per_dataset": [
+                    {
+                        "animal_name": "RatA",
+                        "date": "20240101",
+                        "n_inactive_significant": 1,
+                        "n_active_significant": 1,
+                    },
+                    {
+                        "animal_name": "RatB",
+                        "date": "20240102",
+                        "n_inactive_significant": 0,
+                        "n_active_significant": 1,
+                    },
+                ],
+            },
+        }
+    }
     fig, ax = plt.subplots()
-    plot_glm_behavior_association_panel(ax, association_payload)
+    plot_glm_behavior_association_panel(
+        ax,
+        association_payload,
+        activity_statistics_by_epoch=activity_statistics_by_epoch,
+    )
     assert len(ax.child_axes) == 3
     fraction_ax, box_ax, similarity_ax = ax.child_axes
     assert fraction_ax.get_xlabel() == "$p$<0.05\nfrac."
@@ -2174,14 +2552,25 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert box_width > 0.32
     assert similarity_position.x0 - box_position.x1 > 0.18
     assert ax.texts[-1].get_text() == (
-        "Plots show p<0.05 units; dark active split uses 0.5 Hz"
+        "GLM positive: p<0.05; dark active: >=0.5 Hz"
     )
     assert len(fraction_ax.patches) == 2
+    assert [patch.get_width() for patch in fraction_ax.patches] == pytest.approx(
+        [1.0 / 3.0, 2.0 / 3.0]
+    )
     assert len(box_ax.patches) == 2
     assert len(box_ax.collections) == 2
     assert len(box_ax.lines) >= 3
     assert len(fraction_ax.collections) == 3
     assert len(fraction_ax.lines) >= 2
+    np.testing.assert_allclose(
+        np.sort(fraction_ax.collections[1].get_offsets()[:, 0]),
+        [0.0, 0.5],
+    )
+    np.testing.assert_allclose(
+        np.sort(fraction_ax.collections[2].get_offsets()[:, 0]),
+        [0.5, 1.0],
+    )
     assert len(similarity_ax.patches) == 10
     assert len(similarity_ax.collections) == 0
     assert len(similarity_ax.lines) == 2
@@ -2237,7 +2626,7 @@ def test_plot_helpers_draw_expected_axes() -> None:
     )
     assert devexp_box_line_max == pytest.approx(0.4)
     box_significance_markers = [
-        text for text in box_ax.texts if text.get_text() == "***"
+        text for text in box_ax.texts if text.get_text() == "*"
     ]
     assert len(box_significance_markers) == 1
     assert box_significance_markers[0].get_position()[0] > devexp_box_line_max
@@ -2302,11 +2691,14 @@ def test_plot_helpers_draw_expected_axes() -> None:
     plt.close(fig)
 
     fig, ax = plt.subplots()
-    plot_glm_dark_epoch_properties_panel(
+    panel_e_analysis = plot_glm_dark_epoch_properties_panel(
         ax,
         association_payload,
         n_permutations=25,
         random_seed=1,
+        activity_n_permutations=25,
+        activity_random_seed=1,
+        activity_devexp_batch_size=5,
     )
     assert len(ax.child_axes) == 3
     fraction_ax, box_ax, dppi_ax = ax.child_axes
@@ -2314,6 +2706,16 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert box_ax.get_xlabel() == "Dev. explained"
     assert dppi_ax.get_xlabel() == "Dark DPPI"
     assert dppi_ax.get_ylabel() == "Fraction"
+    activity_analysis = panel_e_analysis["activity_statistics_by_epoch"]["light"]
+    assert activity_analysis["significant_fraction"]["n_total"] == 4
+    assert activity_analysis["devexp"]["n_active"] == 2
+    assert activity_analysis["devexp"]["n_inactive"] == 1
+    assert _format_significance_stars(
+        float(activity_analysis["significant_fraction"]["p_value"])
+    ) in {text.get_text() for text in fraction_ax.texts}
+    assert _format_significance_stars(
+        float(activity_analysis["devexp"]["p_value"])
+    ) in {text.get_text() for text in box_ax.texts}
     fig.canvas.draw()
     _align_xaxis_labels_to_reference(dppi_ax, (fraction_ax, box_ax))
     fig.canvas.draw()
@@ -2350,8 +2752,32 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert ax.child_axes[0].get_xlim()[1] == pytest.approx(0.5)
     assert ax.child_axes[0].get_ylim()[0] == pytest.approx(-0.2)
     assert ax.child_axes[0].get_ylim()[1] == pytest.approx(0.5)
-    assert len(ax.child_axes[0].collections) == 1
-    assert len(ax.child_axes[2].collections) == 2
+    assert len(ax.child_axes[0].collections) == 2
+    assert len(ax.child_axes[2].collections) == 4
+    assert sum(
+        len(collection.get_offsets())
+        for collection in ax.child_axes[0].collections
+    ) == 2
+    assert sum(
+        len(collection.get_offsets())
+        for collection in ax.child_axes[2].collections
+    ) == 4
+    np.testing.assert_allclose(
+        ax.child_axes[0].collections[0].get_facecolor()[0][:3],
+        to_rgba(NONSIGNIFICANT_COLOR)[:3],
+    )
+    np.testing.assert_allclose(
+        ax.child_axes[0].collections[1].get_facecolor()[0][:3],
+        to_rgba(PANEL_C_SOURCE_COMPARISON_COLOR)[:3],
+    )
+    np.testing.assert_allclose(
+        ax.child_axes[0].collections[0].get_offsets(),
+        [[0.0, 0.1]],
+    )
+    np.testing.assert_allclose(
+        ax.child_axes[0].collections[1].get_offsets(),
+        [[0.1, 0.2]],
+    )
     assert len(ax.child_axes[0].lines) == 1
     assert any(
         text.get_text() == "Mean CA1 activity\ndev. explained"
@@ -2362,12 +2788,17 @@ def test_plot_helpers_draw_expected_axes() -> None:
         for text in ax.texts
     )
     assert any(
-        text.get_text() == "Showing vector p<0.05 units"
+        text.get_text() == "All V1 units with paired model estimates"
         for text in ax.texts
     )
     assert any(
-        text.get_text() == "n=1\nfrac vector>mean=1.00"
+        text.get_text() == "n=2\nfrac vector>mean=1.00"
         for text in ax.child_axes[0].texts
+    )
+    assert not any(
+        text.get_text() in {"*", "**", "***", "n.s."}
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
     )
     plt.close(fig)
 
@@ -2398,7 +2829,9 @@ def test_plot_helpers_draw_expected_axes() -> None:
         tick.get_text() for tick in ax.child_axes[0].get_yticklabels()
     ]
     assert not ax.texts
-    compact_summary_text = next(text for text in ax.child_axes[0].texts if text.get_text() == "n=2")
+    compact_summary_text = next(
+        text for text in ax.child_axes[0].texts if text.get_text() == "n=4"
+    )
     assert compact_summary_text.get_position() == pytest.approx((0.97, 0.05))
     assert compact_summary_text.get_ha() == "right"
     assert compact_summary_text.get_va() == "bottom"
@@ -2431,11 +2864,77 @@ def test_plot_helpers_draw_expected_axes() -> None:
     fraction_ax, box_ax = ax.child_axes
     assert fraction_ax.get_xlabel() == "$p$<0.05\nfrac."
     assert box_ax.get_xlabel() == "Dev.\nexplained"
+    assert not any(
+        text.get_text() in {"*", "**", "***", "n.s."}
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
+    )
     assert all(child_axis.get_xlabel() != "Dark\nDPPI" for child_axis in ax.child_axes)
     assert not any(
         text.get_text().startswith("median=")
         for child_axis in ax.child_axes
         for text in child_axis.texts
+    )
+    plt.close(fig)
+
+
+def test_source_predictor_panel_marks_only_the_pooled_sign_test() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    payload = {
+        "comparison_table": pd.DataFrame(
+            {
+                "animal_name": ["RatA"] * 5,
+                "date": ["20240101"] * 5,
+                "mean_activity_devexp_mean": np.linspace(0.0, 0.04, 5),
+                "vector_devexp_mean": np.linspace(0.1, 0.14, 5),
+                "vector_devexp_p_value": [0.9] * 5,
+            }
+        )
+    }
+
+    fig, ax = plt.subplots()
+    pooled_statistics = plot_glm_source_predictor_comparison_panel(
+        ax,
+        payload,
+        show_color_note=False,
+        summary_location="lower_right",
+        annotate_pooled_sign_test=True,
+    )
+
+    assert pooled_statistics is not None
+    assert pooled_statistics["n_finite_pairs"] == 5
+    assert pooled_statistics["n_vector_greater"] == 5
+    assert pooled_statistics["p_value"] == pytest.approx(1.0 / 32.0)
+    assert len(ax.child_axes) == 2
+    assert len(ax.child_axes[0].collections[0].get_offsets()) == 5
+    assert len(ax.child_axes[1].collections[0].get_offsets()) == 5
+    np.testing.assert_allclose(
+        ax.child_axes[0].collections[0].get_facecolor()[0][:3],
+        to_rgba(NONSIGNIFICANT_COLOR)[:3],
+    )
+    np.testing.assert_allclose(
+        ax.child_axes[1].collections[0].get_facecolor()[0][:3],
+        to_rgba(NONSIGNIFICANT_COLOR)[:3],
+    )
+    significance_markers = [
+        text
+        for child_axis in ax.child_axes
+        for text in child_axis.texts
+        if text.get_text() in {"*", "**", "***", "n.s."}
+    ]
+    assert len(significance_markers) == 1
+    assert significance_markers[0].get_text() == "*"
+    assert significance_markers[0].axes is ax.child_axes[1]
+    assert significance_markers[0].get_position() == pytest.approx((0.05, 0.95))
+    assert significance_markers[0].get_ha() == "left"
+    assert significance_markers[0].get_va() == "top"
+    assert all(
+        len(line.get_xdata()) == 2
+        for child_axis in ax.child_axes
+        for line in child_axis.lines
     )
     plt.close(fig)
 

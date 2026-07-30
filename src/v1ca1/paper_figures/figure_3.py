@@ -207,6 +207,9 @@ PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS = (
 )
 PANEL_E_WIDTH_FRACTION = 0.60
 PANEL_E_DPPI_AXIS_BOUNDS = (0.65, 0.17, 0.25, 0.72)
+PANEL_E_ACTIVITY_NULL_PERMUTATIONS = 1_000_000
+PANEL_E_ACTIVITY_NULL_RANDOM_SEED = 20260710
+PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE = 1_000
 PANEL_F_DPPI_NULL_PERMUTATIONS = 20_000
 PANEL_F_DPPI_NULL_RANDOM_SEED = 59
 PANEL_F_DPPI_HISTOGRAM_BIN_EDGES = np.linspace(0.0, 1.0, 11)
@@ -996,6 +999,11 @@ def normalize_heatmap_rows(values: np.ndarray) -> np.ndarray:
     normalized = np.full_like(value_array, np.nan, dtype=float)
     if np.any(valid_rows):
         normalized[valid_rows] = value_array[valid_rows] / row_scale[valid_rows, None]
+    all_zero_rows = (
+        np.isfinite(value_array).all(axis=1)
+        & np.isclose(value_array, 0.0).all(axis=1)
+    )
+    normalized[all_zero_rows] = 0.0
     return normalized
 
 
@@ -1006,19 +1014,20 @@ def build_peri_ripple_heatmap_payload(
 ) -> dict[str, Any]:
     """Return unit/time matrix payload for one region's peri-ripple heatmap."""
     region_rows = firing_rate_table.loc[firing_rate_table["region"].astype(str) == region].copy()
-    if region_rows.empty:
-        return {
-            "region": region,
-            "unit_ids": np.asarray([], dtype=object),
-            "time_s": np.asarray([], dtype=float),
-            "mean_rate_hz": np.empty((0, 0), dtype=float),
-        }
-
     identity_columns = [
         column
         for column in ("animal_name", "date", "epoch", "unit_id")
         if column in region_rows.columns
     ]
+    if region_rows.empty:
+        return {
+            "region": region,
+            "identity_columns": tuple(identity_columns),
+            "unit_ids": np.asarray([], dtype=object),
+            "time_s": np.asarray([], dtype=float),
+            "mean_rate_hz": np.empty((0, 0), dtype=float),
+        }
+
     if "unit_id" not in identity_columns:
         raise ValueError("Peri-ripple firing-rate table is missing required column: 'unit_id'")
 
@@ -1044,10 +1053,64 @@ def build_peri_ripple_heatmap_payload(
     matrix = np.vstack(rate_rows) if rate_rows else np.empty((0, 0), dtype=float)
     return {
         "region": region,
+        "identity_columns": tuple(identity_columns),
         "unit_ids": np.asarray(unit_ids, dtype=object),
         "time_s": np.asarray(time_s if time_s is not None else [], dtype=float),
         "mean_rate_hz": matrix,
     }
+
+
+def _compute_modulation_index_heatmap_order(
+    payload: Mapping[str, Any],
+    summary_table: Any,
+) -> np.ndarray:
+    """Order heatmap rows by modulation index, with raw peak rate as a tiebreaker."""
+    matrix = np.asarray(payload["mean_rate_hz"], dtype=float)
+    row_peak = np.full(matrix.shape[0], -np.inf, dtype=float)
+    finite_rows = np.isfinite(matrix).any(axis=1)
+    if np.any(finite_rows):
+        row_peak[finite_rows] = np.nanmax(matrix[finite_rows], axis=1)
+    peak_order = np.argsort(-row_peak, kind="stable")
+
+    identity_columns = tuple(payload.get("identity_columns", ()))
+    summary_columns = set(getattr(summary_table, "columns", ()))
+    required_columns = {*identity_columns, "region", "ripple_modulation_index"}
+    if (
+        matrix.shape[0] == 0
+        or not identity_columns
+        or summary_table is None
+        or not required_columns.issubset(summary_columns)
+    ):
+        return peak_order
+
+    unit_id_values = np.asarray(payload["unit_ids"], dtype=object)
+    expected_value_count = matrix.shape[0] * len(identity_columns)
+    if unit_id_values.size != expected_value_count:
+        return peak_order
+    row_keys = [
+        tuple(str(value) for value in row)
+        for row in unit_id_values.reshape(matrix.shape[0], len(identity_columns))
+    ]
+
+    region_rows = summary_table.loc[
+        summary_table["region"].astype(str) == str(payload["region"]),
+        [*identity_columns, "ripple_modulation_index"],
+    ]
+    modulation_by_key = {
+        tuple(str(value) for value in row[:-1]): float(row[-1])
+        for row in region_rows.itertuples(index=False, name=None)
+    }
+    modulation_index = np.asarray(
+        [modulation_by_key.get(row_key, np.nan) for row_key in row_keys],
+        dtype=float,
+    )
+    ordered_modulation_index = modulation_index[peak_order]
+    sort_values = np.where(
+        np.isfinite(ordered_modulation_index),
+        ordered_modulation_index,
+        -np.inf,
+    )
+    return peak_order[np.argsort(-sort_values, kind="stable")]
 
 
 def _filter_existing_unit_ids(unit_ids: np.ndarray, available_unit_ids: np.ndarray) -> np.ndarray:
@@ -2641,6 +2704,63 @@ def build_glm_dark_activity_devexp_table(
     ]
 
 
+def build_dark_activity_reference_table(
+    dark_activity_table: Any,
+    *,
+    animal_name: str,
+    date: str,
+    dark_epoch: str,
+    dark_activity_threshold_hz: float = PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+) -> Any:
+    """Return all finite-rate V1 cells in one dark-activity reference population."""
+    import pandas as pd
+
+    columns = [
+        "animal_name",
+        "date",
+        "unit",
+        "dark_epoch",
+        "dark_firing_rate_hz",
+        "dark_active",
+        "dark_activity_group",
+    ]
+    if dark_activity_table is None or not len(dark_activity_table):
+        return pd.DataFrame(columns=columns)
+
+    rows = dark_activity_table.copy()
+    rows["unit"] = pd.to_numeric(rows["unit"], errors="coerce")
+    rows["dark_firing_rate_hz"] = pd.to_numeric(
+        rows["dark_firing_rate_hz"],
+        errors="coerce",
+    )
+    rows = rows[
+        np.isfinite(rows["unit"].to_numpy(dtype=float))
+        & np.isfinite(rows["dark_firing_rate_hz"].to_numpy(dtype=float))
+    ].copy()
+    rows["unit"] = rows["unit"].astype(int)
+    if rows["unit"].duplicated().any():
+        duplicate_units = sorted(
+            rows.loc[rows["unit"].duplicated(keep=False), "unit"].unique().tolist()
+        )
+        raise ValueError(
+            "Dark-activity reference table contains duplicate unit IDs for "
+            f"{animal_name} {date} {dark_epoch}: {duplicate_units}"
+        )
+
+    dark_active = (
+        rows["dark_firing_rate_hz"].to_numpy(dtype=float)
+        >= float(dark_activity_threshold_hz)
+    )
+    rows = rows.assign(
+        animal_name=str(animal_name),
+        date=str(date),
+        dark_epoch=str(dark_epoch),
+        dark_active=dark_active,
+        dark_activity_group=np.where(dark_active, "Dark active", "Dark inactive"),
+    )
+    return rows[columns]
+
+
 def build_dark_active_dppi_reference_table(
     dark_activity_table: Any,
     tuning_similarity_table: Any | None,
@@ -2931,6 +3051,7 @@ def load_glm_dark_activity_devexp_tables(
     import pandas as pd
 
     rows: list[Any] = []
+    dark_activity_reference_rows: list[Any] = []
     dark_active_reference_rows: list[Any] = []
     missing_artifacts: list[dict[str, str]] = []
     selected_epoch_types = tuple(epoch_types)
@@ -2968,6 +3089,15 @@ def load_glm_dark_activity_devexp_tables(
             )
             continue
 
+        dark_activity_reference_rows.append(
+            build_dark_activity_reference_table(
+                dark_activity_table,
+                animal_name=animal_name,
+                date=date,
+                dark_epoch=dark_run_epoch,
+                dark_activity_threshold_hz=dark_activity_threshold_hz,
+            )
+        )
         try:
             tuning_similarity_table = load_dark_same_turn_tuning_similarity_table(
                 data_root,
@@ -3060,6 +3190,11 @@ def load_glm_dark_activity_devexp_tables(
             )
 
     devexp_table = pd.concat(rows, axis=0, ignore_index=True) if rows else pd.DataFrame()
+    dark_activity_reference_table = (
+        pd.concat(dark_activity_reference_rows, axis=0, ignore_index=True)
+        if dark_activity_reference_rows
+        else pd.DataFrame()
+    )
     dark_active_reference_table = (
         pd.concat(dark_active_reference_rows, axis=0, ignore_index=True)
         if dark_active_reference_rows
@@ -3067,6 +3202,7 @@ def load_glm_dark_activity_devexp_tables(
     )
     return {
         "devexp_table": devexp_table,
+        "dark_activity_reference_table": dark_activity_reference_table,
         "dark_active_dppi_reference_table": dark_active_reference_table,
         "missing_artifacts": missing_artifacts,
         "region": region,
@@ -4199,11 +4335,10 @@ def plot_epoch_ripple_heatmap_panel(
                 )
             else:
                 normalized = normalize_heatmap_rows(matrix)
-                row_peak = np.full(normalized.shape[0], -np.inf, dtype=float)
-                finite_rows = np.isfinite(matrix).any(axis=1)
-                if np.any(finite_rows):
-                    row_peak[finite_rows] = np.nanmax(matrix[finite_rows], axis=1)
-                order = np.argsort(-row_peak, kind="stable")
+                order = _compute_modulation_index_heatmap_order(
+                    payload,
+                    epoch_payload.get("summary_table"),
+                )
                 image = heatmap_ax.imshow(
                     normalized[order],
                     origin="upper",
@@ -5466,6 +5601,7 @@ def _plot_dark_activity_devexp_boxplot(
     x_limits: tuple[float, float] | None = None,
     show_y_ticklabels: bool = True,
     show_significance_marker: bool = True,
+    significance_p_value: float = float("nan"),
 ) -> None:
     """Plot significant ripple-GLM deviance explained by dark activity group."""
     ax.axvline(0.0, color="0.55", linewidth=0.55, linestyle="--", zorder=0)
@@ -5559,8 +5695,10 @@ def _plot_dark_activity_devexp_boxplot(
     if x_limits is not None:
         ax.set_xlim(*x_limits)
     ax.set_ylim(0.4, 2.6)
+    significance_text = _format_significance_stars(significance_p_value)
     if (
         show_significance_marker
+        and significance_text
         and len(values_by_group) == 2
         and all(values.size for values in values_by_group)
     ):
@@ -5573,7 +5711,7 @@ def _plot_dark_activity_devexp_boxplot(
             y1=2.0,
             arm_length=0.025 * x_range,
             marker_offset_points=7.0,
-            marker_text="***",
+            marker_text=significance_text,
             marker_rotation=90.0,
         )
     ax.set_yticks([1.0, 2.0])
@@ -5713,8 +5851,9 @@ def _plot_dark_activity_significant_composition(
     title: str,
     show_significance_marker: bool = True,
     composition_label_x: float | None = None,
+    fraction_statistics: Mapping[str, Any] | None = None,
 ) -> None:
-    """Plot dark activity composition among ripple-GLM significant cells."""
+    """Plot dark-activity composition among ripple-GLM-positive cells."""
     import pandas as pd
 
     colors = [
@@ -5723,30 +5862,112 @@ def _plot_dark_activity_significant_composition(
     ]
     group_labels = ["Dark\ninactive", "Dark\nactive"]
     fractions = [np.nan, np.nan]
-    counts = [0, 0]
+    significant_counts = [0, 0]
     total_significant_count = 0
+    dataset_fractions_by_key: dict[tuple[str, str], list[float]] = {}
     bar_height = 0.58
-    if table is None or len(table) == 0:
-        ax.text(0.5, 0.5, "No GLM\nunits", ha="center", va="center", fontsize=6, transform=ax.transAxes)
-    else:
+    has_test_population = bool(
+        fraction_statistics
+        and int(fraction_statistics.get("n_total", 0)) > 0
+    )
+    if has_test_population:
+        assert fraction_statistics is not None
+        significant_counts = [
+            int(fraction_statistics["n_inactive_significant"]),
+            int(fraction_statistics["n_active_significant"]),
+        ]
+        total_significant_count = int(sum(significant_counts))
+        if total_significant_count:
+            fractions = [
+                count / total_significant_count for count in significant_counts
+            ]
+        for row in fraction_statistics.get("per_dataset", []):
+            dataset_significant_counts = [
+                int(row["n_inactive_significant"]),
+                int(row["n_active_significant"]),
+            ]
+            dataset_total = int(sum(dataset_significant_counts))
+            if not dataset_total:
+                continue
+            key = (str(row["animal_name"]), str(row["date"]))
+            dataset_fractions_by_key[key] = [
+                count / dataset_total for count in dataset_significant_counts
+            ]
+    elif table is not None and len(table):
         epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)].copy()
         p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
         dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
-        significant = (
-            np.isfinite(p_values)
-            & np.isfinite(dark_rates_hz)
-            & (p_values < float(p_value_threshold))
-        )
+        valid = np.isfinite(p_values) & np.isfinite(dark_rates_hz)
+        significant = valid & (p_values < float(p_value_threshold))
         group_masks = [
             significant & (dark_rates_hz < float(dark_activity_threshold_hz)),
             significant & (dark_rates_hz >= float(dark_activity_threshold_hz)),
         ]
         total_significant_count = int(np.sum(significant))
         for group_index, mask in enumerate(group_masks):
-            counts[group_index] = int(np.sum(mask))
+            significant_counts[group_index] = int(np.sum(mask))
             if total_significant_count:
-                fractions[group_index] = float(counts[group_index] / total_significant_count)
+                fractions[group_index] = float(
+                    significant_counts[group_index] / total_significant_count
+                )
+        if {"animal_name", "date"}.issubset(epoch_rows.columns):
+            for (_animal_name, _date), dataset_rows in epoch_rows.groupby(
+                ["animal_name", "date"],
+                sort=True,
+            ):
+                dataset_p_values = pd.to_numeric(
+                    dataset_rows["ripple_devexp_p_value"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                dataset_dark_rates_hz = pd.to_numeric(
+                    dataset_rows["dark_firing_rate_hz"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                dataset_valid = np.isfinite(dataset_p_values) & np.isfinite(
+                    dataset_dark_rates_hz
+                )
+                dataset_significant = dataset_valid & (
+                    dataset_p_values < float(p_value_threshold)
+                )
+                dataset_total = int(np.sum(dataset_significant))
+                if not dataset_total:
+                    continue
+                dataset_significant_counts = [
+                    int(
+                        np.sum(
+                            dataset_significant
+                            & (
+                                dataset_dark_rates_hz
+                                < float(dark_activity_threshold_hz)
+                            )
+                        )
+                    ),
+                    int(
+                        np.sum(
+                            dataset_significant
+                            & (
+                                dataset_dark_rates_hz
+                                >= float(dark_activity_threshold_hz)
+                            )
+                        )
+                    ),
+                ]
+                key = (str(_animal_name), str(_date))
+                dataset_fractions_by_key[key] = [
+                    count / dataset_total for count in dataset_significant_counts
+                ]
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No GLM\nunits",
+            ha="center",
+            va="center",
+            fontsize=6,
+            transform=ax.transAxes,
+        )
 
+    if has_test_population or (table is not None and len(table)):
         positions = np.arange(1, 3, dtype=float)
         widths = np.nan_to_num(np.asarray(fractions, dtype=float), nan=0.0)
         ax.barh(
@@ -5768,93 +5989,63 @@ def _plot_dark_activity_significant_composition(
             linewidths=0.35,
             zorder=4,
         )
-        if {"animal_name", "date"}.issubset(epoch_rows.columns):
-            dataset_fractions_by_key: dict[tuple[str, str], list[float]] = {}
-            for (_animal_name, _date), dataset_rows in epoch_rows.groupby(
-                ["animal_name", "date"], sort=True
-            ):
-                dataset_p_values = pd.to_numeric(
-                    dataset_rows["ripple_devexp_p_value"],
-                    errors="coerce",
-                ).to_numpy(dtype=float)
-                dataset_dark_rates_hz = pd.to_numeric(
-                    dataset_rows["dark_firing_rate_hz"],
-                    errors="coerce",
-                ).to_numpy(dtype=float)
-                dataset_significant = (
-                    np.isfinite(dataset_p_values)
-                    & np.isfinite(dataset_dark_rates_hz)
-                    & (dataset_p_values < float(p_value_threshold))
+        if dataset_fractions_by_key:
+            dataset_keys = sorted(dataset_fractions_by_key)
+            offsets = (
+                np.asarray([0.0], dtype=float)
+                if len(dataset_keys) == 1
+                else np.linspace(-0.08, 0.08, len(dataset_keys), dtype=float)
+            )
+            offset_by_key = dict(zip(dataset_keys, offsets, strict=True))
+            for key in dataset_keys:
+                dataset_fractions = np.asarray(
+                    dataset_fractions_by_key[key],
+                    dtype=float,
                 )
-                dataset_total = int(np.sum(dataset_significant))
-                if not dataset_total:
-                    continue
-                key = (str(_animal_name), str(_date))
-                dataset_inactive = int(
-                    np.sum(
-                        dataset_significant
-                        & (dataset_dark_rates_hz < float(dark_activity_threshold_hz))
+                y_positions = positions + float(offset_by_key[key])
+                if np.all(np.isfinite(dataset_fractions)):
+                    ax.plot(
+                        dataset_fractions,
+                        y_positions,
+                        color="0.45",
+                        linewidth=0.45,
+                        alpha=0.55,
+                        zorder=3,
                     )
-                )
-                dataset_active = int(
-                    np.sum(
-                        dataset_significant
-                        & (dataset_dark_rates_hz >= float(dark_activity_threshold_hz))
-                    )
-                )
-                dataset_fractions_by_key[key] = [
-                    float(dataset_inactive / dataset_total),
-                    float(dataset_active / dataset_total),
+            for group_index in range(2):
+                group_keys = [
+                    key
+                    for key in dataset_keys
+                    if np.isfinite(dataset_fractions_by_key[key][group_index])
                 ]
-            if dataset_fractions_by_key:
-                dataset_keys = sorted(dataset_fractions_by_key)
-                if len(dataset_keys) == 1:
-                    offsets = np.asarray([0.0], dtype=float)
-                else:
-                    offsets = np.linspace(-0.08, 0.08, len(dataset_keys), dtype=float)
-                offset_by_key = dict(zip(dataset_keys, offsets, strict=True))
-                for key in dataset_keys:
-                    dataset_fractions = np.asarray(dataset_fractions_by_key[key], dtype=float)
-                    finite_pair = np.isfinite(dataset_fractions)
-                    y_positions = positions + float(offset_by_key[key])
-                    if np.all(finite_pair):
-                        ax.plot(
-                            dataset_fractions,
-                            y_positions,
-                            color="0.45",
-                            linewidth=0.45,
-                            alpha=0.55,
-                            zorder=3,
-                        )
-                for group_index in range(2):
-                    group_keys = [
-                        key
-                        for key in dataset_keys
-                        if np.isfinite(dataset_fractions_by_key[key][group_index])
-                    ]
-                    if not group_keys:
-                        continue
-                    ax.scatter(
-                        [
-                            dataset_fractions_by_key[key][group_index]
-                            for key in group_keys
-                        ],
-                        [
-                            positions[group_index] + float(offset_by_key[key])
-                            for key in group_keys
-                        ],
-                        s=5.5,
-                        color=colors[group_index],
-                        alpha=0.7,
-                        edgecolors="none",
-                        zorder=5,
-                    )
-        for position, fraction, count in zip(positions, fractions, counts, strict=True):
+                if not group_keys:
+                    continue
+                ax.scatter(
+                    [
+                        dataset_fractions_by_key[key][group_index]
+                        for key in group_keys
+                    ],
+                    [
+                        positions[group_index] + float(offset_by_key[key])
+                        for key in group_keys
+                    ],
+                    s=5.5,
+                    color=colors[group_index],
+                    alpha=0.7,
+                    edgecolors="none",
+                    zorder=5,
+                )
+        for position, fraction, significant_count in zip(
+            positions,
+            fractions,
+            significant_counts,
+            strict=True,
+        ):
             if composition_label_x is not None:
                 label = (
-                    f"{fraction:.2f}\nn={count}"
+                    f"{fraction:.2f}\nn={significant_count}"
                     if np.isfinite(fraction)
-                    else f"n={count}"
+                    else f"n={significant_count}"
                 )
                 ax.text(
                     composition_label_x,
@@ -5868,7 +6059,7 @@ def _plot_dark_activity_significant_composition(
                 is_upper_bar = position > float(np.mean(positions))
                 vertical_direction = 1.0 if is_upper_bar else -1.0
                 ax.annotate(
-                    f"{fraction:.2f}, n={count}",
+                    f"{fraction:.2f}, n={significant_count}",
                     xy=(fraction, position + vertical_direction * bar_height / 2.0),
                     xytext=(0.0, vertical_direction),
                     textcoords="offset points",
@@ -5881,12 +6072,22 @@ def _plot_dark_activity_significant_composition(
                 ax.text(
                     0.04,
                     position,
-                    f"n={count}",
+                    f"n={significant_count}",
                     ha="left",
                     va="center",
                     fontsize=6,
                 )
-        if show_significance_marker and np.isfinite(fractions[1]):
+        significance_p_value = (
+            float(fraction_statistics.get("p_value", np.nan))
+            if fraction_statistics
+            else float("nan")
+        )
+        significance_text = _format_significance_stars(significance_p_value)
+        if (
+            show_significance_marker
+            and significance_text
+            and total_significant_count > 0
+        ):
             _draw_vertical_significance_bracket(
                 ax,
                 x=1.02,
@@ -5894,7 +6095,7 @@ def _plot_dark_activity_significant_composition(
                 y1=2.0,
                 arm_length=0.045,
                 marker_offset_points=7.0,
-                marker_text="***",
+                marker_text=significance_text,
                 marker_rotation=90.0,
             )
 
@@ -5931,6 +6132,7 @@ def plot_glm_behavior_association_panel(
     single_line_axis_labels: bool = False,
     similarity_median_text_position: tuple[float, float] = (0.96, 0.94),
     similarity_median_text_horizontalalignment: str = "right",
+    activity_statistics_by_epoch: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """Plot ripple-GLM deviance explained by dark activity group."""
     ax.set_xlim(0.0, 1.0)
@@ -6016,6 +6218,13 @@ def plot_glm_behavior_association_panel(
         similarity_left,
         similarity_width,
     ) in axis_layouts:
+        epoch_statistics = (
+            activity_statistics_by_epoch.get(epoch_type, {})
+            if activity_statistics_by_epoch
+            else {}
+        )
+        fraction_statistics = epoch_statistics.get("significant_fraction")
+        devexp_statistics = epoch_statistics.get("devexp")
         fraction_ax = ax.inset_axes([fraction_left, bottom, fraction_width, height])
         _plot_dark_activity_significant_composition(
             fraction_ax,
@@ -6026,6 +6235,7 @@ def plot_glm_behavior_association_panel(
             title="",
             show_significance_marker=show_significance_marker,
             composition_label_x=composition_label_x,
+            fraction_statistics=fraction_statistics,
         )
         if single_line_axis_labels:
             fraction_ax.set_xlabel(
@@ -6045,6 +6255,11 @@ def plot_glm_behavior_association_panel(
             x_limits=x_limits,
             show_y_ticklabels=False,
             show_significance_marker=show_significance_marker,
+            significance_p_value=(
+                float(devexp_statistics.get("p_value", np.nan))
+                if devexp_statistics
+                else float("nan")
+            ),
         )
         if single_line_axis_labels:
             devexp_ax.set_xlabel("Dev. explained")
@@ -6069,7 +6284,7 @@ def plot_glm_behavior_association_panel(
         ax.text(
             0.50,
             0.035,
-            "Plots show p<0.05 units; dark active split uses 0.5 Hz",
+            "GLM positive: p<0.05; dark active: >=0.5 Hz",
             ha="center",
             va="bottom",
             fontsize=6,
@@ -6095,6 +6310,418 @@ def _match_selected_values_to_reference(
             "Selected DPPI values are not contained in the reference population."
         )
     return selected_mask
+
+
+def compute_dark_activity_devexp_median_permutation(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_ACTIVITY_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    batch_size: int = PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE,
+) -> dict[str, Any]:
+    """Test whether dark-active significant cells have greater median deviance."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    dark_activity_threshold_hz = float(
+        payload.get(
+            "dark_activity_threshold_hz",
+            PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+        )
+    )
+
+    empty_result = {
+        "test_name": "pooled_label_permutation_median_difference",
+        "alternative": "greater",
+        "population": "glm_significant_cells",
+        "glm_significance_p_value": float(p_value_threshold),
+        "dark_activity_threshold_hz": dark_activity_threshold_hz,
+        "dark_activity_threshold_inclusive": True,
+        "n_active": 0,
+        "n_inactive": 0,
+        "median_active": float("nan"),
+        "median_inactive": float("nan"),
+        "median_difference": float("nan"),
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "extreme_count": 0,
+        "p_value": float("nan"),
+        "per_dataset": [],
+    }
+    table = payload.get("devexp_table")
+    if table is None or not len(table):
+        return empty_result
+
+    epoch_rows = table[table["epoch_type"].astype(str) == str(epoch_type)].copy()
+    if not len(epoch_rows):
+        return empty_result
+    devexp = np.asarray(epoch_rows["ripple_devexp_mean"], dtype=float)
+    p_values = np.asarray(epoch_rows["ripple_devexp_p_value"], dtype=float)
+    dark_rates_hz = np.asarray(epoch_rows["dark_firing_rate_hz"], dtype=float)
+    significant = (
+        np.isfinite(devexp)
+        & np.isfinite(p_values)
+        & np.isfinite(dark_rates_hz)
+        & (p_values < float(p_value_threshold))
+    )
+    active = significant & (dark_rates_hz >= dark_activity_threshold_hz)
+    inactive = significant & ~active
+    active_values = devexp[active]
+    inactive_values = devexp[inactive]
+    n_active = int(active_values.size)
+    n_inactive = int(inactive_values.size)
+    if n_active == 0 or n_inactive == 0:
+        return {
+            **empty_result,
+            "n_active": n_active,
+            "n_inactive": n_inactive,
+        }
+
+    median_active = float(np.median(active_values))
+    median_inactive = float(np.median(inactive_values))
+    observed_difference = median_active - median_inactive
+    pooled_values = np.concatenate((active_values, inactive_values))
+    rng = np.random.default_rng(random_seed)
+    extreme_count = 0
+    completed = 0
+    while completed < int(n_permutations):
+        current_batch_size = min(int(batch_size), int(n_permutations) - completed)
+        random_keys = rng.random((current_batch_size, pooled_values.size))
+        order = np.argpartition(random_keys, n_inactive - 1, axis=1)
+        permuted_inactive = pooled_values[order[:, :n_inactive]]
+        permuted_active = pooled_values[order[:, n_inactive:]]
+        permuted_differences = np.median(permuted_active, axis=1) - np.median(
+            permuted_inactive,
+            axis=1,
+        )
+        extreme_count += int(np.sum(permuted_differences >= observed_difference))
+        completed += current_batch_size
+
+    per_dataset: list[dict[str, Any]] = []
+    if {"animal_name", "date"}.issubset(epoch_rows.columns):
+        significant_rows = epoch_rows.loc[significant].copy()
+        for (animal_name, date), rows in significant_rows.groupby(
+            ["animal_name", "date"],
+            sort=True,
+        ):
+            row_devexp = np.asarray(rows["ripple_devexp_mean"], dtype=float)
+            row_dark_rates_hz = np.asarray(rows["dark_firing_rate_hz"], dtype=float)
+            row_active = row_dark_rates_hz >= dark_activity_threshold_hz
+            row_inactive = ~row_active
+            row_difference = (
+                float(
+                    np.median(row_devexp[row_active])
+                    - np.median(row_devexp[row_inactive])
+                )
+                if np.any(row_active) and np.any(row_inactive)
+                else float("nan")
+            )
+            per_dataset.append(
+                {
+                    "animal_name": str(animal_name),
+                    "date": str(date),
+                    "n_active": int(np.sum(row_active)),
+                    "n_inactive": int(np.sum(row_inactive)),
+                    "median_difference": row_difference,
+                }
+            )
+
+    return {
+        **empty_result,
+        "n_active": n_active,
+        "n_inactive": n_inactive,
+        "median_active": median_active,
+        "median_inactive": median_inactive,
+        "median_difference": observed_difference,
+        "extreme_count": extreme_count,
+        "p_value": (extreme_count + 1.0) / (float(n_permutations) + 1.0),
+        "per_dataset": per_dataset,
+    }
+
+
+def compute_dark_activity_significance_fraction_permutation(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_ACTIVITY_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+) -> dict[str, Any]:
+    """Test dark-active enrichment among GLM-positive cells in the all-cell pool."""
+    import pandas as pd
+
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    dark_activity_threshold_hz = float(
+        payload.get(
+            "dark_activity_threshold_hz",
+            PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+        )
+    )
+
+    empty_result = {
+        "test_name": "fixed_margin_significance_fraction_permutation",
+        "alternative": "greater",
+        "population": "all_finite_dark_rate_cells_in_glm_sessions",
+        "missing_glm_policy": "count_as_not_glm_positive",
+        "glm_significance_p_value": float(p_value_threshold),
+        "dark_activity_threshold_hz": dark_activity_threshold_hz,
+        "dark_activity_threshold_inclusive": True,
+        "n_total": 0,
+        "n_active": 0,
+        "n_inactive": 0,
+        "n_significant": 0,
+        "n_active_significant": 0,
+        "n_inactive_significant": 0,
+        "n_missing_glm_result": 0,
+        "active_significant_fraction": float("nan"),
+        "inactive_significant_fraction": float("nan"),
+        "significant_fraction_difference": float("nan"),
+        "odds_ratio": float("nan"),
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "extreme_count": 0,
+        "p_value": float("nan"),
+        "exact_hypergeometric_p_value": float("nan"),
+        "per_dataset": [],
+    }
+    reference_table = payload.get("dark_activity_reference_table")
+    devexp_table = payload.get("devexp_table")
+    if reference_table is None or devexp_table is None:
+        return empty_result
+    if not len(reference_table) or not len(devexp_table):
+        return empty_result
+
+    required_reference_columns = {
+        "animal_name",
+        "date",
+        "unit",
+        "dark_firing_rate_hz",
+    }
+    required_devexp_columns = {
+        "animal_name",
+        "date",
+        "unit",
+        "epoch_type",
+        "ripple_devexp_p_value",
+    }
+    if not required_reference_columns.issubset(reference_table.columns):
+        missing = sorted(required_reference_columns - set(reference_table.columns))
+        raise ValueError(
+            f"Dark-activity reference table is missing columns: {missing}"
+        )
+    if not required_devexp_columns.issubset(devexp_table.columns):
+        missing = sorted(required_devexp_columns - set(devexp_table.columns))
+        raise ValueError(f"GLM deviance table is missing columns: {missing}")
+
+    epoch_rows = devexp_table[
+        devexp_table["epoch_type"].astype(str) == str(epoch_type)
+    ].copy()
+    if not len(epoch_rows):
+        return empty_result
+
+    key_columns = ["animal_name", "date", "unit"]
+    session_columns = ["animal_name", "date"]
+    reference_rows = reference_table.copy()
+    for column in session_columns:
+        reference_rows[column] = reference_rows[column].astype(str)
+        epoch_rows[column] = epoch_rows[column].astype(str)
+    reference_rows["unit"] = pd.to_numeric(
+        reference_rows["unit"],
+        errors="coerce",
+    )
+    reference_rows["dark_firing_rate_hz"] = pd.to_numeric(
+        reference_rows["dark_firing_rate_hz"],
+        errors="coerce",
+    )
+    reference_rows = reference_rows[
+        np.isfinite(reference_rows["unit"].to_numpy(dtype=float))
+        & np.isfinite(
+            reference_rows["dark_firing_rate_hz"].to_numpy(dtype=float)
+        )
+    ].copy()
+    reference_rows["unit"] = reference_rows["unit"].astype(int)
+    epoch_rows["unit"] = pd.to_numeric(epoch_rows["unit"], errors="coerce")
+    epoch_rows = epoch_rows[
+        np.isfinite(epoch_rows["unit"].to_numpy(dtype=float))
+    ].copy()
+    epoch_rows["unit"] = epoch_rows["unit"].astype(int)
+
+    represented_sessions = epoch_rows[session_columns].drop_duplicates()
+    reference_rows = reference_rows.merge(
+        represented_sessions,
+        on=session_columns,
+        how="inner",
+        validate="many_to_one",
+    )
+    if reference_rows.duplicated(key_columns).any():
+        raise ValueError(
+            "Dark-activity reference table contains duplicate animal/date/unit keys."
+        )
+    if epoch_rows.duplicated(key_columns).any():
+        raise ValueError("GLM deviance table contains duplicate animal/date/unit keys.")
+
+    glm_rows = epoch_rows[key_columns + ["ripple_devexp_p_value"]].copy()
+    glm_rows["ripple_devexp_p_value"] = pd.to_numeric(
+        glm_rows["ripple_devexp_p_value"],
+        errors="coerce",
+    )
+    analysis_rows = reference_rows.merge(
+        glm_rows,
+        on=key_columns,
+        how="left",
+        validate="one_to_one",
+    )
+    p_values = analysis_rows["ripple_devexp_p_value"].to_numpy(dtype=float)
+    dark_rates_hz = analysis_rows["dark_firing_rate_hz"].to_numpy(dtype=float)
+    significant = np.isfinite(p_values) & (
+        p_values < float(p_value_threshold)
+    )
+    active = dark_rates_hz >= dark_activity_threshold_hz
+    n_total = int(significant.size)
+    n_active = int(np.sum(active))
+    n_inactive = int(np.sum(~active))
+    n_significant = int(np.sum(significant))
+    n_active_significant = int(np.sum(active & significant))
+    n_inactive_significant = int(np.sum((~active) & significant))
+    n_missing_glm_result = int(np.sum(~np.isfinite(p_values)))
+    if n_active == 0 or n_inactive == 0:
+        return {
+            **empty_result,
+            "n_total": n_total,
+            "n_active": n_active,
+            "n_inactive": n_inactive,
+            "n_significant": n_significant,
+            "n_active_significant": n_active_significant,
+            "n_inactive_significant": n_inactive_significant,
+            "n_missing_glm_result": n_missing_glm_result,
+        }
+
+    active_fraction = n_active_significant / n_active
+    inactive_fraction = n_inactive_significant / n_inactive
+    observed_difference = active_fraction - inactive_fraction
+    rng = np.random.default_rng(random_seed)
+    surrogate_active_significant = rng.hypergeometric(
+        ngood=n_significant,
+        nbad=n_total - n_significant,
+        nsample=n_active,
+        size=int(n_permutations),
+    )
+    extreme_count = int(
+        np.sum(surrogate_active_significant >= n_active_significant)
+    )
+
+    from scipy.stats import hypergeom
+
+    exact_p_value = float(
+        hypergeom.sf(
+            n_active_significant - 1,
+            n_total,
+            n_significant,
+            n_active,
+        )
+    )
+    active_nonsignificant = n_active - n_active_significant
+    inactive_nonsignificant = n_inactive - n_inactive_significant
+    odds_numerator = n_active_significant * inactive_nonsignificant
+    odds_denominator = active_nonsignificant * n_inactive_significant
+    odds_ratio = (
+        float(odds_numerator / odds_denominator)
+        if odds_denominator
+        else (float("inf") if odds_numerator else float("nan"))
+    )
+
+    per_dataset = []
+    analysis_rows = analysis_rows.assign(
+        glm_significant=significant,
+        dark_active=active,
+    )
+    for (animal_name, date), rows in analysis_rows.groupby(
+        session_columns,
+        sort=True,
+    ):
+        row_significant = rows["glm_significant"].to_numpy(dtype=bool)
+        row_active = rows["dark_active"].to_numpy(dtype=bool)
+        row_n_active = int(np.sum(row_active))
+        row_n_inactive = int(np.sum(~row_active))
+        row_n_active_significant = int(np.sum(row_active & row_significant))
+        row_n_inactive_significant = int(np.sum((~row_active) & row_significant))
+        per_dataset.append(
+            {
+                "animal_name": str(animal_name),
+                "date": str(date),
+                "n_active": row_n_active,
+                "n_inactive": row_n_inactive,
+                "n_active_significant": row_n_active_significant,
+                "n_inactive_significant": row_n_inactive_significant,
+                "active_significant_fraction": (
+                    row_n_active_significant / row_n_active
+                    if row_n_active
+                    else float("nan")
+                ),
+                "inactive_significant_fraction": (
+                    row_n_inactive_significant / row_n_inactive
+                    if row_n_inactive
+                    else float("nan")
+                ),
+            }
+        )
+
+    return {
+        **empty_result,
+        "n_total": n_total,
+        "n_active": n_active,
+        "n_inactive": n_inactive,
+        "n_significant": n_significant,
+        "n_active_significant": n_active_significant,
+        "n_inactive_significant": n_inactive_significant,
+        "n_missing_glm_result": n_missing_glm_result,
+        "active_significant_fraction": active_fraction,
+        "inactive_significant_fraction": inactive_fraction,
+        "significant_fraction_difference": observed_difference,
+        "odds_ratio": odds_ratio,
+        "extreme_count": extreme_count,
+        "p_value": (extreme_count + 1.0) / (float(n_permutations) + 1.0),
+        "exact_hypergeometric_p_value": exact_p_value,
+        "per_dataset": per_dataset,
+    }
+
+
+def compute_glm_dark_activity_statistics(
+    payload: Mapping[str, Any],
+    *,
+    epoch_types: Sequence[str] = PANEL_D_EPOCH_ORDER,
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_ACTIVITY_NULL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    devexp_batch_size: int = PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE,
+) -> dict[str, dict[str, Any]]:
+    """Return the dark-activity tests used to annotate each requested epoch."""
+    return {
+        str(epoch_type): {
+            "devexp": compute_dark_activity_devexp_median_permutation(
+                payload,
+                epoch_type=str(epoch_type),
+                p_value_threshold=p_value_threshold,
+                n_permutations=n_permutations,
+                random_seed=random_seed,
+                batch_size=devexp_batch_size,
+            ),
+            "significant_fraction": (
+                compute_dark_activity_significance_fraction_permutation(
+                    payload,
+                    epoch_type=str(epoch_type),
+                    p_value_threshold=p_value_threshold,
+                    n_permutations=n_permutations,
+                    random_seed=random_seed,
+                )
+            ),
+        }
+        for epoch_type in epoch_types
+    }
 
 
 def _format_significance_stars(p_value: float) -> str:
@@ -6333,8 +6960,18 @@ def plot_glm_dark_epoch_properties_panel(
     *,
     n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
     random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+    activity_n_permutations: int = PANEL_E_ACTIVITY_NULL_PERMUTATIONS,
+    activity_random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    activity_devexp_batch_size: int = PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE,
 ) -> dict[str, Any]:
     """Plot dark activity and DPPI properties of ripple-predictable V1 cells."""
+    activity_statistics_by_epoch = compute_glm_dark_activity_statistics(
+        payload,
+        epoch_types=PANEL_D_EPOCH_ORDER,
+        n_permutations=activity_n_permutations,
+        random_seed=activity_random_seed,
+        devexp_batch_size=activity_devexp_batch_size,
+    )
     plot_glm_behavior_association_panel(
         ax,
         payload,
@@ -6342,19 +6979,129 @@ def plot_glm_dark_epoch_properties_panel(
         include_similarity=False,
         single_epoch_column_bounds=PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS,
         single_line_axis_labels=True,
+        activity_statistics_by_epoch=activity_statistics_by_epoch,
     )
-    return plot_dark_active_dppi_distribution_panel(
+    dppi_analysis = plot_dark_active_dppi_distribution_panel(
         ax,
         payload,
         n_permutations=n_permutations,
         random_seed=random_seed,
         axis_bounds=PANEL_E_DPPI_AXIS_BOUNDS,
     )
+    return {
+        **dppi_analysis,
+        "activity_statistics_by_epoch": activity_statistics_by_epoch,
+    }
 
 
 def _compute_source_comparison_axis_limits(table: Any) -> tuple[float, float]:
     """Return shared deviance-explained limits for source-mode comparisons."""
     return PANEL_C_SOURCE_COMPARISON_LIMITS
+
+
+def compute_source_predictor_paired_sign_test(table: Any) -> dict[str, Any]:
+    """Return the exact paired-cell sign test for the two CA1 source models."""
+    n_input_pairs = 0 if table is None else int(len(table))
+    empty_result = {
+        "test_name": "exact_paired_sign_test",
+        "alternative": "vector_greater_than_mean_activity",
+        "unit_of_analysis": "v1_unit",
+        "tie_rule": "exact_zero_delta_excluded",
+        "n_input_pairs": n_input_pairs,
+        "n_finite_pairs": 0,
+        "n_nonfinite_pairs": n_input_pairs,
+        "n_vector_greater": 0,
+        "n_mean_activity_greater": 0,
+        "n_ties": 0,
+        "n_tested": 0,
+        "fraction_vector_greater": float("nan"),
+        "median_delta_vector_minus_mean": float("nan"),
+        "p_value": float("nan"),
+    }
+    if table is None or not len(table):
+        return empty_result
+
+    mean_activity_values = np.asarray(
+        table["mean_activity_devexp_mean"],
+        dtype=float,
+    )
+    vector_values = np.asarray(table["vector_devexp_mean"], dtype=float)
+    finite_pairs = np.isfinite(mean_activity_values) & np.isfinite(vector_values)
+    deltas = vector_values[finite_pairs] - mean_activity_values[finite_pairs]
+    n_finite_pairs = int(deltas.size)
+    n_vector_greater = int(np.sum(deltas > 0.0))
+    n_mean_activity_greater = int(np.sum(deltas < 0.0))
+    n_ties = int(np.sum(deltas == 0.0))
+    n_tested = n_vector_greater + n_mean_activity_greater
+    if n_tested:
+        from scipy.stats import binomtest
+
+        fraction_vector_greater = n_vector_greater / n_tested
+        p_value = float(
+            binomtest(
+                n_vector_greater,
+                n_tested,
+                p=0.5,
+                alternative="greater",
+            ).pvalue
+        )
+    else:
+        fraction_vector_greater = float("nan")
+        p_value = float("nan")
+
+    return {
+        **empty_result,
+        "n_finite_pairs": n_finite_pairs,
+        "n_nonfinite_pairs": n_input_pairs - n_finite_pairs,
+        "n_vector_greater": n_vector_greater,
+        "n_mean_activity_greater": n_mean_activity_greater,
+        "n_ties": n_ties,
+        "n_tested": n_tested,
+        "fraction_vector_greater": float(fraction_vector_greater),
+        "median_delta_vector_minus_mean": (
+            float(np.median(deltas)) if n_finite_pairs else float("nan")
+        ),
+        "p_value": p_value,
+    }
+
+
+def _scatter_source_predictor_comparison_points(ax: "Axes", table: Any) -> None:
+    """Plot paired source-model estimates colored by vector-model significance."""
+    x_values = np.asarray(table["mean_activity_devexp_mean"], dtype=float)
+    y_values = np.asarray(table["vector_devexp_mean"], dtype=float)
+    if "vector_devexp_p_value" in table:
+        p_values = np.asarray(table["vector_devexp_p_value"], dtype=float)
+    else:
+        p_values = np.full(x_values.shape, np.nan, dtype=float)
+    valid = np.isfinite(x_values) & np.isfinite(y_values)
+    significant = (
+        valid
+        & np.isfinite(p_values)
+        & (p_values < PANEL_C_SIGNIFICANCE_P_VALUE)
+    )
+    nonsignificant = valid & ~significant
+    if np.any(nonsignificant):
+        ax.scatter(
+            x_values[nonsignificant],
+            y_values[nonsignificant],
+            s=5,
+            color=NONSIGNIFICANT_COLOR,
+            alpha=0.45,
+            edgecolors="none",
+            rasterized=True,
+            zorder=2,
+        )
+    if np.any(significant):
+        ax.scatter(
+            x_values[significant],
+            y_values[significant],
+            s=6,
+            color=PANEL_C_SOURCE_COMPARISON_COLOR,
+            alpha=0.55,
+            edgecolors="none",
+            rasterized=True,
+            zorder=3,
+        )
 
 
 def _plot_source_predictor_comparison_axis(
@@ -6364,13 +7111,13 @@ def _plot_source_predictor_comparison_axis(
     title: str,
     axis_limits: tuple[float, float],
     pooled: bool = False,
-    p_value_threshold: float = SIGNIFICANCE_P_VALUE,
     summary_location: str = "upper_left",
     summary_mode: str = "full",
-) -> str | None:
+    show_significance_marker: bool = False,
+) -> dict[str, Any]:
     """Plot vector-model deviance explained against mean-activity control."""
     lower, upper = axis_limits
-    summary_text: str | None = None
+    statistics = compute_source_predictor_paired_sign_test(table)
     ax.plot(
         [lower, upper],
         [lower, upper],
@@ -6392,53 +7139,32 @@ def _plot_source_predictor_comparison_axis(
     else:
         x_values = np.asarray(table["mean_activity_devexp_mean"], dtype=float)
         y_values = np.asarray(table["vector_devexp_mean"], dtype=float)
-        p_values = (
-            np.asarray(table["vector_devexp_p_value"], dtype=float)
-            if "vector_devexp_p_value" in table
-            else np.full(len(table), np.nan, dtype=float)
-        )
         valid = np.isfinite(x_values) & np.isfinite(y_values)
-        significant = (
-            valid
-            & np.isfinite(p_values)
-            & (p_values < float(p_value_threshold))
-        )
-        if np.any(significant):
+        if np.any(valid):
             if pooled and {"animal_name", "date"}.issubset(table.columns):
-                for (_animal_name, _date), dataset_rows in table.loc[significant].groupby(
+                for (_animal_name, _date), dataset_rows in table.loc[valid].groupby(
                     ["animal_name", "date"],
                     sort=True,
                 ):
-                    ax.scatter(
-                        dataset_rows["mean_activity_devexp_mean"],
-                        dataset_rows["vector_devexp_mean"],
-                        s=4.2,
-                        color=PANEL_C_SOURCE_COMPARISON_COLOR,
-                        alpha=0.42,
-                        edgecolors="none",
-                        rasterized=True,
-                        zorder=3,
-                    )
+                    _scatter_source_predictor_comparison_points(ax, dataset_rows)
             else:
-                ax.scatter(
-                    x_values[significant],
-                    y_values[significant],
-                    s=4.2,
-                    color=PANEL_C_SOURCE_COMPARISON_COLOR,
-                    alpha=0.42,
-                    edgecolors="none",
-                    rasterized=True,
-                    zorder=3,
-                )
-            deltas = y_values[significant] - x_values[significant]
-            vector_greater_fraction = float(np.mean(deltas > 0.0))
+                _scatter_source_predictor_comparison_points(ax, table.loc[valid])
+            n_finite_pairs = int(statistics["n_finite_pairs"])
+            fraction_vector_greater = float(
+                statistics["fraction_vector_greater"]
+            )
+            fraction_text = (
+                f"{fraction_vector_greater:.2f}"
+                if np.isfinite(fraction_vector_greater)
+                else "n/a"
+            )
             summary_text = (
-                f"n={int(np.sum(significant))}\n"
-                f"frac vector>mean={vector_greater_fraction:.2f}"
+                f"n={n_finite_pairs}\n"
+                f"frac vector>mean={fraction_text}"
             )
             if summary_location != "none":
                 display_summary_text = (
-                    f"n={int(np.sum(significant))}"
+                    f"n={n_finite_pairs}"
                     if summary_mode == "n_only"
                     else summary_text
                 )
@@ -6472,11 +7198,33 @@ def _plot_source_predictor_comparison_axis(
                         "pad": 0.35,
                     },
                 )
+            if show_significance_marker:
+                significance_marker = _format_significance_stars(
+                    float(statistics["p_value"])
+                )
+                if significance_marker:
+                    ax.text(
+                        0.05,
+                        0.95,
+                        significance_marker,
+                        ha="left",
+                        va="top",
+                        fontsize=7,
+                        fontweight="bold",
+                        transform=ax.transAxes,
+                        bbox={
+                            "facecolor": "white",
+                            "edgecolor": "none",
+                            "alpha": 0.75,
+                            "pad": 0.35,
+                        },
+                        zorder=5,
+                    )
         else:
             ax.text(
                 0.5,
                 0.5,
-                "No p<0.05\nunits",
+                "No finite paired\nGLM data",
                 ha="center",
                 va="center",
                 fontsize=6,
@@ -6500,7 +7248,7 @@ def _plot_source_predictor_comparison_axis(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="both", labelsize=6, length=1.5, pad=1)
-    return summary_text
+    return statistics
 
 
 def plot_glm_source_predictor_comparison_panel(
@@ -6516,7 +7264,8 @@ def plot_glm_source_predictor_comparison_panel(
     summary_location: str | None = None,
     x_label_y: float = 0.035,
     x_label: str = "Mean CA1 activity\ndev. explained",
-) -> None:
+    annotate_pooled_sign_test: bool = False,
+) -> dict[str, Any] | None:
     """Plot full CA1 vector GLM performance against mean CA1 activity."""
     import pandas as pd
 
@@ -6559,7 +7308,7 @@ def plot_glm_source_predictor_comparison_panel(
             fontsize=6,
             transform=ax.transAxes,
         )
-        return
+        return None
 
     left = PANEL_D_COMPACT_SOURCE_LEFT if compact_labels else 0.075
     right = PANEL_D_COMPACT_SOURCE_RIGHT if compact_labels else 0.985
@@ -6569,19 +7318,22 @@ def plot_glm_source_predictor_comparison_panel(
         summary_location = "lower_right" if compact_labels else "upper_left"
     gap = 0.030
     width = (right - left - gap * (len(groups) - 1)) / len(groups)
+    pooled_statistics: dict[str, Any] | None = None
     for index, (title, rows, pooled) in enumerate(groups):
         child_ax = ax.inset_axes([left + index * (width + gap), bottom, width, height])
         child_title = title if show_group_titles and not compact_labels else ""
-        _plot_source_predictor_comparison_axis(
+        group_statistics = _plot_source_predictor_comparison_axis(
             child_ax,
             rows,
             title=child_title,
             axis_limits=axis_limits,
             pooled=pooled,
-            p_value_threshold=SIGNIFICANCE_P_VALUE,
             summary_location=summary_location,
             summary_mode="n_only" if compact_labels else "full",
+            show_significance_marker=annotate_pooled_sign_test and pooled,
         )
+        if pooled:
+            pooled_statistics = group_statistics
         if compact_labels:
             child_ax.set_xlabel("Mean CA1\ndev. explained", fontsize=6, labelpad=0.8)
             if index == 0:
@@ -6603,7 +7355,7 @@ def plot_glm_source_predictor_comparison_panel(
         ax.text(
             0.98,
             0.035,
-            f"Showing vector p<{SIGNIFICANCE_P_VALUE:g} units",
+            "All V1 units with paired model estimates",
             ha="right",
             va="bottom",
             fontsize=6,
@@ -6620,6 +7372,7 @@ def plot_glm_source_predictor_comparison_panel(
             fontsize=6.0,
             transform=ax.transAxes,
         )
+    return pooled_statistics
 
 
 def filter_epoch_payloads(
@@ -6978,13 +7731,14 @@ def make_figure_3(
     )
     panel_c_title = "Predicting V1 activity during ripples with CA1 activity"
     axes[2].set_title(panel_c_title, fontsize=7.2, pad=2)
-    plot_glm_source_predictor_comparison_panel(
+    panel_d_sign_test = plot_glm_source_predictor_comparison_panel(
         axes[3],
         source_comparison_payload,
         include_per_animal=False,
         include_pooled=True,
         compact_labels=True,
         show_color_note=False,
+        annotate_pooled_sign_test=True,
     )
     axes[3].set_title(
         "CA1 spike vector vs.\nmean CA1 activity",
@@ -7056,6 +7810,16 @@ def make_figure_3(
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']} "
             f"({missing['source_predictor_mode']}): {missing['path']}"
+        )
+    if panel_d_sign_test is not None:
+        p_value = float(panel_d_sign_test["p_value"])
+        p_value_text = f"{p_value:.3g}" if np.isfinite(p_value) else "nan"
+        print(
+            "Panel D pooled one-sided exact paired sign test: "
+            f"{panel_d_sign_test['n_vector_greater']}/"
+            f"{panel_d_sign_test['n_tested']} non-tied V1 units favor the "
+            "CA1 vector model; "
+            f"{panel_d_sign_test['n_ties']} ties; p={p_value_text}"
         )
     print(f"Saved Figure 3 to {output_path}")
     return output_path

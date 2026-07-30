@@ -99,6 +99,25 @@ def format_place_bin_size_token(place_bin_size_cm: float) -> str:
     return f"placebin{_format_float_token(place_bin_size_cm)}cm"
 
 
+def format_time_bin_size_token(bin_size_s: float) -> str:
+    """Return the filename token for one temporal-bin-size setting."""
+    if not np.isfinite(bin_size_s) or bin_size_s <= 0:
+        raise ValueError("bin_size_s must be positive and finite.")
+    return f"bin{_format_float_token(bin_size_s)}s"
+
+
+def format_encoding_binning_token(
+    *,
+    bin_size_s: float,
+    place_bin_size_cm: float,
+) -> str:
+    """Return the shared temporal- and spatial-binning filename token."""
+    return (
+        f"{format_time_bin_size_token(bin_size_s)}_"
+        f"{format_place_bin_size_token(place_bin_size_cm)}"
+    )
+
+
 def get_unit_mask(
     movement_firing_rates: np.ndarray,
     threshold_hz: float,
@@ -1380,16 +1399,20 @@ def save_epoch_tables(
     summary_tables: dict[str, dict[str, pd.DataFrame]],
     data_dir: Path,
     n_folds: int,
+    bin_size_s: float,
     place_bin_size_cm: float,
 ) -> list[Path]:
     """Write one parquet summary table per region and run epoch."""
     saved_paths: list[Path] = []
-    place_bin_token = format_place_bin_size_token(place_bin_size_cm)
+    binning_token = format_encoding_binning_token(
+        bin_size_s=bin_size_s,
+        place_bin_size_cm=place_bin_size_cm,
+    )
     for region, tables_by_epoch in summary_tables.items():
         for epoch, table in tables_by_epoch.items():
             path = (
                 data_dir
-                / f"{region}_{epoch}_cv{n_folds}_{place_bin_token}_encoding_summary.parquet"
+                / f"{region}_{epoch}_cv{n_folds}_{binning_token}_encoding_summary.parquet"
             )
             table.to_parquet(path)
             saved_paths.append(path)
@@ -1401,18 +1424,22 @@ def save_comparison_tables(
     data_dir: Path,
     dark_epoch: str,
     n_folds: int,
+    bin_size_s: float,
     place_bin_size_cm: float,
 ) -> list[Path]:
     """Write one parquet comparison table per region and light epoch."""
     saved_paths: list[Path] = []
-    place_bin_token = format_place_bin_size_token(place_bin_size_cm)
+    binning_token = format_encoding_binning_token(
+        bin_size_s=bin_size_s,
+        place_bin_size_cm=place_bin_size_cm,
+    )
     for region, tables_by_light_epoch in comparison_tables.items():
         for light_epoch, table in tables_by_light_epoch.items():
             path = (
                 data_dir
                 / (
                     f"{region}_{light_epoch}_{dark_epoch}_cv{n_folds}_"
-                    f"{place_bin_token}_encoding_comparison.parquet"
+                    f"{binning_token}_encoding_comparison.parquet"
                 )
             )
             table.to_parquet(path)
@@ -1424,17 +1451,21 @@ def save_tp_cross_trajectory_tables(
     cross_trajectory_tables: dict[str, dict[str, pd.DataFrame]],
     data_dir: Path,
     n_folds: int,
+    bin_size_s: float,
     place_bin_size_cm: float,
 ) -> list[Path]:
     """Write one TP cross-trajectory transfer table per region and run epoch."""
     saved_paths: list[Path] = []
-    place_bin_token = format_place_bin_size_token(place_bin_size_cm)
+    binning_token = format_encoding_binning_token(
+        bin_size_s=bin_size_s,
+        place_bin_size_cm=place_bin_size_cm,
+    )
     for region, tables_by_epoch in cross_trajectory_tables.items():
         for epoch, table in tables_by_epoch.items():
             path = (
                 data_dir
                 / (
-                    f"{region}_{epoch}_cv{n_folds}_{place_bin_token}_"
+                    f"{region}_{epoch}_cv{n_folds}_{binning_token}_"
                     "tp_cross_trajectory_encoding.parquet"
                 )
             )
@@ -1560,6 +1591,8 @@ def main() -> None:
     args = parse_arguments()
     if args.generalized_place_branch_gap_cm < 0:
         raise ValueError("--generalized-place-branch-gap-cm must be non-negative.")
+    if not np.isfinite(args.bin_size_s) or args.bin_size_s <= 0:
+        raise ValueError("--bin-size-s must be positive.")
     if not np.isfinite(args.place_bin_size_cm) or args.place_bin_size_cm <= 0:
         raise ValueError("--place-bin-size-cm must be positive.")
     if not np.isfinite(args.v1_min_fr_hz) or args.v1_min_fr_hz < 0:
@@ -1604,7 +1637,10 @@ def main() -> None:
         session["trajectory_intervals"],
         n_folds=args.n_folds,
     )
-    place_bin_token = format_place_bin_size_token(args.place_bin_size_cm)
+    binning_token = format_encoding_binning_token(
+        bin_size_s=args.bin_size_s,
+        place_bin_size_cm=args.place_bin_size_cm,
+    )
     position_bins = build_linear_position_bins(
         args.animal_name,
         args.place_bin_size_cm,
@@ -1739,6 +1775,7 @@ def main() -> None:
         summary_tables,
         data_dir=data_dir,
         n_folds=args.n_folds,
+        bin_size_s=args.bin_size_s,
         place_bin_size_cm=args.place_bin_size_cm,
     )
     saved_comparison_tables = save_comparison_tables(
@@ -1746,12 +1783,14 @@ def main() -> None:
         data_dir=data_dir,
         dark_epoch=dark_epoch,
         n_folds=args.n_folds,
+        bin_size_s=args.bin_size_s,
         place_bin_size_cm=args.place_bin_size_cm,
     )
     saved_tp_cross_trajectory_tables = save_tp_cross_trajectory_tables(
         tp_cross_trajectory_tables,
         data_dir=data_dir,
         n_folds=args.n_folds,
+        bin_size_s=args.bin_size_s,
         place_bin_size_cm=args.place_bin_size_cm,
     )
 
@@ -1760,7 +1799,7 @@ def main() -> None:
         for epoch in session["run_epochs"]:
             histogram_path = (
                 fig_dir
-                / f"{region}_{epoch}_cv_{place_bin_token}_place_vs_tp_histogram.png"
+                / f"{region}_{epoch}_cv_{binning_token}_place_vs_tp_histogram.png"
             )
             plot_epoch_delta_histogram(
                 summary_tables[region][epoch],
@@ -1777,7 +1816,7 @@ def main() -> None:
             histogram_path = (
                 fig_dir
                 / (
-                    f"{region}_{epoch}_cv_{place_bin_token}_"
+                    f"{region}_{epoch}_cv_{binning_token}_"
                     "generalized_place_vs_tp_histogram.png"
                 )
             )
@@ -1794,7 +1833,7 @@ def main() -> None:
             saved_figures.append(histogram_path)
 
             histogram_path = (
-                fig_dir / f"{region}_{epoch}_cv_{place_bin_token}_gtp_vs_tp_histogram.png"
+                fig_dir / f"{region}_{epoch}_cv_{binning_token}_gtp_vs_tp_histogram.png"
             )
             plot_epoch_delta_histogram(
                 summary_tables[region][epoch],
@@ -1812,7 +1851,7 @@ def main() -> None:
                 histogram_path = (
                     fig_dir
                     / (
-                        f"{region}_{epoch}_{target_trajectory}_{place_bin_token}_"
+                        f"{region}_{epoch}_{target_trajectory}_{binning_token}_"
                         "tp_transfer_family_comparison_histogram.png"
                     )
                 )
@@ -1848,7 +1887,7 @@ def main() -> None:
             )
             figure_path = (
                 fig_dir
-                / f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{place_bin_token}_place_vs_tp.png"
+                / f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{binning_token}_place_vs_tp.png"
             )
             plot_cv_light_dark_comparison(
                 filtered_light_place_tp,
@@ -1874,7 +1913,7 @@ def main() -> None:
             figure_path = (
                 fig_dir
                 / (
-                    f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{place_bin_token}_"
+                    f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{binning_token}_"
                     "generalized_place_vs_tp.png"
                 )
             )
@@ -1901,7 +1940,7 @@ def main() -> None:
             )
             figure_path = (
                 fig_dir
-                / f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{place_bin_token}_gtp_vs_tp.png"
+                / f"{region}_{light_epoch}_vs_{dark_epoch}_cv_{binning_token}_gtp_vs_tp.png"
             )
             plot_cv_light_dark_comparison(
                 filtered_light_gtp_tp,

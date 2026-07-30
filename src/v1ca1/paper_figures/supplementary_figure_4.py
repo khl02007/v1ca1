@@ -80,8 +80,9 @@ PANEL_B_DEVIANCE_EXPLAINED_LIMITS = (-0.1, 0.3)
 PANEL_C_SOURCE_COMPARISON_LIMITS = (-0.1, 0.3)
 PANEL_A_HISTOGRAM_BOTTOM = 0.20
 PANEL_A_HISTOGRAM_HEIGHT = 0.70
-PANEL_GRID_WIDTH_RATIOS = (3.0, 7.0)
-PANEL_GRID_HEIGHT_RATIOS = (1.0, 1.0)
+TOP_ROW_PANEL_WIDTH_RATIOS = (4.0, 6.0)
+BOTTOM_ROW_PANEL_WIDTH_RATIOS = (3.0, 7.0)
+PANEL_GRID_HEIGHT_RATIOS = (0.9, 1.0)
 PANEL_GRID_WSPACE = 0.08
 PANEL_GRID_HSPACE = 0.08
 PANEL_D_SINGLE_EPOCH_COLUMN_BOUNDS = (
@@ -1555,16 +1556,26 @@ def make_supplementary_figure_4(
     )
     outer_grid = fig.add_gridspec(
         nrows=2,
-        ncols=2,
-        width_ratios=PANEL_GRID_WIDTH_RATIOS,
+        ncols=1,
         height_ratios=PANEL_GRID_HEIGHT_RATIOS,
-        wspace=PANEL_GRID_WSPACE,
         hspace=PANEL_GRID_HSPACE,
     )
-    modulation_ax = fig.add_subplot(outer_grid[0, 0])
-    panel_b_ax = fig.add_subplot(outer_grid[0, 1])
-    source_comparison_ax = fig.add_subplot(outer_grid[1, 0])
-    behavior_ax = fig.add_subplot(outer_grid[1, 1])
+    top_row_grid = outer_grid[0, 0].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=TOP_ROW_PANEL_WIDTH_RATIOS,
+        wspace=PANEL_GRID_WSPACE,
+    )
+    bottom_row_grid = outer_grid[1, 0].subgridspec(
+        nrows=1,
+        ncols=2,
+        width_ratios=BOTTOM_ROW_PANEL_WIDTH_RATIOS,
+        wspace=PANEL_GRID_WSPACE,
+    )
+    modulation_ax = fig.add_subplot(top_row_grid[0, 0])
+    panel_b_ax = fig.add_subplot(top_row_grid[0, 1])
+    source_comparison_ax = fig.add_subplot(bottom_row_grid[0, 0])
+    behavior_ax = fig.add_subplot(bottom_row_grid[0, 1])
 
     plot_epoch_modulation_histogram_panel(
         modulation_ax,
@@ -1636,7 +1647,7 @@ def make_supplementary_figure_4(
             "Ripple modulation index",
             panel_b_title,
         ),
-        label_x_offsets=(-0.04, -0.04),
+        label_x_offsets=(-0.01, -0.04),
         fontsize=7.2,
     )
     add_aligned_panel_headers(
@@ -1651,7 +1662,7 @@ def make_supplementary_figure_4(
         fontsize=7.2,
     )
 
-    save_figure(fig, output_path, dpi=dpi)
+    save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
     for missing in source_comparison_payload["missing_artifacts"]:
         print(

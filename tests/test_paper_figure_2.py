@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import v1ca1.paper_figures._figure_2_base as figure_2_base_module
+import v1ca1.paper_figures.figure_1 as figure_1_module
 import v1ca1.paper_figures.figure_2 as figure_2_module
 import v1ca1.paper_figures.figure_2_common as figure_2_common_module
 from v1ca1.helper.plot_wtrack_schematic import get_w_track_geometry
@@ -418,6 +419,14 @@ def test_default_cli_matches_shared_figure_3_canvas() -> None:
     assert args.position_offset == DEFAULT_POSITION_OFFSET
     assert args.speed_threshold_cm_s == pytest.approx(DEFAULT_SPEED_THRESHOLD_CM_S)
     assert args.sigma_bins == pytest.approx(DEFAULT_SIGMA_BINS)
+    assert (
+        args.decoding_n_permutations
+        == figure_1_module.DECODING_PERMUTATION_COUNT
+    )
+    assert (
+        args.decoding_permutation_seed
+        == figure_1_module.DECODING_PERMUTATION_SEED
+    )
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(FIGURE_3_WIDTH_MM)
     assert PANEL_BC_ROW_HEIGHT_MM == pytest.approx(
         FIGURE_3_HEIGHT_MM
@@ -1042,15 +1051,353 @@ def test_add_panel_c2_light_dark_brackets_lowers_right_bracket() -> None:
     for axis in axes:
         axis.set_ylim(0.0, 1.0)
 
-    figure_2_module.add_panel_c2_light_dark_brackets(parent_ax)
+    figure_2_module.add_panel_c2_light_dark_brackets(
+        parent_ax,
+        ("**", "****"),
+    )
 
     left_bracket_y = max(axes[0].lines[0].get_ydata())
     right_bracket_y = max(axes[1].lines[0].get_ydata())
+    assert [axis.texts[0].get_text() for axis in axes] == ["**", "****"]
     assert right_bracket_y < left_bracket_y
     assert right_bracket_y == pytest.approx(
         figure_2_module.PANEL_C2_RIGHT_SIGNIFICANCE_BRACKET_Y_FRACTION
         + figure_2_module.DECODING_SIGNIFICANCE_BRACKET_HEIGHT
     )
+    plt.close(fig)
+
+
+def test_build_panel_e_decoding_trial_error_table_uses_half_open_laps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pd = pytest.importorskip("pandas")
+    nap = pytest.importorskip("pynapple")
+    import numpy as np
+
+    comparison = (
+        "same_turn_cross_arm",
+        "Same turn\ncross arm",
+        "same_turn_cross_arm",
+        (("center_to_left", "right_to_center"),),
+    )
+    trajectory_intervals = {
+        "right_to_center": ((0.0, 2.0), (3.0, 4.0)),
+        "center_to_left": ((5.0, 6.0),),
+        "left_to_center": ((7.0, 8.0),),
+        "center_to_right": ((9.0, 10.0),),
+    }
+    epoch_specs = (("02_r1", 0.0), ("08_r4", 20.0))
+    analysis_path = tmp_path / "L14" / "20240611"
+    analysis_path.mkdir(parents=True)
+    interval_records = []
+    for epoch, offset in epoch_specs:
+        for trajectory, intervals in trajectory_intervals.items():
+            for start, end in intervals:
+                interval_records.append(
+                    {
+                        "start": start + offset,
+                        "end": end + offset,
+                        "epoch": epoch,
+                        "trajectory_type": trajectory,
+                    }
+                )
+    pd.DataFrame.from_records(interval_records).to_parquet(
+        analysis_path / "trajectory_times.parquet"
+    )
+
+    def save_tsd_pair(
+        true_path: Path,
+        decoded_path: Path,
+        sample_times: np.ndarray,
+        decoded_values: np.ndarray,
+    ) -> None:
+        true_path.parent.mkdir(parents=True, exist_ok=True)
+        nap.Tsd(
+            t=sample_times,
+            d=np.zeros(sample_times.size),
+            time_units="s",
+        ).save(true_path)
+        nap.Tsd(
+            t=sample_times,
+            d=decoded_values,
+            time_units="s",
+        ).save(decoded_path)
+
+    for epoch, offset in epoch_specs:
+        place_times = np.asarray(
+            [
+                0.0,
+                0.5,
+                1.5,
+                2.0,
+                3.0,
+                3.5,
+                4.0,
+                5.25,
+                7.25,
+                9.25,
+            ]
+        ) + offset
+        place_values = np.asarray(
+            [1.0, 3.0, 9.0, 990.0, 4.0, 8.0, 990.0, 2.0, 2.0, 2.0]
+        )
+        true_place_path, decoded_place_path = (
+            figure_2_module.get_within_epoch_decoding_tsd_paths(
+                tmp_path,
+                animal_name="L14",
+                date="20240611",
+                region="v1",
+                epoch=epoch,
+                model_name="place",
+            )
+        )
+        save_tsd_pair(
+            true_place_path,
+            decoded_place_path,
+            place_times,
+            place_values,
+        )
+
+        cross_times = np.asarray(
+            [0.0, 0.5, 1.5, 2.0, 3.0, 3.5, 4.0]
+        ) + offset
+        true_cross_path, decoded_cross_path = (
+            figure_2_module.get_cross_trajectory_decoding_tsd_paths(
+                tmp_path,
+                animal_name="L14",
+                date="20240611",
+                region="v1",
+                epoch=epoch,
+                transfer_family="same_turn_cross_arm",
+                encoding_trajectory="center_to_left",
+                decoding_trajectory="right_to_center",
+            )
+        )
+        save_tsd_pair(
+            true_cross_path,
+            decoded_cross_path,
+            cross_times,
+            np.asarray([0.1, 0.3, 0.9, 99.0, 0.4, 0.8, 99.0]),
+        )
+
+    monkeypatch.setattr(
+        figure_2_module,
+        "get_wtrack_total_length",
+        lambda _animal_name: 10.0,
+    )
+    table = figure_2_module.build_panel_e_decoding_trial_error_table(
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        light_epoch=None,
+        dark_epoch=None,
+        comparisons=(comparison,),
+    )
+
+    light_right_place = table.loc[
+        (table["epoch_type"] == "light")
+        & (table["analysis"] == "place")
+        & (table["decoding_trajectory"] == "right_to_center")
+    ]
+    assert light_right_place["trial_index"].tolist() == [0, 1]
+    assert light_right_place["n_samples"].tolist() == [3, 2]
+    assert light_right_place["trial_median_absolute_error"].tolist() == (
+        pytest.approx([0.3, 0.6])
+    )
+
+    light_cross = table.loc[
+        (table["epoch_type"] == "light")
+        & (table["analysis"] == "cross_trajectory")
+    ]
+    assert light_cross["trial_index"].tolist() == [0, 1]
+    assert light_cross["n_samples"].tolist() == [3, 2]
+    assert light_cross["trial_median_absolute_error"].tolist() == pytest.approx(
+        [0.3, 0.6]
+    )
+    assert set(table["epoch_type"]) == {"light", "dark"}
+
+
+def _build_complete_panel_e_trial_error_table() -> object:
+    """Return synthetic lap errors covering both Figure 2E analyses."""
+    pd = pytest.importorskip("pandas")
+
+    records = []
+    for animal_offset, animal_name in enumerate(("L15", "L14")):
+        for analysis in figure_2_module.PANEL_E_DECODING_ANALYSES:
+            for epoch_type in ("light", "dark"):
+                if analysis == "cross_trajectory":
+                    epoch_offset = 0.5 if epoch_type == "light" else 0.1
+                else:
+                    epoch_offset = 0.1 if epoch_type == "light" else 0.5
+                for trajectory_index, decoding_trajectory in enumerate(
+                    figure_2_module.TRAJECTORY_TYPES
+                ):
+                    for trial_index in range(2):
+                        records.append(
+                            {
+                                "animal_name": animal_name,
+                                "date": f"date-{animal_name}",
+                                "epoch_type": epoch_type,
+                                "analysis": analysis,
+                                "decoding_trajectory": decoding_trajectory,
+                                "trial_median_absolute_error": (
+                                    epoch_offset
+                                    + 0.01 * animal_offset
+                                    + 0.001 * trajectory_index
+                                    + 0.0001 * trial_index
+                                ),
+                            }
+                        )
+    return pd.DataFrame.from_records(records)
+
+
+def test_compute_panel_e_decoding_permutation_tests_matches_figure_1() -> None:
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+
+    trial_table = _build_complete_panel_e_trial_error_table()
+    n_permutations = 11
+    seed = 23
+
+    results = figure_2_module.compute_panel_e_decoding_permutation_tests(
+        trial_table,
+        n_permutations=n_permutations,
+        seed=seed,
+    )
+    repeated_results = (
+        figure_2_module.compute_panel_e_decoding_permutation_tests(
+            trial_table,
+            n_permutations=n_permutations,
+            seed=seed,
+        )
+    )
+    pd.testing.assert_frame_equal(results, repeated_results)
+    assert results["animal_name"].tolist() == ["L14", "L14", "L15", "L15"]
+    assert results["analysis"].tolist() == [
+        "cross_trajectory",
+        "place",
+        "cross_trajectory",
+        "place",
+    ]
+
+    rng = np.random.default_rng(seed)
+    expected_records = []
+    for animal_name in ("L14", "L15"):
+        animal_table = trial_table.loc[
+            trial_table["animal_name"].astype(str) == animal_name
+        ]
+        for analysis in figure_2_module.PANEL_E_DECODING_ANALYSES:
+            test_table = animal_table.loc[
+                animal_table["analysis"].astype(str) == analysis
+            ].copy()
+            test_table["comparison"] = test_table["epoch_type"].astype(str)
+            expected_records.append(
+                {
+                    "animal_name": animal_name,
+                    "analysis": analysis,
+                    **figure_1_module.stratified_median_permutation_test(
+                        test_table,
+                        "light",
+                        "dark",
+                        n_permutations=n_permutations,
+                        rng=rng,
+                    ),
+                }
+            )
+    expected = pd.DataFrame.from_records(expected_records).loc[
+        :,
+        results.columns,
+    ]
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_compute_panel_e_decoding_permutation_tests_rejects_missing_path() -> None:
+    trial_table = _build_complete_panel_e_trial_error_table()
+    incomplete = trial_table.loc[
+        ~(
+            (trial_table["animal_name"] == "L14")
+            & (trial_table["analysis"] == "cross_trajectory")
+            & (trial_table["epoch_type"] == "dark")
+            & (trial_table["decoding_trajectory"] == "right_to_center")
+        )
+    ]
+
+    with pytest.raises(ValueError, match="Incomplete.*coverage"):
+        figure_2_module.compute_panel_e_decoding_permutation_tests(
+            incomplete,
+            n_permutations=2,
+            seed=1,
+        )
+
+
+def test_build_panel_e_decoding_significance_labels_uses_maximum_p_value() -> None:
+    pd = pytest.importorskip("pandas")
+    animal_names = ("L12", "L14", "L15", "L19")
+    results = pd.DataFrame(
+        {
+            "animal_name": list(animal_names) * 2,
+            "analysis": ["cross_trajectory"] * 4 + ["place"] * 4,
+            "median_difference": [0.4, 0.3, 0.2, 0.1]
+            + [-0.1, -0.2, -0.3, -0.4],
+            "p_two_sided": [0.00001, 0.001, 0.004, 0.007]
+            + [0.00001, 0.00002, 0.00003, 0.00005],
+        }
+    )
+
+    labels = figure_2_module.build_panel_e_decoding_significance_labels(
+        results,
+        animal_names=animal_names,
+    )
+
+    assert labels == ("**", "****")
+
+
+def test_build_panel_e_decoding_significance_labels_requires_direction() -> None:
+    pd = pytest.importorskip("pandas")
+    results = pd.DataFrame(
+        {
+            "animal_name": ["L14", "L14"],
+            "analysis": ["cross_trajectory", "place"],
+            "median_difference": [-0.1, -0.1],
+            "p_two_sided": [0.001, 0.001],
+        }
+    )
+
+    with pytest.raises(ValueError, match="higher"):
+        figure_2_module.build_panel_e_decoding_significance_labels(
+            results,
+            animal_names=("L14",),
+        )
+
+
+def test_plot_panel_e2_decoding_panel_defaults_to_no_brackets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        figure_2_base_module,
+        "plot_panel_c_cross_and_place_decoding",
+        lambda _ax, _table: None,
+    )
+    monkeypatch.setattr(
+        figure_2_module,
+        "format_panel_c2_decoding_axes",
+        lambda _ax: None,
+    )
+    monkeypatch.setattr(
+        figure_2_module,
+        "add_panel_c2_light_dark_brackets",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    fig, ax = plt.subplots()
+    figure_2_module.plot_panel_e2_decoding_panel(ax, decoding_error_table=None)
+    assert calls == []
     plt.close(fig)
 
 
@@ -2200,6 +2547,26 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
         calls["panel_c_loader_kwargs"] = kwargs
         return "panel-c-decoding"
 
+    def fake_build_panel_e_decoding_trial_error_table(**kwargs: object) -> str:
+        calls["panel_e_trial_loader_kwargs"] = kwargs
+        return "panel-e-trials"
+
+    def fake_compute_panel_e_decoding_permutation_tests(
+        trial_table: object,
+        **kwargs: object,
+    ) -> str:
+        calls["panel_e_permutation_table"] = trial_table
+        calls["panel_e_permutation_kwargs"] = kwargs
+        return "panel-e-results"
+
+    def fake_build_panel_e_decoding_significance_labels(
+        results: object,
+        **kwargs: object,
+    ) -> tuple[str, str]:
+        calls["panel_e_significance_results"] = results
+        calls["panel_e_significance_kwargs"] = kwargs
+        return "**", "****"
+
     def fake_plot_panel_d2_swap_results_panel(
         ax: object,
         swap_delta_table: object,
@@ -2219,9 +2586,12 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
     def fake_plot_panel_e2_decoding_panel(
         ax: object,
         decoding_error_table: object,
+        *,
+        significance_labels: object,
     ) -> None:
         calls["decoding_axis"] = ax
         calls["decoding_table"] = decoding_error_table
+        calls["decoding_significance_labels"] = significance_labels
 
     def fake_save_figure(
         figure: object,
@@ -2316,6 +2686,21 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
     )
     monkeypatch.setattr(
         figure_2_module,
+        "build_panel_e_decoding_trial_error_table",
+        fake_build_panel_e_decoding_trial_error_table,
+    )
+    monkeypatch.setattr(
+        figure_2_module,
+        "compute_panel_e_decoding_permutation_tests",
+        fake_compute_panel_e_decoding_permutation_tests,
+    )
+    monkeypatch.setattr(
+        figure_2_module,
+        "build_panel_e_decoding_significance_labels",
+        fake_build_panel_e_decoding_significance_labels,
+    )
+    monkeypatch.setattr(
+        figure_2_module,
         "plot_panel_d2_swap_results_panel",
         fake_plot_panel_d2_swap_results_panel,
     )
@@ -2340,6 +2725,8 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
         light_epoch=None,
         dark_epoch=None,
         dpi=300,
+        decoding_n_permutations=17,
+        decoding_permutation_seed=29,
     )
 
     assert saved_path == output_path
@@ -2365,6 +2752,16 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
     assert calls["swap_results_examples"] == ["swap-example"]
     assert "architecture_axis" in calls
     assert calls["decoding_table"] == "panel-c-decoding"
+    assert calls["panel_e_permutation_table"] == "panel-e-trials"
+    assert calls["panel_e_permutation_kwargs"] == {
+        "n_permutations": 17,
+        "seed": 29,
+    }
+    assert calls["panel_e_significance_results"] == "panel-e-results"
+    assert calls["panel_e_significance_kwargs"] == {
+        "animal_names": ("L14",),
+    }
+    assert calls["decoding_significance_labels"] == ("**", "****")
 
     axis_bounds = calls["titled_axis_bounds"]
     panel_b_bounds = axis_bounds["Dark and light DPP coding"]
