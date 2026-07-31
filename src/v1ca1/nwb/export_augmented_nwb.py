@@ -4,7 +4,8 @@ from __future__ import annotations
 
 This workflow preserves the source epochs table, adds saved ephys recording
 intervals, and can also add poke-defined trajectory intervals, speed-gated
-ripples, canonical head/body position, and curated spike sorting results.
+ripples, canonical head/body position, W-track graph inputs, curated spike
+sorting results, and per-shank spike-sorting FigURLs.
 """
 
 import argparse
@@ -14,6 +15,7 @@ import re
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
@@ -34,6 +36,7 @@ from v1ca1.helper.wtrack import (
     get_wtrack_direction,
     get_wtrack_full_graph_inputs,
 )
+from v1ca1.spikesorting._region_assignment import get_expected_probe_shank_pairs
 from v1ca1.spikesorting.consolidate_sorting import DEFAULT_CURATION_ROOT
 
 if TYPE_CHECKING:
@@ -90,8 +93,20 @@ REQUIRED_SORTING_PROPERTIES = (
     "curation_json_relpath",
 )
 SORTING_PROVENANCE_SCRATCH_NAME = "spike_sorting_curation_provenance"
+SPIKE_SORTING_FIGURLS_TABLE_NAME = "spike_sorting_figurls"
+SPIKE_SORTING_FIGURLS_RELATIVE_DIR = Path("figurl")
+SPIKE_SORTING_FIGURL_FILENAME_PATTERN = re.compile(
+    r"figurl_probe(?P<probe_idx>\d+)_shank(?P<shank_idx>\d+)_ms4\.txt"
+)
 UNITS_TABLE_DESCRIPTION = (
     "Curated spike sorting units exported from consolidated SpikeInterface sortings."
+)
+SPIKE_SORTING_FIGURLS_DESCRIPTION = (
+    "Externally hosted interactive SortingView links generated for Mountainsort4 "
+    "output. Each row identifies one probe/shank view containing all raw sorter "
+    "units from that shank. URLs require network access, and their curation URI may "
+    "resolve to state newer than the frozen curation payload stored in "
+    f"/scratch/{SORTING_PROVENANCE_SCRATCH_NAME}."
 )
 EPHYS_INTERVALS_DESCRIPTION = (
     "Contiguous spans of recorded ephys timestamps imported from "
@@ -238,6 +253,18 @@ _UNITS_COLUMN_DESCRIPTIONS = {
     "sorting_unit_id": "Unit id from the consolidated SpikeInterface sorting.",
     "curation_json_relpath": "Path to the raw sortingview curation JSON relative to the curation root.",
     "is_merged": "Whether the curated unit resulted from a manual merge.",
+}
+_SPIKE_SORTING_FIGURL_COLUMN_DESCRIPTIONS = {
+    "probe_idx": "Probe index represented by this interactive sorting view.",
+    "shank_idx": "Shank index represented by this interactive sorting view.",
+    "sorter": "Spike sorter represented by this interactive view.",
+    "figurl_url": "Exact FigURL read from the canonical analysis text artifact.",
+    "data_uri": "Content-addressed FigURL data URI embedded in figurl_url.",
+    "curation_uri": (
+        "External sortingCuration URI embedded in the FigURL state. This URI may "
+        "be mutable and is not the frozen curation snapshot used for NWB units."
+    ),
+    "source_file": "Analysis-relative path of the text file containing figurl_url.",
 }
 _SPIKEINTERFACE = None
 
@@ -2231,6 +2258,226 @@ def _create_temporary_output_path(output_path: Path) -> Path:
         return Path(temp_file.name)
 
 
+def _get_single_figurl_query_value(
+    query: dict[str, list[str]],
+    name: str,
+    source_path: Path,
+) -> str:
+    """Return one required, nonempty FigURL query value."""
+    values = query.get(name, [])
+    if len(values) != 1 or not values[0]:
+        raise ValueError(
+            f"FigURL {source_path} must contain exactly one nonempty {name!r} "
+            "query parameter."
+        )
+    return values[0]
+
+
+def _parse_spike_sorting_figurl(
+    *,
+    source_path: Path,
+    analysis_path: Path,
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+) -> dict[str, Any]:
+    """Parse and validate one canonical per-shank spike-sorting FigURL."""
+    figurl_url = source_path.read_text(encoding="utf-8").strip()
+    if not figurl_url or any(character.isspace() for character in figurl_url):
+        raise ValueError(
+            f"Spike-sorting FigURL is empty or contains whitespace: {source_path}"
+        )
+
+    parsed_url = urlparse(figurl_url)
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.netloc != "figurl.org"
+        or parsed_url.path != "/f"
+    ):
+        raise ValueError(
+            f"Spike-sorting FigURL has an unexpected URL target: {source_path}"
+        )
+    try:
+        query = parse_qs(
+            parsed_url.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Spike-sorting FigURL has a malformed query string: {source_path}"
+        ) from exc
+
+    view_uri = _get_single_figurl_query_value(query, "v", source_path)
+    data_uri = _get_single_figurl_query_value(query, "d", source_path)
+    state_json = _get_single_figurl_query_value(query, "s", source_path)
+    _get_single_figurl_query_value(query, "label", source_path)
+    _get_single_figurl_query_value(query, "zone", source_path)
+    if not view_uri.startswith("npm://") or not data_uri.startswith("sha1://"):
+        raise ValueError(
+            f"Spike-sorting FigURL has unsupported view or data URIs: {source_path}"
+        )
+
+    try:
+        state = json.loads(state_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Spike-sorting FigURL has invalid JSON state: {source_path}"
+        ) from exc
+    if not isinstance(state, dict):
+        raise ValueError(
+            f"Spike-sorting FigURL state must be a JSON object: {source_path}"
+        )
+    curation_uri = state.get("sortingCuration")
+    expected_curation_suffix = (
+        f"/{animal_name}/{date}/probe{probe_idx}/shank{shank_idx}/"
+        "ms4/curation.json"
+    )
+    if (
+        not isinstance(curation_uri, str)
+        or not curation_uri.startswith("gh://")
+        or not curation_uri.endswith(expected_curation_suffix)
+    ):
+        raise ValueError(
+            "Spike-sorting FigURL sortingCuration URI does not match its "
+            f"session/probe/shank identity: {source_path}"
+        )
+
+    return {
+        "probe_idx": int(probe_idx),
+        "shank_idx": int(shank_idx),
+        "sorter": "mountainsort4",
+        "figurl_url": figurl_url,
+        "data_uri": data_uri,
+        "curation_uri": curation_uri,
+        "source_file": source_path.relative_to(analysis_path).as_posix(),
+    }
+
+
+def load_spike_sorting_figurls(
+    analysis_path: Path,
+    *,
+    animal_name: str,
+    date: str,
+) -> tuple[list[dict[str, Any]], list[Path]]:
+    """Load canonical spike-sorting FigURLs ordered by probe and shank."""
+    figurl_dir = analysis_path / SPIKE_SORTING_FIGURLS_RELATIVE_DIR
+    if not figurl_dir.exists():
+        raise FileNotFoundError(
+            f"Spike-sorting FigURL directory not found: {figurl_dir}"
+        )
+
+    records_by_pair: dict[tuple[int, int], dict[str, Any]] = {}
+    source_paths_by_pair: dict[tuple[int, int], Path] = {}
+    for source_path in sorted(figurl_dir.glob("figurl_probe*_shank*_ms4.txt")):
+        match = SPIKE_SORTING_FIGURL_FILENAME_PATTERN.fullmatch(source_path.name)
+        if match is None:
+            raise ValueError(
+                f"Unexpected spike-sorting FigURL filename: {source_path}"
+            )
+        probe_idx = int(match.group("probe_idx"))
+        shank_idx = int(match.group("shank_idx"))
+        pair = (probe_idx, shank_idx)
+        if pair in records_by_pair:
+            raise ValueError(
+                "Duplicate spike-sorting FigURLs for probe/shank "
+                f"{pair}: {source_paths_by_pair[pair]} and {source_path}"
+            )
+        records_by_pair[pair] = _parse_spike_sorting_figurl(
+            source_path=source_path,
+            analysis_path=analysis_path,
+            animal_name=animal_name,
+            date=date,
+            probe_idx=probe_idx,
+            shank_idx=shank_idx,
+        )
+        source_paths_by_pair[pair] = source_path
+
+    if not records_by_pair:
+        raise FileNotFoundError(
+            f"No canonical spike-sorting FigURL text files found under {figurl_dir}."
+        )
+    ordered_pairs = sorted(records_by_pair)
+    return (
+        [records_by_pair[pair] for pair in ordered_pairs],
+        [source_paths_by_pair[pair] for pair in ordered_pairs],
+    )
+
+
+def add_spike_sorting_figurls_to_nwb(
+    nwbfile: "pynwb.NWBFile",
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Add per-shank interactive spike-sorting links as an ecephys table."""
+    from hdmf.common import DynamicTable
+
+    ecephys_module = nwbfile.processing.get("ecephys")
+    if (
+        ecephys_module is not None
+        and SPIKE_SORTING_FIGURLS_TABLE_NAME in ecephys_module.data_interfaces
+    ):
+        raise ValueError(
+            "NWB ecephys module already contains a data interface named "
+            f"{SPIKE_SORTING_FIGURLS_TABLE_NAME!r}."
+        )
+
+    record_pairs = {
+        (int(record["probe_idx"]), int(record["shank_idx"]))
+        for record in records
+    }
+    if len(record_pairs) != len(records):
+        raise ValueError("Spike-sorting FigURL records contain duplicate probe/shank pairs.")
+    expected_pairs = set(get_expected_probe_shank_pairs())
+    missing_pairs = sorted(expected_pairs.difference(record_pairs))
+    unexpected_pairs = sorted(record_pairs.difference(expected_pairs))
+    if missing_pairs or unexpected_pairs:
+        raise ValueError(
+            "Spike-sorting FigURL probe/shank pairs do not match the expected "
+            f"four-probe/four-shank layout. Missing: {missing_pairs!r}; "
+            f"unexpected: {unexpected_pairs!r}."
+        )
+
+    electrode_rows_by_id = _get_electrode_row_indices_by_id(nwbfile)
+    for probe_idx, shank_idx in sorted(expected_pairs):
+        _get_shank_electrode_rows(
+            electrode_rows_by_id=electrode_rows_by_id,
+            probe_idx=probe_idx,
+            shank_idx=shank_idx,
+        )
+
+    if ecephys_module is None:
+        ecephys_module = nwbfile.create_processing_module(
+            name="ecephys",
+            description="Processed electrophysiology data.",
+        )
+    table = DynamicTable(
+        name=SPIKE_SORTING_FIGURLS_TABLE_NAME,
+        description=SPIKE_SORTING_FIGURLS_DESCRIPTION,
+        id=np.arange(len(records), dtype=np.int64),
+    )
+    for column_name, description in (
+        _SPIKE_SORTING_FIGURL_COLUMN_DESCRIPTIONS.items()
+    ):
+        table.add_column(
+            name=column_name,
+            description=description,
+            data=[record[column_name] for record in records],
+        )
+    ecephys_module.add(table)
+    nwbfile.set_modified()
+    return {
+        "spike_sorting_figurls_table_path": (
+            f"/processing/ecephys/{SPIKE_SORTING_FIGURLS_TABLE_NAME}"
+        ),
+        "spike_sorting_figurls_row_count": int(len(records)),
+        "spike_sorting_figurl_probe_shank_pairs": [
+            [probe_idx, shank_idx]
+            for probe_idx, shank_idx in sorted(record_pairs)
+        ],
+    }
+
+
 def get_region_sorting_path(analysis_path: Path, region: str) -> Path:
     """Return the consolidated sorting folder for one region."""
     return analysis_path / f"sorting_{region}"
@@ -2532,6 +2779,7 @@ def export_augmented_nwb(
     add_position: bool = False,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     add_wtrack_linearization: bool = False,
+    add_spike_sorting_figurls: bool = False,
 ) -> Path:
     """Write a new NWB file augmented from saved analysis outputs."""
     import pynwb
@@ -2618,6 +2866,23 @@ def export_augmented_nwb(
     if add_wtrack_linearization:
         wtrack_configurations = build_wtrack_linearization_configurations(
             animal_name
+        )
+
+    spike_sorting_figurl_records = None
+    spike_sorting_figurl_source_paths: list[Path] = []
+    spike_sorting_figurl_outputs: dict[str, Any] = {
+        "spike_sorting_figurl_export_enabled": bool(
+            add_spike_sorting_figurls
+        ),
+    }
+    if add_spike_sorting_figurls:
+        (
+            spike_sorting_figurl_records,
+            spike_sorting_figurl_source_paths,
+        ) = load_spike_sorting_figurls(
+            analysis_path,
+            animal_name=animal_name,
+            date=date,
         )
 
     print(f"Processing {animal_name} {date}.")
@@ -2742,6 +3007,20 @@ def export_augmented_nwb(
                     configurations=wtrack_configurations,
                 )
             )
+        if add_spike_sorting_figurls:
+            if spike_sorting_figurl_records is None:
+                raise RuntimeError("Spike-sorting FigURL inputs were not loaded.")
+            spike_sorting_figurl_outputs.update(
+                {
+                    "spike_sorting_figurl_source_paths": (
+                        spike_sorting_figurl_source_paths
+                    ),
+                    **add_spike_sorting_figurls_to_nwb(
+                        nwbfile=nwbfile,
+                        records=spike_sorting_figurl_records,
+                    ),
+                }
+            )
         if add_sorting:
             sorting_outputs.update(
                 export_curated_sorting_to_nwb(
@@ -2788,6 +3067,7 @@ def export_augmented_nwb(
         **ripple_outputs,
         **position_outputs,
         **wtrack_outputs,
+        **spike_sorting_figurl_outputs,
         **sorting_outputs,
     }
     log_path = write_run_log(
@@ -2805,6 +3085,7 @@ def export_augmented_nwb(
             "add_position": add_position,
             "position_offset": position_offset,
             "add_wtrack_linearization": add_wtrack_linearization,
+            "add_spike_sorting_figurls": add_spike_sorting_figurls,
             "add_sorting": add_sorting,
             "curation_root": curation_root,
         },
@@ -2819,8 +3100,8 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Export an augmented NWB copy with saved ephys intervals and optional "
-            "trajectory, ripple, position, W-track linearization, and curated "
-            "sorting outputs"
+            "trajectory, ripple, position, W-track linearization, spike-sorting "
+            "FigURL, and curated sorting outputs"
         )
     )
     parser.add_argument(
@@ -2901,6 +3182,14 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--add-spike-sorting-figurls",
+        action="store_true",
+        help=(
+            "Add one validated interactive spike-sorting FigURL per probe/shank "
+            f"under /processing/ecephys/{SPIKE_SORTING_FIGURLS_TABLE_NAME}."
+        ),
+    )
+    parser.add_argument(
         "--add-sorting",
         action="store_true",
         help="Add curated consolidated spike sorting output to the NWB units table.",
@@ -2929,6 +3218,7 @@ def main() -> None:
         add_position=args.add_position,
         position_offset=args.position_offset,
         add_wtrack_linearization=args.add_wtrack_linearization,
+        add_spike_sorting_figurls=args.add_spike_sorting_figurls,
         add_sorting=args.add_sorting,
         curation_root=args.curation_root,
     )

@@ -33,15 +33,18 @@ from v1ca1.nwb.export_augmented_nwb import (
     RIPPLE_PROVENANCE_SCRATCH_NAME,
     RIPPLES_INTERVALS_TABLE_NAME,
     SORTING_PROVENANCE_SCRATCH_NAME,
+    SPIKE_SORTING_FIGURLS_TABLE_NAME,
     TRAJECTORY_INTERVALS_TABLE_NAME,
     WTRACK_FULL_GRAPH_CONFIGURATION_NAME,
     WTRACK_LINEARIZATION_TABLE_NAME,
+    add_spike_sorting_figurls_to_nwb,
     add_wtrack_linearization_to_nwb,
     build_wtrack_linearization_configurations,
     export_augmented_nwb,
     load_position_parquet,
     load_position_producer_provenance,
     load_ripple_times_parquet,
+    load_spike_sorting_figurls,
     parse_arguments,
 )
 
@@ -482,6 +485,44 @@ def _write_curation_json(
         ),
         encoding="utf-8",
     )
+
+
+def _write_spike_sorting_figurl(
+    analysis_path: Path,
+    *,
+    animal_name: str,
+    date: str,
+    probe_idx: int,
+    shank_idx: int,
+    curation_uri: str | None = None,
+) -> tuple[Path, str]:
+    """Write one canonical per-shank spike-sorting FigURL text artifact."""
+    if curation_uri is None:
+        curation_uri = (
+            "gh://LorenFrankLab/sorting-curations/main/khl02007/"
+            f"{animal_name}/{date}/probe{probe_idx}/shank{shank_idx}/"
+            "ms4/curation.json"
+        )
+    state = json.dumps(
+        {"sortingCuration": curation_uri},
+        separators=(",", ":"),
+    )
+    figurl_url = (
+        "https://figurl.org/f?"
+        "v=npm://@fi-sci/figurl-sortingview@12/dist"
+        f"&d=sha1://test-data-{probe_idx}-{shank_idx}"
+        f"&s={state}"
+        f"&label={animal_name}%20{date}%20probe{probe_idx}%20shank{shank_idx}%20ms4"
+        "&zone=franklab.default"
+    )
+    figurl_path = (
+        analysis_path
+        / "figurl"
+        / f"figurl_probe{probe_idx}_shank{shank_idx}_ms4.txt"
+    )
+    figurl_path.parent.mkdir(parents=True, exist_ok=True)
+    figurl_path.write_text(figurl_url, encoding="utf-8")
+    return figurl_path, figurl_url
 
 
 def _read_epoch_bounds(nwb_path: Path) -> tuple[list[str], np.ndarray, np.ndarray]:
@@ -1143,6 +1184,197 @@ def test_add_wtrack_linearization_rejects_existing_table() -> None:
             nwbfile=nwbfile,
             configurations=build_wtrack_linearization_configurations("L14"),
         )
+
+
+def test_export_augmented_nwb_can_export_spike_sorting_figurls(
+    tmp_path: Path,
+) -> None:
+    animal_name = "animal"
+    date = "20240101"
+    analysis_path = tmp_path / "analysis" / animal_name / date
+    nwb_root = tmp_path / "raw"
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+    analysis_path.mkdir(parents=True)
+    nwb_root.mkdir(parents=True)
+
+    _write_test_nwb(
+        nwb_path,
+        ["01_s1"],
+        [(0.0, 1.0)],
+        electrode_ids=list(range(512)),
+    )
+    _write_timestamps_ephys_npz(analysis_path, ["01_s1"], [(0.1, 0.9)])
+    expected_urls: dict[tuple[int, int], str] = {}
+    for probe_idx in range(4):
+        for shank_idx in range(4):
+            _path, figurl_url = _write_spike_sorting_figurl(
+                analysis_path,
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+            )
+            expected_urls[(probe_idx, shank_idx)] = figurl_url
+
+    output_path = export_augmented_nwb(
+        animal_name=animal_name,
+        date=date,
+        data_root=tmp_path / "analysis",
+        nwb_root=nwb_root,
+        add_spike_sorting_figurls=True,
+    )
+
+    pynwb = pytest.importorskip("pynwb")
+    assert pynwb.validate(path=output_path) == []
+    with pynwb.NWBHDF5IO(output_path, "r") as io:
+        nwbfile = io.read()
+        table = nwbfile.processing["ecephys"].data_interfaces[
+            SPIKE_SORTING_FIGURLS_TABLE_NAME
+        ]
+        assert tuple(table.colnames) == (
+            "probe_idx",
+            "shank_idx",
+            "sorter",
+            "figurl_url",
+            "data_uri",
+            "curation_uri",
+            "source_file",
+        )
+        table_frame = table.to_dataframe().reset_index(drop=True)
+
+    assert len(table_frame) == 16
+    assert list(
+        zip(
+            table_frame["probe_idx"].astype(int),
+            table_frame["shank_idx"].astype(int),
+            strict=True,
+        )
+    ) == [(probe_idx, shank_idx) for probe_idx in range(4) for shank_idx in range(4)]
+    for row in table_frame.to_dict("records"):
+        pair = (int(row["probe_idx"]), int(row["shank_idx"]))
+        assert row["sorter"] == "mountainsort4"
+        assert row["figurl_url"] == expected_urls[pair]
+        assert row["data_uri"] == f"sha1://test-data-{pair[0]}-{pair[1]}"
+        assert row["curation_uri"].endswith(
+            f"/{animal_name}/{date}/probe{pair[0]}/shank{pair[1]}/"
+            "ms4/curation.json"
+        )
+        assert row["source_file"] == (
+            f"figurl/figurl_probe{pair[0]}_shank{pair[1]}_ms4.txt"
+        )
+
+    export_logs = list(
+        (analysis_path / "v1ca1_log").glob(
+            "v1ca1_nwb_export_augmented_nwb_*.json"
+        )
+    )
+    assert len(export_logs) == 1
+    export_record = json.loads(export_logs[0].read_text(encoding="utf-8"))
+    assert export_record["parameters"]["add_spike_sorting_figurls"] is True
+    assert export_record["outputs"]["spike_sorting_figurls_row_count"] == 16
+    assert export_record["outputs"]["spike_sorting_figurls_table_path"] == (
+        f"/processing/ecephys/{SPIKE_SORTING_FIGURLS_TABLE_NAME}"
+    )
+
+
+def test_export_augmented_nwb_rejects_missing_spike_sorting_figurl_pair(
+    tmp_path: Path,
+) -> None:
+    animal_name = "animal"
+    date = "20240101"
+    analysis_path = tmp_path / "analysis" / animal_name / date
+    nwb_root = tmp_path / "raw"
+    nwb_path = nwb_root / f"{animal_name}{date}.nwb"
+    analysis_path.mkdir(parents=True)
+    nwb_root.mkdir(parents=True)
+
+    _write_test_nwb(
+        nwb_path,
+        ["01_s1"],
+        [(0.0, 1.0)],
+        electrode_ids=list(range(512)),
+    )
+    _write_timestamps_ephys_npz(analysis_path, ["01_s1"], [(0.1, 0.9)])
+    for probe_idx in range(4):
+        for shank_idx in range(4):
+            if (probe_idx, shank_idx) == (3, 3):
+                continue
+            _write_spike_sorting_figurl(
+                analysis_path,
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+            )
+
+    with pytest.raises(ValueError, match=r"Missing: \[\(3, 3\)\]"):
+        export_augmented_nwb(
+            animal_name=animal_name,
+            date=date,
+            data_root=tmp_path / "analysis",
+            nwb_root=nwb_root,
+            add_spike_sorting_figurls=True,
+        )
+
+
+def test_load_spike_sorting_figurls_rejects_mismatched_curation_uri(
+    tmp_path: Path,
+) -> None:
+    animal_name = "animal"
+    date = "20240101"
+    analysis_path = tmp_path / "analysis" / animal_name / date
+    _write_spike_sorting_figurl(
+        analysis_path,
+        animal_name=animal_name,
+        date=date,
+        probe_idx=0,
+        shank_idx=0,
+        curation_uri=(
+            "gh://LorenFrankLab/sorting-curations/main/khl02007/"
+            f"{animal_name}/{date}/probe0/shank1/ms4/curation.json"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match its session/probe/shank"):
+        load_spike_sorting_figurls(
+            analysis_path,
+            animal_name=animal_name,
+            date=date,
+        )
+
+
+def test_add_spike_sorting_figurls_rejects_existing_table(
+    tmp_path: Path,
+) -> None:
+    animal_name = "animal"
+    date = "20240101"
+    analysis_path = tmp_path / "analysis" / animal_name / date
+    for probe_idx in range(4):
+        for shank_idx in range(4):
+            _write_spike_sorting_figurl(
+                analysis_path,
+                animal_name=animal_name,
+                date=date,
+                probe_idx=probe_idx,
+                shank_idx=shank_idx,
+            )
+    records, _source_paths = load_spike_sorting_figurls(
+        analysis_path,
+        animal_name=animal_name,
+        date=date,
+    )
+
+    pynwb = pytest.importorskip("pynwb")
+    nwbfile = pynwb.NWBFile(
+        session_description="test session",
+        identifier="test-id",
+        session_start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    _add_test_electrodes(nwbfile, list(range(512)))
+    add_spike_sorting_figurls_to_nwb(nwbfile, records)
+
+    with pytest.raises(ValueError, match="already contains a data interface"):
+        add_spike_sorting_figurls_to_nwb(nwbfile, records)
 
 
 @pytest.mark.parametrize(
@@ -2012,6 +2244,7 @@ def test_parse_arguments_accepts_add_ripples(
             "--position-offset",
             "7",
             "--add-wtrack-linearization",
+            "--add-spike-sorting-figurls",
         ],
     )
 
@@ -2021,6 +2254,7 @@ def test_parse_arguments_accepts_add_ripples(
     assert args.add_position is True
     assert args.position_offset == 7
     assert args.add_wtrack_linearization is True
+    assert args.add_spike_sorting_figurls is True
 
 
 def test_export_augmented_nwb_requires_trajectory_parquet_when_enabled(
