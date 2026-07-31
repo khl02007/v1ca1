@@ -33,6 +33,7 @@ WTRACK_TRAJECTORY_TYPES = (
 )
 WTRACK_BRANCH_SIDES = ("left", "right")
 WTRACK_DIRECTIONS = ("from_center", "to_center")
+DEFAULT_WTRACK_BRANCH_GAP_CM = 15.0
 
 _WTRACK_BRANCH_SIDE_BY_TRAJECTORY = {
     "center_to_left": "left",
@@ -292,6 +293,27 @@ def get_wtrack_edge_order(
     return list(geometry[key])
 
 
+def get_wtrack_branch_graph_inputs(
+    animal_name: str,
+    branch_side: str,
+    direction: str,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int]]]:
+    """Return the raw arrays used to construct one branch-specific graph."""
+    if branch_side not in WTRACK_BRANCH_SIDES:
+        raise ValueError(
+            f"Unknown branch_side {branch_side!r}. "
+            f"Expected one of {WTRACK_BRANCH_SIDES!r}."
+        )
+
+    node_positions = np.asarray(
+        get_wtrack_node_positions(animal_name, branch_side),
+        dtype=float,
+    )
+    edges = get_wtrack_edges(animal_name, direction)
+    edge_order = get_wtrack_edge_order(animal_name, direction)
+    return node_positions, edges, edge_order
+
+
 def get_wtrack_branch_graph(
     animal_name: str,
     branch_side: str,
@@ -316,31 +338,25 @@ def get_wtrack_branch_graph(
     """
     import track_linearization as tl
 
-    if branch_side not in WTRACK_BRANCH_SIDES:
-        raise ValueError(
-            f"Unknown branch_side {branch_side!r}. "
-            f"Expected one of {WTRACK_BRANCH_SIDES!r}."
-        )
-
-    node_positions = np.asarray(get_wtrack_node_positions(animal_name, branch_side), dtype=float)
-    edges = get_wtrack_edges(animal_name, direction)
-    edge_order = get_wtrack_edge_order(animal_name, direction)
+    node_positions, edges, edge_order = get_wtrack_branch_graph_inputs(
+        animal_name=animal_name,
+        branch_side=branch_side,
+        direction=direction,
+    )
     return tl.make_track_graph(node_positions, edges), edge_order
 
 
-def get_wtrack_full_graph(
+def get_wtrack_full_graph_inputs(
     animal_name: str,
-    branch_gap_cm: float = 15.0,
-) -> tuple[Any, list[tuple[int, int]], list[float]]:
-    """Return an animal-specific full W-track graph and linear edge spacing.
+    branch_gap_cm: float = DEFAULT_WTRACK_BRANCH_GAP_CM,
+) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int]], list[float]]:
+    """Return the raw arrays used to construct the full W-track graph.
 
     The full graph is derived from the stored branch geometries instead of
     hard-coding a second coordinate table. Nodes 0 and 1 are the shared center
     well and center junction. Nodes 2-5 are the full left branch continuation,
     and nodes 6-9 are the full right branch continuation.
     """
-    import track_linearization as tl
-
     if branch_gap_cm < 0:
         raise ValueError("--branch-gap-cm must be non-negative.")
 
@@ -392,4 +408,18 @@ def get_wtrack_full_graph(
         (8, 9),
     ]
     edge_spacing = [0.0, 0.0, 0.0, 0.0, float(branch_gap_cm), 0.0, 0.0, 0.0]
+    return node_positions, edges, edge_order, edge_spacing
+
+
+def get_wtrack_full_graph(
+    animal_name: str,
+    branch_gap_cm: float = DEFAULT_WTRACK_BRANCH_GAP_CM,
+) -> tuple[Any, list[tuple[int, int]], list[float]]:
+    """Return an animal-specific full W-track graph and linear edge spacing."""
+    import track_linearization as tl
+
+    node_positions, edges, edge_order, edge_spacing = get_wtrack_full_graph_inputs(
+        animal_name=animal_name,
+        branch_gap_cm=branch_gap_cm,
+    )
     return tl.make_track_graph(node_positions, edges), edge_order, edge_spacing

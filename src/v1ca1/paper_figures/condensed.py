@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from v1ca1.paper_figures.figure_1 import (
+    draw_behavior_task_design_panel,
     get_dark_epoch,
     plot_panel_e_rate_axis,
     plot_position_aligned_raster_axis,
@@ -30,6 +31,11 @@ CONDENSED_C_COLUMN_WIDTH = 0.86
 CONDENSED_TOP_RASTER_Y = 0.67
 CONDENSED_BOTTOM_RASTER_Y = 0.43
 CONDENSED_RASTER_HEIGHT = 0.18
+CONDENSED_RASTER_TICK_MARKERSIZE = 0.9
+CONDENSED_RASTER_TICK_MARKEREDGEWIDTH = 0.32
+CONDENSED_RASTER_TICK_ZORDER = 3
+CONDENSED_RASTER_SEGMENT_BOUNDARY_COLOR = "0.78"
+CONDENSED_RASTER_SEGMENT_BOUNDARY_LINEWIDTH = 0.28
 CONDENSED_RATE_Y = 0.15
 CONDENSED_RATE_HEIGHT = 0.18
 CONDENSED_DECODING_CROSS_AXIS_BOUNDS = (0.18, 0.55, 0.78, 0.30)
@@ -42,14 +48,14 @@ CONDENSED_DECODING_CROSS_LABEL_Y = 0.96
 CONDENSED_DECODING_PLACE_LABEL_X = 0.96
 CONDENSED_DECODING_PLACE_LABEL_Y = 0.96
 CONDENSED_PANEL_B_COLUMN_LABEL_Y = 0.862
-CONDENSED_PANEL_B_COLUMN_LABELS = ("Silent pair", "Active pair")
+CONDENSED_PANEL_B_COLUMN_LABELS = ("Right turn pair", "Left turn pair")
 CONDENSED_PANEL_B_YLABEL_X = -0.26
 CONDENSED_PANEL_TRANSITION_ARROW_PAD = 0.002
 CONDENSED_PANEL_GROUP_RECT_PAD = 0.006
 CONDENSED_PANEL_GROUP_RECT_COLOR = "0.55"
 CONDENSED_PANEL_GROUP_RECT_LINEWIDTH = 0.55
 CONDENSED_PANEL_GROUP_RECT_BOTTOM_EXTRA = 0.055
-CONDENSED_PANEL_GROUP_RECT_TOP_EXTRA = 0.075
+CONDENSED_PANEL_GROUP_RECT_TOP_EXTRA = 0.0
 CONDENSED_RASTER_PATH_ICON_WIDTH = 0.061
 CONDENSED_C_RASTER_PATH_ICON_WIDTH = (
     CONDENSED_RASTER_PATH_ICON_WIDTH
@@ -83,51 +89,6 @@ CONDENSED_TRAJECTORY_LEGEND_LABELS = {
 }
 
 
-def _scale_inset_bounds(
-    bounds: tuple[float, float, float, float],
-    *,
-    x_scale: float,
-    y_scale: float,
-) -> list[float]:
-    """Return inset bounds scaled around center and clipped to the parent axis."""
-    x0, y0, width, height = bounds
-    scaled_width = min(width * x_scale, 1.0)
-    scaled_height = min(height * y_scale, 1.0)
-    center_x = x0 + width / 2.0
-    center_y = y0 + height / 2.0
-    scaled_x0 = min(max(center_x - scaled_width / 2.0, 0.0), 1.0 - scaled_width)
-    scaled_y0 = min(max(center_y - scaled_height / 2.0, 0.0), 1.0 - scaled_height)
-    return [scaled_x0, scaled_y0, scaled_width, scaled_height]
-
-
-def _draw_condensed_task_panel(ax: Any) -> None:
-    """Draw a denser version of the summary task schematic for condensed Panel A."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-
-    trajectory_ax = ax.inset_axes(
-        _scale_inset_bounds(
-            base.SUMMARY_TASK_TRAJECTORY_BLOCK_BOUNDS,
-            x_scale=1.28,
-            y_scale=1.22,
-        )
-    )
-    base._draw_summary_trajectory_cycle(trajectory_ax)
-
-    visual_ax = ax.inset_axes(
-        _scale_inset_bounds(
-            base.SUMMARY_TASK_VISUAL_BLOCK_BOUNDS,
-            x_scale=1.10,
-            y_scale=1.12,
-        )
-    )
-    base._draw_summary_visual_stimulus_block(
-        visual_ax,
-        timeline_style="run_sleep_boxes",
-    )
-
-
 def _argv_has_output_name(argv: Sequence[str] | None) -> bool:
     """Return whether the user explicitly supplied an output basename."""
     values = sys.argv[1:] if argv is None else list(argv)
@@ -156,6 +117,18 @@ def _set_shared_x_label(ax: Any) -> None:
         transform=ax.transAxes,
         clip_on=False,
     )
+
+
+def _emphasize_raster_axis(ax: Any) -> None:
+    """Emphasize condensed raster ticks over their segment boundaries."""
+    for line in ax.lines:
+        if line.get_marker() == "|":
+            line.set_markersize(CONDENSED_RASTER_TICK_MARKERSIZE)
+            line.set_markeredgewidth(CONDENSED_RASTER_TICK_MARKEREDGEWIDTH)
+            line.set_zorder(CONDENSED_RASTER_TICK_ZORDER)
+        elif line.get_zorder() == 1:
+            line.set_color(CONDENSED_RASTER_SEGMENT_BOUNDARY_COLOR)
+            line.set_linewidth(CONDENSED_RASTER_SEGMENT_BOUNDARY_LINEWIDTH)
 
 
 def _add_condensed_panel_headers(
@@ -338,6 +311,7 @@ def plot_swapped_direction_panel(
                 trajectory_type,
                 show_ylabel=column_index == 0,
             )
+            _emphasize_raster_axis(raster_ax)
             raster_ax.set_facecolor(base.PANEL_A_DARK_EPOCH_BACKGROUND)
             if column_index == 0:
                 raster_ax.yaxis.set_label_coords(CONDENSED_PANEL_B_YLABEL_X, 0.5)
@@ -510,6 +484,7 @@ def plot_light_example_column(
             show_ylabel=False,
             show_title=False,
         )
+        _emphasize_raster_axis(raster_ax)
 
     rate_ax = ax.inset_axes(
         [
@@ -606,6 +581,7 @@ def make_condensed_figure(
     light_epoch: str | None,
     dark_epoch: str | None,
     dpi: int,
+    asset_dir: Path = base.DEFAULT_ASSET_DIR,
     position_bin_count: int = base.DEFAULT_POSITION_BIN_COUNT,
     position_offset: int = base.DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = base.DEFAULT_SPEED_THRESHOLD_CM_S,
@@ -684,7 +660,7 @@ def make_condensed_figure(
     example_ax = fig.add_subplot(grid[0, 2])
     decoding_ax = fig.add_subplot(grid[0, 3])
 
-    _draw_condensed_task_panel(task_ax)
+    draw_behavior_task_design_panel(task_ax, asset_dir=asset_dir)
     light_y_max = base._example_rate_y_max(
         example,
         base.PANEL_A_EXAMPLE_Y_MAX_OVERRIDES.get(example_number),
@@ -718,12 +694,12 @@ def make_condensed_figure(
             (
                 dpp_ax,
                 "B",
-                "V1 neurons generalize across\nsame-turn paths in dark",
+                "V1 neurons encode\npath progression in darkness",
             ),
             (
                 example_ax,
                 "C",
-                "Light differentiates\nactive pair",
+                "Visual stimuli\ngain-modulate\npath progression tuning",
             ),
             (decoding_ax, "D", "Dark generalizes,\nlight separates"),
         ),
@@ -760,6 +736,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     make_condensed_figure(
         data_root=args.data_root,
+        asset_dir=args.asset_dir,
         output_path=output_path,
         datasets=datasets,
         regions=regions,
