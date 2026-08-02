@@ -11,6 +11,10 @@ __pycache__/
 *.pdf
 *.log
 
+# Local scientific audit reports
+/REPOSITORY_SCIENTIFIC_AUDIT.md
+/v1ca1_biorxiv_v1.0_MANUSCRIPT_CODE_AUDIT.md
+
 paper_figures/output/cache/
 
 .git/

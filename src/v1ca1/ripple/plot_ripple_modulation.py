@@ -22,7 +22,9 @@ from v1ca1.helper.session import (
 )
 
 
-DEFAULT_RIPPLE_THRESHOLD_ZSCORE = 4.0
+DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE: float | None = None
+# Backward-compatible alias for callers that still use the old, ambiguous name.
+DEFAULT_RIPPLE_THRESHOLD_ZSCORE = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE
 DEFAULT_BIN_SIZE_S = 20e-3
 DEFAULT_TIME_BEFORE_S = 0.5
 DEFAULT_TIME_AFTER_S = 0.5
@@ -68,8 +70,11 @@ PERI_RIPPLE_FIRING_RATE_COLUMNS = [
 
 def validate_arguments(args: argparse.Namespace) -> None:
     """Validate CLI argument ranges."""
-    if args.ripple_threshold_zscore <= 0:
-        raise ValueError("--ripple-threshold-zscore must be positive.")
+    if (
+        args.ripple_threshold_zscore is not None
+        and args.ripple_threshold_zscore <= 0
+    ):
+        raise ValueError("--minimum-ripple-mean-zscore must be positive.")
     if args.bin_size_s <= 0:
         raise ValueError("--bin-size-s must be positive.")
     if args.time_before_s <= 0:
@@ -173,9 +178,11 @@ def filter_ripple_table_by_threshold(
     ripple_table: pd.DataFrame,
     *,
     epoch: str,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
 ) -> pd.DataFrame:
-    """Return ripples above threshold for one epoch."""
+    """Return detector-qualified ripples after an optional event-mean filter."""
+    if ripple_threshold_zscore is None:
+        return ripple_table.reset_index(drop=True)
     if "mean_zscore" not in ripple_table.columns:
         raise ValueError(
             "Ripple thresholding requires a 'mean_zscore' column in the detect_ripples.py output. "
@@ -189,7 +196,7 @@ def build_ripple_start_times(
     ripple_table: pd.DataFrame,
     *,
     epoch: str,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     epoch_timestamps: np.ndarray,
 ) -> tuple[Any | None, int]:
     """Build a pynapple timestamp series of ripple starts for one epoch."""
@@ -376,8 +383,10 @@ def build_region_epoch_modulation_result(
     }
 
 
-def format_output_value(value: float | str) -> str:
+def format_output_value(value: float | str | None) -> str:
     """Return a filename-safe string for one parameter value."""
+    if value is None:
+        return "all_detected"
     if isinstance(value, str):
         return value
     return f"{value:g}".replace("-", "neg").replace(".", "p")
@@ -389,7 +398,7 @@ def build_epoch_output_stem(
     date: str,
     epoch: str,
     region_label: str,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     bin_size_s: float,
     time_before_s: float,
     time_after_s: float,
@@ -398,9 +407,14 @@ def build_epoch_output_stem(
     heatmap_normalize: str,
 ) -> str:
     """Return the shared filename stem for one epoch output."""
+    ripple_selection_suffix = (
+        "_mean_zscore_all_detected"
+        if ripple_threshold_zscore is None
+        else f"_thr_{format_output_value(ripple_threshold_zscore)}"
+    )
     return (
         f"{animal_name}_{date}_{epoch}_{region_label}"
-        f"_thr_{format_output_value(ripple_threshold_zscore)}"
+        f"{ripple_selection_suffix}"
         f"_bin_{format_output_value(bin_size_s)}"
         f"_tb_{format_output_value(time_before_s)}"
         f"_ta_{format_output_value(time_after_s)}"
@@ -417,7 +431,7 @@ def get_epoch_output_paths(
     date: str,
     epoch: str,
     region_label: str,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     bin_size_s: float,
     time_before_s: float,
     time_after_s: float,
@@ -798,7 +812,7 @@ def plot_ripple_modulation_for_session(
     data_root: Path = DEFAULT_DATA_ROOT,
     region: str | None = None,
     epochs: list[str] | None = None,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -851,7 +865,7 @@ def plot_ripple_modulation_for_session(
     saved_peri_paths: list[Path] = []
     saved_summary_paths: list[Path] = []
     saved_figure_paths: list[Path] = []
-    skipped_epochs_below_threshold: list[str] = []
+    skipped_epochs_without_selected_ripples: list[str] = []
 
     for epoch in selected_epochs:
         print(f"Preparing outputs for epoch {epoch}")
@@ -894,9 +908,9 @@ def plot_ripple_modulation_for_session(
                 epoch_timestamps=timestamps_ephys_by_epoch[epoch],
             )
             if n_ripples == 0:
-                skipped_epochs_below_threshold.append(epoch)
+                skipped_epochs_without_selected_ripples.append(epoch)
                 print(
-                    "Skipping epoch with no ripples above threshold: "
+                    "Skipping epoch with no ripples after event selection: "
                     f"{animal_name} {date} {epoch}"
                 )
                 continue
@@ -985,7 +999,7 @@ def plot_ripple_modulation_for_session(
             "data_root": data_root,
             "region": region,
             "epochs": epochs,
-            "ripple_threshold_zscore": ripple_threshold_zscore,
+            "minimum_ripple_mean_zscore": ripple_threshold_zscore,
             "bin_size_s": bin_size_s,
             "time_before_s": time_before_s,
             "time_after_s": time_after_s,
@@ -1007,7 +1021,9 @@ def plot_ripple_modulation_for_session(
             "selected_epochs": selected_epochs,
             "successful_epochs": sorted(epoch_results),
             "skipped_epochs_without_ripple_output": skipped_epochs_without_ripple_output,
-            "skipped_epochs_below_threshold": skipped_epochs_below_threshold,
+            "skipped_epochs_without_selected_ripples": (
+                skipped_epochs_without_selected_ripples
+            ),
             "saved_peri_ripple_firing_rate_paths": saved_peri_paths,
             "saved_summary_paths": saved_summary_paths,
             "saved_figure_paths": saved_figure_paths,
@@ -1027,7 +1043,11 @@ def plot_ripple_modulation_for_session(
         "selected_epochs": selected_epochs,
         "selected_regions": selected_regions,
         "skipped_epochs_without_ripple_output": skipped_epochs_without_ripple_output,
-        "skipped_epochs_below_threshold": skipped_epochs_below_threshold,
+        "skipped_epochs_without_selected_ripples": (
+            skipped_epochs_without_selected_ripples
+        ),
+        # Compatibility alias for callers using the previous result key.
+        "skipped_epochs_below_threshold": skipped_epochs_without_selected_ripples,
     }
 
 
@@ -1055,12 +1075,14 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional subset of epochs to process. Default: all epochs with ripple outputs.",
     )
     parser.add_argument(
+        "--minimum-ripple-mean-zscore",
         "--ripple-threshold-zscore",
+        dest="ripple_threshold_zscore",
         type=float,
-        default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+        default=DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
         help=(
-            "Minimum ripple mean z-score to keep one ripple event. "
-            f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE}"
+            "Optional minimum event mean z-score applied after ripple detection. "
+            "By default, use all detector-qualified ripples."
         ),
     )
     parser.add_argument(

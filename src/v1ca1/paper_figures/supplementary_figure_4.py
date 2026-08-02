@@ -18,9 +18,9 @@ from v1ca1.paper_figures.datasets import (
 from v1ca1.paper_figures.figure_3 import (
     DEFAULT_FIGURE_CACHE_DIR,
     DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
+    DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     DEFAULT_REGIONS,
     DEFAULT_RIDGE_STRENGTH,
-    DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     DEFAULT_RIPPLE_WINDOW_S,
     FIGURE_FORMATS,
@@ -59,6 +59,8 @@ DEFAULT_OUTPUT_NAME = "supplementary_figure_4"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_FIGURE_HEIGHT_MM = 115.0
+# Backward-compatible name for callers using the former CLI terminology.
+DEFAULT_RIPPLE_THRESHOLD_ZSCORE = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE
 DEFAULT_SOURCE_COMPARISON_PANEL_HEIGHT_MM = 48.0
 DEFAULT_SECTION_HEADER_HEIGHT_MM = 8.0
 DEFAULT_DATASET_ROW_HEIGHT_MM = 13.0
@@ -1481,7 +1483,7 @@ def make_supplementary_figure_4(
     light_epoch: str | None,
     dark_epoch: str | None,
     sleep_epoch: str | None,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     ripple_selection_modes: Sequence[str],
     ripple_window_s: float,
     ridge_strength: float,
@@ -1753,12 +1755,14 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--minimum-ripple-mean-zscore",
         "--ripple-threshold-zscore",
+        dest="ripple_threshold_zscore",
         type=float,
-        default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+        default=DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
         help=(
-            "Ripple mean-zscore threshold matching cached ripple-modulation outputs. "
-            f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE:g}"
+            "Optional minimum event mean z-score matching cached ripple-modulation "
+            "outputs. By default, use all speed-gated detector-qualified ripples."
         ),
     )
     parser.add_argument(

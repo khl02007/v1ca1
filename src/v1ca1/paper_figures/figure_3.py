@@ -109,7 +109,7 @@ TUNING_ANALYSIS_RELATIVE_DIR = Path("task_progression") / "tuning_analysis"
 COMPUTE_TUNING_CURVES_RELATIVE_DIR = (
     Path("task_progression") / "compute_tuning_curves"
 )
-DEFAULT_RIPPLE_THRESHOLD_ZSCORE = 2.0
+DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE: float | None = None
 DEFAULT_BIN_SIZE_S = 20e-3
 DEFAULT_TIME_BEFORE_S = 0.5
 DEFAULT_TIME_AFTER_S = 0.5
@@ -274,8 +274,10 @@ def get_ripple_lfp_path(
     )
 
 
-def format_output_value(value: float | str) -> str:
+def format_output_value(value: float | str | None) -> str:
     """Return a filename-safe value using the ripple-modulation convention."""
+    if value is None:
+        return "all_detected"
     if isinstance(value, str):
         return value
     return f"{value:g}".replace("-", "neg").replace(".", "p")
@@ -287,7 +289,7 @@ def build_ripple_modulation_output_stem(
     date: str,
     epoch: str,
     region_label: str,
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     bin_size_s: float,
     time_before_s: float,
     time_after_s: float,
@@ -296,9 +298,14 @@ def build_ripple_modulation_output_stem(
     heatmap_normalize: str,
 ) -> str:
     """Return the shared ripple-modulation filename stem for one epoch."""
+    ripple_selection_suffix = (
+        "_mean_zscore_all_detected"
+        if ripple_threshold_zscore is None
+        else f"_thr_{format_output_value(ripple_threshold_zscore)}"
+    )
     return (
         f"{animal_name}_{date}_{epoch}_{region_label}"
-        f"_thr_{format_output_value(ripple_threshold_zscore)}"
+        f"{ripple_selection_suffix}"
         f"_bin_{format_output_value(bin_size_s)}"
         f"_tb_{format_output_value(time_before_s)}"
         f"_ta_{format_output_value(time_after_s)}"
@@ -315,7 +322,7 @@ def get_ripple_modulation_paths(
     date: str,
     epoch: str,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -663,7 +670,7 @@ def load_ripple_count_table(
     data_root: Path,
     datasets: Sequence[DatasetId],
     *,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
 ) -> Any:
     """Load per-data-set ripple counts from saved event tables."""
     import pandas as pd
@@ -695,7 +702,7 @@ def load_epoch_modulation_summary_table(
     date: str,
     epoch: str,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -743,7 +750,7 @@ def load_modulation_summary_table(
     datasets: Sequence[DatasetId],
     *,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -786,7 +793,7 @@ def load_peri_ripple_firing_rate_table(
     date: str,
     epoch: str,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -833,7 +840,7 @@ def load_ripple_heatmap_epoch_tables(
     epoch_ids: Mapping[str, DatasetId],
     *,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -888,7 +895,7 @@ def load_pooled_ripple_heatmap_epoch_tables(
     dark_epoch: str | None = None,
     sleep_epoch: str | None = None,
     region_label: str = DEFAULT_REGION_LABEL,
-    ripple_threshold_zscore: float = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     time_before_s: float = DEFAULT_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_TIME_AFTER_S,
@@ -1402,7 +1409,7 @@ def load_example_ripple_lfp_trace(
     animal_name: str,
     date: str,
     epoch: str,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     time_before_s: float = DEFAULT_LFP_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_LFP_TIME_AFTER_S,
 ) -> dict[str, Any]:
@@ -1500,7 +1507,7 @@ def build_panel_b_schematic_cache_metadata(
     animal_name: str,
     date: str,
     epoch: str,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
     n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
@@ -1603,17 +1610,15 @@ def _select_strongly_modulated_ca1_units(
     date: str,
     epoch: str,
     n_units: int,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
 ) -> list[Any]:
     """Return CA1 units with the strongest finite ripple modulation."""
-    if ripple_threshold_zscore is None:
-        raise ValueError("CA1 ripple-modulation ranking requires a finite ripple threshold.")
     table = load_epoch_modulation_summary_table(
         data_root,
         animal_name=animal_name,
         date=date,
         epoch=epoch,
-        ripple_threshold_zscore=float(ripple_threshold_zscore),
+        ripple_threshold_zscore=ripple_threshold_zscore,
     )
     ca1_table = table.loc[table["region"].astype(str) == "ca1"].copy()
     if ca1_table.empty:
@@ -1775,7 +1780,7 @@ def build_panel_b_schematic_example(
     animal_name: str,
     date: str,
     epoch: str,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
     n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
@@ -1961,7 +1966,7 @@ def load_or_build_panel_b_schematic_example(
     animal_name: str,
     date: str,
     epoch: str,
-    ripple_threshold_zscore: float | None = DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+    ripple_threshold_zscore: float | None = DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     time_before_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
     time_after_s: float = DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
     n_units_per_region: int = DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
@@ -7531,7 +7536,7 @@ def make_figure_3(
     dark_epoch: str | None,
     sleep_epoch: str | None,
     regions: Sequence[str],
-    ripple_threshold_zscore: float,
+    ripple_threshold_zscore: float | None,
     ripple_window_s: float,
     ripple_window_offset_s: float,
     ripple_selection: str,
@@ -7925,12 +7930,14 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Recompute and overwrite the cached real-spike panel B schematic example.",
     )
     parser.add_argument(
+        "--minimum-ripple-mean-zscore",
         "--ripple-threshold-zscore",
+        dest="ripple_threshold_zscore",
         type=float,
-        default=DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
+        default=DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
         help=(
-            "Ripple mean-zscore threshold matching cached ripple-modulation outputs. "
-            f"Default: {DEFAULT_RIPPLE_THRESHOLD_ZSCORE:g}"
+            "Optional minimum event mean z-score applied after ripple detection. "
+            "By default, use all detector-qualified ripples."
         ),
     )
     parser.add_argument(

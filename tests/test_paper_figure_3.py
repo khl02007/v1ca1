@@ -12,13 +12,13 @@ from v1ca1.paper_figures.figure_3 import (
     DEFAULT_EXAMPLE_DATASET,
     DEFAULT_FIGURE_CACHE_DIR,
     DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
+    DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PANEL_B_PREDICTION_EXAMPLES,
     DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
     DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
     DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
     DEFAULT_RIDGE_STRENGTH,
-    DEFAULT_RIPPLE_THRESHOLD_ZSCORE,
     DEFAULT_RIPPLE_WINDOW_S,
     DEFAULT_RIPPLE_WINDOW_OFFSET_S,
     NEURON_SCALE_BAR_COUNT,
@@ -295,6 +295,7 @@ def test_panel_b_schematic_cache_roundtrip_preserves_legacy_stem(
         animal_name="L15",
         date="20241121",
         epoch="02_r1",
+        ripple_threshold_zscore=2.0,
     )
     cache_path = build_panel_b_schematic_cache_path(tmp_path, metadata)
     payload = {
@@ -363,6 +364,7 @@ def test_ripple_modulation_paths_match_cached_output_stem(tmp_path: Path) -> Non
         animal_name="L14",
         date="20240611",
         epoch="08_r4",
+        ripple_threshold_zscore=2.0,
     )
 
     assert paths["summary"] == (
@@ -374,6 +376,17 @@ def test_ripple_modulation_paths_match_cached_output_stem(tmp_path: Path) -> Non
         / f"{stem}_summary.parquet"
     )
     assert paths["peri_ripple_firing_rate"].name == f"{stem}_peri_ripple_firing_rate.parquet"
+
+
+def test_default_ripple_modulation_path_uses_all_detector_events(tmp_path: Path) -> None:
+    paths = get_ripple_modulation_paths(
+        tmp_path,
+        animal_name="L14",
+        date="20240611",
+        epoch="08_r4",
+    )
+
+    assert "_mean_zscore_all_detected_" in paths["summary"].name
 
 
 def test_ripple_glm_path_matches_samplewise_output_name(tmp_path: Path) -> None:
@@ -631,6 +644,12 @@ def test_load_ripple_count_table_filters_epoch_and_threshold(tmp_path: Path) -> 
     assert table["animal_name"].tolist() == ["L14"]
     assert table["epoch"].tolist() == ["08_r4"]
     assert table["n_ripples"].tolist() == [1]
+
+    all_detected = load_ripple_count_table(
+        tmp_path,
+        [("L14", "20240611", "08_r4")],
+    )
+    assert all_detected["n_ripples"].tolist() == [2]
 
 
 def test_load_example_ripple_lfp_trace_uses_largest_thresholded_ripple(tmp_path: Path) -> None:
@@ -2952,7 +2971,7 @@ def test_parse_arguments_defaults_match_figure_3_cli() -> None:
     assert args.dark_movement_fr_cache_dir == DEFAULT_FIGURE_CACHE_DIR
     assert args.refresh_dark_movement_fr_cache is False
     assert args.refresh_panel_b_schematic_cache is False
-    assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
+    assert args.ripple_threshold_zscore == DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE
     assert args.ripple_window_s == DEFAULT_RIPPLE_WINDOW_S
     assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S
     assert args.ripple_selection == DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION

@@ -10,6 +10,7 @@ from v1ca1.paper_figures.supplementary_figure_4 import (
     DEFAULT_EPOCH_TYPES,
     DEFAULT_FIGURE_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
+    DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_NAME,
     DEFAULT_REGIONS,
@@ -51,7 +52,8 @@ def test_default_cli_matches_supplementary_figure_4_defaults() -> None:
     assert DEFAULT_RIPPLE_SELECTION_MODES == ("single",)
     assert args.region is None
     assert DEFAULT_REGIONS == ("v1", "ca1")
-    assert args.ripple_threshold_zscore == DEFAULT_RIPPLE_THRESHOLD_ZSCORE
+    assert args.ripple_threshold_zscore is DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE
+    assert DEFAULT_RIPPLE_THRESHOLD_ZSCORE is DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE
     assert DEFAULT_PER_ANIMAL_SIGNIFICANCE_P_VALUE == pytest.approx(0.05)
     assert args.dataset is None
     assert args.ripple_window_offset_s == DEFAULT_RIPPLE_WINDOW_OFFSET_S

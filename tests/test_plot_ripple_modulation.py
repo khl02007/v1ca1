@@ -173,6 +173,24 @@ def test_filter_ripple_table_by_threshold_filters_rows() -> None:
     assert np.allclose(filtered["start_time"], [3.0])
 
 
+def test_filter_ripple_table_without_event_mean_threshold_keeps_detector_events() -> None:
+    table = pd.DataFrame(
+        {
+            "start_time": [1.0, 2.0],
+            "end_time": [1.1, 2.1],
+            "mean_zscore": [1.5, 3.0],
+        }
+    )
+
+    filtered = ripple_plot.filter_ripple_table_by_threshold(
+        table,
+        epoch="02_r1",
+        ripple_threshold_zscore=None,
+    )
+
+    pd.testing.assert_frame_equal(filtered, table)
+
+
 def test_compute_modulation_stats_returns_expected_zscore() -> None:
     stats = ripple_plot.compute_modulation_stats(
         np.array([-0.15, -0.05, 0.05, 0.15], dtype=float),
