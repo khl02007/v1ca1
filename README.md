@@ -126,3 +126,63 @@ A typical workflow is:
 3. Run downstream analyses from the relevant subpackage once the expected session artifacts exist.
 
 The repo is most useful if you already have the local Frank Lab-style data layout and intermediate files in place.
+
+## Project Spyglass Pipeline
+
+`v1ca1.spyglass` contains the project-owned `kyuv1ca1` tables. Importing the
+package is passive: it does not connect to DataJoint, activate schemas, insert
+rows, or populate computations. In a separately configured Spyglass process,
+the intended order is:
+
+```python
+import datajoint as dj
+
+from v1ca1.spyglass import activate, ingest_v1ca1_nwb
+
+custom = dict(dj.config.get("custom", {}))
+custom["database.prefix"] = "kyuv1ca1"
+dj.config["custom"] = custom
+tables = activate()  # Explicit schema activation/DDL.
+tables["ripple_modulation_parameters"].insert_default()
+ingest_v1ca1_nwb("L1420240611_augmented.nwb", tables=tables)
+```
+
+The custom prefix must be set before activation so Spyglass associates the
+project AnalysisNwbfile table with the `kyuv1ca1_nwbfile` schema. Activation
+does not modify Spyglass's analysis-table registry. If that table is later used
+for NWB-natural results, register it once, explicitly, with
+`tables["analysis_nwbfile"]().register_with_spyglass()`.
+
+Standard Spyglass ingestion, including `Session`, `Nwbfile`, and
+`ImportedSpikeSorting`, must already be complete. The custom ingestion indexes
+NWB object pointers and small metadata only. Arrays remain in NWB and are read
+on demand:
+
+```python
+ripples = tables["ripples"].load_intervals(ripple_key)
+head_position = tables["position"].load_position(position_key)
+graph_inputs = tables["wtrack_graph"].load_graph(graph_key)
+track_graph = make_track_graph(**graph_inputs["track_graph_kwargs"])
+linearized = get_linearized_position(
+    head_position.values,
+    track_graph,
+    **graph_inputs["linearization_kwargs"],
+)
+```
+
+The initial computed pipeline is `RippleModulationComputed`. Its selection is
+downstream of `Ripples`, `EpochIntervals`, scalar parameters, and the standard
+Spyglass `SortedSpikesGroup`; the current implementation deliberately requires
+the `all_units` filter. Results are keyed Parquets under
+`/stelmo/nwb/analysis/kyu/v1ca1`, while a project-owned `AnalysisNwbfile` table
+is available for future NWB-natural outputs. Existing legacy Parquets can be
+registered with `RippleModulationComputed.register_existing()`; source paths,
+SHA-256 hashes, optional source commits, and runtime commits are retained.
+
+Use a new `v1ca1-spyglass` environment for this pipeline. The old local
+`spyglass` environment (Python 3.9/PyNWB 2.3) cannot read the augmented files.
+The new environment needs the pinned local Spyglass checkout, PyNWB 3.1.3 or
+newer, Pynapple, and PyArrow. Do not install the full `v1ca1[analysis]` extra
+there because its SpikeInterface requirement conflicts with the pinned
+Spyglass checkout; install this package without dependencies and add only the
+pipeline runtime dependencies.
