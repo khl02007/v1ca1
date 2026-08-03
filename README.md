@@ -144,6 +144,7 @@ custom["database.prefix"] = "kyuv1ca1"
 dj.config["custom"] = custom
 tables = activate()  # Explicit schema/table declaration; no data insertion.
 tables["ripple_modulation_parameters"].insert_default()
+tables["movement_parameters"].insert_default()
 tables["task_progression_stability_parameters"].insert_default()
 ingest_v1ca1_nwb("L1420240611_augmented.nwb", tables=tables)
 ```
@@ -183,7 +184,7 @@ offset by default without truncating or rewriting the source series.
 has an audited epoch parent. A provenance-selected ripple epoch is cataloged
 even when it contains no events, with `ripple_count=0`.
 
-Both current analyses share an adapter for standard `SortedSpikesGroup`,
+The analyses share an adapter for standard `SortedSpikesGroup`,
 `UnitSelectionParams`, and `SpikeSortingOutput`. It supports imported or
 curated sorting parents, applies include/exclude label filters and region
 selection, and combines canonical ephys-referenced spike times. Persistent
@@ -199,24 +200,33 @@ Ripples + EpochIntervals + RippleModulationParameters
     -> RippleModulationSelection
     -> RippleModulation
 
-EpochIntervals + TrajectoryIntervals + Position + WTrackGraph
-    + TaskProgressionStabilityParameters
+Position + MovementParameters
     + SortedSpikesGroup / UnitSelectionParams
+    -> MovementFiringRateSelection
+    -> MovementFiringRate
+
+TrajectoryIntervals + WTrackGraph + MovementFiringRate
+    + TaskProgressionStabilityParameters
     -> TaskProgressionStabilitySelection
     -> TaskProgressionStability
 ```
 
-The computed tables are named `RippleModulation` and
+The computed tables are named `RippleModulation`, `MovementFiringRate`, and
 `TaskProgressionStability`, without a `Computed` suffix. Each explicit
-selection freezes sorting-group membership, unit-filter settings, and a
-SHA-256 digest of the selected parameter values. That snapshot determines a
-table-specific UUIDv5. Computation rejects later edits to those Manual
-parameter values and requires a new selection. Results are Parquets under
+selection freezes its upstream membership, filters, and parameter values. That
+snapshot determines a table-specific UUIDv5. Computation rejects later edits
+to those Manual parameter values and requires a new selection. Results use
 session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
 
 ```text
-<animal>/<date>/ripple_modulation/<epoch>/<region>/<uuid>/...
-<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/...
+<animal>/<date>/ripple_modulation/<epoch>/<region>/<uuid>/
+    summary.parquet
+    peri_ripple_firing_rate.parquet
+<animal>/<date>/movement_firing_rate/<epoch>/<region>/<uuid>/
+    movement_firing_rate.parquet
+    movement_intervals.npz
+<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/
+    stability.parquet
 ```
 
 The canonical `Ripples` source contains speed-gated events detected at the
@@ -227,22 +237,35 @@ epochs remain explicit `no_ripples` results. Stability retains all selected
 units and explicit QC for undefined correlations. Firing-rate and stability
 thresholds are downstream scientific selections, not hidden producer filters.
 
+`MovementFiringRate` saves one Parquet row per selected unit plus the exact
+Pynapple movement `IntervalSet` in ephys-referenced seconds. There is no
+firing-rate prefilter: a zero-spike unit has a valid 0 Hz rate whenever valid
+movement support exists. Sleep epochs are allowed when the selected Position
+series exists. Its result statuses are `valid`, `no_units`,
+`no_valid_position`, and `no_movement`; the latter two retain one
+undefined-rate QC row per selected unit. `TaskProgressionStability.make()` loads
+these saved artifacts through its upstream `MovementFiringRate` row and does
+not recompute speed, movement support, or firing rates.
+
 Calling `make()` computes from NWB and the selected sorting group. Calling
-`register_existing()` validates and partitions a compatible legacy artifact,
-copies it into the same canonical output layout, and inserts the result without
-rerunning the analysis. Legacy registration is limited to matching imported
-sorting outputs. It requires the complete canonical Parquet schemas and, for
+`register_existing()` on `RippleModulation` or `TaskProgressionStability`
+validates and partitions a compatible legacy artifact, copies it into the same
+canonical output layout, and inserts the result without rerunning the analysis.
+`MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle
+atomically. Legacy registration is limited to matching imported sorting
+outputs. It requires the complete canonical Parquet schemas and, for
 peri-ripple firing rates, one complete common time grid per unit. Canonical
 empty artifacts are retained as `no_units` or `no_ripples` terminal results.
 UUID-keyed result rows and destinations are immutable: registration rejects
 `overwrite=True`, checks for an existing result before invoking its artifact
 hook, and directly inserts into the computed table only after that preflight.
 With `skip_duplicates=True`, an existing row is returned without touching its
-files. Both compute and registration retain artifact origin, a selected-unit
-digest, and actual runtime V1–CA1 and Spyglass commits; registration also
-retains source paths, hashes, and optional source commits. The current Parquet
-results use `filepath@analysis`; the project `AnalysisNwbfile` remains
-available for future NWB-natural results.
+files. Tables with both routes retain artifact origin, a selected-unit digest,
+and actual runtime V1–CA1 and Spyglass commits; registration also retains source
+paths, hashes, and optional source commits. `MovementFiringRate` records its
+selected-unit digest and runtime commits directly. Current file-backed results
+use `filepath@analysis`; the project `AnalysisNwbfile` remains available for
+future NWB-natural results.
 
 Use a new `v1ca1-spyglass` environment for this pipeline. The old local
 `spyglass` environment (Python 3.9/PyNWB 2.3) cannot read the augmented files.

@@ -121,11 +121,7 @@ def _validate_stability_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
             "task_progression_stability_param_name must be a non-empty string "
             "of at most 64 characters."
         )
-    for field_name in (
-        "speed_threshold_cm_s",
-        "speed_smoothing_sigma_s",
-        "place_bin_size_cm",
-    ):
+    for field_name in ("place_bin_size_cm",):
         value = values[field_name]
         if isinstance(value, bool) or not isinstance(value, Real):
             raise TypeError(f"{field_name} must be one numeric scalar.")
@@ -133,6 +129,41 @@ def _validate_stability_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{field_name} must be positive and finite.")
         values[field_name] = value
+    return values
+
+
+def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and copy one shared movement parameter row."""
+    expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "Movement parameters must have exactly the declared fields; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["movement_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "movement_param_name must be a non-empty string of at most 64 "
+            "characters."
+        )
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
+        values[field_name] = value
+    if values["speed_threshold_cm_s"] < 0:
+        raise ValueError("speed_threshold_cm_s must be non-negative.")
+    if values["speed_smoothing_sigma_s"] <= 0:
+        raise ValueError("speed_smoothing_sigma_s must be positive.")
     return values
 
 
@@ -172,7 +203,7 @@ def _session_identity(session_table: Any, key: Mapping[str, Any]) -> tuple[str, 
     )
     if subject_id is None or not str(subject_id).strip():
         raise ValueError(
-            "Session.subject_id is required for RippleModulation artifact paths."
+            "Session.subject_id is required for analysis artifact paths."
         )
     if isinstance(start_time, (datetime, date)):
         session_date = start_time.strftime("%Y%m%d")
@@ -209,11 +240,18 @@ def _file_sha256(path: Path) -> str:
 
 
 def _remove_created_artifacts(paths: list[str]) -> None:
-    """Remove only exact artifact files created for a failed table insert."""
+    """Remove newly created files and their now-empty immediate directory."""
+    parents: set[Path] = set()
     for raw_path in paths:
         path = Path(raw_path)
+        parents.add(path.parent)
         if path.is_file():
             path.unlink()
+    for parent in parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
 
 
 def _existing_result_row(
@@ -448,18 +486,15 @@ def _ripple_modulation_selection_row(
     }
 
 
-def _stability_selection_row(
+def _movement_firing_rate_selection_row(
     *,
     key: Mapping[str, Any],
-    epoch_intervals_table: Any,
-    trajectory_intervals_table: Any,
     position_table: Any,
-    wtrack_graph_table: Any,
     parameters_table: Any,
     sorted_spikes_group: Any,
     unit_selection_params: Any,
 ) -> dict[str, Any]:
-    """Validate and identify one immutable trajectory-stability selection."""
+    """Validate and identify one immutable movement firing-rate selection."""
     from v1ca1.spyglass.selection import selection_uuid
 
     natural_key = {
@@ -467,18 +502,81 @@ def _stability_selection_row(
         for field_name in (
             "nwb_file_name",
             "epoch",
-            "trajectory_type",
             "position_series_name",
-            "configuration_name",
-            "task_progression_stability_param_name",
+            "movement_param_name",
             "unit_filter_params_name",
             "sorted_spikes_group_name",
         )
     }
     natural_key["region"] = _analysis_region(key["region"])
+    position_row = _fetch1_dict(position_table, natural_key)
+    if position_row.get("spatial_unit") != "cm":
+        raise ValueError("MovementFiringRate position must use centimeters.")
+    parameters = _validate_movement_parameter_row(
+        _fetch1_dict(parameters_table, natural_key)
+    )
+    provenance = _resolve_sorting_snapshot(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        key=natural_key,
+    )
+    snapshot = _sorting_snapshot_fields(provenance)
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="movement_parameters_sha256",
+    )
+    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    return {
+        "movement_firing_rate_id": selection_uuid(
+            "MovementFiringRate",
+            identity_payload,
+        ),
+        **natural_key,
+        **snapshot,
+        **parameter_snapshot,
+    }
+
+
+def _stability_selection_row(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable trajectory-stability selection."""
+    from v1ca1.spyglass.selection import selection_uuid
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    for field_name in ("nwb_file_name", "epoch"):
+        supplied = key.get(field_name, movement_selection[field_name])
+        if str(supplied) != str(movement_selection[field_name]):
+            raise ValueError(
+                "TaskProgressionStability and MovementFiringRate must select "
+                f"the same {field_name}."
+            )
+    natural_key = {
+        "nwb_file_name": movement_selection["nwb_file_name"],
+        "epoch": movement_selection["epoch"],
+        "trajectory_type": key["trajectory_type"],
+        "configuration_name": key["configuration_name"],
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        "task_progression_stability_param_name": key[
+            "task_progression_stability_param_name"
+        ],
+    }
     epoch_row = _fetch1_dict(epoch_intervals_table, natural_key)
     _fetch1_dict(trajectory_intervals_table, natural_key)
-    position_row = _fetch1_dict(position_table, natural_key)
     graph_row = _fetch1_dict(wtrack_graph_table, natural_key)
     parameters = _validate_stability_parameter_row(
         _fetch1_dict(parameters_table, natural_key)
@@ -490,28 +588,19 @@ def _stability_selection_row(
         )
     if epoch_row.get("epoch_type") not in (None, "run"):
         raise ValueError("TaskProgressionStability requires a run epoch.")
-    if position_row.get("spatial_unit") != "cm":
-        raise ValueError("TaskProgressionStability position must use centimeters.")
     if graph_row.get("coordinate_unit") != "cm":
         raise ValueError("TaskProgressionStability graph must use centimeters.")
-    provenance = _resolve_sorting_snapshot(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        key=natural_key,
-    )
-    snapshot = _sorting_snapshot_fields(provenance)
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
         field_name="task_progression_stability_parameters_sha256",
     )
-    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    identity_payload = {**natural_key, **parameter_snapshot}
     return {
         "task_progression_stability_id": selection_uuid(
             "TaskProgressionStability",
             identity_payload,
         ),
         **natural_key,
-        **snapshot,
         **parameter_snapshot,
     }
 
@@ -1084,6 +1173,215 @@ def _register_existing_ripple_modulation_row(
     }
 
 
+def _make_movement_firing_rate_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    position_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one epoch-wide movement firing-rate bundle."""
+    import pynwb
+
+    from v1ca1.spyglass.movement import (
+        compute_selected_movement_firing_rate,
+        get_movement_artifact_paths,
+        write_movement_artifacts,
+    )
+    from v1ca1.spyglass.nwb import load_position
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    parameters = _validate_movement_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="movement_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, key)
+    position_row = _fetch1_dict(position_table, key)
+    if position_row.get("spatial_unit") != "cm":
+        raise ValueError("MovementFiringRate position must use centimeters.")
+
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
+
+    region = _analysis_region(key["region"])
+    loaded_spikes = _load_group_spikes(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=key,
+        region=region,
+        time_support=(epoch_start, epoch_stop),
+    )
+    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+
+    position = None
+    if loaded_spikes["status"] != "no_units":
+        nwb_path = Path(nwbfile_table.get_abs_path(str(key["nwb_file_name"])))
+        with pynwb.NWBHDF5IO(
+            str(nwb_path),
+            mode="r",
+            load_namespaces=True,
+        ) as io:
+            position = load_position(
+                io.read(),
+                position_row,
+                apply_analysis_offset=True,
+            )
+
+    animal_name, session_date = _session_identity(session_table, key)
+    result = compute_selected_movement_firing_rate(
+        animal_name=animal_name,
+        date=session_date,
+        region=region,
+        epoch=str(key["epoch"]),
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=position,
+        speed_threshold_cm_s=parameters["speed_threshold_cm_s"],
+        speed_smoothing_sigma_s=parameters["speed_smoothing_sigma_s"],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_movement_artifact_paths(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(key["epoch"]),
+        region=region,
+        movement_firing_rate_id=key["movement_firing_rate_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = (
+        [
+            str(paths["firing_rate_path"]),
+            str(paths["movement_intervals_path"]),
+        ]
+        if not artifact_dir.exists()
+        else []
+    )
+    written = write_movement_artifacts(
+        result["table"],
+        result["movement_intervals"],
+        artifact_dir,
+    )
+    return {
+        "movement_firing_rate_path": str(written["firing_rate_path"]),
+        "movement_intervals_path": str(written["movement_intervals_path"]),
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "n_units_with_spikes": int(result["n_units_with_spikes"]),
+        "movement_interval_count": int(result["movement_interval_count"]),
+        "movement_duration_s": float(result["movement_duration_s"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": unit_identity_sha256(
+            loaded_spikes["unit_ids"]
+        ),
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _load_movement_result_artifacts(
+    *,
+    result_row: Mapping[str, Any],
+    parameters: Mapping[str, Any] | None = None,
+    expected_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load a movement bundle and verify its DataJoint summary scalars."""
+    from v1ca1.spyglass.movement import (
+        load_movement_firing_rate_artifact,
+        load_movement_interval_artifact,
+        movement_interval_summary,
+        validate_movement_artifacts,
+    )
+
+    table = load_movement_firing_rate_artifact(
+        Path(result_row["movement_firing_rate_path"])
+    )
+    movement_intervals = load_movement_interval_artifact(
+        Path(result_row["movement_intervals_path"])
+    )
+    validate_movement_artifacts(table, movement_intervals)
+    if not table.empty:
+        for field_name, expected_value in dict(expected_metadata or {}).items():
+            actual_values = table[field_name].astype(str).unique().tolist()
+            if actual_values != [str(expected_value)]:
+                raise ValueError(
+                    "MovementFiringRate artifact does not match its selection: "
+                    f"{field_name}."
+                )
+        if parameters is not None:
+            for field_name in (
+                "speed_threshold_cm_s",
+                "speed_smoothing_sigma_s",
+            ):
+                actual_values = table[field_name].astype(float).unique().tolist()
+                if len(actual_values) != 1 or not math.isclose(
+                    actual_values[0],
+                    float(parameters[field_name]),
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                ):
+                    raise ValueError(
+                        "MovementFiringRate artifact does not match its selection: "
+                        f"{field_name}."
+                    )
+    interval_count, duration = movement_interval_summary(movement_intervals)
+    status = "no_units" if table.empty else str(
+        table["firing_rate_status"].iloc[0]
+    )
+    n_units = len(table)
+    n_valid_units = n_units if status == "valid" else 0
+    n_units_with_spikes = (
+        0
+        if table.empty
+        else int((table["movement_spike_count"].astype(int) > 0).sum())
+    )
+    expected = {
+        "n_units": n_units,
+        "n_valid_units": n_valid_units,
+        "n_units_with_spikes": n_units_with_spikes,
+        "movement_interval_count": interval_count,
+        "analysis_status": status,
+    }
+    for field_name, current in expected.items():
+        stored = result_row.get(field_name)
+        if str(stored) != str(current):
+            raise ValueError(
+                "MovementFiringRate result metadata disagrees with its "
+                f"artifacts: {field_name}."
+            )
+    if not math.isclose(
+        float(result_row["movement_duration_s"]),
+        duration,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "MovementFiringRate result metadata disagrees with its artifacts: "
+            "movement_duration_s."
+        )
+    return {
+        "table": table,
+        "movement_intervals": movement_intervals,
+        "analysis_status": status,
+    }
+
+
 def _make_task_progression_stability_row(
     *,
     key: Mapping[str, Any],
@@ -1092,6 +1390,9 @@ def _make_task_progression_stability_row(
     trajectory_intervals_table: Any,
     position_table: Any,
     wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
     session_table: Any,
     sorted_spikes_group: Any,
     unit_selection_params: Any,
@@ -1122,15 +1423,35 @@ def _make_task_progression_stability_row(
         parameters,
         field_name="task_progression_stability_parameters_sha256",
     )
-    epoch_row = _fetch1_dict(epoch_intervals_table, key)
-    trajectory_row = _fetch1_dict(trajectory_intervals_table, key)
-    position_row = _fetch1_dict(position_table, key)
-    graph_row = _fetch1_dict(wtrack_graph_table, key)
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    context = {**key, **movement_selection}
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, context)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, context)
+    trajectory_row = _fetch1_dict(trajectory_intervals_table, context)
+    position_row = _fetch1_dict(position_table, context)
+    graph_row = _fetch1_dict(wtrack_graph_table, context)
     if str(key["trajectory_type"]) != str(key["configuration_name"]):
         raise ValueError(
             "TaskProgressionStability graph configuration must match trajectory_type."
         )
-    animal_name, session_date = _session_identity(session_table, key)
+    animal_name, session_date = _session_identity(session_table, context)
     epoch_start = float(epoch_row["start_time"])
     epoch_stop = float(epoch_row["stop_time"])
     if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
@@ -1142,32 +1463,65 @@ def _make_task_progression_stability_row(
         sorted_spikes_group=sorted_spikes_group,
         unit_selection_params=unit_selection_params,
         spike_sorting_output=spike_sorting_output,
-        key=key,
-        region=_analysis_region(key["region"]),
+        key=context,
+        region=_analysis_region(movement_selection["region"]),
         time_support=(epoch_start, epoch_stop),
     )
-    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+    _validate_frozen_sorting_snapshot(movement_selection, loaded_spikes)
+    selected_units_sha256 = unit_identity_sha256(loaded_spikes["unit_ids"])
+    if selected_units_sha256 != str(
+        movement_result["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": _analysis_region(movement_selection["region"]),
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
 
-    nwb_path = Path(nwbfile_table.get_abs_path(str(key["nwb_file_name"])))
-    with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
-        nwbfile = io.read()
-        position = load_position(nwbfile, position_row, apply_analysis_offset=True)
-        trajectory_interval = load_interval_set(nwbfile, trajectory_row)
-        graph_inputs = load_wtrack_graph(nwbfile, graph_row)
+    position = None
+    trajectory_interval = None
+    graph_inputs: dict[str, Any] = {}
+    if movement["analysis_status"] == "valid":
+        nwb_path = Path(
+            nwbfile_table.get_abs_path(
+                str(movement_selection["nwb_file_name"])
+            )
+        )
+        with pynwb.NWBHDF5IO(
+            str(nwb_path),
+            mode="r",
+            load_namespaces=True,
+        ) as io:
+            nwbfile = io.read()
+            position = load_position(
+                nwbfile,
+                position_row,
+                apply_analysis_offset=True,
+            )
+            trajectory_interval = load_interval_set(nwbfile, trajectory_row)
+            graph_inputs = load_wtrack_graph(nwbfile, graph_row)
 
     result = compute_selected_stability(
         animal_name=animal_name,
         date=session_date,
-        region=_analysis_region(key["region"]),
-        epoch=str(key["epoch"]),
+        region=_analysis_region(movement_selection["region"]),
+        epoch=str(movement_selection["epoch"]),
         trajectory_type=str(key["trajectory_type"]),
         spikes=loaded_spikes["ts_group"],
         stable_unit_ids=loaded_spikes["unit_ids"],
         position=position,
         trajectory_interval=trajectory_interval,
         graph_inputs=graph_inputs,
-        speed_threshold_cm_s=parameters["speed_threshold_cm_s"],
-        speed_smoothing_sigma_s=parameters["speed_smoothing_sigma_s"],
+        movement_interval=movement["movement_intervals"],
+        movement_firing_rate_table=movement["table"],
         place_bin_size_cm=parameters["place_bin_size_cm"],
     )
     path_kwargs: dict[str, Any] = {}
@@ -1176,9 +1530,9 @@ def _make_task_progression_stability_row(
     artifact_path = get_stability_artifact_path(
         animal_name=animal_name,
         date=session_date,
-        epoch=str(key["epoch"]),
+        epoch=str(movement_selection["epoch"]),
         trajectory_type=str(key["trajectory_type"]),
-        region=_analysis_region(key["region"]),
+        region=_analysis_region(movement_selection["region"]),
         task_progression_stability_id=key["task_progression_stability_id"],
         **path_kwargs,
     )
@@ -1189,7 +1543,7 @@ def _make_task_progression_stability_row(
         "n_units": int(result["n_units"]),
         "n_valid_units": int(result["n_valid_units"]),
         "analysis_status": str(result["analysis_status"]),
-        "selected_units_sha256": unit_identity_sha256(loaded_spikes["unit_ids"]),
+        "selected_units_sha256": selected_units_sha256,
         "artifact_origin": "computed",
         "legacy_artifact_provenance": None,
         "_created_artifact_paths": created_artifact_paths,
@@ -1222,6 +1576,9 @@ def _register_existing_task_progression_stability_row(
     stability_path: Path,
     overwrite: bool,
     parameters_table: Any,
+    movement_parameters_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
     session_table: Any,
     sorted_spikes_group: Any,
     unit_selection_params: Any,
@@ -1249,17 +1606,13 @@ def _register_existing_task_progression_stability_row(
         parameters,
         field_name="task_progression_stability_parameters_sha256",
     )
-    default_parameters = dict(
+    default_stability_parameters = dict(
         table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
     )
-    for field_name in (
-        "speed_threshold_cm_s",
-        "speed_smoothing_sigma_s",
-        "place_bin_size_cm",
-    ):
+    for field_name in ("place_bin_size_cm",):
         if not math.isclose(
             parameters[field_name],
-            default_parameters[field_name],
+            default_stability_parameters[field_name],
             rel_tol=1e-12,
             abs_tol=1e-12,
         ):
@@ -1267,17 +1620,71 @@ def _register_existing_task_progression_stability_row(
                 "Legacy stability registration is only valid for the regenerated "
                 f"default parameters; {field_name} differs."
             )
-    animal_name, session_date = _session_identity(session_table, key)
-    region = _analysis_region(key["region"])
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    context = {**key, **movement_selection}
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, context)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    default_movement_parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+    ):
+        if not math.isclose(
+            movement_parameters[field_name],
+            default_movement_parameters[field_name],
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "Legacy stability registration is only valid for the regenerated "
+                f"default movement parameters; {field_name} differs."
+            )
+
+    animal_name, session_date = _session_identity(session_table, context)
+    region = _analysis_region(movement_selection["region"])
     loaded_units = _load_group_unit_data(
         sorted_spikes_group=sorted_spikes_group,
         unit_selection_params=unit_selection_params,
         spike_sorting_output=spike_sorting_output,
-        key=key,
+        key=context,
         region=region,
         allow_empty=True,
     )
-    _validate_frozen_sorting_snapshot(key, loaded_units)
+    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
+    if selected_units_sha256 != str(
+        movement_result["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
     non_imported = [
         str(merge_id)
         for merge_id in loaded_units["merge_ids"]
@@ -1298,7 +1705,7 @@ def _register_existing_task_progression_stability_row(
     expected_partition = {
         "animal_name": animal_name,
         "date": session_date,
-        "epoch": str(key["epoch"]),
+        "epoch": str(movement_selection["epoch"]),
         "trajectory_type": str(key["trajectory_type"]),
         "region": region,
     }
@@ -1340,6 +1747,39 @@ def _register_existing_task_progression_stability_row(
             "Existing stability partition must contain exactly one row per "
             "selected SortedSpikesGroup unit."
         )
+    movement_units = set(
+        movement["table"].get("stable_unit_id", pd.Series(dtype=str)).astype(str)
+    )
+    if movement_units != expected_units:
+        raise ValueError(
+            "MovementFiringRate artifact does not contain exactly the selected "
+            "SortedSpikesGroup units."
+        )
+    if expected_units:
+        selected_rates = (
+            selected.set_index("stable_unit_id")["firing_rate_hz"]
+            .astype(float)
+            .loc[sorted(expected_units)]
+            .to_numpy()
+        )
+        movement_rates = (
+            movement["table"]
+            .set_index("stable_unit_id")["movement_firing_rate_hz"]
+            .astype(float)
+            .loc[sorted(expected_units)]
+            .to_numpy()
+        )
+        if not np.allclose(
+            selected_rates,
+            movement_rates,
+            rtol=1e-9,
+            atol=1e-12,
+            equal_nan=True,
+        ):
+            raise ValueError(
+                "Existing stability firing_rate_hz does not match the upstream "
+                "MovementFiringRate artifact."
+            )
     ordered_identity = [
         "spikesorting_merge_id",
         "unit_id",
@@ -1350,9 +1790,22 @@ def _register_existing_task_progression_stability_row(
         column for column in selected if column not in ordered_identity
     )
     selected = selected.loc[:, ordered_identity]
-    n_valid_units = int(selected["stability_status"].astype(str).eq("valid").sum())
+    n_valid_units = int(
+        selected["stability_status"].astype(str).eq("valid").sum()
+    )
     if not expected_units:
         analysis_status = "no_units"
+    elif movement["analysis_status"] in {
+        "no_valid_position",
+        "no_movement",
+    }:
+        statuses = set(selected["stability_status"].astype(str))
+        if statuses != {movement["analysis_status"]}:
+            raise ValueError(
+                "Existing stability terminal status does not match the upstream "
+                "MovementFiringRate status."
+            )
+        analysis_status = movement["analysis_status"]
     else:
         analysis_status = "valid" if n_valid_units else "no_valid_units"
     path_kwargs: dict[str, Any] = {}
@@ -1361,7 +1814,7 @@ def _register_existing_task_progression_stability_row(
     destination = get_stability_artifact_path(
         animal_name=animal_name,
         date=session_date,
-        epoch=str(key["epoch"]),
+        epoch=str(movement_selection["epoch"]),
         trajectory_type=str(key["trajectory_type"]),
         region=region,
         task_progression_stability_id=key["task_progression_stability_id"],
@@ -1378,14 +1831,17 @@ def _register_existing_task_progression_stability_row(
         "n_units": len(expected_units),
         "n_valid_units": n_valid_units,
         "analysis_status": analysis_status,
-        "selected_units_sha256": unit_identity_sha256(loaded_units["unit_ids"]),
+        "selected_units_sha256": selected_units_sha256,
         "artifact_origin": "registered_existing",
         "legacy_artifact_provenance": {
             "source_path": str(stability_path.resolve(strict=True)),
             "sha256": _file_sha256(stability_path),
             "source_v1ca1_git_commit": source_v1ca1_git_commit,
             "source_spyglass_git_commit": source_spyglass_git_commit,
-            "assumed_parameters": parameters,
+            "assumed_parameters": {
+                "movement": movement_parameters,
+                "stability": parameters,
+            },
         },
         "_created_artifact_paths": created_artifact_paths,
     }
@@ -1458,6 +1914,10 @@ def _construct_tables(
             _register_existing_ripple_modulation_row,
         ),
     )
+    movement_compute_hook = runtime_hooks.get(
+        "movement_firing_rate_compute",
+        _make_movement_firing_rate_row,
+    )
     stability_compute_hook = runtime_hooks.get(
         "task_progression_stability_compute",
         _make_task_progression_stability_row,
@@ -1471,6 +1931,7 @@ def _construct_tables(
         for hook in (
             ripple_compute_hook,
             ripple_register_hook,
+            movement_compute_hook,
             stability_compute_hook,
             stability_register_hook,
         )
@@ -1598,6 +2059,120 @@ def _construct_tables(
 
     SpikeSortingFigurl = main_schema(SpikeSortingFigurl)
     main_context["SpikeSortingFigurl"] = SpikeSortingFigurl
+
+    class MovementParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.MOVEMENT_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one shared movement definition."""
+            validated = _validate_movement_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_default(cls, *, skip_duplicates: bool = True) -> dict[str, Any]:
+            """Explicitly insert the canonical movement parameters."""
+            return cls.insert_parameters(
+                table_specs.DEFAULT_MOVEMENT_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    MovementParameters = main_schema(MovementParameters)
+    main_context["MovementParameters"] = MovementParameters
+
+    class MovementFiringRateSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.MOVEMENT_FIRING_RATE_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one movement selection."""
+            row = _movement_firing_rate_selection_row(
+                key=key,
+                position_table=Position,
+                parameters_table=MovementParameters,
+                sorted_spikes_group=sorted_spikes_group,
+                unit_selection_params=unit_selection_params,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    MovementFiringRateSelection = main_schema(MovementFiringRateSelection)
+    main_context["MovementFiringRateSelection"] = MovementFiringRateSelection
+
+    class MovementFiringRate(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.MOVEMENT_FIRING_RATE_DEFINITION
+        _compute_hook = staticmethod(movement_compute_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one movement artifact bundle."""
+            selection = _fetch1_dict(MovementFiringRateSelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=MovementParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    position_table=Position,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "movement_firing_rate_id": selection[
+                            "movement_firing_rate_id"
+                        ],
+                        **row,
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_firing_rates(cls, key: Mapping[str, Any]) -> Any:
+            """Load and validate one all-unit movement-rate Parquet."""
+            from v1ca1.spyglass.movement import (
+                load_movement_firing_rate_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            return load_movement_firing_rate_artifact(
+                Path(row["movement_firing_rate_path"])
+            )
+
+        @classmethod
+        def load_intervals(cls, key: Mapping[str, Any]) -> Any:
+            """Load and validate one exact Pynapple movement IntervalSet."""
+            from v1ca1.spyglass.movement import load_movement_interval_artifact
+
+            row = _fetch1_dict(cls, key)
+            return load_movement_interval_artifact(
+                Path(row["movement_intervals_path"])
+            )
+
+    MovementFiringRate = main_schema(MovementFiringRate)
+    main_context["MovementFiringRate"] = MovementFiringRate
 
     class RippleModulationParameters(spyglass_mixin, dj_module.Manual):
         definition = table_specs.RIPPLE_MODULATION_PARAMETERS_DEFINITION
@@ -1808,11 +2383,12 @@ def _construct_tables(
                 key=key,
                 epoch_intervals_table=EpochIntervals,
                 trajectory_intervals_table=TrajectoryIntervals,
-                position_table=Position,
                 wtrack_graph_table=WTrackGraph,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
                 parameters_table=TaskProgressionStabilityParameters,
-                sorted_spikes_group=sorted_spikes_group,
-                unit_selection_params=unit_selection_params,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
@@ -1840,6 +2416,11 @@ def _construct_tables(
                     trajectory_intervals_table=TrajectoryIntervals,
                     position_table=Position,
                     wtrack_graph_table=WTrackGraph,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
                     session_table=session_table,
                     sorted_spikes_group=sorted_spikes_group,
                     unit_selection_params=unit_selection_params,
@@ -1903,6 +2484,11 @@ def _construct_tables(
                     stability_path=Path(stability_path),
                     overwrite=False,
                     parameters_table=TaskProgressionStabilityParameters,
+                    movement_parameters_table=MovementParameters,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
                     session_table=session_table,
                     sorted_spikes_group=sorted_spikes_group,
                     unit_selection_params=unit_selection_params,
@@ -1972,6 +2558,9 @@ def _construct_tables(
         "position": Position,
         "wtrack_graph": WTrackGraph,
         "spike_sorting_figurl": SpikeSortingFigurl,
+        "movement_parameters": MovementParameters,
+        "movement_firing_rate_selection": MovementFiringRateSelection,
+        "movement_firing_rate": MovementFiringRate,
         "ripple_modulation_parameters": RippleModulationParameters,
         "ripple_modulation_selection": RippleModulationSelection,
         "ripple_modulation": RippleModulation,

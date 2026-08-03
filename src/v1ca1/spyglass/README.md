@@ -21,8 +21,8 @@ register artifacts, or write to NWB.
   ephys-referenced seconds and provides Pynapple and SpikeInterface adapters.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
-- `ripple_modulation.py` and `stability.py` provide database-free computation
-  and atomic Parquet writing.
+- `movement.py`, `ripple_modulation.py`, and `stability.py` provide
+  database-free computation and atomic artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
@@ -53,7 +53,7 @@ the catalog without inserting it.
 
 ## Units and immutable selections
 
-Both analyses use one shared `SortedSpikesGroup` adapter. It resolves every
+All analyses use one shared `SortedSpikesGroup` adapter. It resolves every
 group member through `SpikeSortingOutput`, supports imported and curated merge
 parents, applies the associated `UnitSelectionParams` include/exclude labels,
 checks session and region provenance, and combines canonical spike times in
@@ -89,12 +89,48 @@ detector. The default parameters require the source detector threshold to be
 selected source row; it has no downstream ripple-mean-z-score threshold. A
 selected row with `ripple_count=0` remains an explicit `no_ripples` result.
 
+Movement firing rate uses:
+
+```text
+Position + MovementParameters
+    + SortedSpikesGroup / UnitSelectionParams snapshot
+    -> MovementFiringRateSelection (movement_firing_rate_id)
+    -> MovementFiringRate
+    -> movement_firing_rate.parquet + movement_intervals.npz
+```
+
+`MovementFiringRateSelection` identifies one named, epoch-specific position
+series, region, sorting group, unit filter, and movement parameter set. The
+default parameters define movement as speed above 4.0 cm/s after smoothing
+speed with a 0.1 s sigma. `MovementFiringRate.make()` applies the position
+series' NWB-recorded analysis offset, derives movement once, and saves both the
+exact Pynapple `IntervalSet` in ephys-referenced seconds and the corresponding
+epoch-wide firing rates. Movement rows are not restricted to run epochs; a
+sleep epoch is valid whenever its selected Position series exists.
+
+The Parquet contains one row for every unit selected by the sorting-group,
+label, and region filters, keyed persistently by
+`(spikesorting_merge_id, unit_id)`. It does not apply a firing-rate prefilter.
+When movement support is valid, a unit with no movement spikes is retained with
+`movement_spike_count=0` and `movement_firing_rate_hz=0.0`. The result status is
+one of:
+
+- `valid`: positive-duration movement support exists, so every selected unit
+  has a finite movement firing rate.
+- `no_units`: no units survive the upstream sorting-group filters; the Parquet
+  and IntervalSet are canonical empty artifacts.
+- `no_valid_position`: fewer than two usable position or speed samples remain;
+  selected units are retained with undefined rates and the IntervalSet is
+  empty.
+- `no_movement`: position and speed are usable but no positive-duration
+  movement support exceeds the threshold; selected units are retained with
+  undefined rates and the IntervalSet is empty.
+
 Task-progression stability uses:
 
 ```text
-EpochIntervals + TrajectoryIntervals + Position + WTrackGraph
+TrajectoryIntervals + WTrackGraph + MovementFiringRate
     + TaskProgressionStabilityParameters
-    + SortedSpikesGroup / UnitSelectionParams snapshot
     -> TaskProgressionStabilitySelection (task_progression_stability_id)
     -> TaskProgressionStability
     -> stability.parquet
@@ -102,14 +138,21 @@ EpochIntervals + TrajectoryIntervals + Position + WTrackGraph
 
 Each result covers one epoch, trajectory, graph configuration, named position
 series, region, sorting group, and parameter set. The graph configuration must
-match the trajectory. The Parquet retains every selected unit, including
-undefined correlations, with explicit QC/status columns; firing-rate and
-stability thresholds remain downstream selection choices.
+match the trajectory. Its `make()` loads the saved movement IntervalSet and
+all-unit firing-rate Parquet through the selected `MovementFiringRate` row; it
+does not recompute speed, movement support, or firing rates. Consequently,
+`TaskProgressionStabilityParameters` contains only the place-bin size. The
+stability Parquet retains every selected unit, including undefined
+correlations, with explicit QC/status columns; firing-rate and stability
+thresholds remain downstream selection choices. `no_units`,
+`no_valid_position`, and `no_movement` propagate from the movement result;
+otherwise stability reports `valid` when at least one unit has a valid
+correlation and `no_valid_units` when none does.
 
-The computed table names are `RippleModulation` and
+The computed table names are `RippleModulation`, `MovementFiringRate`, and
 `TaskProgressionStability`—there is no `Computed` suffix. Empty but valid
-selections are recorded through terminal statuses such as `no_units`,
-`no_ripples`, or `no_valid_units` rather than being silently omitted.
+selections are recorded through explicit terminal statuses rather than being
+silently omitted.
 
 ## Artifacts and provenance
 
@@ -121,12 +164,19 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     summary.parquet
     peri_ripple_firing_rate.parquet
 
+<root>/<animal>/<date>/movement_firing_rate/<epoch>/<region>/<uuid>/
+    movement_firing_rate.parquet
+    movement_intervals.npz
+
 <root>/<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/
     stability.parquet
 ```
 
-`make()` computes from the selected NWB and Spyglass sorting sources, writes a
-new artifact, and inserts the result row. `register_existing()` instead
+`make()` computes from the selected sources, writes a new artifact bundle, and
+inserts the result row. It never writes results into the source NWB.
+`MovementFiringRate` is compute-only: its Parquet and Pynapple-backed NPZ are
+written and validated together. `RippleModulation` and
+`TaskProgressionStability` additionally provide `register_existing()`, which
 validates and partitions matching legacy Parquets, copies the selected content
 into the same canonical path, and inserts a result row without rerunning the
 analysis. Legacy registration is restricted to matching
@@ -140,13 +190,14 @@ rejects `overwrite=True` and checks for an existing row before calling the
 artifact hook. With `skip_duplicates=True`, it returns that row without
 touching files; otherwise a duplicate is an error. A new result is inserted
 directly into the computed table only after this preflight and artifact
-validation. Both routes record `artifact_origin`, a selected-unit digest, and
-the actual runtime commits. Registration additionally retains source paths,
-source hashes, and any supplied source commits. Neither route writes derived
-results into the raw or augmented NWB file.
+validation. For tables that support both routes, both record `artifact_origin`,
+a selected-unit digest, and the actual runtime commits. Registration
+additionally retains source paths, source hashes, and any supplied source
+commits. `MovementFiringRate` records the selected-unit digest and runtime
+commits directly on its compute-only result.
 
 The project `AnalysisNwbfile` table remains available for future outputs that
-fit an NWB-native container. The current Parquet-native analyses use
+fit an NWB-native container. The current file-backed analyses use
 `filepath@analysis`; activation does not register `AnalysisNwbfile` globally.
 Call `register_with_spyglass()` explicitly if it is needed later.
 

@@ -137,6 +137,50 @@ source_object_id = NULL: varchar(64)
 """
 
 
+MOVEMENT_PARAMETERS_DEFINITION = """
+# Named parameters defining movement from one position series.
+movement_param_name: varchar(64)
+---
+speed_threshold_cm_s: double
+speed_smoothing_sigma_s: double
+"""
+
+
+MOVEMENT_FIRING_RATE_SELECTION_DEFINITION = """
+# One immutable position, sorting-group snapshot, region, and movement definition.
+movement_firing_rate_id: uuid
+---
+-> Position
+-> MovementParameters
+-> SortedSpikesGroup
+region: enum('v1', 'ca1')
+sorting_group_members: longblob
+sorting_group_members_sha256: char(64)
+unit_filter_include_labels: longblob
+unit_filter_exclude_labels: longblob
+unit_filter_params_sha256: char(64)
+movement_parameters_sha256: char(64)
+"""
+
+
+MOVEMENT_FIRING_RATE_DEFINITION = """
+# Keyed movement support and all-unit movement firing-rate artifacts.
+-> MovementFiringRateSelection
+---
+movement_firing_rate_path: filepath@analysis
+movement_intervals_path: filepath@analysis
+n_units: int unsigned
+n_valid_units: int unsigned
+n_units_with_spikes: int unsigned
+movement_interval_count: int unsigned
+movement_duration_s: double
+analysis_status: enum('valid', 'no_units', 'no_valid_position', 'no_movement')
+selected_units_sha256: char(64)
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+"""
+
+
 RIPPLE_MODULATION_PARAMETERS_DEFINITION = """
 # Named scalar parameters for ripple-triggered firing-rate analysis.
 ripple_modulation_param_name: varchar(64)
@@ -193,27 +237,18 @@ TASK_PROGRESSION_STABILITY_PARAMETERS_DEFINITION = """
 # Named numerical parameters for odd/even task-progression stability.
 task_progression_stability_param_name: varchar(64)
 ---
-speed_threshold_cm_s: double
-speed_smoothing_sigma_s: double
 place_bin_size_cm: double
 """
 
 
 TASK_PROGRESSION_STABILITY_SELECTION_DEFINITION = """
-# One immutable epoch, trajectory, graph, position, sorting, region, and parameter selection.
+# One immutable trajectory/graph selection downstream of saved movement support.
 task_progression_stability_id: uuid
 ---
 -> TrajectoryIntervals
--> Position
 -> WTrackGraph
+-> MovementFiringRate
 -> TaskProgressionStabilityParameters
--> SortedSpikesGroup
-region: enum('v1', 'ca1')
-sorting_group_members: longblob
-sorting_group_members_sha256: char(64)
-unit_filter_include_labels: longblob
-unit_filter_exclude_labels: longblob
-unit_filter_params_sha256: char(64)
 task_progression_stability_parameters_sha256: char(64)
 """
 
@@ -225,7 +260,7 @@ TASK_PROGRESSION_STABILITY_DEFINITION = """
 stability_path: filepath@analysis
 n_units: int unsigned
 n_valid_units: int unsigned
-analysis_status: enum('valid', 'no_units', 'no_valid_units')
+analysis_status: enum('valid', 'no_units', 'no_valid_position', 'no_movement', 'no_valid_units')
 selected_units_sha256: char(64)
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
@@ -265,11 +300,18 @@ DEFAULT_RIPPLE_MODULATION_PARAMETERS = MappingProxyType(
 )
 
 
+DEFAULT_MOVEMENT_PARAMETERS = MappingProxyType(
+    {
+        "movement_param_name": "default",
+        "speed_threshold_cm_s": 4.0,
+        "speed_smoothing_sigma_s": 0.1,
+    }
+)
+
+
 DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS = MappingProxyType(
     {
         "task_progression_stability_param_name": "default",
-        "speed_threshold_cm_s": 4.0,
-        "speed_smoothing_sigma_s": 0.1,
         "place_bin_size_cm": 4.0,
     }
 )
@@ -283,6 +325,11 @@ TABLE_DEFINITIONS = MappingProxyType(
         "position": POSITION_DEFINITION,
         "wtrack_graph": WTRACK_GRAPH_DEFINITION,
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,
+        "movement_parameters": MOVEMENT_PARAMETERS_DEFINITION,
+        "movement_firing_rate_selection": (
+            MOVEMENT_FIRING_RATE_SELECTION_DEFINITION
+        ),
+        "movement_firing_rate": MOVEMENT_FIRING_RATE_DEFINITION,
         "ripple_modulation_parameters": RIPPLE_MODULATION_PARAMETERS_DEFINITION,
         "ripple_modulation_selection": RIPPLE_MODULATION_SELECTION_DEFINITION,
         "ripple_modulation": RIPPLE_MODULATION_DEFINITION,
@@ -300,6 +347,7 @@ TABLE_DEFINITIONS = MappingProxyType(
 
 __all__ = [
     "DEFAULT_ANALYSIS_NWBFILE_SCHEMA_NAME",
+    "DEFAULT_MOVEMENT_PARAMETERS",
     "DEFAULT_RIPPLE_MODULATION_PARAMETERS",
     "DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS",
     "DEFAULT_SCHEMA_NAME",

@@ -23,8 +23,10 @@ from v1ca1.spyglass.tables import (
     _construct_tables,
     _filter_registered_table,
     _intervals_to_frame,
+    _make_movement_firing_rate_row,
     _make_ripple_modulation_row,
     _make_task_progression_stability_row,
+    _movement_firing_rate_selection_row,
     _ripple_modulation_selection_row,
     _stability_selection_row,
     _validate_analysis_schema_prefix,
@@ -187,17 +189,28 @@ def _ripple_selection_key() -> dict[str, Any]:
     }
 
 
+def _movement_selection_key() -> dict[str, Any]:
+    return {
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "position_series_name": "head_position",
+        "movement_param_name": "default",
+        "unit_filter_params_name": "curated_units",
+        "sorted_spikes_group_name": "all shanks",
+        "region": "ca1",
+    }
+
+
 def _stability_selection_key() -> dict[str, Any]:
     return {
         "nwb_file_name": "L1420240102_.nwb",
         "epoch": "02_r1",
         "trajectory_type": "center_to_left",
-        "position_series_name": "head_position",
         "configuration_name": "center_to_left",
+        "movement_firing_rate_id": uuid.UUID(
+            "33333333-3333-5333-8333-333333333333"
+        ),
         "task_progression_stability_param_name": "default",
-        "unit_filter_params_name": "curated_units",
-        "sorted_spikes_group_name": "all shanks",
-        "region": "ca1",
     }
 
 
@@ -230,6 +243,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert tuple(key for key in bundle if key in SOURCE_TABLE_KEYS) == SOURCE_TABLE_KEYS
     assert set(bundle) == {
         *SOURCE_TABLE_KEYS,
+        "movement_parameters",
+        "movement_firing_rate_selection",
+        "movement_firing_rate",
         "ripple_modulation_parameters",
         "ripple_modulation_selection",
         "ripple_modulation",
@@ -281,13 +297,34 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "selected_units_sha256: char(64)" in ripple_result
     assert "RippleModulationComputed" not in ripple_result
 
+    movement_selection = bundle["movement_firing_rate_selection"].definition
+    assert "movement_firing_rate_id: uuid" in movement_selection
+    assert "-> Position" in movement_selection
+    assert "-> MovementParameters" in movement_selection
+    assert "-> SortedSpikesGroup" in movement_selection
+    assert "sorting_group_members_sha256: char(64)" in movement_selection
+    assert "unit_filter_params_sha256: char(64)" in movement_selection
+    assert "movement_parameters_sha256: char(64)" in movement_selection
+
+    movement_result = bundle["movement_firing_rate"].definition
+    assert "-> MovementFiringRateSelection" in movement_result
+    assert "movement_firing_rate_path: filepath@analysis" in movement_result
+    assert "movement_intervals_path: filepath@analysis" in movement_result
+    assert "n_units_with_spikes: int unsigned" in movement_result
+    assert "'no_valid_position'" in movement_result
+    assert "'no_movement'" in movement_result
+    assert "artifact_origin" not in movement_result
+    assert not hasattr(bundle["movement_firing_rate"], "register_existing")
+
     stability_selection = bundle["task_progression_stability_selection"].definition
     assert "task_progression_stability_id: uuid" in stability_selection
     assert "-> TrajectoryIntervals" in stability_selection
-    assert "-> Position" in stability_selection
     assert "-> WTrackGraph" in stability_selection
+    assert "-> MovementFiringRate" in stability_selection
     assert "-> TaskProgressionStabilityParameters" in stability_selection
-    assert "-> SortedSpikesGroup" in stability_selection
+    assert "-> Position" not in stability_selection
+    assert "-> SortedSpikesGroup" not in stability_selection
+    assert "sorting_group_members_sha256" not in stability_selection
     assert (
         "task_progression_stability_parameters_sha256: char(64)"
         in stability_selection
@@ -297,6 +334,8 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "-> TaskProgressionStabilitySelection" in stability_result
     assert "stability_path: filepath@analysis" in stability_result
     assert "analysis_status:" in stability_result
+    assert "'no_valid_position'" in stability_result
+    assert "'no_movement'" in stability_result
     assert "selected_units_sha256: char(64)" in stability_result
 
 
@@ -319,11 +358,23 @@ def test_analysis_schema_prefix_is_validated_before_activation() -> None:
 
 def test_parameter_tables_insert_current_scalar_defaults() -> None:
     bundle, _, _ = _fake_bundle()
+    movement_parameters = bundle["movement_parameters"]
     ripple_parameters = bundle["ripple_modulation_parameters"]
     stability_parameters = bundle["task_progression_stability_parameters"]
 
+    movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
     stability_row = stability_parameters.insert_default()
+
+    assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    assert movement_row == {
+        "movement_param_name": "default",
+        "speed_threshold_cm_s": 4.0,
+        "speed_smoothing_sigma_s": 0.1,
+    }
+    assert movement_parameters._insert_calls == [
+        (movement_row, {"skip_duplicates": True})
+    ]
 
     assert ripple_row == dict(table_specs.DEFAULT_RIPPLE_MODULATION_PARAMETERS)
     assert "minimum_ripple_mean_zscore" not in ripple_row
@@ -339,8 +390,6 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     )
     assert stability_row == {
         "task_progression_stability_param_name": "default",
-        "speed_threshold_cm_s": 4.0,
-        "speed_smoothing_sigma_s": 0.1,
         "place_bin_size_cm": 4.0,
     }
     assert stability_parameters._insert_calls == [
@@ -353,9 +402,25 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         ripple_parameters.insert_parameters(
             {**ripple_row, "baseline_window_start_s": -0.6}
         )
+    zero_threshold = movement_parameters.insert_parameters(
+        {**movement_row, "movement_param_name": "zero", "speed_threshold_cm_s": 0}
+    )
+    assert zero_threshold["speed_threshold_cm_s"] == 0.0
+    with pytest.raises(TypeError, match="numeric scalar"):
+        movement_parameters.insert_parameters(
+            {**movement_row, "speed_threshold_cm_s": [4.0]}
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        movement_parameters.insert_parameters(
+            {**movement_row, "speed_threshold_cm_s": -1.0}
+        )
+    with pytest.raises(ValueError, match="positive"):
+        movement_parameters.insert_parameters(
+            {**movement_row, "speed_smoothing_sigma_s": 0.0}
+        )
     with pytest.raises(ValueError, match="positive and finite"):
         stability_parameters.insert_parameters(
-            {**stability_row, "speed_threshold_cm_s": 0.0}
+            {**stability_row, "place_bin_size_cm": 0.0}
         )
 
     assert _analysis_region("ca1") == "ca1"
@@ -456,47 +521,154 @@ def test_ripple_selection_uuid_is_deterministic_and_freezes_sorting_snapshot() -
         _validate_frozen_sorting_snapshot(first, _sorting_provenance(("merge-a",)))
 
 
-def test_stability_selection_uuid_captures_sources_and_parameter_values() -> None:
-    key = _stability_selection_key()
-    source = _FakeRelation({})
-    epoch = _FakeRelation({"epoch_type": "run"})
+def test_movement_selection_uuid_freezes_sorting_and_parameter_values() -> None:
+    key = _movement_selection_key()
     position = _FakeRelation({"spatial_unit": "cm"})
-    graph = _FakeRelation({"coordinate_unit": "cm"})
-    parameter_values = dict(table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS)
+    parameter_values = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     parameters = _FakeRelation(parameter_values)
     unit_parameters = _FakeRelation(
         {"include_labels": ["accepted"], "exclude_labels": ["noise", "mua"]}
     )
 
-    row = _stability_selection_row(
+    first = _movement_firing_rate_selection_row(
         key=key,
-        epoch_intervals_table=epoch,
-        trajectory_intervals_table=source,
         position_table=position,
-        wtrack_graph_table=graph,
         parameters_table=parameters,
         sorted_spikes_group=_FakeSortedSpikesGroup(["merge-b", "merge-a"]),
         unit_selection_params=unit_parameters,
     )
-    changed_parameter_values = {**parameter_values, "speed_threshold_cm_s": 5.0}
-    changed_parameters = _stability_selection_row(
+    reordered = _movement_firing_rate_selection_row(
         key=key,
-        epoch_intervals_table=epoch,
-        trajectory_intervals_table=source,
         position_table=position,
-        wtrack_graph_table=graph,
+        parameters_table=parameters,
+        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
+        unit_selection_params=unit_parameters,
+    )
+    changed_membership = _movement_firing_rate_selection_row(
+        key=key,
+        position_table=position,
+        parameters_table=parameters,
+        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-c"]),
+        unit_selection_params=unit_parameters,
+    )
+    changed_parameter_values = {
+        **parameter_values,
+        "speed_threshold_cm_s": 5.0,
+    }
+    changed_parameters = _movement_firing_rate_selection_row(
+        key=key,
+        position_table=position,
         parameters_table=_FakeRelation(changed_parameter_values),
         sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
         unit_selection_params=unit_parameters,
     )
 
+    assert isinstance(first["movement_firing_rate_id"], uuid.UUID)
+    assert first["movement_firing_rate_id"].version == 5
+    assert first["movement_firing_rate_id"] == reordered["movement_firing_rate_id"]
+    assert first["movement_firing_rate_id"] != changed_membership[
+        "movement_firing_rate_id"
+    ]
+    assert first["movement_firing_rate_id"] != changed_parameters[
+        "movement_firing_rate_id"
+    ]
+    assert first["sorting_group_members"] == ["merge-a", "merge-b"]
+    assert first["unit_filter_include_labels"] == ["accepted"]
+    assert first["unit_filter_exclude_labels"] == ["mua", "noise"]
+    assert first["movement_parameters_sha256"] == provenance_sha256(
+        parameter_values
+    )
+    assert changed_parameters["movement_parameters_sha256"] == provenance_sha256(
+        changed_parameter_values
+    )
+
+    with pytest.raises(ValueError, match="centimeters"):
+        _movement_firing_rate_selection_row(
+            key=key,
+            position_table=_FakeRelation({"spatial_unit": "m"}),
+            parameters_table=parameters,
+            sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a"]),
+            unit_selection_params=unit_parameters,
+        )
+
+
+def test_stability_selection_uuid_captures_movement_and_parameter_values() -> None:
+    key = _stability_selection_key()
+    source = _FakeRelation({})
+    epoch = _FakeRelation({"epoch_type": "run"})
+    graph = _FakeRelation({"coordinate_unit": "cm"})
+    movement_result = _FakeRelation(
+        {"movement_firing_rate_id": key["movement_firing_rate_id"]}
+    )
+    movement_selection = _FakeRelation(
+        {
+            "movement_firing_rate_id": key["movement_firing_rate_id"],
+            **_movement_selection_key(),
+        }
+    )
+    parameter_values = dict(table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS)
+    parameters = _FakeRelation(parameter_values)
+
+    row = _stability_selection_row(
+        key=key,
+        epoch_intervals_table=epoch,
+        trajectory_intervals_table=source,
+        wtrack_graph_table=graph,
+        movement_firing_rate_table=movement_result,
+        movement_firing_rate_selection_table=movement_selection,
+        parameters_table=parameters,
+    )
+    repeated = _stability_selection_row(
+        key=key,
+        epoch_intervals_table=epoch,
+        trajectory_intervals_table=source,
+        wtrack_graph_table=graph,
+        movement_firing_rate_table=movement_result,
+        movement_firing_rate_selection_table=movement_selection,
+        parameters_table=parameters,
+    )
+    changed_parameter_values = {**parameter_values, "place_bin_size_cm": 5.0}
+    changed_parameters = _stability_selection_row(
+        key=key,
+        epoch_intervals_table=epoch,
+        trajectory_intervals_table=source,
+        wtrack_graph_table=graph,
+        movement_firing_rate_table=movement_result,
+        movement_firing_rate_selection_table=movement_selection,
+        parameters_table=_FakeRelation(changed_parameter_values),
+    )
+    changed_movement_id = uuid.UUID("44444444-4444-5444-8444-444444444444")
+    changed_movement = _stability_selection_row(
+        key={**key, "movement_firing_rate_id": changed_movement_id},
+        epoch_intervals_table=epoch,
+        trajectory_intervals_table=source,
+        wtrack_graph_table=graph,
+        movement_firing_rate_table=_FakeRelation(
+            {"movement_firing_rate_id": changed_movement_id}
+        ),
+        movement_firing_rate_selection_table=_FakeRelation(
+            {
+                "movement_firing_rate_id": changed_movement_id,
+                **_movement_selection_key(),
+            }
+        ),
+        parameters_table=parameters,
+    )
+
     assert isinstance(row["task_progression_stability_id"], uuid.UUID)
     assert row["task_progression_stability_id"].version == 5
+    assert row["task_progression_stability_id"] == repeated[
+        "task_progression_stability_id"
+    ]
     assert row["trajectory_type"] == "center_to_left"
     assert row["configuration_name"] == "center_to_left"
-    assert row["position_series_name"] == "head_position"
-    assert row["sorting_group_members"] == ["merge-a", "merge-b"]
+    assert row["movement_firing_rate_id"] == key["movement_firing_rate_id"]
+    assert "position_series_name" not in row
+    assert "sorting_group_members" not in row
     assert row["task_progression_stability_id"] != changed_parameters[
+        "task_progression_stability_id"
+    ]
+    assert row["task_progression_stability_id"] != changed_movement[
         "task_progression_stability_id"
     ]
     assert row[
@@ -511,11 +683,21 @@ def test_stability_selection_uuid_captures_sources_and_parameter_values() -> Non
             key={**key, "configuration_name": "center_to_right"},
             epoch_intervals_table=epoch,
             trajectory_intervals_table=source,
-            position_table=position,
             wtrack_graph_table=graph,
+            movement_firing_rate_table=movement_result,
+            movement_firing_rate_selection_table=movement_selection,
             parameters_table=parameters,
-            sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a"]),
-            unit_selection_params=unit_parameters,
+        )
+
+    with pytest.raises(ValueError, match="same epoch"):
+        _stability_selection_row(
+            key={**key, "epoch": "04_r2"},
+            epoch_intervals_table=epoch,
+            trajectory_intervals_table=source,
+            wtrack_graph_table=graph,
+            movement_firing_rate_table=movement_result,
+            movement_firing_rate_selection_table=movement_selection,
+            parameters_table=parameters,
         )
 
 
@@ -544,6 +726,28 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             artifact_root=None,
         )
 
+    movement_parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    movement_selection = {
+        **_movement_selection_key(),
+        "movement_firing_rate_id": uuid.uuid4(),
+        "movement_parameters_sha256": provenance_sha256(movement_parameters),
+    }
+    with pytest.raises(ValueError, match="parameters changed after selection"):
+        _make_movement_firing_rate_row(
+            key=movement_selection,
+            parameters_table=_FakeRelation(
+                {**movement_parameters, "speed_threshold_cm_s": 5.0}
+            ),
+            epoch_intervals_table=object(),
+            position_table=object(),
+            session_table=object(),
+            sorted_spikes_group=object(),
+            unit_selection_params=object(),
+            spike_sorting_output=object(),
+            nwbfile_table=object(),
+            artifact_root=None,
+        )
+
     stability_parameters = dict(
         table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
     )
@@ -558,12 +762,15 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
         _make_task_progression_stability_row(
             key=stability_selection,
             parameters_table=_FakeRelation(
-                {**stability_parameters, "speed_threshold_cm_s": 5.0}
+                {**stability_parameters, "place_bin_size_cm": 5.0}
             ),
             epoch_intervals_table=object(),
             trajectory_intervals_table=object(),
             position_table=object(),
             wtrack_graph_table=object(),
+            movement_firing_rate_table=object(),
+            movement_firing_rate_selection_table=object(),
+            movement_parameters_table=object(),
             session_table=object(),
             sorted_spikes_group=object(),
             unit_selection_params=object(),
@@ -576,7 +783,12 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
 def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -> None:
     ripple_id = uuid.UUID("11111111-1111-5111-8111-111111111111")
     stability_id = uuid.UUID("22222222-2222-5222-8222-222222222222")
+    movement_id = uuid.UUID("33333333-3333-5333-8333-333333333333")
     ripple_selection = {"ripple_modulation_id": ripple_id, **_ripple_selection_key()}
+    movement_selection = {
+        "movement_firing_rate_id": movement_id,
+        **_movement_selection_key(),
+    }
     stability_selection = {
         "task_progression_stability_id": stability_id,
         **_stability_selection_key(),
@@ -593,6 +805,20 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
             "n_valid_units": 1,
             "analysis_status": "valid",
             "selected_units_sha256": "a" * 64,
+        }
+
+    def movement_compute(**kwargs):
+        calls.append(("movement_compute", kwargs))
+        return {
+            "movement_firing_rate_path": "/analysis/movement_firing_rate.parquet",
+            "movement_intervals_path": "/analysis/movement_intervals.npz",
+            "n_units": 2,
+            "n_valid_units": 2,
+            "n_units_with_spikes": 1,
+            "movement_interval_count": 3,
+            "movement_duration_s": 12.5,
+            "analysis_status": "valid",
+            "selected_units_sha256": "c" * 64,
         }
 
     def ripple_register(**kwargs):
@@ -631,6 +857,9 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         if table.__name__ == "RippleModulationSelection":
             assert key == {"ripple_modulation_id": ripple_id}
             return dict(ripple_selection)
+        if table.__name__ == "MovementFiringRateSelection":
+            assert key == {"movement_firing_rate_id": movement_id}
+            return dict(movement_selection)
         if table.__name__ == "TaskProgressionStabilitySelection":
             assert key == {"task_progression_stability_id": stability_id}
             return dict(stability_selection)
@@ -646,12 +875,14 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         runtime_hooks={
             "ripple_modulation_compute": ripple_compute,
             "ripple_modulation_register_existing": ripple_register,
+            "movement_firing_rate_compute": movement_compute,
             "task_progression_stability_compute": stability_compute,
             "task_progression_stability_register_existing": stability_register,
         }
     )
 
     ripple = bundle["ripple_modulation"]
+    movement = bundle["movement_firing_rate"]
     stability = bundle["task_progression_stability"]
     ripple().make({"ripple_modulation_id": ripple_id})
     ripple.register_existing(
@@ -660,6 +891,7 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         peri_ripple_firing_rate_path="old-peri.parquet",
         source_v1ca1_git_commit="source-v1-commit",
     )
+    movement().make({"movement_firing_rate_id": movement_id})
     stability().make({"task_progression_stability_id": stability_id})
     stability.register_existing(
         {"task_progression_stability_id": stability_id},
@@ -670,15 +902,17 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     assert [name for name, _ in calls] == [
         "ripple_compute",
         "ripple_register",
+        "movement_compute",
         "stability_compute",
         "stability_register",
     ]
     assert calls[0][1]["key"] == ripple_selection
     assert calls[1][1]["key"] == ripple_selection
-    assert calls[2][1]["key"] == stability_selection
+    assert calls[2][1]["key"] == movement_selection
     assert calls[3][1]["key"] == stability_selection
+    assert calls[4][1]["key"] == stability_selection
     assert calls[1][1]["overwrite"] is False
-    assert calls[3][1]["overwrite"] is False
+    assert calls[4][1]["overwrite"] is False
     assert all(
         kwargs["unit_selection_params"] is unit_selection_params
         for _, kwargs in calls
@@ -689,6 +923,17 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         "skip_duplicates": False,
         "allow_direct_insert": True,
     }
+    assert movement._insert_calls[0][0]["movement_firing_rate_id"] == movement_id
+    assert "artifact_origin" not in movement._insert_calls[0][0]
+    assert calls[2][1]["parameters_table"] is bundle["movement_parameters"]
+    for call_index in (3, 4):
+        assert calls[call_index][1]["movement_firing_rate_table"] is movement
+        assert calls[call_index][1][
+            "movement_firing_rate_selection_table"
+        ] is bundle["movement_firing_rate_selection"]
+        assert calls[call_index][1]["movement_parameters_table"] is bundle[
+            "movement_parameters"
+        ]
     assert stability._insert_calls[0][0][
         "task_progression_stability_id"
     ] == stability_id
@@ -699,7 +944,7 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     }
     assert all(
         row["runtime_spyglass_git_commit"] == "runtime-spyglass-commit"
-        for result in (ripple, stability)
+        for result in (ripple, movement, stability)
         for row, _kwargs in result._insert_calls
     )
 
@@ -830,19 +1075,31 @@ def test_register_existing_preflights_duplicate_before_hook(
 
 
 @pytest.mark.parametrize(
-    ("table_key", "selection_id_name", "hook_name", "artifact_fields"),
+    ("table_key", "selection_id_name", "hook_name", "artifact_specs"),
     [
         (
             "ripple_modulation",
             "ripple_modulation_id",
             "ripple_modulation_compute",
-            ("summary_path", "peri_ripple_firing_rate_path"),
+            (
+                ("summary_path", "summary.parquet"),
+                ("peri_ripple_firing_rate_path", "peri.parquet"),
+            ),
+        ),
+        (
+            "movement_firing_rate",
+            "movement_firing_rate_id",
+            "movement_firing_rate_compute",
+            (
+                ("movement_firing_rate_path", "movement_firing_rate.parquet"),
+                ("movement_intervals_path", "movement_intervals.npz"),
+            ),
         ),
         (
             "task_progression_stability",
             "task_progression_stability_id",
             "task_progression_stability_compute",
-            ("stability_path",),
+            (("stability_path", "stability.parquet"),),
         ),
     ],
 )
@@ -852,12 +1109,13 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
     table_key: str,
     selection_id_name: str,
     hook_name: str,
-    artifact_fields: tuple[str, ...],
+    artifact_specs: tuple[tuple[str, str], ...],
 ) -> None:
     selection_id = uuid.uuid4()
+    artifact_dir = tmp_path / table_key
+    artifact_dir.mkdir()
     created_paths = [
-        tmp_path / f"created-{index}.parquet"
-        for index in range(len(artifact_fields))
+        artifact_dir / filename for _field_name, filename in artifact_specs
     ]
     retained_path = tmp_path / "preexisting.parquet"
     retained_path.write_bytes(b"keep")
@@ -866,7 +1124,12 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
         for path in created_paths:
             path.write_bytes(b"new")
         row = {
-            field: str(path) for field, path in zip(artifact_fields, created_paths)
+            field_name: str(path)
+            for (field_name, _filename), path in zip(
+                artifact_specs,
+                created_paths,
+                strict=True,
+            )
         }
         row.update(
             {
@@ -879,6 +1142,14 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
         )
         if table_key == "ripple_modulation":
             row["n_ripples"] = 3
+        if table_key == "movement_firing_rate":
+            row.update(
+                {
+                    "n_units_with_spikes": 1,
+                    "movement_interval_count": 2,
+                    "movement_duration_s": 5.0,
+                }
+            )
         return row
 
     monkeypatch.setitem(
@@ -897,6 +1168,7 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
         result().make({selection_id_name: selection_id})
 
     assert all(not path.exists() for path in created_paths)
+    assert not artifact_dir.exists()
     assert retained_path.read_bytes() == b"keep"
 
 
