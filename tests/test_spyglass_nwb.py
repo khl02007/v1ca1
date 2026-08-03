@@ -12,6 +12,7 @@ import pytest
 
 from v1ca1.spyglass.nwb import (
     POSITION_EPOCHS_TABLE_PATH,
+    POSITION_INTERFACE_PATH,
     catalog_augmented_nwb,
     load_interval_set,
     load_position,
@@ -313,9 +314,16 @@ def test_catalog_augmented_nwb_groups_source_tables() -> None:
     assert catalog["ripples"][0]["detector_zscore_threshold"] == pytest.approx(2.0)
     assert catalog["ripples"][0]["speed_gated"] is True
     assert catalog["ripples"][0]["provenance_object_id"] == "ripple-provenance-id"
-    assert [(row["epoch"], row["position_type"]) for row in catalog["position"]] == [
-        ("r1", "head"),
-        ("r1", "body"),
+    assert [
+        (
+            row["epoch"],
+            row["position_series_name"],
+            row["position_role"],
+        )
+        for row in catalog["position"]
+    ] == [
+        ("r1", "head_position", "head"),
+        ("r1", "body_position", "body"),
     ]
     assert {row["spatial_unit"] for row in catalog["position"]} == {"cm"}
     assert catalog["position"][0]["source_table_path"] == POSITION_EPOCHS_TABLE_PATH
@@ -369,6 +377,44 @@ def test_interval_loader_filters_group_and_preserves_event_metadata(
     assert ripples.metadata["mean_zscore"] == [2.0, 3.0]
 
 
+def test_zero_count_selected_ripple_epoch_is_cataloged_and_loads_empty(
+    fake_pynapple: None,
+) -> None:
+    nwbfile = _base_nwb()
+    nwbfile.intervals["ripples"] = _Table(
+        "ripples",
+        {
+            "start_time": [1.1, 3.1],
+            "stop_time": [1.2, 3.2],
+            "epoch": ["r1", "r1"],
+            "mean_zscore": [2.0, 3.0],
+        },
+        object_id="ripple-id",
+    )
+    provenance = json.loads(
+        nwbfile.scratch["ripple_detection_provenance"].data
+    )
+    provenance["run_log"]["record"]["outputs"] = {
+        "selected_epochs": ["r1", "s1"],
+        "epoch_summaries": {
+            "r1": {"ripple_count": 2},
+            "s1": {"ripple_count": 0},
+        },
+    }
+    nwbfile.scratch["ripple_detection_provenance"].data = json.dumps(
+        provenance
+    )
+
+    ripple_rows = read_ripples(nwbfile)
+    zero_row = next(row for row in ripple_rows if row["epoch"] == "s1")
+    empty_intervals = load_interval_set(nwbfile, zero_row)
+
+    assert zero_row["ripple_count"] == 0
+    assert empty_intervals.start.size == 0
+    assert empty_intervals.end.size == 0
+    assert empty_intervals.metadata["epoch"] == []
+
+
 def test_loaders_reject_catalog_object_ids_from_another_nwb(
     fake_pynapple: None,
 ) -> None:
@@ -405,6 +451,36 @@ def test_position_loader_applies_offset_by_default(fake_pynapple: None) -> None:
     assert stored.d.shape == (4, 2)
 
 
+def test_position_loader_selects_explicit_future_series_name(
+    fake_pynapple: None,
+) -> None:
+    nwbfile = _base_nwb()
+    position = nwbfile.processing["behavior"].data_interfaces["position"]
+    position.spatial_series["nose_tip_xy"] = _SpatialSeries(
+        "nose_tip_xy",
+        data=np.arange(20, 28, dtype=float).reshape(4, 2),
+        timestamps=np.asarray([0.5, 1.5, 2.5, 3.5]),
+        object_id="nose-tip-id",
+    )
+    row = read_position_index(nwbfile)[0]
+    row.update(
+        {
+            "position_series_name": "nose_tip_xy",
+            "position_role": "nose_tip",
+            "source_object_path": f"{POSITION_INTERFACE_PATH}/nose_tip_xy",
+            "source_object_id": "nose-tip-id",
+        }
+    )
+
+    loaded = load_position(nwbfile, row)
+
+    np.testing.assert_allclose(loaded.t, [1.5, 2.5, 3.5])
+    np.testing.assert_allclose(
+        loaded.d,
+        np.asarray([[22.0, 23.0], [24.0, 25.0], [26.0, 27.0]]),
+    )
+
+
 def test_position_catalog_rejects_units_that_do_not_match_graph_cm() -> None:
     nwbfile = _base_nwb()
     position = nwbfile.processing["behavior"].data_interfaces["position"]
@@ -414,6 +490,27 @@ def test_position_catalog_rejects_units_that_do_not_match_graph_cm() -> None:
         read_position_index(nwbfile)
 
 
+def test_position_loader_rejects_changed_series_path_and_units(
+    fake_pynapple: None,
+) -> None:
+    nwbfile = _base_nwb()
+    row = read_position_index(nwbfile)[0]
+
+    with pytest.raises(ValueError, match="source_object_path is not canonical"):
+        load_position(
+            nwbfile,
+            {
+                **row,
+                "source_object_path": f"{POSITION_INTERFACE_PATH}/body_position",
+            },
+        )
+
+    position = nwbfile.processing["behavior"].data_interfaces["position"]
+    position.spatial_series["head_position"].unit = "meters"
+    with pytest.raises(ValueError, match="must use centimeters"):
+        load_position(nwbfile, row)
+
+
 def test_position_loader_rejects_truncated_source_slice(fake_pynapple: None) -> None:
     nwbfile = _base_nwb()
     row = read_position_index(nwbfile)[0]
@@ -421,6 +518,21 @@ def test_position_loader_rejects_truncated_source_slice(fake_pynapple: None) -> 
 
     with pytest.raises(ValueError, match="bounds do not match"):
         load_position(nwbfile, row, apply_analysis_offset=False)
+
+
+def test_position_loader_rejects_changed_epoch_times_and_offset(
+    fake_pynapple: None,
+) -> None:
+    nwbfile = _base_nwb()
+    row = read_position_index(nwbfile)[0]
+
+    with pytest.raises(ValueError, match="epoch time bounds do not match"):
+        load_position(nwbfile, {**row, "start_time": 0.6})
+    with pytest.raises(ValueError, match="bounds do not match"):
+        load_position(
+            nwbfile,
+            {**row, "analysis_start_offset_samples": 0},
+        )
 
 
 def test_wtrack_loader_reads_only_selected_configuration() -> None:

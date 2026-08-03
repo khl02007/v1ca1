@@ -20,7 +20,10 @@ from v1ca1.paper_figures.datasets import (
     get_processed_datasets,
     normalize_dataset_id,
 )
-from v1ca1.paper_figures.figure_1 import get_stability_table_path
+from v1ca1.paper_figures.figure_1 import (
+    PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
+    get_stability_table_path,
+)
 from v1ca1.paper_figures.figure_3 import (
     DARK_MOVEMENT_FR_CACHE_COLUMNS,
     DARK_MOVEMENT_FR_CACHE_VERSION,
@@ -173,6 +176,9 @@ PANEL_B_ALIGNMENT_SCHEMATIC_AXIS_BOUNDS = (-0.06, 0.39, 0.40, 0.58)
 PANEL_C_SCHEMATIC_AXIS_BOUNDS = (-0.08, 0.25, 0.40, 0.72)
 PANEL_C_DELTA_AXIS_BOUNDS = (0.39, 0.35, 0.60, 0.59)
 PANEL_B_MIN_TUNING_STABILITY_CORRELATION = 0.5
+PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ = (
+    PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ
+)
 PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION = (
     PANEL_B_MIN_TUNING_STABILITY_CORRELATION
 )
@@ -2103,6 +2109,9 @@ def make_figure_2(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        swap_delta_min_movement_firing_rate_hz=(
+            PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         swap_delta_min_tuning_stability_correlation=(
             PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),

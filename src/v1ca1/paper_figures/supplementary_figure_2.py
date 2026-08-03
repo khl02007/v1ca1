@@ -37,6 +37,7 @@ from v1ca1.paper_figures._dark_light import (
     parse_dataset_id,
 )
 from v1ca1.paper_figures.figure_2 import (
+    PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
 )
 from v1ca1.paper_figures.style import (
@@ -3891,6 +3892,9 @@ def make_supplementary_figure_2(
         datasets=datasets,
         region=region,
         dark_epoch=dark_epoch,
+        min_movement_firing_rate_hz=(
+            PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         min_tuning_stability_correlation=(
             PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),

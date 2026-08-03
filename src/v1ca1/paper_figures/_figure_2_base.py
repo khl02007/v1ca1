@@ -25,6 +25,7 @@ from v1ca1.paper_figures.figure_1 import (
     _format_cell_animal_count,
     _format_delta_advantage_summary,
     get_stability_table_path,
+    select_units_by_saved_movement_firing_rate,
 )
 from v1ca1.paper_figures.figure_2_common import *  # noqa: F403
 from v1ca1.paper_figures.figure_2_common import (
@@ -55,6 +56,7 @@ from v1ca1.paper_figures.figure_2_common import (
     PANEL_B_EXAMPLE_MODEL_LABELS,
     PANEL_B_FIELD_LABEL_Y,
     PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
+    PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_B_INDEPENDENT_BASIS_ICON_SCALE,
     PANEL_B_INDEPENDENT_BASIS_LABEL,
@@ -769,9 +771,10 @@ def _load_panel_b_stable_units_for_epoch(
     epoch: str,
     epoch_type: str,
     region: str,
+    min_movement_firing_rate_hz: float | None,
     min_stability_correlation: float,
 ) -> Any:
-    """Return units with stable even-odd tuning in at least one DPP trajectory."""
+    """Return active units with stable tuning in at least one DPP trajectory."""
     import pandas as pd
 
     path = get_stability_table_path(data_root, animal_name, date)
@@ -782,13 +785,15 @@ def _load_panel_b_stable_units_for_epoch(
             "for this session first."
         )
     table = pd.read_parquet(path)
-    required_columns = (
+    required_columns = [
         "unit",
         "region",
         "epoch",
         "trajectory_type",
         "stability_correlation",
-    )
+    ]
+    if min_movement_firing_rate_hz is not None:
+        required_columns.append("firing_rate_hz")
     missing_columns = [column for column in required_columns if column not in table]
     if missing_columns:
         raise ValueError(
@@ -805,12 +810,17 @@ def _load_panel_b_stable_units_for_epoch(
         )
     ].copy()
     rows["unit"] = pd.to_numeric(rows["unit"], errors="coerce")
+    active_units = select_units_by_saved_movement_firing_rate(
+        rows,
+        min_movement_firing_rate_hz,
+    )
     rows["stability_correlation"] = pd.to_numeric(
         rows["stability_correlation"],
         errors="coerce",
     )
     rows = rows[
         np.isfinite(rows["unit"].to_numpy(dtype=float))
+        & rows["unit"].isin(active_units)
         & np.isfinite(rows["stability_correlation"].to_numpy(dtype=float))
         & (
             rows["stability_correlation"].to_numpy(dtype=float)
@@ -846,9 +856,12 @@ def filter_panel_b_overlap_by_even_odd_stability(
     region: str,
     light_epoch: str | None,
     dark_epoch: str | None,
+    min_movement_firing_rate_hz: float | None = (
+        PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+    ),
     min_stability_correlation: float,
 ) -> Any:
-    """Keep Panel B units stable in at least one DPP trajectory in each epoch."""
+    """Keep Panel B units active and stable in both light and dark epochs."""
     import pandas as pd
 
     if table is None or not len(table):
@@ -866,6 +879,7 @@ def filter_panel_b_overlap_by_even_odd_stability(
             epoch=resolved_dark_epoch,
             epoch_type="dark",
             region=region,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
             min_stability_correlation=min_stability_correlation,
         )
         light_stable = _load_panel_b_stable_units_for_epoch(
@@ -875,6 +889,7 @@ def filter_panel_b_overlap_by_even_odd_stability(
             epoch=resolved_light_epoch,
             epoch_type="light",
             region=region,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
             min_stability_correlation=min_stability_correlation,
         )
         stable_tables.append(
@@ -1283,13 +1298,13 @@ def _draw_panel_d_swap_schematic(
     )
 
 
-def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
-    """Return one held-out mean swapped-segment delta LL per unit."""
+def _summarize_swap_delta_across_trajectories(swap_delta_table: Any) -> Any:
+    """Return complete held-out mean swapped-segment delta LL rows per unit."""
     import pandas as pd
 
     table = _filter_panel_h_heldout_delta(swap_delta_table)
     if table is None or "delta_ll_bits_per_spike" not in table or not len(table):
-        return np.asarray([], dtype=float)
+        return pd.DataFrame(columns=["mean_delta"])
 
     table = table.copy()
     table["delta_ll_bits_per_spike"] = pd.to_numeric(
@@ -1299,7 +1314,7 @@ def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
     finite_mask = np.isfinite(table["delta_ll_bits_per_spike"].to_numpy(dtype=float))
     table = table[finite_mask].copy()
     if table.empty:
-        return np.asarray([], dtype=float)
+        return pd.DataFrame(columns=["mean_delta"])
 
     if "trajectory" in table:
         table = table[
@@ -1319,7 +1334,7 @@ def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
     ]
     if not key_columns:
         values = table["delta_ll_bits_per_spike"].to_numpy(dtype=float)
-        return values[np.isfinite(values)]
+        return pd.DataFrame({"mean_delta": values[np.isfinite(values)]})
 
     grouped = table.groupby(key_columns, dropna=False)
     if "trajectory" in table:
@@ -1332,8 +1347,16 @@ def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
         ]
     else:
         summary = grouped.agg(mean_delta=("delta_ll_bits_per_spike", "mean"))
-    values = summary["mean_delta"].to_numpy(dtype=float)
-    return values[np.isfinite(values)]
+    summary = summary.reset_index()
+    return summary[
+        np.isfinite(summary["mean_delta"].to_numpy(dtype=float))
+    ].copy()
+
+
+def _mean_swap_delta_across_trajectories(swap_delta_table: Any) -> np.ndarray:
+    """Return one held-out mean swapped-segment delta LL per complete unit."""
+    summary = _summarize_swap_delta_across_trajectories(swap_delta_table)
+    return np.asarray(summary["mean_delta"], dtype=float)
 
 
 def plot_panel_d_mean_swap_delta_axis(
@@ -1348,7 +1371,8 @@ def plot_panel_d_mean_swap_delta_axis(
     visual_color = _panel_model_color("visual", model_colors)
     model_color = _panel_model_color(model_name, model_colors)
     model_label = _panel_model_label(model_name, model_labels)
-    values = _mean_swap_delta_across_trajectories(swap_delta_table)
+    summary = _summarize_swap_delta_across_trajectories(swap_delta_table)
+    values = np.asarray(summary["mean_delta"], dtype=float)
     x_limits = PANEL_H_DELTA_X_LIMITS
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
 
@@ -1404,8 +1428,8 @@ def plot_panel_d_mean_swap_delta_axis(
             0.03,
             0.06,
             _format_cell_animal_count(
-                swap_delta_table,
-                value_column="delta_ll_bits_per_spike",
+                summary,
+                value_column="mean_delta",
             ),
             ha="left",
             va="bottom",
@@ -1654,6 +1678,9 @@ def make_figure_2(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        swap_delta_min_movement_firing_rate_hz=(
+            PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         swap_delta_min_tuning_stability_correlation=(
             PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),
@@ -1697,6 +1724,9 @@ def make_figure_2(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        min_movement_firing_rate_hz=(
+            PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         min_stability_correlation=(
             PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),

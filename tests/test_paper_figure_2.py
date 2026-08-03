@@ -29,6 +29,7 @@ from v1ca1.paper_figures.figure_2 import (
     PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
     PANEL_B_EXAMPLE_MODEL_COLORS,
     PANEL_B_EXAMPLE_MODEL_LABELS,
+    PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
     PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
     PANEL_B_MIN_TUNING_STABILITY_CORRELATION,
@@ -336,6 +337,53 @@ def test_panel_b_light_tuning_stability_requires_one_stable_trajectory(
     )
 
 
+def test_panel_b_overlap_intersects_movement_rate_and_stability(
+    tmp_path: Path,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+
+    stability_path = figure_1_module.get_stability_table_path(
+        tmp_path,
+        "L14",
+        "20240611",
+    )
+    stability_path.parent.mkdir(parents=True, exist_ok=True)
+    pandas.DataFrame(
+        {
+            "unit": [11, 11, 12, 12, 13, 13],
+            "region": ["v1"] * 6,
+            "epoch": ["02_r1", "08_r4"] * 3,
+            "trajectory_type": ["center_to_left"] * 6,
+            "firing_rate_hz": [0.5, 0.5, 1.0, 0.49, 1.0, 1.0],
+            "stability_correlation": [0.5, 0.5, 0.9, 0.9, 0.9, 0.49],
+        }
+    ).to_parquet(stability_path)
+    overlap_table = pandas.DataFrame(
+        {
+            "animal_name": ["L14"] * 3,
+            "date": ["20240611"] * 3,
+            "unit": [11, 12, 13],
+            "similarity_dark": [0.2, 0.4, 0.6],
+            "similarity_light": [0.3, 0.5, 0.7],
+        }
+    )
+
+    result = figure_2_base_module.filter_panel_b_overlap_by_even_odd_stability(
+        overlap_table,
+        data_root=tmp_path,
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        light_epoch=None,
+        dark_epoch=None,
+        min_movement_firing_rate_hz=0.5,
+        min_stability_correlation=0.5,
+    )
+
+    assert result["unit"].tolist() == [11]
+    assert result["max_light_tuning_stability_correlation"].tolist() == [0.5]
+    assert result["max_dark_tuning_stability_correlation"].tolist() == [0.5]
+
+
 def test_panel_b_tuning_correlation_table_uses_figure_3_similarity_pairs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,6 +498,7 @@ def test_default_cli_matches_shared_figure_3_canvas() -> None:
         "high_dpp": "#E45756",
     }
     assert PANEL_B_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
+    assert PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ == pytest.approx(0.5)
     assert PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
     assert "visual" in PANEL_B_EXAMPLE_MODEL_COLORS
     assert len(PANEL_B_EXAMPLE_MODEL_COLORS) == 2
@@ -1886,7 +1935,7 @@ def test_panel_d_example_layout_requests_per_example_axis_labels(
     plt.close(fig)
 
 
-def test_panel_e_mean_delta_histogram_uses_figure_1_delta_convention() -> None:
+def test_panel_d_mean_delta_histogram_counts_only_complete_units() -> None:
     pd = pytest.importorskip("pandas")
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -1910,6 +1959,19 @@ def test_panel_e_mean_delta_histogram_uses_figure_1_delta_convention() -> None:
                     "delta_ll_bits_per_spike": value,
                 }
             )
+    for trajectory in figure_2_module.PANEL_H_DELTA_TRAJECTORIES[:-1]:
+        rows.append(
+            {
+                "animal_name": "L19",
+                "date": "20250930",
+                "region": "v1",
+                "dark_epoch": "08_r4",
+                "unit": 3,
+                "model_name": figure_2_module.PANEL_C_SWAP_MODEL_NAME,
+                "trajectory": trajectory,
+                "delta_ll_bits_per_spike": 0.9,
+            }
+        )
     table = pd.DataFrame(rows)
     fig, ax = plt.subplots()
     figure_2_module.plot_panel_d_mean_swap_delta_axis(
@@ -2448,6 +2510,7 @@ def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
         return []
 
     def fake_load_panel_h_swap_delta_table(**kwargs: object) -> str:
+        calls["swap_delta_kwargs"] = kwargs
         return "swap-delta"
 
     monkeypatch.setattr(
@@ -2472,6 +2535,8 @@ def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
         region="v1",
         light_epoch=None,
         dark_epoch=None,
+        swap_delta_min_movement_firing_rate_hz=0.5,
+        swap_delta_min_tuning_stability_correlation=0.5,
         dark_light_requested_examples=PANEL_C_DARK_LIGHT_EXAMPLES,
     )
 
@@ -2481,6 +2546,8 @@ def test_load_panel_glm_data_requests_all_configured_dark_light_examples(
     assert calls["dark_light_kwargs"]["example_count"] == len(
         PANEL_C_DARK_LIGHT_EXAMPLES
     )
+    assert calls["swap_delta_kwargs"]["min_movement_firing_rate_hz"] == 0.5
+    assert calls["swap_delta_kwargs"]["min_tuning_stability_correlation"] == 0.5
 
 
 def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
@@ -2730,6 +2797,12 @@ def test_make_figure_2_splits_decoding_panel_and_swaps_c_d_locations(
     )
 
     assert saved_path == output_path
+    assert calls["glm_kwargs"][
+        "swap_delta_min_movement_firing_rate_hz"
+    ] == pytest.approx(0.5)
+    assert calls["panel_b_filter_kwargs"][
+        "min_movement_firing_rate_hz"
+    ] == pytest.approx(0.5)
     assert calls["figsize"][0] == pytest.approx(
         figure_2_module.DEFAULT_FIGURE_WIDTH_MM / 25.4
     )

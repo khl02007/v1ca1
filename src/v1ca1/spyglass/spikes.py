@@ -10,6 +10,8 @@ separately because their default spike trains are sample indices.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+import hashlib
+import json
 from typing import Any
 
 import numpy as np
@@ -21,6 +23,11 @@ SUPPORTED_MERGE_PARENTS = (
     "CuratedSpikeSorting",
 )
 NWB_UNITS_FIELDS = ("object_id", "units")
+SORTED_SPIKES_GROUP_KEY_FIELDS = (
+    "nwb_file_name",
+    "unit_filter_params_name",
+    "sorted_spikes_group_name",
+)
 
 
 def _as_python_scalar(value: Any) -> Any:
@@ -55,6 +62,131 @@ def _normalize_parent_name(parent: Any) -> str:
         f"Unsupported spike-sorting merge parent {parent!r}. "
         f"Supported parents are {SUPPORTED_MERGE_PARENTS!r}."
     )
+
+
+def _sha256_json(value: Mapping[str, Any]) -> str:
+    """Return a deterministic digest for one JSON-compatible mapping."""
+    payload = json.dumps(
+        dict(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sorted_group_key(key: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the complete primary key for one standard sorting group."""
+    missing = [field for field in SORTED_SPIKES_GROUP_KEY_FIELDS if field not in key]
+    if missing:
+        raise ValueError(f"SortedSpikesGroup key is missing fields {missing!r}.")
+    group_key = {field: _as_python_scalar(key[field]) for field in SORTED_SPIKES_GROUP_KEY_FIELDS}
+    for field, value in group_key.items():
+        if not str(value).strip():
+            raise ValueError(f"SortedSpikesGroup key field {field!r} must be non-empty.")
+    return group_key
+
+
+def _normalize_label_filter(value: Any, *, field_name: str) -> tuple[str, ...]:
+    """Return one deterministic include/exclude-label tuple."""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{field_name} must be a sequence of labels, not a string.")
+    try:
+        raw_labels = list(value)
+    except TypeError as exc:
+        raise TypeError(f"{field_name} must be a sequence of labels or None.") from exc
+
+    labels: list[str] = []
+    for raw_label in raw_labels:
+        raw_label = _as_python_scalar(raw_label)
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise ValueError(f"{field_name} must contain only non-empty strings.")
+        labels.append(raw_label.strip())
+    return tuple(sorted(set(labels)))
+
+
+def resolve_unit_selection_filter(
+    unit_selection_params: Any,
+    key: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve and validate one standard UnitSelectionParams row."""
+    group_key = _sorted_group_key(key)
+    parameter_key = {
+        "unit_filter_params_name": group_key["unit_filter_params_name"]
+    }
+    relation, _ = _restrict_source(unit_selection_params, parameter_key)
+    fetch1 = getattr(relation, "fetch1", None)
+    if not callable(fetch1):
+        raise TypeError("UnitSelectionParams must expose a callable fetch1 method.")
+    try:
+        include_labels, exclude_labels = fetch1(
+            "include_labels",
+            "exclude_labels",
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Could not resolve exactly one UnitSelectionParams row for "
+            f"{parameter_key!r}."
+        ) from exc
+
+    provenance = {
+        "unit_filter_params_name": str(group_key["unit_filter_params_name"]),
+        "include_labels": list(
+            _normalize_label_filter(include_labels, field_name="include_labels")
+        ),
+        "exclude_labels": list(
+            _normalize_label_filter(exclude_labels, field_name="exclude_labels")
+        ),
+    }
+    return {
+        **provenance,
+        "unit_selection_params_sha256": _sha256_json(provenance),
+    }
+
+
+def resolve_sorted_spikes_group_provenance(
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    key: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve sorted group membership and unit-filter provenance."""
+    group_key = _sorted_group_key(key)
+    units_relation = getattr(sorted_spikes_group, "Units", None)
+    if units_relation is None:
+        raise TypeError("SortedSpikesGroup must expose its Units part table.")
+    restricted_units, _ = _restrict_source(units_relation, group_key)
+    fetch = getattr(restricted_units, "fetch", None)
+    if not callable(fetch):
+        raise TypeError("SortedSpikesGroup.Units must expose a callable fetch method.")
+    merge_ids = sorted(
+        [_as_python_scalar(value) for value in fetch("spikesorting_merge_id")],
+        key=str,
+    )
+    member_strings = [str(merge_id) for merge_id in merge_ids]
+    if not member_strings:
+        raise ValueError(f"SortedSpikesGroup has no members for {group_key!r}.")
+    if len(set(member_strings)) != len(member_strings):
+        raise ValueError("SortedSpikesGroup contains duplicate SpikeSortingOutput IDs.")
+    membership_digest = hashlib.sha256(
+        "\0".join(member_strings).encode("utf-8")
+    ).hexdigest()
+    unit_filter = resolve_unit_selection_filter(unit_selection_params, group_key)
+    return {
+        "group_key": group_key,
+        "merge_ids": merge_ids,
+        "sorting_group_members": member_strings,
+        "sorting_group_members_sha256": membership_digest,
+        "unit_selection_params": {
+            "unit_filter_params_name": unit_filter["unit_filter_params_name"],
+            "include_labels": unit_filter["include_labels"],
+            "exclude_labels": unit_filter["exclude_labels"],
+        },
+        "unit_selection_params_sha256": unit_filter[
+            "unit_selection_params_sha256"
+        ],
+    }
 
 
 def _restrict_source(source: Any, key: Mapping[str, Any]) -> tuple[Any, bool]:
@@ -304,6 +436,187 @@ def _validate_curated_parent_region(
         merge_parent=merge_parent,
         region=region,
     )
+
+
+def _sorting_output_sessions(
+    spike_sorting_output: Any,
+    *,
+    merge_id: Any,
+) -> set[str]:
+    """Resolve the source NWB session names for one merge output."""
+    merge_key = {"merge_id": merge_id}
+    get_parent = getattr(spike_sorting_output, "merge_get_parent", None)
+    if not callable(get_parent):
+        raise TypeError(
+            "SpikeSortingOutput must expose merge_get_parent for session validation."
+        )
+    parent = get_parent(merge_key)
+    heading_names = tuple(getattr(getattr(parent, "heading", None), "names", ()))
+    if not heading_names or "nwb_file_name" in heading_names:
+        fetch = getattr(parent, "fetch", None)
+        if not callable(fetch):
+            raise TypeError("SpikeSortingOutput merge parent must expose fetch().")
+        try:
+            return {str(value) for value in fetch("nwb_file_name")}
+        except (KeyError, TypeError, ValueError):
+            if "nwb_file_name" in heading_names:
+                raise
+
+    get_sort_group_info = getattr(spike_sorting_output, "get_sort_group_info", None)
+    if not callable(get_sort_group_info):
+        raise ValueError(
+            f"Cannot resolve nwb_file_name lineage for SpikeSortingOutput {merge_id!r}."
+        )
+    sort_group_info = get_sort_group_info(merge_key)
+    info_heading_names = tuple(
+        getattr(getattr(sort_group_info, "heading", None), "names", ())
+    )
+    if info_heading_names and "nwb_file_name" not in info_heading_names:
+        raise ValueError(
+            f"SpikeSortingOutput {merge_id!r} sort-group lineage has no "
+            "nwb_file_name."
+        )
+    fetch = getattr(sort_group_info, "fetch", None)
+    if not callable(fetch):
+        raise TypeError("SpikeSortingOutput sort-group lineage must expose fetch().")
+    try:
+        return {str(value) for value in fetch("nwb_file_name")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot resolve nwb_file_name lineage for SpikeSortingOutput {merge_id!r}."
+        ) from exc
+
+
+def _normalize_unit_labels(value: Any, *, field_name: str) -> tuple[str, ...]:
+    """Return the labels associated with one unit row."""
+    value = _as_python_scalar(value)
+    if value is None:
+        return ()
+    if isinstance(value, float) and np.isnan(value):
+        return ()
+    raw_labels = [value] if isinstance(value, str) else list(value)
+    labels: list[str] = []
+    for raw_label in raw_labels:
+        raw_label = _as_python_scalar(raw_label)
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise ValueError(
+                f"NWB units {field_name!r} values must contain only non-empty strings."
+            )
+        labels.append(raw_label.strip())
+    return tuple(labels)
+
+
+def _filter_units_by_labels(
+    units: Any,
+    *,
+    include_labels: Sequence[str],
+    exclude_labels: Sequence[str],
+) -> tuple[Any, str | None]:
+    """Apply standard UnitSelectionParams semantics to one units table."""
+    include = set(include_labels)
+    exclude = set(exclude_labels)
+    if not include and not exclude:
+        return units, None
+
+    columns = set(getattr(units, "columns", ()))
+    label_column = (
+        "curation_label"
+        if "curation_label" in columns
+        else "label" if "label" in columns else None
+    )
+    if label_column is None:
+        raise ValueError(
+            "Nonempty UnitSelectionParams filters require an NWB units "
+            "'curation_label' or 'label' column."
+        )
+
+    raw_values = units[label_column]
+    values = raw_values.to_list() if hasattr(raw_values, "to_list") else list(raw_values)
+    unit_labels = [
+        set(_normalize_unit_labels(value, field_name=label_column)) for value in values
+    ]
+    include_mask = np.asarray(
+        [
+            (not include or bool(labels.intersection(include)))
+            and not bool(labels.intersection(exclude))
+            for labels in unit_labels
+        ],
+        dtype=bool,
+    )
+    if include_mask.size != len(units):
+        raise ValueError("NWB unit labels do not align with units table rows.")
+    return units.loc[include_mask].copy(), label_column
+
+
+def _filter_units_by_group_region(
+    units: Any,
+    *,
+    spike_sorting_output: Any,
+    key: Mapping[str, Any],
+    merge_parent: str,
+    region: str | None,
+    region_validator: Callable[..., Any] | None,
+) -> tuple[Any, str | None]:
+    """Select a region while permitting nonmatching group members to be skipped."""
+    if region is None:
+        return units, None
+
+    columns = set(getattr(units, "columns", ()))
+    if "region" in columns:
+        raw_regions = units["region"]
+        values = (
+            raw_regions.to_list()
+            if hasattr(raw_regions, "to_list")
+            else list(raw_regions)
+        )
+        normalized_values = [_normalize_region(value) for value in values]
+        include = np.asarray(
+            [value == region for value in normalized_values],
+            dtype=bool,
+        )
+        if include.size != len(units):
+            raise ValueError("NWB unit regions do not align with units table rows.")
+        return units.loc[include].copy(), "nwb_units.region"
+
+    if merge_parent == "ImportedSpikeSorting":
+        raise ValueError(
+            "ImportedSpikeSorting region selection requires the augmented NWB "
+            "units table to contain a 'region' column."
+        )
+
+    get_sort_group_info = getattr(spike_sorting_output, "get_sort_group_info", None)
+    if callable(get_sort_group_info):
+        sort_group_info = get_sort_group_info(dict(key))
+        try:
+            member_regions = sorted(set(_extract_region_names(sort_group_info)))
+        except ValueError:
+            if region_validator is None:
+                raise
+        else:
+            if len(member_regions) != 1:
+                raise ValueError(
+                    f"{merge_parent} member has ambiguous regions {member_regions!r} "
+                    "and no per-unit region column."
+                )
+            include_member = member_regions[0] == region
+            include = np.full(len(units), include_member, dtype=bool)
+            return units.loc[include].copy(), "sort_group_info.region_name"
+
+    if region_validator is None:
+        raise ValueError(
+            f"Cannot validate requested region {region!r} for {merge_parent}. "
+            "Inject a source with get_sort_group_info or pass region_validator=."
+        )
+    valid = region_validator(
+        spike_sorting_output=spike_sorting_output,
+        key=dict(key),
+        merge_parent=merge_parent,
+        region=region,
+    )
+    if valid not in (None, True, False):
+        raise TypeError("region_validator must return True, False, or None.")
+    include = np.full(len(units), valid is not False, dtype=bool)
+    return units.loc[include].copy(), "region_validator"
 
 
 def _spikes_and_unit_ids_from_units(
@@ -584,6 +897,147 @@ def build_spike_tsgroup(
         if callable(set_info):
             set_info(**metadata)
         return group
+
+
+def load_sorted_spikes_group(
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    key: Mapping[str, Any],
+    *,
+    region: str | None = None,
+    region_validator: Callable[..., Any] | None = None,
+    time_support: Any | tuple[float, float] | None = None,
+    allow_empty: bool = False,
+    pynapple_module: Any | None = None,
+) -> dict[str, Any]:
+    """Load and validate every member of one standard SortedSpikesGroup.
+
+    UnitSelectionParams labels and the optional region are applied to every
+    member before their canonical NWB/ephys-reference seconds are combined.
+    Nonmatching regions are skipped across a mixed group. Stable unit identity
+    remains the pair ``(spikesorting_merge_id, unit_id)`` while Pynapple keys
+    are deliberately consecutive and ephemeral.
+    """
+    provenance = resolve_sorted_spikes_group_provenance(
+        sorted_spikes_group,
+        unit_selection_params,
+        key,
+    )
+    group_key = provenance["group_key"]
+    requested_region = None if region is None else _normalize_region(region)
+    expected_session = str(group_key["nwb_file_name"])
+    label_parameters = provenance["unit_selection_params"]
+
+    spike_times_s: list[np.ndarray] = []
+    unit_ids: list[dict[str, Any]] = []
+    unit_metadata: list[dict[str, Any]] = []
+    member_provenance: list[dict[str, Any]] = []
+    for merge_id in provenance["merge_ids"]:
+        member_sessions = _sorting_output_sessions(
+            spike_sorting_output,
+            merge_id=merge_id,
+        )
+        if member_sessions != {expected_session}:
+            raise ValueError(
+                f"SpikeSortingOutput {merge_id!r} belongs to sessions "
+                f"{sorted(member_sessions)!r}, not sorting-group session "
+                f"{expected_session!r}."
+            )
+
+        member_key = {"merge_id": merge_id}
+        merge_parent = resolve_merge_parent(spike_sorting_output, member_key)
+        nwb_payloads, returned_merge_ids = _fetch_nwb_payloads(
+            spike_sorting_output,
+            member_key,
+        )
+        if any(str(value) != str(merge_id) for value in returned_merge_ids):
+            raise ValueError(
+                f"SpikeSortingOutput {merge_id!r} returned payloads for merge ids "
+                f"{[str(value) for value in returned_merge_ids]!r}."
+            )
+
+        member_unit_count = 0
+        label_columns: set[str] = set()
+        region_sources: set[str] = set()
+        for nwb_payload, returned_merge_id in zip(
+            nwb_payloads,
+            returned_merge_ids,
+        ):
+            units = _get_units_table(nwb_payload)
+            units, label_column = _filter_units_by_labels(
+                units,
+                include_labels=label_parameters["include_labels"],
+                exclude_labels=label_parameters["exclude_labels"],
+            )
+            units, region_source = _filter_units_by_group_region(
+                units,
+                spike_sorting_output=spike_sorting_output,
+                key=member_key,
+                merge_parent=merge_parent,
+                region=requested_region,
+                region_validator=region_validator,
+            )
+            if label_column is not None:
+                label_columns.add(label_column)
+            if region_source is not None:
+                region_sources.add(region_source)
+            file_spikes, file_unit_ids, file_metadata = (
+                _spikes_and_unit_ids_from_units(
+                    units,
+                    merge_id=returned_merge_id,
+                )
+            )
+            spike_times_s.extend(file_spikes)
+            unit_ids.extend(file_unit_ids)
+            unit_metadata.extend(file_metadata)
+            member_unit_count += len(file_unit_ids)
+
+        member_provenance.append(
+            {
+                "spikesorting_merge_id": str(merge_id),
+                "merge_parent": merge_parent,
+                "n_selected_units": member_unit_count,
+                "label_columns": sorted(label_columns),
+                "region_sources": sorted(region_sources),
+            }
+        )
+
+    stable_ids = [
+        (str(unit_id["spikesorting_merge_id"]), str(unit_id["unit_id"]))
+        for unit_id in unit_ids
+    ]
+    if len(set(stable_ids)) != len(stable_ids):
+        raise ValueError(
+            "SortedSpikesGroup produced duplicate stable unit identifiers."
+        )
+    if not unit_ids and not allow_empty:
+        raise ValueError(
+            "SortedSpikesGroup has no units after applying UnitSelectionParams "
+            f"and region {requested_region!r}."
+        )
+
+    ts_group = None
+    if unit_ids or time_support is not None:
+        ts_group = build_spike_tsgroup(
+            spike_times_s,
+            unit_ids,
+            time_support=time_support,
+            pynapple_module=pynapple_module,
+        )
+    compatibility = build_compatibility_payload(spike_times_s, unit_ids)
+    return {
+        **provenance,
+        "region": requested_region,
+        "status": "valid" if unit_ids else "no_units",
+        "n_units": len(unit_ids),
+        "spike_times_s": spike_times_s,
+        "unit_ids": unit_ids,
+        "unit_metadata": unit_metadata,
+        "ts_group": ts_group,
+        "compatibility": compatibility,
+        "member_provenance": member_provenance,
+    }
 
 
 def load_spikes(

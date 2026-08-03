@@ -21,7 +21,9 @@ import pandas as pd
 from v1ca1.helper.run_logging import write_run_log
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_PLACE_BIN_SIZE_CM,
     DEFAULT_POSITION_OFFSET,
+    DEFAULT_SPEED_SIGMA_S,
     DEFAULT_SPEED_THRESHOLD_CM_S,
     REGIONS,
     TRAJECTORY_TYPES,
@@ -438,6 +440,64 @@ def compute_odd_even_tuning_curves_for_trajectory(
     return odd_tuning_curve, even_tuning_curve, metadata
 
 
+def compute_trajectory_stability_table(
+    *,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    trajectory_type: str,
+    spikes: Any,
+    task_progression: Any,
+    trajectory_interval: Any,
+    movement_interval: Any,
+    bins: np.ndarray,
+    epoch_firing_rates: pd.Series,
+) -> pd.DataFrame:
+    """Compute all-unit odd/even stability for one trajectory and epoch.
+
+    Unit identifiers are taken directly from ``spikes.keys()``. This supports
+    ephemeral integer keys used by database adapters while leaving attachment
+    of persistent unit identities to the caller.
+    """
+    if trajectory_type not in TRAJECTORY_TYPES:
+        raise ValueError(
+            f"Unknown trajectory_type {trajectory_type!r}; expected one of "
+            f"{TRAJECTORY_TYPES!r}."
+        )
+
+    unit_ids = _normalize_unit_ids(spikes.keys())
+    odd_tuning_curve, even_tuning_curve, metadata = (
+        compute_odd_even_tuning_curves_for_trajectory(
+            spikes=spikes,
+            task_progression=task_progression,
+            trajectory_interval=trajectory_interval,
+            movement_interval=movement_interval,
+            bins=bins,
+        )
+    )
+    return build_stability_table_for_tuning_curves(
+        animal_name=animal_name,
+        date=date,
+        region=region,
+        epoch=epoch,
+        trajectory_type=trajectory_type,
+        expected_unit_ids=unit_ids,
+        odd_tuning_curve=odd_tuning_curve,
+        even_tuning_curve=even_tuning_curve,
+        epoch_firing_rates=epoch_firing_rates,
+        odd_spike_counts=metadata["odd_spike_counts"],
+        even_spike_counts=metadata["even_spike_counts"],
+        n_odd_trials=int(metadata["n_odd_trials"]),
+        n_even_trials=int(metadata["n_even_trials"]),
+        odd_duration_s=float(metadata["odd_duration_s"]),
+        even_duration_s=float(metadata["even_duration_s"]),
+        n_odd_feature_samples=int(metadata["n_odd_feature_samples"]),
+        n_even_feature_samples=int(metadata["n_even_feature_samples"]),
+        trajectory_status=_trajectory_stability_status(metadata),
+    )
+
+
 def compute_epoch_stability_table(
     *,
     animal_name: str,
@@ -452,40 +512,21 @@ def compute_epoch_stability_table(
     epoch_firing_rates: pd.Series,
 ) -> pd.DataFrame:
     """Compute odd/even stability rows for all trajectories in one epoch."""
-    unit_ids = _normalize_unit_ids(spikes.keys())
     tables: list[pd.DataFrame] = []
     for trajectory_type in TRAJECTORY_TYPES:
-        odd_tuning_curve, even_tuning_curve, metadata = (
-            compute_odd_even_tuning_curves_for_trajectory(
-                spikes=spikes,
-                task_progression=task_progression_by_trajectory[trajectory_type],
-                trajectory_interval=trajectory_intervals[trajectory_type],
-                movement_interval=movement_interval,
-                bins=bins,
-            )
-        )
-        trajectory_status = _trajectory_stability_status(metadata)
-
         tables.append(
-            build_stability_table_for_tuning_curves(
+            compute_trajectory_stability_table(
                 animal_name=animal_name,
                 date=date,
                 region=region,
                 epoch=epoch,
                 trajectory_type=trajectory_type,
-                expected_unit_ids=unit_ids,
-                odd_tuning_curve=odd_tuning_curve,
-                even_tuning_curve=even_tuning_curve,
+                spikes=spikes,
+                task_progression=task_progression_by_trajectory[trajectory_type],
+                trajectory_interval=trajectory_intervals[trajectory_type],
+                movement_interval=movement_interval,
+                bins=bins,
                 epoch_firing_rates=epoch_firing_rates,
-                odd_spike_counts=metadata["odd_spike_counts"],
-                even_spike_counts=metadata["even_spike_counts"],
-                n_odd_trials=int(metadata["n_odd_trials"]),
-                n_even_trials=int(metadata["n_even_trials"]),
-                odd_duration_s=float(metadata["odd_duration_s"]),
-                even_duration_s=float(metadata["even_duration_s"]),
-                n_odd_feature_samples=int(metadata["n_odd_feature_samples"]),
-                n_even_feature_samples=int(metadata["n_even_feature_samples"]),
-                trajectory_status=trajectory_status,
             )
         )
 
@@ -627,12 +668,32 @@ def parse_arguments() -> argparse.Namespace:
             f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
         ),
     )
+    parser.add_argument(
+        "--speed-smoothing-sigma-s",
+        type=float,
+        default=DEFAULT_SPEED_SIGMA_S,
+        help=(
+            "Gaussian smoothing sigma in seconds used to estimate speed. "
+            f"Default: {DEFAULT_SPEED_SIGMA_S}"
+        ),
+    )
+    parser.add_argument(
+        "--place-bin-size-cm",
+        type=float,
+        default=DEFAULT_PLACE_BIN_SIZE_CM,
+        help=(
+            "Physical bin size used to construct normalized task-progression "
+            f"bins. Default: {DEFAULT_PLACE_BIN_SIZE_CM}"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run odd/even task-progression stability analysis for one session."""
     args = parse_arguments()
+    if not np.isfinite(args.place_bin_size_cm) or args.place_bin_size_cm <= 0:
+        raise ValueError("--place-bin-size-cm must be positive and finite.")
     selected_regions = tuple(dict.fromkeys(args.regions))
     selected_epochs = deduplicate_requested_epochs(args.epochs)
 
@@ -644,6 +705,7 @@ def main() -> None:
         selected_run_epochs=selected_epochs,
         position_offset=args.position_offset,
         speed_threshold_cm_s=args.speed_threshold_cm_s,
+        speed_smoothing_sigma_s=args.speed_smoothing_sigma_s,
     )
 
     analysis_path = get_analysis_path(args.animal_name, args.date, args.data_root)
@@ -652,7 +714,10 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    task_progression_bins = build_task_progression_bins(args.animal_name)
+    task_progression_bins = build_task_progression_bins(
+        args.animal_name,
+        place_bin_size_cm=args.place_bin_size_cm,
+    )
     movement_firing_rates = compute_movement_firing_rates(
         session["spikes_by_region"],
         session["movement_by_run"],
@@ -706,6 +771,8 @@ def main() -> None:
             "epochs": session["run_epochs"],
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
+            "speed_smoothing_sigma_s": args.speed_smoothing_sigma_s,
+            "place_bin_size_cm": args.place_bin_size_cm,
             "minimum_finite_bins_per_curve": MIN_FINITE_BINS_PER_CURVE,
             "minimum_feature_samples_per_split": MIN_FEATURE_SAMPLES_PER_SPLIT,
             "constant_curve_epsilon": CONSTANT_CURVE_EPS,

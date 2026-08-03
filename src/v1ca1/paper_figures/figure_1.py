@@ -252,6 +252,7 @@ MOTOR_NESTED_CV_CONFIG_TOKEN = (
     "bin0p05s_spbin2-8cmn3_order4_gpgap15cm_"
     "zscore_outer5_inner3_ridge0p1-1em06n6"
 )
+MOTOR_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
 MOTOR_MIN_TUNING_STABILITY_CORRELATION = 0.5
 ENCODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "encoding_comparison"
 ENCODING_COMPARISON_REGION = "v1"
@@ -259,6 +260,7 @@ ENCODING_COMPARISON_N_FOLDS = 5
 ENCODING_COMPARISON_BIN_SIZE_S = 0.05
 ENCODING_COMPARISON_PLACE_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
 ENCODING_COMPARISON_MIN_SPIKES = 0
+ENCODING_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
 ENCODING_MIN_TUNING_STABILITY_CORRELATION = 0.5
 DECODING_COMPARISON_RELATIVE_DIR = Path("task_progression") / "decoding_comparison"
 DECODING_COMPARISON_REGION = "v1"
@@ -1695,11 +1697,14 @@ def load_motor_delta_table(
     datasets: Sequence[DatasetId],
     region: str = MOTOR_DELTA_REGION,
     delta_metric: str = MOTOR_DELTA_METRIC,
+    min_movement_firing_rate_hz: float | None = (
+        MOTOR_MIN_MOVEMENT_FIRING_RATE_HZ
+    ),
     min_tuning_stability_correlation: float | None = (
         MOTOR_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 motor+DPP versus motor deltas for stable dark-epoch units."""
+    """Load motor-model deltas for active, stable dark-epoch V1 units."""
     import pandas as pd
     import xarray as xr
 
@@ -1712,6 +1717,7 @@ def load_motor_delta_table(
             date=date,
             region=region,
             epoch=epoch,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
             min_tuning_stability_correlation=min_tuning_stability_correlation,
         )
         stable_unit_set = (
@@ -1773,11 +1779,14 @@ def load_encoding_delta_table(
     bin_size_s: float = ENCODING_COMPARISON_BIN_SIZE_S,
     place_bin_size_cm: float = ENCODING_COMPARISON_PLACE_BIN_SIZE_CM,
     min_spikes: int = ENCODING_COMPARISON_MIN_SPIKES,
+    min_movement_firing_rate_hz: float | None = (
+        ENCODING_MIN_MOVEMENT_FIRING_RATE_HZ
+    ),
     min_tuning_stability_correlation: float | None = (
         ENCODING_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load pooled V1 DPP-versus-absolute-model deltas for stable dark-epoch units."""
+    """Load DPP-model deltas for active, stable dark-epoch V1 units."""
     import pandas as pd
 
     rows: list[dict[str, Any]] = []
@@ -1789,6 +1798,7 @@ def load_encoding_delta_table(
             date=date,
             region=region,
             epoch=epoch,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
             min_tuning_stability_correlation=min_tuning_stability_correlation,
         )
         stable_unit_set = (
@@ -1964,6 +1974,40 @@ def select_units_by_tuning_stability(
     return np.asarray(stable_rows["unit"].drop_duplicates())
 
 
+def select_units_by_saved_movement_firing_rate(
+    stability_table: Any,
+    min_movement_firing_rate_hz: float | None,
+) -> np.ndarray:
+    """Return units meeting an epoch-level movement firing-rate threshold."""
+    if min_movement_firing_rate_hz is None:
+        return np.asarray(stability_table["unit"].drop_duplicates())
+    if min_movement_firing_rate_hz < 0.0:
+        raise ValueError("min_movement_firing_rate_hz must be non-negative.")
+    if "firing_rate_hz" not in stability_table.columns:
+        raise ValueError(
+            "Stability table is missing firing_rate_hz required for unit selection."
+        )
+
+    selected_units: list[Any] = []
+    for unit, unit_rows in stability_table.groupby("unit", sort=False):
+        firing_rates = np.asarray(unit_rows["firing_rate_hz"], dtype=float)
+        finite_rates = firing_rates[np.isfinite(firing_rates)]
+        if finite_rates.size == 0:
+            continue
+        if not np.allclose(
+            finite_rates,
+            finite_rates[0],
+            rtol=1e-9,
+            atol=1e-12,
+        ):
+            raise ValueError(
+                f"Unit {unit!r} has inconsistent movement firing rates in one epoch."
+            )
+        if float(finite_rates[0]) >= float(min_movement_firing_rate_hz):
+            selected_units.append(unit)
+    return np.asarray(selected_units)
+
+
 def load_units_by_tuning_stability(
     *,
     data_root: Path,
@@ -1971,10 +2015,14 @@ def load_units_by_tuning_stability(
     date: str,
     region: str,
     epoch: str,
+    min_movement_firing_rate_hz: float | None = None,
     min_tuning_stability_correlation: float | None,
 ) -> np.ndarray | None:
-    """Return units passing the saved odd/even tuning-stability criterion."""
-    if min_tuning_stability_correlation is None:
+    """Return the intersection of saved firing-rate and stability criteria."""
+    if (
+        min_movement_firing_rate_hz is None
+        and min_tuning_stability_correlation is None
+    ):
         return None
 
     import pandas as pd
@@ -1992,10 +2040,15 @@ def load_units_by_tuning_stability(
         & (table["region"].astype(str) == str(region))
         & (table["trajectory_type"].astype(str).isin(PANEL_D_TRAJECTORY_TYPES))
     ]
-    return select_units_by_tuning_stability(
+    firing_rate_units = select_units_by_saved_movement_firing_rate(
+        table,
+        min_movement_firing_rate_hz,
+    )
+    stable_units = select_units_by_tuning_stability(
         table,
         min_tuning_stability_correlation,
     )
+    return np.intersect1d(firing_rate_units, stable_units)
 
 
 def filter_tuning_curve_units(tuning_curve: Any | None, included_units: np.ndarray) -> Any | None:

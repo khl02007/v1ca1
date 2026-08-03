@@ -132,6 +132,125 @@ def _units_table(regions: tuple[str, str] = ("v1", "v1")) -> pd.DataFrame:
     )
 
 
+class _FakeGroupUnits:
+    def __init__(
+        self,
+        merge_ids: list[str],
+        restriction: dict[str, Any] | None = None,
+    ) -> None:
+        self.merge_ids = list(merge_ids)
+        self.restriction = restriction
+
+    def __and__(self, restriction: dict[str, Any]) -> "_FakeGroupUnits":
+        return _FakeGroupUnits(self.merge_ids, dict(restriction))
+
+    def fetch(self, attribute: str) -> list[str]:
+        assert attribute == "spikesorting_merge_id"
+        assert self.restriction is not None
+        return list(self.merge_ids)
+
+
+class _FakeSortedSpikesGroup:
+    def __init__(self, merge_ids: list[str]) -> None:
+        self.Units = _FakeGroupUnits(merge_ids)
+
+
+class _FakeUnitSelectionParams:
+    def __init__(
+        self,
+        *,
+        include_labels: list[str] | None,
+        exclude_labels: list[str] | None,
+        restriction: dict[str, Any] | None = None,
+    ) -> None:
+        self.include_labels = include_labels
+        self.exclude_labels = exclude_labels
+        self.restriction = restriction
+
+    def __and__(self, restriction: dict[str, Any]) -> "_FakeUnitSelectionParams":
+        return _FakeUnitSelectionParams(
+            include_labels=self.include_labels,
+            exclude_labels=self.exclude_labels,
+            restriction=dict(restriction),
+        )
+
+    def fetch1(self, *attributes: str) -> tuple[Any, Any]:
+        assert attributes == ("include_labels", "exclude_labels")
+        assert self.restriction is not None
+        return self.include_labels, self.exclude_labels
+
+
+class _FakeSortingParent:
+    def __init__(self, nwb_file_name: str) -> None:
+        self.nwb_file_name = nwb_file_name
+
+    def fetch(self, attribute: str) -> list[str]:
+        assert attribute == "nwb_file_name"
+        return [self.nwb_file_name]
+
+
+class _FakeRestrictedMultiOutput:
+    def __init__(self, source: "_FakeMultiOutput", merge_id: str) -> None:
+        self.source = source
+        self.merge_id = merge_id
+
+    def fetch1(self, attribute: str) -> str:
+        assert attribute == "source"
+        return str(self.source.members[self.merge_id]["source"])
+
+    def fetch_nwb(self, *, return_merge_ids: bool = False) -> Any:
+        member = self.source.members[self.merge_id]
+        payload = {str(member.get("units_field", "object_id")): member["units"]}
+        if return_merge_ids:
+            return [payload], [self.merge_id]
+        return [payload]
+
+
+class _FakeMultiOutput:
+    def __init__(self, members: dict[str, dict[str, Any]]) -> None:
+        self.members = members
+
+    def __and__(self, restriction: dict[str, Any]) -> _FakeRestrictedMultiOutput:
+        return _FakeRestrictedMultiOutput(self, str(restriction["merge_id"]))
+
+    def merge_get_parent(self, key: dict[str, Any]) -> _FakeSortingParent:
+        member = self.members[str(key["merge_id"])]
+        return _FakeSortingParent(str(member["nwb_file_name"]))
+
+    def get_sort_group_info(self, key: dict[str, Any]) -> dict[str, Any]:
+        member = self.members[str(key["merge_id"])]
+        region = member.get("sort_group_region")
+        return {} if region is None else {"region_name": region}
+
+
+def _group_key() -> dict[str, str]:
+    return {
+        "nwb_file_name": "L1420240102_.nwb",
+        "unit_filter_params_name": "exclude_noise",
+        "sorted_spikes_group_name": "all shanks",
+    }
+
+
+def _labeled_units(
+    *,
+    unit_ids: list[int],
+    regions: list[str] | None,
+    labels: list[Any] | None,
+) -> pd.DataFrame:
+    table = pd.DataFrame(
+        {
+            "spike_times": [np.asarray([unit_id / 100.0]) for unit_id in unit_ids],
+            "sorting_unit_id": [unit_id + 1000 for unit_id in unit_ids],
+        },
+        index=pd.Index(unit_ids, name="id"),
+    )
+    if regions is not None:
+        table["region"] = regions
+    if labels is not None:
+        table["curation_label"] = labels
+    return table
+
+
 @pytest.mark.parametrize(
     ("source", "units_field"),
     [
@@ -411,3 +530,263 @@ def test_curated_region_validator_is_an_explicit_fallback() -> None:
     assert len(spike_times_s) == 2
     assert calls[0]["merge_parent"] == "CuratedSpikeSorting"
     assert calls[0]["region"] == "v1"
+
+
+def test_sorted_group_provenance_is_order_independent_and_deterministic() -> None:
+    first = spikes.resolve_sorted_spikes_group_provenance(
+        _FakeSortedSpikesGroup(["merge-b", "merge-a"]),
+        _FakeUnitSelectionParams(
+            include_labels=["good", "accepted", "good"],
+            exclude_labels=["mua", "noise"],
+        ),
+        _group_key(),
+    )
+    second = spikes.resolve_sorted_spikes_group_provenance(
+        _FakeSortedSpikesGroup(["merge-a", "merge-b"]),
+        _FakeUnitSelectionParams(
+            include_labels=["accepted", "good"],
+            exclude_labels=["noise", "mua"],
+        ),
+        _group_key(),
+    )
+
+    assert first["merge_ids"] == ["merge-a", "merge-b"]
+    assert first["sorting_group_members"] == ["merge-a", "merge-b"]
+    assert len(first["sorting_group_members_sha256"]) == 64
+    assert first["sorting_group_members_sha256"] == second[
+        "sorting_group_members_sha256"
+    ]
+    assert first["unit_selection_params"] == {
+        "unit_filter_params_name": "exclude_noise",
+        "include_labels": ["accepted", "good"],
+        "exclude_labels": ["mua", "noise"],
+    }
+    assert first["unit_selection_params_sha256"] == second[
+        "unit_selection_params_sha256"
+    ]
+
+
+def test_load_sorted_group_filters_labels_and_mixed_imported_regions() -> None:
+    members = {
+        "merge-a": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=["v1"],
+                labels=[["good"]],
+            ),
+        },
+        "merge-b": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[21, 22],
+                regions=["ca1", "ca1"],
+                labels=[["good"], ["noise"]],
+            ),
+        },
+    }
+    result = spikes.load_sorted_spikes_group(
+        _FakeSortedSpikesGroup(["merge-b", "merge-a"]),
+        _FakeUnitSelectionParams(include_labels=[], exclude_labels=["noise"]),
+        _FakeMultiOutput(members),
+        _group_key(),
+        region="CA1",
+        time_support=(0.0, 1.0),
+        pynapple_module=_FakePynapple,
+    )
+
+    assert result["status"] == "valid"
+    assert result["n_units"] == 1
+    assert result["sorting_group_members"] == ["merge-a", "merge-b"]
+    assert result["unit_ids"] == [
+        {"spikesorting_merge_id": "merge-b", "unit_id": 21}
+    ]
+    assert list(result["ts_group"]) == [0]
+    assert result["ts_group"].metadata == {
+        "spikesorting_merge_id": ["merge-b"],
+        "unit_id": [21],
+    }
+    assert [row["n_selected_units"] for row in result["member_provenance"]] == [
+        0,
+        1,
+    ]
+    assert result["member_provenance"][0]["region_sources"] == [
+        "nwb_units.region"
+    ]
+
+
+def test_load_sorted_group_requires_labels_for_nonempty_filter() -> None:
+    members = {
+        "merge-a": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=["v1"],
+                labels=None,
+            ),
+        }
+    }
+    with pytest.raises(ValueError, match="Nonempty UnitSelectionParams"):
+        spikes.load_sorted_spikes_group(
+            _FakeSortedSpikesGroup(["merge-a"]),
+            _FakeUnitSelectionParams(include_labels=[], exclude_labels=["noise"]),
+            _FakeMultiOutput(members),
+            _group_key(),
+            region="ca1",
+            time_support=(0.0, 1.0),
+            allow_empty=True,
+            pynapple_module=_FakePynapple,
+        )
+
+
+def test_load_sorted_group_skips_nonmatching_curated_members() -> None:
+    members = {
+        "merge-a": {
+            "source": "CurationV1",
+            "nwb_file_name": "L1420240102_.nwb",
+            "sort_group_region": "v1",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=None,
+                labels=["good"],
+            ),
+        },
+        "merge-b": {
+            "source": "CurationV1",
+            "nwb_file_name": "L1420240102_.nwb",
+            "sort_group_region": "ca1",
+            "units": _labeled_units(
+                unit_ids=[21],
+                regions=None,
+                labels=["good"],
+            ),
+        },
+    }
+    result = spikes.load_sorted_spikes_group(
+        _FakeSortedSpikesGroup(["merge-a", "merge-b"]),
+        _FakeUnitSelectionParams(include_labels=["good"], exclude_labels=[]),
+        _FakeMultiOutput(members),
+        _group_key(),
+        region="ca1",
+        time_support=(0.0, 1.0),
+        pynapple_module=_FakePynapple,
+    )
+
+    assert result["unit_ids"] == [
+        {"spikesorting_merge_id": "merge-b", "unit_id": 21}
+    ]
+    assert [row["region_sources"] for row in result["member_provenance"]] == [
+        ["sort_group_info.region_name"],
+        ["sort_group_info.region_name"],
+    ]
+
+
+def test_load_sorted_group_preserves_composite_identity_across_members() -> None:
+    members = {
+        merge_id: {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=["ca1"],
+                labels=None,
+            ),
+        }
+        for merge_id in ("merge-a", "merge-b")
+    }
+    result = spikes.load_sorted_spikes_group(
+        _FakeSortedSpikesGroup(["merge-b", "merge-a"]),
+        _FakeUnitSelectionParams(include_labels=[], exclude_labels=[]),
+        _FakeMultiOutput(members),
+        {**_group_key(), "unit_filter_params_name": "all_units"},
+        region="ca1",
+        time_support=(0.0, 1.0),
+        pynapple_module=_FakePynapple,
+    )
+
+    assert result["unit_ids"] == [
+        {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+        {"spikesorting_merge_id": "merge-b", "unit_id": 11},
+    ]
+    assert list(result["ts_group"]) == [0, 1]
+    assert result["ts_group"].metadata == {
+        "spikesorting_merge_id": ["merge-a", "merge-b"],
+        "unit_id": [11, 11],
+    }
+
+
+def test_load_sorted_group_validates_every_member_session() -> None:
+    members = {
+        "merge-a": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=["v1"],
+                labels=None,
+            ),
+        },
+        "merge-b": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1520240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[21],
+                regions=["v1"],
+                labels=None,
+            ),
+        },
+    }
+    with pytest.raises(ValueError, match="not sorting-group session"):
+        spikes.load_sorted_spikes_group(
+            _FakeSortedSpikesGroup(["merge-a", "merge-b"]),
+            _FakeUnitSelectionParams(include_labels=[], exclude_labels=[]),
+            _FakeMultiOutput(members),
+            {**_group_key(), "unit_filter_params_name": "all_units"},
+            region="v1",
+            time_support=(0.0, 1.0),
+            pynapple_module=_FakePynapple,
+        )
+
+
+def test_load_sorted_group_can_return_explicit_empty_result() -> None:
+    members = {
+        "merge-a": {
+            "source": "ImportedSpikeSorting",
+            "nwb_file_name": "L1420240102_.nwb",
+            "units": _labeled_units(
+                unit_ids=[11],
+                regions=["v1"],
+                labels=None,
+            ),
+        }
+    }
+    arguments = (
+        _FakeSortedSpikesGroup(["merge-a"]),
+        _FakeUnitSelectionParams(include_labels=[], exclude_labels=[]),
+        _FakeMultiOutput(members),
+        {**_group_key(), "unit_filter_params_name": "all_units"},
+    )
+    with pytest.raises(ValueError, match="has no units after"):
+        spikes.load_sorted_spikes_group(
+            *arguments,
+            region="ca1",
+            time_support=(0.0, 1.0),
+            pynapple_module=_FakePynapple,
+        )
+
+    result = spikes.load_sorted_spikes_group(
+        *arguments,
+        region="ca1",
+        time_support=(0.0, 1.0),
+        allow_empty=True,
+        pynapple_module=_FakePynapple,
+    )
+    assert result["status"] == "no_units"
+    assert result["n_units"] == 0
+    assert result["unit_ids"] == []
+    assert result["spike_times_s"] == []
+    assert list(result["ts_group"]) == []
+    assert result["sorting_group_members"] == ["merge-a"]

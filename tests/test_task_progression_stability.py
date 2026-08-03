@@ -251,3 +251,173 @@ def test_compute_epoch_stability_retains_units_when_even_laps_are_missing() -> N
     assert table.groupby("trajectory_type")["unit"].nunique().eq(2).all()
     assert table["stability_correlation"].isna().all()
     assert set(table["stability_status"]) == {"no_even_trials"}
+
+
+def test_compute_trajectory_stability_supports_ephemeral_group_keys() -> None:
+    import pynapple as nap
+
+    module = _reload_stability_module()
+    support = nap.IntervalSet(start=[0.0], end=[2.0], time_units="s")
+    spikes = nap.TsGroup(
+        {
+            0: nap.Ts(
+                t=np.asarray([0.15, 0.55, 1.15, 1.55]),
+                time_units="s",
+                time_support=support,
+            ),
+            1: nap.Ts(
+                t=np.asarray([0.25]),
+                time_units="s",
+                time_support=support,
+            ),
+        },
+        time_support=support,
+    )
+    lap_times = np.concatenate(
+        (np.linspace(0.0, 0.9, 10), np.linspace(1.0, 1.9, 10))
+    )
+    task_progression = nap.Tsd(
+        t=lap_times,
+        d=np.tile(np.linspace(0.0, 1.0, 10), 2),
+        time_units="s",
+    )
+    trajectory_interval = nap.IntervalSet(
+        start=[0.0, 1.0],
+        end=[0.9, 1.9],
+        time_units="s",
+    )
+
+    table = module.compute_trajectory_stability_table(
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="02_r1",
+        trajectory_type="center_to_left",
+        spikes=spikes,
+        task_progression=task_progression,
+        trajectory_interval=trajectory_interval,
+        movement_interval=support,
+        bins=np.linspace(0.0, 1.0, 6),
+        epoch_firing_rates=pd.Series({0: 2.0, 1: 0.5}, dtype=float),
+    )
+
+    assert table["unit"].tolist() == [0, 1]
+    assert table["trajectory_type"].tolist() == [
+        "center_to_left",
+        "center_to_left",
+    ]
+    assert table["n_odd_trials"].tolist() == [1, 1]
+    assert table["n_even_trials"].tolist() == [1, 1]
+    assert table.loc[1, "stability_status"] == "no_even_spikes"
+    assert np.isnan(table.loc[1, "stability_correlation"])
+
+
+def test_compute_epoch_stability_reuses_trajectory_function(monkeypatch) -> None:
+    module = _reload_stability_module()
+    calls: list[str] = []
+
+    def fake_compute_trajectory_stability_table(**kwargs):
+        calls.append(kwargs["trajectory_type"])
+        return pd.DataFrame(
+            {
+                "trajectory_type": [kwargs["trajectory_type"]],
+                "unit": [0],
+            }
+        )
+
+    monkeypatch.setattr(
+        module,
+        "compute_trajectory_stability_table",
+        fake_compute_trajectory_stability_table,
+    )
+    table = module.compute_epoch_stability_table(
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="02_r1",
+        spikes=object(),
+        task_progression_by_trajectory={
+            trajectory_type: object()
+            for trajectory_type in module.TRAJECTORY_TYPES
+        },
+        trajectory_intervals={
+            trajectory_type: object()
+            for trajectory_type in module.TRAJECTORY_TYPES
+        },
+        movement_interval=object(),
+        bins=np.linspace(0.0, 1.0, 6),
+        epoch_firing_rates=pd.Series({0: 1.0}, dtype=float),
+    )
+
+    assert calls == list(module.TRAJECTORY_TYPES)
+    assert table["trajectory_type"].tolist() == list(module.TRAJECTORY_TYPES)
+
+
+def test_stability_cli_exposes_reproducibility_parameters(monkeypatch) -> None:
+    module = _reload_stability_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stability",
+            "--animal-name",
+            "L14",
+            "--date",
+            "20240611",
+            "--speed-smoothing-sigma-s",
+            "0.25",
+            "--place-bin-size-cm",
+            "2.5",
+        ],
+    )
+
+    args = module.parse_arguments()
+
+    assert args.speed_smoothing_sigma_s == pytest.approx(0.25)
+    assert args.place_bin_size_cm == pytest.approx(2.5)
+    assert args.position_offset == module.DEFAULT_POSITION_OFFSET
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["stability", "--animal-name", "L14", "--date", "20240611"],
+    )
+    default_args = module.parse_arguments()
+    assert default_args.speed_smoothing_sigma_s == pytest.approx(
+        module.DEFAULT_SPEED_SIGMA_S
+    )
+    assert default_args.place_bin_size_cm == pytest.approx(
+        module.DEFAULT_PLACE_BIN_SIZE_CM
+    )
+
+
+def test_build_speed_tsd_uses_explicit_smoothing_sigma(monkeypatch) -> None:
+    import position_tools
+
+    from v1ca1.helper import session as session_module
+
+    captured: dict[str, float] = {}
+
+    def fake_get_speed(*, position, time, sampling_frequency, sigma):
+        del position, sampling_frequency
+        captured["sigma"] = sigma
+        return np.zeros_like(time, dtype=float)
+
+    monkeypatch.setattr(position_tools, "get_speed", fake_get_speed)
+    speed = session_module.build_speed_tsd(
+        np.column_stack((np.arange(5, dtype=float), np.zeros(5))),
+        np.arange(5, dtype=float) / 10.0,
+        position_offset=0,
+        speed_smoothing_sigma_s=0.25,
+    )
+
+    assert captured["sigma"] == pytest.approx(0.25)
+    assert np.asarray(speed.d).shape == (5,)
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        session_module.build_speed_tsd(
+            np.column_stack((np.arange(5, dtype=float), np.zeros(5))),
+            np.arange(5, dtype=float) / 10.0,
+            position_offset=0,
+            speed_smoothing_sigma_s=0.0,
+        )

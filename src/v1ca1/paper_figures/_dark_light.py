@@ -52,6 +52,7 @@ from v1ca1.paper_figures.figure_1 import (
     normalize_linear_position_by_trajectory,
     orient_panel_e_task_progression,
     plot_pooled_heatmap_grid,
+    select_units_by_saved_movement_firing_rate,
 )
 from v1ca1.paper_figures.style import (
     EPOCH_TYPE_COLORS,
@@ -2804,6 +2805,7 @@ def load_panel_h_swap_delta_table(
     region: str,
     dark_epoch: str | None,
     light_epoch_pairs: Sequence[tuple[str, str]] = PANEL_H_SWAP_LIGHT_EPOCH_PAIRS,
+    min_movement_firing_rate_hz: float | None = None,
     min_tuning_stability_correlation: float | None = None,
     model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
 ) -> Any:
@@ -2823,6 +2825,7 @@ def load_panel_h_swap_delta_table(
             date=date,
             region=region,
             epoch=dataset_dark_epoch,
+            min_movement_firing_rate_hz=min_movement_firing_rate_hz,
             min_tuning_stability_correlation=min_tuning_stability_correlation,
         )
         stable_unit_set = (
@@ -2924,12 +2927,19 @@ def load_dark_epoch_units_exceeding_tuning_stability(
     date: str,
     region: str,
     epoch: str,
+    min_movement_firing_rate_hz: float | None = None,
     min_tuning_stability_correlation: float | None,
 ) -> np.ndarray | None:
-    """Return dark-epoch units with odd/even stability above the threshold."""
-    if min_tuning_stability_correlation is None:
+    """Return dark-epoch units meeting movement-rate and stability thresholds."""
+    if (
+        min_movement_firing_rate_hz is None
+        and min_tuning_stability_correlation is None
+    ):
         return None
-    if min_tuning_stability_correlation < -1.0:
+    if (
+        min_tuning_stability_correlation is not None
+        and min_tuning_stability_correlation < -1.0
+    ):
         raise ValueError("min_tuning_stability_correlation must be at least -1.")
 
     import pandas as pd
@@ -2942,16 +2952,30 @@ def load_dark_epoch_units_exceeding_tuning_stability(
             "for this session first."
         )
     table = pd.read_parquet(table_path)
+    required_columns = [
+        "unit",
+        "region",
+        "epoch",
+        "trajectory_type",
+        "stability_correlation",
+    ]
+    if min_movement_firing_rate_hz is not None:
+        required_columns.append("firing_rate_hz")
+    _require_columns(table, table_path, required_columns)
     table = table[
         (table["epoch"].astype(str) == str(epoch))
         & (table["region"].astype(str) == str(region))
         & (table["trajectory_type"].astype(str).isin(TRAJECTORY_TYPES))
     ].copy()
+    active_units = select_units_by_saved_movement_firing_rate(
+        table,
+        min_movement_firing_rate_hz,
+    )
     correlations = np.asarray(table["stability_correlation"], dtype=float)
-    stable_rows = table[
-        np.isfinite(correlations)
-        & (correlations > float(min_tuning_stability_correlation))
-    ]
+    keep_mask = table["unit"].isin(active_units) & np.isfinite(correlations)
+    if min_tuning_stability_correlation is not None:
+        keep_mask &= correlations >= float(min_tuning_stability_correlation)
+    stable_rows = table[keep_mask]
     return np.asarray(stable_rows["unit"].drop_duplicates())
 
 
@@ -3282,6 +3306,7 @@ def load_panel_glm_data(
     region: str,
     light_epoch: str | None,
     dark_epoch: str | None,
+    swap_delta_min_movement_firing_rate_hz: float | None = None,
     swap_delta_min_tuning_stability_correlation: float | None = None,
     swap_model_name: str = PANEL_H_DEFAULT_MODEL_NAME,
     swap_example_count: int = 2,
@@ -3319,6 +3344,9 @@ def load_panel_glm_data(
             datasets=datasets,
             region=region,
             dark_epoch=dark_epoch,
+            min_movement_firing_rate_hz=(
+                swap_delta_min_movement_firing_rate_hz
+            ),
             min_tuning_stability_correlation=(
                 swap_delta_min_tuning_stability_correlation
             ),
@@ -5917,4 +5945,3 @@ def plot_panel_h_swap_delta(
             delta_label_position=delta_label_position,
             delta_label_va=delta_label_vertical_alignment,
         )
-

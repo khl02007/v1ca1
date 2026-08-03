@@ -130,9 +130,9 @@ The repo is most useful if you already have the local Frank Lab-style data layou
 ## Project Spyglass Pipeline
 
 `v1ca1.spyglass` contains the project-owned `kyuv1ca1` tables. Importing the
-package is passive: it does not connect to DataJoint, activate schemas, insert
-rows, or populate computations. In a separately configured Spyglass process,
-the intended order is:
+package is passive: it does not import DataJoint or Spyglass, connect to a
+database, activate schemas, insert rows, or modify NWB files. Run it from a
+separately configured Spyglass process. The intended order is:
 
 ```python
 import datajoint as dj
@@ -142,47 +142,118 @@ from v1ca1.spyglass import activate, ingest_v1ca1_nwb
 custom = dict(dj.config.get("custom", {}))
 custom["database.prefix"] = "kyuv1ca1"
 dj.config["custom"] = custom
-tables = activate()  # Explicit schema activation/DDL.
+tables = activate()  # Explicit schema/table declaration; no data insertion.
 tables["ripple_modulation_parameters"].insert_default()
+tables["task_progression_stability_parameters"].insert_default()
 ingest_v1ca1_nwb("L1420240611_augmented.nwb", tables=tables)
 ```
 
 The custom prefix must be set before activation so Spyglass associates the
-project AnalysisNwbfile table with the `kyuv1ca1_nwbfile` schema. Activation
-does not modify Spyglass's analysis-table registry. If that table is later used
-for NWB-natural results, register it once, explicitly, with
+project `AnalysisNwbfile` table with the `kyuv1ca1_nwbfile` schema.
+`activate()` may create the schemas and tables when requested, but it does not
+insert data or parameters, populate computations, register artifacts, alter
+Spyglass's analysis-table registry, or write NWB files. If `AnalysisNwbfile` is
+later used for an NWB-native result, register it once, explicitly, with
 `tables["analysis_nwbfile"]().register_with_spyglass()`.
 
 Standard Spyglass ingestion, including `Session`, `Nwbfile`, and
-`ImportedSpikeSorting`, must already be complete. The custom ingestion indexes
-NWB object pointers and small metadata only. Arrays remain in NWB and are read
-on demand:
+the relevant spike-sorting tables, must already be complete. The explicit
+custom ingestion indexes NWB object pointers and small metadata only; pass
+`dry_run=True` to validate without inserting. Arrays remain in the registered
+NWB and are read on demand:
 
 ```python
 ripples = tables["ripples"].load_intervals(ripple_key)
-head_position = tables["position"].load_position(position_key)
+position = tables["position"].load_position(position_key)
 graph_inputs = tables["wtrack_graph"].load_graph(graph_key)
 track_graph = make_track_graph(**graph_inputs["track_graph_kwargs"])
 linearized = get_linearized_position(
-    head_position.values,
+    position.values,
     track_graph,
     **graph_inputs["linearization_kwargs"],
 )
 ```
 
-The initial computed pipeline is `RippleModulationComputed`. Its selection is
-downstream of `Ripples`, `EpochIntervals`, scalar parameters, and the standard
-Spyglass `SortedSpikesGroup`; the current implementation deliberately requires
-the `all_units` filter. Results are keyed Parquets under
-`/stelmo/nwb/analysis/kyu/v1ca1`, while a project-owned `AnalysisNwbfile` table
-is available for future NWB-natural outputs. Existing legacy Parquets can be
-registered with `RippleModulationComputed.register_existing()`; source paths,
-SHA-256 hashes, optional source commits, and runtime commits are retained.
+`Position` selections use the actual NWB `position_series_name`, with a
+descriptive `position_role`; current files expose `head_position` and
+`body_position`. Loading applies the NWB-recorded leading-sample analysis
+offset by default without truncating or rewriting the source series.
+`TrajectoryIntervals`, `Ripples`, and `Position` are children of
+`EpochIntervals`, so every indexed trajectory, ripple set, and position series
+has an audited epoch parent. A provenance-selected ripple epoch is cataloged
+even when it contains no events, with `ripple_count=0`.
+
+Both current analyses share an adapter for standard `SortedSpikesGroup`,
+`UnitSelectionParams`, and `SpikeSortingOutput`. It supports imported or
+curated sorting parents, applies include/exclude label filters and region
+selection, and combines canonical ephys-referenced spike times. Persistent
+unit identity is `(spikesorting_merge_id, unit_id)`; the Pynapple group keys
+used during computation are temporary. Custom tables do not store one row per
+unit.
+
+The implemented table flows are:
+
+```text
+Ripples + EpochIntervals + RippleModulationParameters
+    + SortedSpikesGroup / UnitSelectionParams
+    -> RippleModulationSelection
+    -> RippleModulation
+
+EpochIntervals + TrajectoryIntervals + Position + WTrackGraph
+    + TaskProgressionStabilityParameters
+    + SortedSpikesGroup / UnitSelectionParams
+    -> TaskProgressionStabilitySelection
+    -> TaskProgressionStability
+```
+
+The computed tables are named `RippleModulation` and
+`TaskProgressionStability`, without a `Computed` suffix. Each explicit
+selection freezes sorting-group membership, unit-filter settings, and a
+SHA-256 digest of the selected parameter values. That snapshot determines a
+table-specific UUIDv5. Computation rejects later edits to those Manual
+parameter values and requires a new selection. Results are Parquets under
+session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
+
+```text
+<animal>/<date>/ripple_modulation/<epoch>/<region>/<uuid>/...
+<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/...
+```
+
+The canonical `Ripples` source contains speed-gated events detected at the
+2.0 z-score threshold. The default `RippleModulationParameters` validates that
+upstream provenance and uses every event in the selected source row; it does
+not apply a downstream ripple-mean-z-score threshold. Selected zero-event
+epochs remain explicit `no_ripples` results. Stability retains all selected
+units and explicit QC for undefined correlations. Firing-rate and stability
+thresholds are downstream scientific selections, not hidden producer filters.
+
+Calling `make()` computes from NWB and the selected sorting group. Calling
+`register_existing()` validates and partitions a compatible legacy artifact,
+copies it into the same canonical output layout, and inserts the result without
+rerunning the analysis. Legacy registration is limited to matching imported
+sorting outputs. It requires the complete canonical Parquet schemas and, for
+peri-ripple firing rates, one complete common time grid per unit. Canonical
+empty artifacts are retained as `no_units` or `no_ripples` terminal results.
+UUID-keyed result rows and destinations are immutable: registration rejects
+`overwrite=True`, checks for an existing result before invoking its artifact
+hook, and directly inserts into the computed table only after that preflight.
+With `skip_duplicates=True`, an existing row is returned without touching its
+files. Both compute and registration retain artifact origin, a selected-unit
+digest, and actual runtime V1–CA1 and Spyglass commits; registration also
+retains source paths, hashes, and optional source commits. The current Parquet
+results use `filepath@analysis`; the project `AnalysisNwbfile` remains
+available for future NWB-natural results.
 
 Use a new `v1ca1-spyglass` environment for this pipeline. The old local
 `spyglass` environment (Python 3.9/PyNWB 2.3) cannot read the augmented files.
-The new environment needs the pinned local Spyglass checkout, PyNWB 3.1.3 or
-newer, Pynapple, and PyArrow. Do not install the full `v1ca1[analysis]` extra
-there because its SpikeInterface requirement conflicts with the pinned
-Spyglass checkout; install this package without dependencies and add only the
-pipeline runtime dependencies.
+The new environment needs the local Spyglass checkout, PyNWB 3.1.3 or newer,
+Pynapple, PyArrow, position-tools, and track-linearization. Do not install the
+full `v1ca1[analysis]` extra there because its SpikeInterface requirement
+conflicts with the Spyglass dependency set; install this package without
+dependencies and add only the pipeline runtime dependencies. The documented
+Spyglass target is commit
+`d5fa7fe1d07c5a349a6d5e0f15d821e5cfe08d38`, but runtime code records the
+actual commit as provenance rather than rejecting a different checkout.
+
+See [the package-level pipeline guide](src/v1ca1/spyglass/README.md) for table
+semantics, exact artifact names, selection insertion, and provenance details.

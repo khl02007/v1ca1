@@ -1501,6 +1501,9 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     assert [call["datasets"] for call in load_calls] == [datasets]
     assert all(call["region"] == "v1" for call in load_calls)
     assert load_calls[0]["model_name"] == SCALAR_MODEL_NAME
+    assert load_calls[0]["min_movement_firing_rate_hz"] == pytest.approx(
+        dark_light_module.PANEL_B_MIN_MOVEMENT_FIRING_RATE_HZ
+    )
     assert load_calls[0]["min_tuning_stability_correlation"] == pytest.approx(
         dark_light_module.PANEL_D_MIN_TUNING_STABILITY_CORRELATION
     )

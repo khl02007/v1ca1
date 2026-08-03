@@ -1,8 +1,8 @@
 """Explicit activation for the project-owned Spyglass tables.
 
 Importing this module is passive: DataJoint and Spyglass are imported only by
-``activate``.  Runtime computation is likewise reached only through an
-explicitly activated ``RippleModulationComputed`` table.
+``activate``. Runtime computation is likewise reached only through explicitly
+activated computed tables.
 """
 
 from __future__ import annotations
@@ -13,9 +13,10 @@ import hashlib
 import math
 from numbers import Real
 from pathlib import Path
-import re
 import subprocess
 from typing import Any
+
+import numpy as np
 
 from v1ca1.spyglass import table_specs
 
@@ -67,15 +68,6 @@ def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{field_name} must be finite.")
         values[field_name] = value
 
-    threshold = values["minimum_ripple_mean_zscore"]
-    if threshold is not None:
-        if isinstance(threshold, bool) or not isinstance(threshold, Real):
-            raise TypeError("minimum_ripple_mean_zscore must be a numeric scalar or None.")
-        threshold = float(threshold)
-        if not math.isfinite(threshold) or threshold <= 0:
-            raise ValueError("minimum_ripple_mean_zscore must be positive when set.")
-        values["minimum_ripple_mean_zscore"] = threshold
-
     for field_name in ("bin_size_s", "time_before_s", "time_after_s"):
         if values[field_name] <= 0:
             raise ValueError(f"{field_name} must be positive.")
@@ -109,6 +101,38 @@ def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     if not is_boolean_scalar:
         raise TypeError("require_speed_gated must be a bool scalar.")
     values["require_speed_gated"] = bool(require_speed_gated)
+    return values
+
+
+def _validate_stability_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and copy one TaskProgressionStability parameter row."""
+    expected = set(table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "TaskProgressionStability parameters must have exactly the declared "
+            f"fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["task_progression_stability_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "task_progression_stability_param_name must be a non-empty string "
+            "of at most 64 characters."
+        )
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+        "place_bin_size_cm",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{field_name} must be positive and finite.")
+        values[field_name] = value
     return values
 
 
@@ -192,6 +216,25 @@ def _remove_created_artifacts(paths: list[str]) -> None:
             path.unlink()
 
 
+def _existing_result_row(
+    table: Any,
+    key: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return an existing result before any registration-side file writes."""
+    try:
+        relation = table & dict(key)
+    except (AttributeError, TypeError):
+        # Minimal injected table fakes used by dependency-free tests do not
+        # implement DataJoint relation operators.
+        return None
+    if not relation:
+        return None
+    row = relation.fetch1()
+    if not isinstance(row, Mapping):
+        raise TypeError("Existing computed result must fetch as a mapping.")
+    return dict(row)
+
+
 def _v1ca1_git_commit() -> str | None:
     """Return the local V1-CA1 HEAD without enforcing a particular commit."""
     return _git_commit(Path(__file__).resolve().parents[3])
@@ -258,7 +301,6 @@ def _validate_ripple_provenance(
 def _parameter_kwargs(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Translate stored scalar columns to the database-free analysis API."""
     return {
-        "minimum_ripple_mean_zscore": parameters["minimum_ripple_mean_zscore"],
         "bin_size_s": parameters["bin_size_s"],
         "time_before_s": parameters["time_before_s"],
         "time_after_s": parameters["time_after_s"],
@@ -281,6 +323,199 @@ def _analysis_region(value: Any) -> str:
     return region
 
 
+def _sorting_snapshot_fields(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """Return selection columns for one resolved sorting-group snapshot."""
+    parameters = dict(provenance["unit_selection_params"])
+    return {
+        "sorting_group_members": list(provenance["sorting_group_members"]),
+        "sorting_group_members_sha256": str(
+            provenance["sorting_group_members_sha256"]
+        ),
+        "unit_filter_include_labels": list(parameters["include_labels"]),
+        "unit_filter_exclude_labels": list(parameters["exclude_labels"]),
+        "unit_filter_params_sha256": str(
+            provenance["unit_selection_params_sha256"]
+        ),
+    }
+
+
+def _resolve_sorting_snapshot(
+    *,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    key: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve one standard group and its immutable label-filter snapshot."""
+    from v1ca1.spyglass.spikes import resolve_sorted_spikes_group_provenance
+
+    return resolve_sorted_spikes_group_provenance(
+        sorted_spikes_group,
+        unit_selection_params,
+        key,
+    )
+
+
+def _validate_frozen_sorting_snapshot(
+    selection: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> None:
+    """Require current group membership/filter values to match a selection."""
+    expected = _sorting_snapshot_fields(provenance)
+    for field_name, current_value in expected.items():
+        selected_value = selection.get(field_name)
+        if field_name.endswith("labels") or field_name == "sorting_group_members":
+            selected_value = list(selected_value or ())
+        if selected_value != current_value:
+            raise ValueError(
+                "SortedSpikesGroup membership or UnitSelectionParams changed "
+                f"after selection insertion: {field_name}. Create a new selection."
+            )
+
+
+def _parameter_snapshot_field(
+    parameters: Mapping[str, Any],
+    *,
+    field_name: str,
+) -> dict[str, str]:
+    """Return one immutable parameter-value digest for a selection row."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return {field_name: provenance_sha256(dict(parameters))}
+
+
+def _validate_frozen_parameters(
+    selection: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    *,
+    field_name: str,
+) -> None:
+    """Require current Manual parameters to match their selection snapshot."""
+    current = _parameter_snapshot_field(parameters, field_name=field_name)[field_name]
+    if str(selection.get(field_name, "")) != current:
+        raise ValueError(
+            "Analysis parameters changed after selection insertion: "
+            f"{field_name}. Create a new selection."
+        )
+
+
+def _ripple_modulation_selection_row(
+    *,
+    key: Mapping[str, Any],
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    parameters_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable RippleModulation selection."""
+    from v1ca1.spyglass.selection import selection_uuid
+
+    natural_key = {
+        field_name: key[field_name]
+        for field_name in (
+            "nwb_file_name",
+            "epoch",
+            "ripple_modulation_param_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+        )
+    }
+    natural_key["region"] = _analysis_region(key["region"])
+    _fetch1_dict(ripples_table, natural_key)
+    _fetch1_dict(epoch_intervals_table, natural_key)
+    parameters = _validate_parameter_row(
+        _fetch1_dict(parameters_table, natural_key)
+    )
+    provenance = _resolve_sorting_snapshot(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        key=natural_key,
+    )
+    snapshot = _sorting_snapshot_fields(provenance)
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="ripple_modulation_parameters_sha256",
+    )
+    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    return {
+        "ripple_modulation_id": selection_uuid(
+            "RippleModulation",
+            identity_payload,
+        ),
+        **natural_key,
+        **snapshot,
+        **parameter_snapshot,
+    }
+
+
+def _stability_selection_row(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    position_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable trajectory-stability selection."""
+    from v1ca1.spyglass.selection import selection_uuid
+
+    natural_key = {
+        field_name: key[field_name]
+        for field_name in (
+            "nwb_file_name",
+            "epoch",
+            "trajectory_type",
+            "position_series_name",
+            "configuration_name",
+            "task_progression_stability_param_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+        )
+    }
+    natural_key["region"] = _analysis_region(key["region"])
+    epoch_row = _fetch1_dict(epoch_intervals_table, natural_key)
+    _fetch1_dict(trajectory_intervals_table, natural_key)
+    position_row = _fetch1_dict(position_table, natural_key)
+    graph_row = _fetch1_dict(wtrack_graph_table, natural_key)
+    parameters = _validate_stability_parameter_row(
+        _fetch1_dict(parameters_table, natural_key)
+    )
+    if natural_key["trajectory_type"] != natural_key["configuration_name"]:
+        raise ValueError(
+            "TaskProgressionStability requires configuration_name to equal "
+            "trajectory_type."
+        )
+    if epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("TaskProgressionStability requires a run epoch.")
+    if position_row.get("spatial_unit") != "cm":
+        raise ValueError("TaskProgressionStability position must use centimeters.")
+    if graph_row.get("coordinate_unit") != "cm":
+        raise ValueError("TaskProgressionStability graph must use centimeters.")
+    provenance = _resolve_sorting_snapshot(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        key=natural_key,
+    )
+    snapshot = _sorting_snapshot_fields(provenance)
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="task_progression_stability_parameters_sha256",
+    )
+    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    return {
+        "task_progression_stability_id": selection_uuid(
+            "TaskProgressionStability",
+            identity_payload,
+        ),
+        **natural_key,
+        **snapshot,
+        **parameter_snapshot,
+    }
+
+
 def _sorted_spikes_group_key(key: Mapping[str, Any]) -> dict[str, Any]:
     """Return the session-constrained standard sorting-group key."""
     required = (
@@ -291,239 +526,52 @@ def _sorted_spikes_group_key(key: Mapping[str, Any]) -> dict[str, Any]:
     missing = [name for name in required if name not in key]
     if missing:
         raise ValueError(f"RippleModulation selection is missing group keys {missing!r}.")
-    if key["unit_filter_params_name"] != "all_units":
-        raise ValueError(
-            "RippleModulation currently requires unit_filter_params_name='all_units'."
-        )
     return {name: key[name] for name in required}
-
-
-def _sorting_output_sessions(
-    spike_sorting_output: Any,
-    *,
-    merge_id: Any,
-) -> set[str]:
-    """Resolve the source NWB session for one merge output."""
-    merge_key = {"merge_id": merge_id}
-    get_parent = getattr(spike_sorting_output, "merge_get_parent", None)
-    if not callable(get_parent):
-        raise TypeError(
-            "SpikeSortingOutput must expose merge_get_parent for session validation."
-        )
-    parent = get_parent(merge_key)
-    heading_names = tuple(getattr(getattr(parent, "heading", None), "names", ()))
-    if not heading_names or "nwb_file_name" in heading_names:
-        fetch = getattr(parent, "fetch", None)
-        if not callable(fetch):
-            raise TypeError("SpikeSortingOutput merge parent must expose fetch().")
-        try:
-            return {str(name) for name in fetch("nwb_file_name")}
-        except (KeyError, TypeError, ValueError):
-            if "nwb_file_name" in heading_names:
-                raise
-
-    get_sort_group_info = getattr(spike_sorting_output, "get_sort_group_info", None)
-    if not callable(get_sort_group_info):
-        raise ValueError(
-            f"Cannot resolve nwb_file_name lineage for SpikeSortingOutput {merge_id!r}."
-        )
-    sort_group_info = get_sort_group_info(merge_key)
-    info_heading_names = tuple(
-        getattr(getattr(sort_group_info, "heading", None), "names", ())
-    )
-    if info_heading_names and "nwb_file_name" not in info_heading_names:
-        raise ValueError(
-            f"SpikeSortingOutput {merge_id!r} sort-group lineage has no "
-            "nwb_file_name."
-        )
-    fetch = getattr(sort_group_info, "fetch", None)
-    if not callable(fetch):
-        raise TypeError("SpikeSortingOutput sort-group lineage must expose fetch().")
-    try:
-        return {str(name) for name in fetch("nwb_file_name")}
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"Cannot resolve nwb_file_name lineage for SpikeSortingOutput {merge_id!r}."
-        ) from exc
-
-
-def _group_membership_provenance(merge_ids: list[Any]) -> tuple[list[str], str]:
-    """Return sorted member ids and a deterministic membership digest."""
-    member_ids = sorted((str(merge_id) for merge_id in merge_ids))
-    if not member_ids or len(set(member_ids)) != len(member_ids):
-        raise ValueError("Sorting-group membership must be non-empty and unique.")
-    digest = hashlib.sha256("\0".join(member_ids).encode("utf-8")).hexdigest()
-    return member_ids, digest
-
-
-def _safe_group_component(
-    key: Mapping[str, Any],
-    *,
-    merge_ids: list[Any] | None = None,
-) -> str:
-    """Build a collision-resistant path component for a sorting group."""
-    group_key = _sorted_spikes_group_key(key)
-    for required_name in ("ripple_modulation_param_name", "nwb_file_name"):
-        if required_name not in key or not str(key[required_name]):
-            raise ValueError(
-                f"RippleModulation selection is missing {required_name!r}."
-            )
-    identity = (
-        f"{key['nwb_file_name']}\0"
-        f"{key['ripple_modulation_param_name']}\0"
-        f"{group_key['sorted_spikes_group_name']}\0"
-        f"{group_key['unit_filter_params_name']}"
-    )
-    slug = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "-",
-        str(group_key["sorted_spikes_group_name"]),
-    ).strip(".-")
-    if not slug:
-        slug = "group"
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
-    component = (
-        f"group-{slug[:48]}-{group_key['unit_filter_params_name']}-{digest}"
-    )
-    if merge_ids is not None:
-        _, membership_digest = _group_membership_provenance(merge_ids)
-        component = f"{component}-members-{membership_digest[:12]}"
-    return component
-
-
-def _group_artifact_paths(
-    paths: Mapping[str, Path],
-    key: Mapping[str, Any],
-    *,
-    merge_ids: list[Any] | None = None,
-) -> dict[str, Path]:
-    """Place an artifact pair beneath its unique sorting-group directory."""
-    component = _safe_group_component(key, merge_ids=merge_ids)
-    directory = Path(paths["directory"]) / component
-    return {
-        "directory": directory,
-        "summary": directory / Path(paths["summary"]).name,
-        "peri_ripple_firing_rate": directory
-        / Path(paths["peri_ripple_firing_rate"]).name,
-    }
-
-
-def _group_registration_plan(
-    plan: Mapping[str, Any],
-    key: Mapping[str, Any],
-    *,
-    merge_ids: list[Any] | None = None,
-) -> dict[str, Any]:
-    """Retarget a pure registration plan to the selection's group directory."""
-    component = _safe_group_component(key, merge_ids=merge_ids)
-    artifact_paths = {
-        name: Path(path).parent / component / Path(path).name
-        for name, path in dict(plan["artifact_paths"]).items()
-    }
-    copies = []
-    for copy in plan["copies"]:
-        name = str(copy["artifact"])
-        source = Path(copy["source"])
-        destination = artifact_paths[name]
-        copies.append(
-            {
-                **dict(copy),
-                "destination": destination,
-                "copy_required": source.resolve(strict=False)
-                != destination.resolve(strict=False),
-            }
-        )
-    return {**dict(plan), "artifact_paths": artifact_paths, "copies": copies}
 
 
 def _load_group_unit_data(
     *,
     sorted_spikes_group: Any,
+    unit_selection_params: Any,
     spike_sorting_output: Any,
     key: Mapping[str, Any],
     region: str,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
-    """Load canonical seconds and metadata for every member of one group."""
-    from v1ca1.spyglass.spikes import fetch_spike_times_seconds_with_metadata
+    """Load one group through the shared strict sorting adapter."""
+    from v1ca1.spyglass.spikes import load_sorted_spikes_group
 
-    group_key = _sorted_spikes_group_key(key)
-    merge_ids = sorted(
-        (sorted_spikes_group.Units & group_key).fetch("spikesorting_merge_id"),
-        key=str,
+    return load_sorted_spikes_group(
+        sorted_spikes_group,
+        unit_selection_params,
+        spike_sorting_output,
+        key,
+        region=region,
+        allow_empty=allow_empty,
     )
-    if not merge_ids:
-        raise ValueError(f"SortedSpikesGroup has no members for {group_key!r}.")
-    if len({str(merge_id) for merge_id in merge_ids}) != len(merge_ids):
-        raise ValueError("SortedSpikesGroup contains duplicate SpikeSortingOutput IDs.")
-
-    spike_times = []
-    unit_ids = []
-    unit_metadata = []
-    for merge_id in merge_ids:
-        member_sessions = _sorting_output_sessions(
-            spike_sorting_output,
-            merge_id=merge_id,
-        )
-        expected_session = str(group_key["nwb_file_name"])
-        if member_sessions != {expected_session}:
-            raise ValueError(
-                f"SpikeSortingOutput {merge_id!r} belongs to sessions "
-                f"{sorted(member_sessions)!r}, not sorting-group session "
-                f"{expected_session!r}."
-            )
-        member_spikes, member_unit_ids, member_metadata = (
-            fetch_spike_times_seconds_with_metadata(
-                spike_sorting_output,
-                {"merge_id": merge_id},
-                region=region,
-            )
-        )
-        spike_times.extend(member_spikes)
-        unit_ids.extend(member_unit_ids)
-        unit_metadata.extend(member_metadata)
-    if not unit_ids:
-        raise ValueError(
-            f"SortedSpikesGroup has no units after validating region {region!r}."
-        )
-    stable_ids = [
-        (str(unit["spikesorting_merge_id"]), str(unit["unit_id"]))
-        for unit in unit_ids
-    ]
-    if len(set(stable_ids)) != len(stable_ids):
-        raise ValueError("SortedSpikesGroup produced duplicate stable unit IDs.")
-    return {
-        "spike_times_s": spike_times,
-        "unit_ids": unit_ids,
-        "unit_metadata": unit_metadata,
-        "merge_ids": merge_ids,
-    }
 
 
 def _load_group_spikes(
     *,
     sorted_spikes_group: Any,
+    unit_selection_params: Any,
     spike_sorting_output: Any,
     key: Mapping[str, Any],
     region: str,
     time_support: tuple[float, float],
 ) -> dict[str, Any]:
     """Build one Pynapple TsGroup from all validated sorting-group members."""
-    from v1ca1.spyglass.spikes import build_spike_tsgroup
+    from v1ca1.spyglass.spikes import load_sorted_spikes_group
 
-    loaded = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        spike_sorting_output=spike_sorting_output,
-        key=key,
+    return load_sorted_spikes_group(
+        sorted_spikes_group,
+        unit_selection_params,
+        spike_sorting_output,
+        key,
         region=region,
+        time_support=time_support,
+        allow_empty=True,
     )
-    return {
-        **loaded,
-        "ts_group": build_spike_tsgroup(
-            loaded["spike_times_s"],
-            loaded["unit_ids"],
-            time_support=time_support,
-        ),
-    }
 
 
 def _make_ripple_modulation_row(
@@ -534,6 +582,7 @@ def _make_ripple_modulation_row(
     epoch_intervals_table: Any,
     session_table: Any,
     sorted_spikes_group: Any,
+    unit_selection_params: Any,
     spike_sorting_output: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
@@ -544,10 +593,18 @@ def _make_ripple_modulation_row(
     from v1ca1.spyglass.nwb import load_interval_set
     from v1ca1.spyglass.ripple_modulation import (
         compute_epoch_region_ripple_modulation,
+        empty_ripple_modulation_result,
         get_ripple_modulation_artifact_paths,
         write_ripple_modulation_artifacts,
     )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
     parameters = _validate_parameter_row(_fetch1_dict(parameters_table, key))
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="ripple_modulation_parameters_sha256",
+    )
     ripple_row = _fetch1_dict(ripples_table, key)
     _validate_ripple_provenance(ripple_row, parameters)
     epoch_row = _fetch1_dict(epoch_intervals_table, key)
@@ -570,48 +627,59 @@ def _make_ripple_modulation_row(
 
     loaded_spikes = _load_group_spikes(
         sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
         spike_sorting_output=spike_sorting_output,
         key=key,
         region=region,
         time_support=(epoch_start, epoch_stop),
     )
-    result = compute_epoch_region_ripple_modulation(
-        animal_name=animal_name,
-        date=session_date,
-        epoch=str(key["epoch"]),
-        region=region,
-        ripple_table=ripple_table,
-        epoch_timestamps=[epoch_start, epoch_stop],
-        region_spikes=loaded_spikes["ts_group"],
-        stable_unit_ids=loaded_spikes["unit_ids"],
-        **_parameter_kwargs(parameters),
-    )
-    if (
-        parameters["minimum_ripple_mean_zscore"] is None
-        and int(result["n_ripples"]) != int(ripple_row["ripple_count"])
-    ):
-        raise ValueError(
-            "Unfiltered RippleModulation ripple count does not match the selected "
-            "Ripples catalog row."
-        )
-    if int(result["n_ripples"]) > int(ripple_row["ripple_count"]):
-        raise ValueError("RippleModulation selected more ripples than its catalog row.")
-    path_kwargs = {
-        **_parameter_kwargs(parameters),
-        "heatmap_normalize": parameters["heatmap_normalize"],
-    }
-    if artifact_root is not None:
-        path_kwargs["artifact_root"] = artifact_root
-    paths = _group_artifact_paths(
-        get_ripple_modulation_artifact_paths(
+    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+    if loaded_spikes["status"] == "no_units":
+        result = empty_ripple_modulation_result(
             animal_name=animal_name,
             date=session_date,
             epoch=str(key["epoch"]),
             region=region,
-            **path_kwargs,
-        ),
-        key,
-        merge_ids=loaded_spikes["merge_ids"],
+            n_ripples=int(ripple_row["ripple_count"]),
+            parameters=_parameter_kwargs(parameters),
+        )
+    else:
+        result = compute_epoch_region_ripple_modulation(
+            animal_name=animal_name,
+            date=session_date,
+            epoch=str(key["epoch"]),
+            region=region,
+            ripple_table=ripple_table,
+            epoch_timestamps=[epoch_start, epoch_stop],
+            region_spikes=loaded_spikes["ts_group"],
+            stable_unit_ids=loaded_spikes["unit_ids"],
+            **_parameter_kwargs(parameters),
+        )
+    if not result["summary"].empty:
+        summary = result["summary"].copy()
+        missing_reason = summary["invalid_reason"].isna()
+        nonfinite_response = ~np.isfinite(
+            summary["response_zscore"].to_numpy(dtype=float)
+        )
+        summary.loc[missing_reason & nonfinite_response, "invalid_reason"] = (
+            "nonfinite_response_zscore"
+        )
+        result = {**result, "summary": summary}
+    if int(result["n_ripples"]) != int(ripple_row["ripple_count"]):
+        raise ValueError(
+            "RippleModulation ripple count does not match the selected "
+            "Ripples catalog row."
+        )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_ripple_modulation_artifact_paths(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(key["epoch"]),
+        region=region,
+        ripple_modulation_id=key["ripple_modulation_id"],
+        **path_kwargs,
     )
     created_artifact_paths = [
         str(paths[name])
@@ -619,16 +687,25 @@ def _make_ripple_modulation_row(
         if not Path(paths[name]).exists()
     ]
     written = write_ripple_modulation_artifacts(result, paths)
-    sorting_group_members, membership_digest = _group_membership_provenance(
-        loaded_spikes["merge_ids"]
-    )
+    n_units = int(loaded_spikes["n_units"])
+    if n_units == 0:
+        analysis_status = "no_units"
+        n_valid_units = 0
+    elif int(result["n_ripples"]) == 0:
+        analysis_status = "no_ripples"
+        n_valid_units = 0
+    else:
+        reasons = result["summary"]["invalid_reason"]
+        n_valid_units = int(reasons.isna().sum())
+        analysis_status = "valid" if n_valid_units else "no_valid_units"
     return {
         "summary_path": str(written["summary"]),
         "peri_ripple_firing_rate_path": str(written["peri_ripple_firing_rate"]),
         "n_ripples": int(result["n_ripples"]),
-        "n_units": int(len(loaded_spikes["unit_ids"])),
-        "sorting_group_members": sorting_group_members,
-        "sorting_group_members_sha256": membership_digest,
+        "n_units": n_units,
+        "n_valid_units": n_valid_units,
+        "analysis_status": analysis_status,
+        "selected_units_sha256": unit_identity_sha256(loaded_spikes["unit_ids"]),
         "legacy_artifact_provenance": None,
         "artifact_origin": "computed",
         "_created_artifact_paths": created_artifact_paths,
@@ -641,6 +718,7 @@ def _filter_registered_table(
     artifact_name: str,
     artifact_key: Mapping[str, str],
     parameters: Mapping[str, Any],
+    allow_empty: bool = False,
 ) -> Any:
     """Select and validate one key from a legacy single- or all-region table."""
     required_key_columns = tuple(artifact_key)
@@ -654,6 +732,8 @@ def _filter_registered_table(
         include = matches if include is None else include & matches
     selected = table.loc[include].copy().reset_index(drop=True)
     if selected.empty:
+        if allow_empty and table.empty:
+            return selected
         raise ValueError(
             f"{artifact_name} parquet has no rows for artifact key {dict(artifact_key)!r}."
         )
@@ -692,6 +772,8 @@ def _attach_registered_unit_identity(
     artifact_name: str,
 ) -> Any:
     """Key a legacy artifact to stable sorting-merge and NWB unit ids."""
+    import pandas as pd
+
     if "unit_id" not in table.columns:
         raise ValueError(f"{artifact_name} parquet is missing unit_id.")
 
@@ -715,19 +797,29 @@ def _attach_registered_unit_identity(
             ).append(metadata)
 
     if not catalog_by_stable_id:
-        raise ValueError("Selected SortedSpikesGroup has no unit metadata.")
-    stable_columns = {"spikesorting_merge_id", "nwb_unit_id"}
-    present_stable_columns = stable_columns.intersection(table.columns)
-    if present_stable_columns and present_stable_columns != stable_columns:
-        raise ValueError(
-            f"{artifact_name} parquet must contain both stable unit columns or neither."
-        )
-
+        if not table.empty:
+            raise ValueError("Selected SortedSpikesGroup has no unit metadata.")
+        output = table.copy()
+        output["group_unit_id"] = output["unit_id"].to_numpy(copy=True)
+        output["spikesorting_merge_id"] = pd.Series(dtype=str)
+        output["unit_id"] = pd.Series(dtype=str)
+        output["stable_unit_id"] = pd.Series(dtype=str)
+        return output
     row_metadata: list[dict[str, Any]] = []
-    if present_stable_columns:
+    has_old_explicit = {
+        "spikesorting_merge_id",
+        "nwb_unit_id",
+    }.issubset(table.columns)
+    has_new_explicit = (
+        "spikesorting_merge_id" in table.columns
+        and "unit_id" in table.columns
+        and not has_old_explicit
+    )
+    if has_old_explicit or has_new_explicit:
+        source_unit_column = "nwb_unit_id" if has_old_explicit else "unit_id"
         stable_pairs = zip(
             table["spikesorting_merge_id"].astype(str),
-            table["nwb_unit_id"].astype(str),
+            table[source_unit_column].astype(str),
         )
         for stable_id in stable_pairs:
             if stable_id not in catalog_by_stable_id:
@@ -763,17 +855,20 @@ def _attach_registered_unit_identity(
         ]
 
     output = table.copy()
+    if "unit_id" in output:
+        output["group_unit_id"] = output["unit_id"].to_numpy(copy=True)
     output["spikesorting_merge_id"] = [
         str(metadata["spikesorting_merge_id"]) for metadata in row_metadata
     ]
-    output["nwb_unit_id"] = [str(metadata["unit_id"]) for metadata in row_metadata]
-    output["unit_id"] = [
-        f"{merge_id}:{nwb_unit_id}"
-        for merge_id, nwb_unit_id in zip(
+    output["unit_id"] = [str(metadata["unit_id"]) for metadata in row_metadata]
+    output["stable_unit_id"] = [
+        f"{merge_id}:{source_unit_id}"
+        for merge_id, source_unit_id in zip(
             output["spikesorting_merge_id"],
-            output["nwb_unit_id"],
+            output["unit_id"],
         )
     ]
+    output = output.drop(columns=["nwb_unit_id"], errors="ignore")
     return output
 
 
@@ -787,6 +882,7 @@ def _register_existing_ripple_modulation_row(
     ripples_table: Any,
     session_table: Any,
     sorted_spikes_group: Any,
+    unit_selection_params: Any,
     spike_sorting_output: Any,
     source_v1ca1_git_commit: str | None,
     source_spyglass_git_commit: str | None,
@@ -798,8 +894,15 @@ def _register_existing_ripple_modulation_row(
         read_planned_artifacts,
         write_planned_artifacts,
     )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.spikes import resolve_merge_parent
 
     parameters = _validate_parameter_row(_fetch1_dict(parameters_table, key))
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="ripple_modulation_parameters_sha256",
+    )
     ripple_row = _fetch1_dict(ripples_table, key)
     _validate_ripple_provenance(ripple_row, parameters)
     animal_name, session_date = _session_identity(session_table, key)
@@ -815,6 +918,7 @@ def _register_existing_ripple_modulation_row(
         "existing_peri_ripple_firing_rate_path": Path(
             peri_ripple_firing_rate_path
         ),
+        "ripple_modulation_id": key["ripple_modulation_id"],
         **_parameter_kwargs(parameters),
         "heatmap_normalize": parameters["heatmap_normalize"],
     }
@@ -822,18 +926,36 @@ def _register_existing_ripple_modulation_row(
         plan_kwargs["artifact_root"] = artifact_root
     loaded_units = _load_group_unit_data(
         sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
         spike_sorting_output=spike_sorting_output,
         key=key,
         region=artifact_key["region"],
+        allow_empty=True,
     )
-    plan = _group_registration_plan(
-        plan_register_existing(**plan_kwargs),
-        key,
-        merge_ids=loaded_units["merge_ids"],
+    _validate_frozen_sorting_snapshot(key, loaded_units)
+    non_imported = [
+        str(merge_id)
+        for merge_id in loaded_units["merge_ids"]
+        if resolve_merge_parent(
+            spike_sorting_output,
+            {"merge_id": merge_id},
+        )
+        != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy RippleModulation registration is restricted to matching "
+            f"ImportedSpikeSorting outputs; found {non_imported!r}."
+        )
+    allow_empty_artifacts = (
+        loaded_units["status"] == "no_units"
+        or int(ripple_row["ripple_count"]) == 0
     )
+    plan = plan_register_existing(**plan_kwargs)
     selected_tables = read_planned_artifacts(
         plan,
         allow_unkeyed_same_path=overwrite,
+        allow_empty=allow_empty_artifacts,
     )
     legacy_artifact_provenance = {
         "summary": {
@@ -854,12 +976,14 @@ def _register_existing_ripple_modulation_row(
         artifact_name="summary",
         artifact_key=artifact_key,
         parameters=parameters,
+        allow_empty=allow_empty_artifacts,
     )
     selected_peri = _filter_registered_table(
         selected_tables["peri_ripple_firing_rate"],
         artifact_name="peri_ripple_firing_rate",
         artifact_key=artifact_key,
         parameters=parameters,
+        allow_empty=allow_empty_artifacts,
     )
 
     selected_summary = _attach_registered_unit_identity(
@@ -887,18 +1011,22 @@ def _register_existing_ripple_modulation_row(
         ):
             raise ValueError(
                 "A same-path registration source requires stable-unit "
-                f"normalization: {copy['source']}. Pass overwrite=True."
+                f"normalization and cannot be registered in place: {copy['source']}."
             )
 
-    summary_units = set(selected_summary["unit_id"].astype(str))
-    peri_units = set(selected_peri["unit_id"].astype(str))
+    summary_units = set(selected_summary["stable_unit_id"].astype(str))
+    peri_units = set(selected_peri["stable_unit_id"].astype(str))
     catalog_units = {
         f"{unit['spikesorting_merge_id']}:{unit['unit_id']}"
         for unit in loaded_units["unit_ids"]
     }
-    if (
-        not summary_units
-        or len(selected_summary) != len(summary_units)
+    no_ripples = int(ripple_row["ripple_count"]) == 0
+    if no_ripples and (not selected_summary.empty or not selected_peri.empty):
+        raise ValueError(
+            "Zero-ripple legacy artifacts must contain canonical empty tables."
+        )
+    if not no_ripples and (
+        len(selected_summary) != len(summary_units)
         or summary_units != peri_units
         or summary_units != catalog_units
     ):
@@ -907,20 +1035,21 @@ def _register_existing_ripple_modulation_row(
             "SortedSpikesGroup unit, and both artifacts must contain exactly "
             "the same units."
         )
-    summary_n_ripples = int(selected_summary["n_ripples"].iloc[0])
-    peri_n_ripples = int(selected_peri["n_ripples"].iloc[0])
+    if not selected_summary.empty:
+        summary_n_ripples = int(selected_summary["n_ripples"].iloc[0])
+        peri_n_ripples = int(selected_peri["n_ripples"].iloc[0])
+    else:
+        summary_n_ripples = int(ripple_row["ripple_count"])
+        peri_n_ripples = summary_n_ripples
     if summary_n_ripples != peri_n_ripples:
         raise ValueError("Existing artifacts disagree on n_ripples.")
     if (
-        parameters["minimum_ripple_mean_zscore"] is None
-        and summary_n_ripples != int(ripple_row["ripple_count"])
+        summary_n_ripples != int(ripple_row["ripple_count"])
     ):
         raise ValueError(
-            "Unfiltered existing artifact n_ripples does not match the selected "
+            "Existing artifact n_ripples does not match the selected "
             "Ripples catalog row."
         )
-    if summary_n_ripples > int(ripple_row["ripple_count"]):
-        raise ValueError("Existing artifact exceeds its cataloged ripple count.")
     created_artifact_paths = [
         str(copy["destination"])
         for copy in plan["copies"]
@@ -932,18 +1061,332 @@ def _register_existing_ripple_modulation_row(
         prepared_tables,
         overwrite=overwrite,
     )
-    sorting_group_members, membership_digest = _group_membership_provenance(
-        loaded_units["merge_ids"]
-    )
+    reasons = selected_summary["invalid_reason"]
+    n_valid_units = int(reasons.isna().sum())
+    n_units = len(catalog_units)
+    if n_units == 0:
+        analysis_status = "no_units"
+    elif summary_n_ripples == 0:
+        analysis_status = "no_ripples"
+    else:
+        analysis_status = "valid" if n_valid_units else "no_valid_units"
     return {
         "summary_path": str(destinations["summary"]),
         "peri_ripple_firing_rate_path": str(destinations["peri_ripple_firing_rate"]),
         "n_ripples": summary_n_ripples,
-        "n_units": len(summary_units),
-        "sorting_group_members": sorting_group_members,
-        "sorting_group_members_sha256": membership_digest,
+        "n_units": n_units,
+        "n_valid_units": n_valid_units,
+        "analysis_status": analysis_status,
+        "selected_units_sha256": unit_identity_sha256(loaded_units["unit_ids"]),
         "legacy_artifact_provenance": legacy_artifact_provenance,
         "artifact_origin": "registered_existing",
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _make_task_progression_stability_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    position_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one trajectory-level stability result."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.stability import (
+        compute_selected_stability,
+        get_stability_artifact_path,
+        write_stability_artifact,
+    )
+
+    parameters = _validate_stability_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="task_progression_stability_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, key)
+    trajectory_row = _fetch1_dict(trajectory_intervals_table, key)
+    position_row = _fetch1_dict(position_table, key)
+    graph_row = _fetch1_dict(wtrack_graph_table, key)
+    if str(key["trajectory_type"]) != str(key["configuration_name"]):
+        raise ValueError(
+            "TaskProgressionStability graph configuration must match trajectory_type."
+        )
+    animal_name, session_date = _session_identity(session_table, key)
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
+
+    loaded_spikes = _load_group_spikes(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=key,
+        region=_analysis_region(key["region"]),
+        time_support=(epoch_start, epoch_stop),
+    )
+    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+
+    nwb_path = Path(nwbfile_table.get_abs_path(str(key["nwb_file_name"])))
+    with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
+        nwbfile = io.read()
+        position = load_position(nwbfile, position_row, apply_analysis_offset=True)
+        trajectory_interval = load_interval_set(nwbfile, trajectory_row)
+        graph_inputs = load_wtrack_graph(nwbfile, graph_row)
+
+    result = compute_selected_stability(
+        animal_name=animal_name,
+        date=session_date,
+        region=_analysis_region(key["region"]),
+        epoch=str(key["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=position,
+        trajectory_interval=trajectory_interval,
+        graph_inputs=graph_inputs,
+        speed_threshold_cm_s=parameters["speed_threshold_cm_s"],
+        speed_smoothing_sigma_s=parameters["speed_smoothing_sigma_s"],
+        place_bin_size_cm=parameters["place_bin_size_cm"],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    artifact_path = get_stability_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(key["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        region=_analysis_region(key["region"]),
+        task_progression_stability_id=key["task_progression_stability_id"],
+        **path_kwargs,
+    )
+    created_artifact_paths = [] if artifact_path.exists() else [str(artifact_path)]
+    written_path = write_stability_artifact(result["table"], artifact_path)
+    return {
+        "stability_path": str(written_path),
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": unit_identity_sha256(loaded_spikes["unit_ids"]),
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _validate_legacy_stability_schema(table: Any) -> None:
+    """Require every canonical QC field in a legacy stability artifact."""
+    from v1ca1.spyglass.stability import empty_stability_table
+
+    required_columns = set(empty_stability_table().columns).difference(
+        {
+            "spikesorting_merge_id",
+            "unit_id",
+            "stable_unit_id",
+            "group_unit_id",
+        }
+    )
+    required_columns.add("unit")
+    missing = sorted(required_columns.difference(table.columns))
+    if missing:
+        raise ValueError(
+            f"Existing stability artifact is missing canonical columns {missing!r}."
+        )
+
+
+def _register_existing_task_progression_stability_row(
+    *,
+    key: Mapping[str, Any],
+    stability_path: Path,
+    overwrite: bool,
+    parameters_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Filter and register one partition of the complete legacy artifact."""
+    import pandas as pd
+
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.spikes import resolve_merge_parent
+    from v1ca1.spyglass.stability import (
+        empty_stability_table,
+        get_stability_artifact_path,
+        write_stability_artifact,
+    )
+
+    parameters = _validate_stability_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="task_progression_stability_parameters_sha256",
+    )
+    default_parameters = dict(
+        table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
+    )
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+        "place_bin_size_cm",
+    ):
+        if not math.isclose(
+            parameters[field_name],
+            default_parameters[field_name],
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "Legacy stability registration is only valid for the regenerated "
+                f"default parameters; {field_name} differs."
+            )
+    animal_name, session_date = _session_identity(session_table, key)
+    region = _analysis_region(key["region"])
+    loaded_units = _load_group_unit_data(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=key,
+        region=region,
+        allow_empty=True,
+    )
+    _validate_frozen_sorting_snapshot(key, loaded_units)
+    non_imported = [
+        str(merge_id)
+        for merge_id in loaded_units["merge_ids"]
+        if resolve_merge_parent(spike_sorting_output, {"merge_id": merge_id})
+        != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy stability registration is restricted to matching "
+            f"ImportedSpikeSorting outputs; found {non_imported!r}."
+        )
+
+    stability_path = Path(stability_path)
+    if not stability_path.is_file():
+        raise FileNotFoundError(f"Existing stability artifact not found: {stability_path}")
+    table = pd.read_parquet(stability_path)
+    _validate_legacy_stability_schema(table)
+    expected_partition = {
+        "animal_name": animal_name,
+        "date": session_date,
+        "epoch": str(key["epoch"]),
+        "trajectory_type": str(key["trajectory_type"]),
+        "region": region,
+    }
+    include = np.ones(len(table), dtype=bool)
+    for column, expected in expected_partition.items():
+        include &= table[column].astype(str).to_numpy() == str(expected)
+    selected = table.loc[include].copy().reset_index(drop=True)
+    if selected.empty and loaded_units["unit_ids"]:
+        raise ValueError(
+            "Existing stability artifact has no rows for the selected partition."
+        )
+    legacy_ids = {
+        str(metadata["sorting_unit_id"])
+        for metadata in loaded_units["unit_metadata"]
+        if metadata.get("sorting_unit_id") is not None
+    }
+    if len(legacy_ids) != len(loaded_units["unit_ids"]):
+        raise ValueError(
+            "Every imported selected unit needs a unique sorting_unit_id for "
+            "legacy stability registration."
+        )
+    selected = selected.loc[selected["unit"].astype(str).isin(legacy_ids)].copy()
+    if loaded_units["unit_ids"]:
+        selected = selected.rename(columns={"unit": "unit_id"})
+        selected = _attach_registered_unit_identity(
+            selected,
+            unit_metadata=loaded_units["unit_metadata"],
+            artifact_name="stability",
+        )
+    else:
+        selected = empty_stability_table()
+    selected_units = set(selected["stable_unit_id"].astype(str))
+    expected_units = {
+        f"{unit['spikesorting_merge_id']}:{unit['unit_id']}"
+        for unit in loaded_units["unit_ids"]
+    }
+    if len(selected) != len(selected_units) or selected_units != expected_units:
+        raise ValueError(
+            "Existing stability partition must contain exactly one row per "
+            "selected SortedSpikesGroup unit."
+        )
+    ordered_identity = [
+        "spikesorting_merge_id",
+        "unit_id",
+        "stable_unit_id",
+        "group_unit_id",
+    ]
+    ordered_identity.extend(
+        column for column in selected if column not in ordered_identity
+    )
+    selected = selected.loc[:, ordered_identity]
+    n_valid_units = int(selected["stability_status"].astype(str).eq("valid").sum())
+    if not expected_units:
+        analysis_status = "no_units"
+    else:
+        analysis_status = "valid" if n_valid_units else "no_valid_units"
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    destination = get_stability_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(key["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        region=region,
+        task_progression_stability_id=key["task_progression_stability_id"],
+        **path_kwargs,
+    )
+    created_artifact_paths = [] if destination.exists() else [str(destination)]
+    written_path = write_stability_artifact(
+        selected,
+        destination,
+        overwrite=overwrite,
+    )
+    return {
+        "stability_path": str(written_path),
+        "n_units": len(expected_units),
+        "n_valid_units": n_valid_units,
+        "analysis_status": analysis_status,
+        "selected_units_sha256": unit_identity_sha256(loaded_units["unit_ids"]),
+        "artifact_origin": "registered_existing",
+        "legacy_artifact_provenance": {
+            "source_path": str(stability_path.resolve(strict=True)),
+            "sha256": _file_sha256(stability_path),
+            "source_v1ca1_git_commit": source_v1ca1_git_commit,
+            "source_spyglass_git_commit": source_spyglass_git_commit,
+            "assumed_parameters": parameters,
+        },
         "_created_artifact_paths": created_artifact_paths,
     }
 
@@ -989,6 +1432,7 @@ def _construct_tables(
     session_table: Any,
     nwbfile_table: Any,
     sorted_spikes_group: Any,
+    unit_selection_params: Any,
     spike_sorting_output: Any,
     spyglass_mixin: type,
     spyglass_analysis: type,
@@ -1003,16 +1447,40 @@ def _construct_tables(
 ) -> dict[str, Any]:
     """Build and decorate tables from injected DataJoint-like dependencies."""
     runtime_hooks = dict(runtime_hooks or {})
-    compute_hook = runtime_hooks.get("compute", _make_ripple_modulation_row)
-    register_hook = runtime_hooks.get(
-        "register_existing", _register_existing_ripple_modulation_row
+    ripple_compute_hook = runtime_hooks.get(
+        "ripple_modulation_compute",
+        runtime_hooks.get("compute", _make_ripple_modulation_row),
     )
-    if not callable(compute_hook) or not callable(register_hook):
-        raise TypeError("RippleModulation runtime hooks must be callable.")
+    ripple_register_hook = runtime_hooks.get(
+        "ripple_modulation_register_existing",
+        runtime_hooks.get(
+            "register_existing",
+            _register_existing_ripple_modulation_row,
+        ),
+    )
+    stability_compute_hook = runtime_hooks.get(
+        "task_progression_stability_compute",
+        _make_task_progression_stability_row,
+    )
+    stability_register_hook = runtime_hooks.get(
+        "task_progression_stability_register_existing",
+        _register_existing_task_progression_stability_row,
+    )
+    if not all(
+        callable(hook)
+        for hook in (
+            ripple_compute_hook,
+            ripple_register_hook,
+            stability_compute_hook,
+            stability_register_hook,
+        )
+    ):
+        raise TypeError("Analysis runtime hooks must be callable.")
 
     main_context: dict[str, Any] = {
         "Session": session_table,
         "SortedSpikesGroup": sorted_spikes_group,
+        "UnitSelectionParams": unit_selection_params,
         "SpikeSortingOutput": spike_sorting_output,
     }
     main_schema = _new_schema(schema_factory, main_context)
@@ -1088,7 +1556,7 @@ def _construct_tables(
             *,
             apply_analysis_offset: bool = True,
         ) -> Any:
-            """Load one epoch/type position series in centimeters and seconds."""
+            """Load one explicitly named epoch position series in centimeters."""
             from v1ca1.spyglass.nwb import load_position
 
             return _load_catalog_nwb_object(
@@ -1160,24 +1628,45 @@ def _construct_tables(
     class RippleModulationSelection(spyglass_mixin, dj_module.Manual):
         definition = table_specs.RIPPLE_MODULATION_SELECTION_DEFINITION
 
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one selection."""
+            row = _ripple_modulation_selection_row(
+                key=key,
+                ripples_table=Ripples,
+                epoch_intervals_table=EpochIntervals,
+                parameters_table=RippleModulationParameters,
+                sorted_spikes_group=sorted_spikes_group,
+                unit_selection_params=unit_selection_params,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
     RippleModulationSelection = main_schema(RippleModulationSelection)
     main_context["RippleModulationSelection"] = RippleModulationSelection
 
-    class RippleModulationComputed(spyglass_mixin, dj_module.Computed):
-        definition = table_specs.RIPPLE_MODULATION_COMPUTED_DEFINITION
-        _compute_hook = staticmethod(compute_hook)
-        _register_existing_hook = staticmethod(register_hook)
+    class RippleModulation(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.RIPPLE_MODULATION_DEFINITION
+        _compute_hook = staticmethod(ripple_compute_hook)
+        _register_existing_hook = staticmethod(ripple_register_hook)
 
         def make(self, key: Mapping[str, Any]) -> None:
             """Compute, write, and register one selected artifact pair."""
+            selection = _fetch1_dict(RippleModulationSelection, key)
             row = dict(
                 self._compute_hook(
-                    key=dict(key),
+                    key=selection,
                     parameters_table=RippleModulationParameters,
                     ripples_table=Ripples,
                     epoch_intervals_table=EpochIntervals,
                     session_table=session_table,
                     sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
@@ -1189,7 +1678,9 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        **dict(key),
+                        "ripple_modulation_id": selection[
+                            "ripple_modulation_id"
+                        ],
                         **row,
                         "artifact_origin": "computed",
                         "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
@@ -1213,18 +1704,35 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Filter keyed legacy Parquets, write them, then insert one row."""
+            if overwrite:
+                raise ValueError(
+                    "Registered RippleModulation results are immutable; create "
+                    "a new selection instead of overwriting an artifact."
+                )
+            selection = _fetch1_dict(RippleModulationSelection, key)
+            result_key = {
+                "ripple_modulation_id": selection["ripple_modulation_id"]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "RippleModulation already contains this immutable selection."
+                )
             artifact_row = dict(
                 cls._register_existing_hook(
-                    key=dict(key),
+                    key=selection,
                     summary_path=Path(summary_path),
                     peri_ripple_firing_rate_path=Path(
                         peri_ripple_firing_rate_path
                     ),
-                    overwrite=overwrite,
+                    overwrite=False,
                     parameters_table=RippleModulationParameters,
                     ripples_table=Ripples,
                     session_table=session_table,
                     sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
                     source_spyglass_git_commit=source_spyglass_git_commit,
@@ -1235,21 +1743,200 @@ def _construct_tables(
                 artifact_row.pop("_created_artifact_paths", ())
             )
             row = {
-                **dict(key),
+                "ripple_modulation_id": selection["ripple_modulation_id"],
                 **artifact_row,
                 "artifact_origin": "registered_existing",
                 "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
                 "runtime_spyglass_git_commit": _spyglass_git_commit(),
             }
             try:
-                cls.insert1(row, skip_duplicates=skip_duplicates)
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
             except Exception:
                 _remove_created_artifacts(created_artifact_paths)
                 raise
             return row
 
-    RippleModulationComputed = main_schema(RippleModulationComputed)
-    main_context["RippleModulationComputed"] = RippleModulationComputed
+    RippleModulation = main_schema(RippleModulation)
+    main_context["RippleModulation"] = RippleModulation
+
+    class TaskProgressionStabilityParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.TASK_PROGRESSION_STABILITY_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one numerical stability parameter set."""
+            validated = _validate_stability_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_default(cls, *, skip_duplicates: bool = True) -> dict[str, Any]:
+            """Explicitly insert the canonical stability parameters."""
+            return cls.insert_parameters(
+                table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    TaskProgressionStabilityParameters = main_schema(
+        TaskProgressionStabilityParameters
+    )
+    main_context["TaskProgressionStabilityParameters"] = (
+        TaskProgressionStabilityParameters
+    )
+
+    class TaskProgressionStabilitySelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.TASK_PROGRESSION_STABILITY_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one stability selection."""
+            row = _stability_selection_row(
+                key=key,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                position_table=Position,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=TaskProgressionStabilityParameters,
+                sorted_spikes_group=sorted_spikes_group,
+                unit_selection_params=unit_selection_params,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    TaskProgressionStabilitySelection = main_schema(
+        TaskProgressionStabilitySelection
+    )
+    main_context["TaskProgressionStabilitySelection"] = (
+        TaskProgressionStabilitySelection
+    )
+
+    class TaskProgressionStability(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.TASK_PROGRESSION_STABILITY_DEFINITION
+        _compute_hook = staticmethod(stability_compute_hook)
+        _register_existing_hook = staticmethod(stability_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one selected stability artifact."""
+            selection = _fetch1_dict(TaskProgressionStabilitySelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=TaskProgressionStabilityParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    position_table=Position,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "task_progression_stability_id": selection[
+                            "task_progression_stability_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            stability_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Filter the complete legacy Parquet and insert one result row."""
+            if overwrite:
+                raise ValueError(
+                    "Registered TaskProgressionStability results are immutable; "
+                    "create a new selection instead of overwriting an artifact."
+                )
+            selection = _fetch1_dict(TaskProgressionStabilitySelection, key)
+            result_key = {
+                "task_progression_stability_id": selection[
+                    "task_progression_stability_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "TaskProgressionStability already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    stability_path=Path(stability_path),
+                    overwrite=False,
+                    parameters_table=TaskProgressionStabilityParameters,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "task_progression_stability_id": selection[
+                    "task_progression_stability_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    TaskProgressionStability = main_schema(TaskProgressionStability)
+    main_context["TaskProgressionStability"] = TaskProgressionStability
 
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
@@ -1287,7 +1974,14 @@ def _construct_tables(
         "spike_sorting_figurl": SpikeSortingFigurl,
         "ripple_modulation_parameters": RippleModulationParameters,
         "ripple_modulation_selection": RippleModulationSelection,
-        "ripple_modulation_computed": RippleModulationComputed,
+        "ripple_modulation": RippleModulation,
+        "task_progression_stability_parameters": (
+            TaskProgressionStabilityParameters
+        ),
+        "task_progression_stability_selection": (
+            TaskProgressionStabilitySelection
+        ),
+        "task_progression_stability": TaskProgressionStability,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 
@@ -1310,7 +2004,10 @@ def activate(
     import datajoint as dj
 
     from spyglass.common import Nwbfile, Session
-    from spyglass.spikesorting.analysis.v1.group import SortedSpikesGroup
+    from spyglass.spikesorting.analysis.v1.group import (
+        SortedSpikesGroup,
+        UnitSelectionParams,
+    )
     from spyglass.spikesorting.spikesorting_merge import SpikeSortingOutput
     from spyglass.utils import SpyglassAnalysis, SpyglassMixin
 
@@ -1321,6 +2018,7 @@ def activate(
         session_table=Session,
         nwbfile_table=Nwbfile,
         sorted_spikes_group=SortedSpikesGroup,
+        unit_selection_params=UnitSelectionParams,
         spike_sorting_output=SpikeSortingOutput,
         spyglass_mixin=SpyglassMixin,
         spyglass_analysis=SpyglassAnalysis,

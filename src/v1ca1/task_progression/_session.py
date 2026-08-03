@@ -444,6 +444,7 @@ def prepare_task_progression_session(
     clean_dlc_input_name: str = DEFAULT_CLEAN_DLC_POSITION_NAME,
     position_offset: int = DEFAULT_POSITION_OFFSET,
     speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
+    speed_smoothing_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
     require_npz_timestamps: bool = True,
     load_body_position: bool = True,
     include_generalized_place: bool = False,
@@ -563,6 +564,7 @@ def prepare_task_progression_session(
             position_by_epoch[epoch],
             timestamps_position[epoch],
             position_offset=position_offset,
+            speed_smoothing_sigma_s=speed_smoothing_sigma_s,
         )
         movement_by_run[epoch] = build_movement_interval(
             speed_by_run[epoch],

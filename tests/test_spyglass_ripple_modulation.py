@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import sys
 import types
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,9 @@ import pytest
 
 from v1ca1.ripple import plot_ripple_modulation as ripple_plot
 from v1ca1.spyglass import ripple_modulation
+
+
+RIPPLE_MODULATION_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
 
 class _FakeTs:
@@ -75,12 +80,13 @@ def _ripple_table() -> pd.DataFrame:
 
 def _compute(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
     _install_fake_pynapple(monkeypatch)
+    ripple_table = kwargs.pop("ripple_table", _ripple_table())
     return ripple_modulation.compute_epoch_region_ripple_modulation(
         animal_name="RatA",
         date="20240101",
         epoch="02_r1",
         region="v1",
-        ripple_table=_ripple_table(),
+        ripple_table=ripple_table,
         epoch_timestamps=np.linspace(0.0, 1.0, 1001),
         region_spikes={
             11: types.SimpleNamespace(unit_id=11),
@@ -95,6 +101,151 @@ def _compute(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
     )
 
 
+def _legacy_artifact_paths(
+    directory: Path,
+    *,
+    region_label: str = "all_regions",
+    ripple_threshold_zscore: float | None = None,
+) -> dict[str, Path]:
+    """Return standalone-script artifact paths for registration tests."""
+    stem = ripple_plot.build_epoch_output_stem(
+        animal_name="RatA",
+        date="20240101",
+        epoch="02_r1",
+        region_label=region_label,
+        ripple_threshold_zscore=ripple_threshold_zscore,
+        bin_size_s=ripple_plot.DEFAULT_BIN_SIZE_S,
+        time_before_s=ripple_plot.DEFAULT_TIME_BEFORE_S,
+        time_after_s=ripple_plot.DEFAULT_TIME_AFTER_S,
+        response_window=(
+            ripple_plot.DEFAULT_RESPONSE_WINDOW_START_S,
+            ripple_plot.DEFAULT_RESPONSE_WINDOW_END_S,
+        ),
+        baseline_window=(
+            ripple_plot.DEFAULT_BASELINE_WINDOW_START_S,
+            ripple_plot.DEFAULT_BASELINE_WINDOW_END_S,
+        ),
+        heatmap_normalize=ripple_plot.DEFAULT_HEATMAP_NORMALIZE,
+    )
+    return {
+        "summary": directory / f"{stem}_summary.parquet",
+        "peri_ripple_firing_rate": (
+            directory / f"{stem}_peri_ripple_firing_rate.parquet"
+        ),
+    }
+
+
+def _legacy_summary_table(
+    *,
+    regions: tuple[str, ...] = ("v1", "ca1"),
+) -> pd.DataFrame:
+    """Return a complete standalone summary fixture."""
+    rows = []
+    for unit_id, region in enumerate(regions, start=11):
+        rows.append(
+            {
+                "animal_name": "RatA",
+                "date": "20240101",
+                "epoch": "02_r1",
+                "region": region,
+                "unit_id": unit_id,
+                "n_ripples": 2,
+                "bin_size_s": ripple_plot.DEFAULT_BIN_SIZE_S,
+                "time_before_s": ripple_plot.DEFAULT_TIME_BEFORE_S,
+                "time_after_s": ripple_plot.DEFAULT_TIME_AFTER_S,
+                "baseline_mean_hz": 1.0,
+                "baseline_std_hz": 0.5,
+                "response_mean_hz": 1.5,
+                "ripple_modulation_index": 0.2,
+                "response_zscore": 1.0,
+                "invalid_reason": None,
+            }
+        )
+    return pd.DataFrame(rows, columns=ripple_plot.SUMMARY_COLUMNS)
+
+
+def _legacy_peri_table(
+    *,
+    regions: tuple[str, ...] = ("v1", "ca1"),
+) -> pd.DataFrame:
+    """Return complete standalone peri-ripple traces on the default grid."""
+    bin_size_s = ripple_plot.DEFAULT_BIN_SIZE_S
+    time_values = (
+        -ripple_plot.DEFAULT_TIME_BEFORE_S
+        + (bin_size_s / 2.0)
+        + np.arange(
+            round(
+                (
+                    ripple_plot.DEFAULT_TIME_BEFORE_S
+                    + ripple_plot.DEFAULT_TIME_AFTER_S
+                )
+                / bin_size_s
+            )
+        )
+        * bin_size_s
+    )
+    rows = []
+    for unit_id, region in enumerate(regions, start=11):
+        for time_s in time_values:
+            rows.append(
+                {
+                    "animal_name": "RatA",
+                    "date": "20240101",
+                    "epoch": "02_r1",
+                    "region": region,
+                    "unit_id": unit_id,
+                    "n_ripples": 2,
+                    "bin_size_s": bin_size_s,
+                    "time_before_s": ripple_plot.DEFAULT_TIME_BEFORE_S,
+                    "time_after_s": ripple_plot.DEFAULT_TIME_AFTER_S,
+                    "time_s": float(time_s),
+                    "mean_rate_hz": 1.0,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS,
+    )
+
+
+def _write_legacy_artifacts(
+    paths: dict[str, Path],
+    *,
+    summary: pd.DataFrame | None = None,
+    peri: pd.DataFrame | None = None,
+) -> None:
+    """Write one pair of legacy registration fixtures."""
+    paths["summary"].parent.mkdir(parents=True, exist_ok=True)
+    (summary if summary is not None else _legacy_summary_table()).to_parquet(
+        paths["summary"],
+        index=False,
+    )
+    (peri if peri is not None else _legacy_peri_table()).to_parquet(
+        paths["peri_ripple_firing_rate"],
+        index=False,
+    )
+
+
+def _registration_plan(
+    paths: dict[str, Path],
+    *,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    """Plan registration of one fixture pair into a UUID destination."""
+    return ripple_modulation.plan_register_existing(
+        animal_name="RatA",
+        date="20240101",
+        epoch="02_r1",
+        region="v1",
+        ripple_modulation_id=RIPPLE_MODULATION_ID,
+        existing_summary_path=paths["summary"],
+        existing_peri_ripple_firing_rate_path=paths[
+            "peri_ripple_firing_rate"
+        ],
+        artifact_root=artifact_root,
+    )
+
+
 def test_compute_one_epoch_region_uses_all_detector_events_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,8 +254,9 @@ def test_compute_one_epoch_region_uses_all_detector_events_by_default(
     assert result["epoch"] == "02_r1"
     assert result["region"] == "v1"
     assert result["n_ripples"] == 2
-    assert result["minimum_ripple_mean_zscore"] is None
+    assert "minimum_ripple_mean_zscore" not in result
     assert result["selected_ripple_table"]["epoch"].unique().tolist() == ["02_r1"]
+    assert result["selected_ripple_table"]["mean_zscore"].tolist() == [1.5, 5.0]
     assert list(result["summary"].columns) == ripple_plot.SUMMARY_COLUMNS
     assert list(result["peri_ripple_firing_rate"].columns) == (
         ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS
@@ -143,17 +295,55 @@ def test_compute_accepts_pynapple_intervalset_dataframe_view(
     assert list(result["selected_ripple_table"]["start_time"]) == [0.25, 0.75]
 
 
-def test_optional_minimum_event_mean_zscore_is_the_only_extra_filter(
+def test_compute_rejects_ripples_outside_selected_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = _compute(monkeypatch, minimum_ripple_mean_zscore=4.0)
+    ripple_table = pd.DataFrame(
+        {
+            "epoch": ["02_r1"],
+            "start_time": [0.95],
+            "end_time": [1.05],
+        }
+    )
 
-    assert result["n_ripples"] == 1
-    assert np.allclose(result["selected_ripple_table"]["start_time"], [0.75])
-    assert set(result["summary"]["n_ripples"]) == {1}
+    with pytest.raises(ValueError, match="within epoch_timestamps"):
+        _compute(monkeypatch, ripple_table=ripple_table)
 
 
-def test_compute_writes_stable_merge_and_nwb_unit_identity(
+def test_compute_and_registration_apis_have_no_secondary_mean_zscore_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compute_parameters = inspect.signature(
+        ripple_modulation.compute_epoch_region_ripple_modulation
+    ).parameters
+    registration_parameters = inspect.signature(
+        ripple_modulation.plan_register_existing
+    ).parameters
+
+    assert "minimum_ripple_mean_zscore" not in compute_parameters
+    assert "minimum_ripple_mean_zscore" not in registration_parameters
+    with pytest.raises(TypeError, match="minimum_ripple_mean_zscore"):
+        _compute(monkeypatch, minimum_ripple_mean_zscore=4.0)
+
+    legacy_paths = _legacy_artifact_paths(tmp_path)
+    with pytest.raises(TypeError, match="minimum_ripple_mean_zscore"):
+        ripple_modulation.plan_register_existing(
+            animal_name="RatA",
+            date="20240101",
+            epoch="02_r1",
+            region="v1",
+            ripple_modulation_id=RIPPLE_MODULATION_ID,
+            existing_summary_path=legacy_paths["summary"],
+            existing_peri_ripple_firing_rate_path=legacy_paths[
+                "peri_ripple_firing_rate"
+            ],
+            artifact_root=tmp_path / "native",
+            minimum_ripple_mean_zscore=4.0,
+        )
+
+
+def test_compute_writes_persistent_and_convenience_unit_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _compute(
@@ -164,15 +354,23 @@ def test_compute_writes_stable_merge_and_nwb_unit_identity(
         ],
     )
 
-    expected_ids = ["merge-a:11", "merge-b:12"]
-    assert result["summary"]["unit_id"].tolist() == expected_ids
+    expected_stable_ids = ["merge-a:11", "merge-b:12"]
+    assert ripple_modulation.STABLE_UNIT_COLUMNS == (
+        "spikesorting_merge_id",
+        "unit_id",
+    )
+    assert result["summary"]["unit_id"].tolist() == ["11", "12"]
     assert result["summary"]["spikesorting_merge_id"].tolist() == [
         "merge-a",
         "merge-b",
     ]
-    assert result["summary"]["nwb_unit_id"].tolist() == ["11", "12"]
-    assert set(result["peri_ripple_firing_rate"]["unit_id"]) == set(expected_ids)
-    assert result["heatmap_payload"]["unit_ids"].tolist() == expected_ids
+    assert result["summary"]["stable_unit_id"].tolist() == expected_stable_ids
+    assert result["summary"]["group_unit_id"].tolist() == [11, 12]
+    assert set(result["peri_ripple_firing_rate"]["unit_id"]) == {"11", "12"}
+    assert set(result["peri_ripple_firing_rate"]["stable_unit_id"]) == set(
+        expected_stable_ids
+    )
+    assert result["heatmap_payload"]["unit_ids"].tolist() == expected_stable_ids
 
 
 def test_stable_unit_identity_must_align_with_tsgroup(
@@ -187,21 +385,38 @@ def test_stable_unit_identity_must_align_with_tsgroup(
         )
 
 
-def test_compute_preserves_empty_parquet_schemas_after_filtering_all_events(
+def test_compute_preserves_empty_parquet_schemas_when_epoch_has_no_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = _compute(monkeypatch, minimum_ripple_mean_zscore=10.0)
+    result = _compute(
+        monkeypatch,
+        ripple_table=_ripple_table().loc[lambda table: table["epoch"] == "03_r2"],
+        stable_unit_ids=[
+            {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+            {"spikesorting_merge_id": "merge-b", "unit_id": 12},
+        ],
+    )
 
     assert result["n_ripples"] == 0
     assert result["summary"].empty
     assert result["peri_ripple_firing_rate"].empty
-    assert list(result["summary"].columns) == ripple_plot.SUMMARY_COLUMNS
+    assert list(result["summary"].columns) == [
+        *ripple_plot.SUMMARY_COLUMNS,
+        "group_unit_id",
+        "spikesorting_merge_id",
+        "stable_unit_id",
+    ]
     assert list(result["peri_ripple_firing_rate"].columns) == (
-        ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS
+        [
+            *ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS,
+            "group_unit_id",
+            "spikesorting_merge_id",
+            "stable_unit_id",
+        ]
     )
 
 
-def test_artifact_paths_are_session_first_and_do_not_create_directories(
+def test_artifact_paths_are_uuid_keyed_and_do_not_create_directories(
     tmp_path: Path,
 ) -> None:
     paths = ripple_modulation.get_ripple_modulation_artifact_paths(
@@ -209,18 +424,38 @@ def test_artifact_paths_are_session_first_and_do_not_create_directories(
         date="20240101",
         epoch="02_r1",
         region="v1",
+        ripple_modulation_id=RIPPLE_MODULATION_ID,
         artifact_root=tmp_path,
     )
 
     expected_directory = (
-        tmp_path / "RatA" / "20240101" / "ripple_modulation" / "02_r1" / "v1"
+        tmp_path
+        / "RatA"
+        / "20240101"
+        / "ripple_modulation"
+        / "02_r1"
+        / "v1"
+        / str(RIPPLE_MODULATION_ID)
     )
     assert paths["directory"] == expected_directory
     assert paths["summary"].parent == expected_directory
     assert paths["peri_ripple_firing_rate"].parent == expected_directory
-    assert paths["summary"].name.endswith("_summary.parquet")
-    assert "mean_zscore_all_detected" in paths["summary"].name
+    assert paths["summary"].name == "summary.parquet"
+    assert (
+        paths["peri_ripple_firing_rate"].name
+        == "peri_ripple_firing_rate.parquet"
+    )
     assert not expected_directory.exists()
+
+    with pytest.raises(ValueError, match="UUID"):
+        ripple_modulation.get_ripple_modulation_artifact_paths(
+            animal_name="RatA",
+            date="20240101",
+            epoch="02_r1",
+            region="v1",
+            ripple_modulation_id="not-a-uuid",
+            artifact_root=tmp_path,
+        )
 
 
 def test_register_existing_plan_has_no_database_writes_and_copy_is_explicit(
@@ -228,38 +463,17 @@ def test_register_existing_plan_has_no_database_writes_and_copy_is_explicit(
 ) -> None:
     existing_dir = tmp_path / "legacy"
     existing_dir.mkdir()
-    source_names = ripple_modulation.get_ripple_modulation_artifact_paths(
-        animal_name="RatA",
-        date="20240101",
-        epoch="02_r1",
-        region="all_regions",
-        artifact_root=existing_dir,
-    )
-    summary_source = existing_dir / source_names["summary"].name
-    peri_source = existing_dir / source_names["peri_ripple_firing_rate"].name
-    legacy_rows = {
-        "animal_name": ["RatA", "RatA"],
-        "date": ["20240101", "20240101"],
-        "epoch": ["02_r1", "02_r1"],
-        "region": ["v1", "ca1"],
-        "bin_size_s": [0.02, 0.02],
-        "time_before_s": [0.5, 0.5],
-        "time_after_s": [0.5, 0.5],
-    }
-    pd.DataFrame({**legacy_rows, "response_zscore": [1.0, 2.0]}).to_parquet(
-        summary_source,
-        index=False,
-    )
-    pd.DataFrame({**legacy_rows, "time_s": [0.0, 0.0]}).to_parquet(
-        peri_source,
-        index=False,
-    )
+    source_paths = _legacy_artifact_paths(existing_dir)
+    summary_source = source_paths["summary"]
+    peri_source = source_paths["peri_ripple_firing_rate"]
+    _write_legacy_artifacts(source_paths)
 
     plan = ripple_modulation.plan_register_existing(
         animal_name="RatA",
         date="20240101",
         epoch="02_r1",
         region="v1",
+        ripple_modulation_id=RIPPLE_MODULATION_ID,
         existing_summary_path=summary_source,
         existing_peri_ripple_firing_rate_path=peri_source,
         artifact_root=tmp_path / "native",
@@ -269,44 +483,129 @@ def test_register_existing_plan_has_no_database_writes_and_copy_is_explicit(
     assert plan["database_operations"] == []
     assert all(copy["copy_required"] for copy in plan["copies"])
     assert not plan["artifact_paths"]["summary"].exists()
+    assert plan["artifact_paths"]["summary"] == (
+        tmp_path
+        / "native"
+        / "RatA"
+        / "20240101"
+        / "ripple_modulation"
+        / "02_r1"
+        / "v1"
+        / str(RIPPLE_MODULATION_ID)
+        / "summary.parquet"
+    )
+    assert set(plan["accepted_source_names"]["summary"]) == {
+        _legacy_artifact_paths(existing_dir, region_label="v1")["summary"].name,
+        source_paths["summary"].name,
+    }
 
     copied = ripple_modulation.copy_planned_artifacts(plan)
 
     copied_summary = pd.read_parquet(copied["summary"])
     copied_peri = pd.read_parquet(copied["peri_ripple_firing_rate"])
     assert copied_summary["region"].tolist() == ["v1"]
-    assert copied_peri["region"].tolist() == ["v1"]
+    assert set(copied_peri["region"]) == {"v1"}
+    assert len(copied_peri) == 50
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         ripple_modulation.copy_planned_artifacts(plan)
 
 
+@pytest.mark.parametrize(
+    ("artifact_name", "missing_column"),
+    [
+        ("summary", "response_zscore"),
+        ("peri_ripple_firing_rate", "mean_rate_hz"),
+    ],
+)
+def test_register_existing_requires_full_canonical_artifact_schemas(
+    tmp_path: Path,
+    artifact_name: str,
+    missing_column: str,
+) -> None:
+    paths = _legacy_artifact_paths(tmp_path / "legacy")
+    summary = _legacy_summary_table()
+    peri = _legacy_peri_table()
+    if artifact_name == "summary":
+        summary = summary.drop(columns=missing_column)
+    else:
+        peri = peri.drop(columns=missing_column)
+    _write_legacy_artifacts(paths, summary=summary, peri=peri)
+    plan = _registration_plan(paths, artifact_root=tmp_path / "native")
+
+    with pytest.raises(ValueError):
+        ripple_modulation.read_planned_artifacts(plan)
+
+
+@pytest.mark.parametrize("grid_error", ["incomplete", "missing", "shifted"])
+def test_register_existing_rejects_invalid_per_unit_time_grid(
+    tmp_path: Path,
+    grid_error: str,
+) -> None:
+    paths = _legacy_artifact_paths(tmp_path / "legacy")
+    peri = _legacy_peri_table()
+    v1_indices = peri.index[peri["region"] == "v1"]
+    if grid_error == "incomplete":
+        peri = peri.drop(index=v1_indices[-1])
+    elif grid_error == "missing":
+        peri.loc[v1_indices[len(v1_indices) // 2], "time_s"] = np.nan
+    else:
+        peri.loc[v1_indices, "time_s"] += (
+            ripple_plot.DEFAULT_BIN_SIZE_S / 2.0
+        )
+    _write_legacy_artifacts(paths, peri=peri)
+    plan = _registration_plan(paths, artifact_root=tmp_path / "native")
+
+    with pytest.raises(ValueError):
+        ripple_modulation.read_planned_artifacts(plan)
+
+
+def test_empty_legacy_tables_require_explicit_allow_empty(tmp_path: Path) -> None:
+    paths = _legacy_artifact_paths(tmp_path / "legacy")
+    empty_summary = pd.DataFrame(columns=ripple_plot.SUMMARY_COLUMNS)
+    empty_peri = pd.DataFrame(
+        columns=ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS
+    )
+    _write_legacy_artifacts(
+        paths,
+        summary=empty_summary,
+        peri=empty_peri,
+    )
+    plan = _registration_plan(paths, artifact_root=tmp_path / "native")
+
+    with pytest.raises(ValueError, match="no rows"):
+        ripple_modulation.read_planned_artifacts(plan)
+
+    loaded = ripple_modulation.read_planned_artifacts(
+        plan,
+        allow_empty=True,
+    )
+
+    assert loaded["summary"].empty
+    assert loaded["peri_ripple_firing_rate"].empty
+    assert list(loaded["summary"].columns) == ripple_plot.SUMMARY_COLUMNS
+    assert (
+        list(loaded["peri_ripple_firing_rate"].columns)
+        == ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS
+    )
+
+
 def test_register_existing_rejects_artifact_without_matching_key(tmp_path: Path) -> None:
-    source_name = ripple_modulation.get_ripple_modulation_artifact_paths(
-        animal_name="RatA",
-        date="20240101",
-        epoch="02_r1",
-        region="all_regions",
-        artifact_root=tmp_path,
-    )["summary"].name
-    source = tmp_path / source_name
-    pd.DataFrame(
-        {
-            "animal_name": ["RatA"],
-            "date": ["20240101"],
-            "epoch": ["02_r1"],
-            "region": ["ca1"],
-            "bin_size_s": [0.02],
-            "time_before_s": [0.5],
-            "time_after_s": [0.5],
-        }
-    ).to_parquet(source, index=False)
+    paths = _legacy_artifact_paths(tmp_path)
+    _write_legacy_artifacts(
+        paths,
+        summary=_legacy_summary_table(regions=("ca1",)),
+        peri=_legacy_peri_table(regions=("ca1",)),
+    )
     plan = ripple_modulation.plan_register_existing(
         animal_name="RatA",
         date="20240101",
         epoch="02_r1",
         region="v1",
-        existing_summary_path=source,
-        existing_peri_ripple_firing_rate_path=source,
+        ripple_modulation_id=RIPPLE_MODULATION_ID,
+        existing_summary_path=paths["summary"],
+        existing_peri_ripple_firing_rate_path=paths[
+            "peri_ripple_firing_rate"
+        ],
         artifact_root=tmp_path / "native",
     )
 
@@ -314,35 +613,18 @@ def test_register_existing_rejects_artifact_without_matching_key(tmp_path: Path)
         ripple_modulation.copy_planned_artifacts(plan)
 
 
-def test_register_existing_rejects_mismatched_threshold_stem(tmp_path: Path) -> None:
-    thresholded_paths = ripple_modulation.get_ripple_modulation_artifact_paths(
-        animal_name="RatA",
-        date="20240101",
-        epoch="02_r1",
-        region="all_regions",
-        artifact_root=tmp_path,
-        minimum_ripple_mean_zscore=2.0,
+def test_register_existing_rejects_thresholded_legacy_name(tmp_path: Path) -> None:
+    thresholded_paths = _legacy_artifact_paths(
+        tmp_path,
+        ripple_threshold_zscore=2.0,
     )
-    table = pd.DataFrame(
-        {
-            "animal_name": ["RatA"],
-            "date": ["20240101"],
-            "epoch": ["02_r1"],
-            "region": ["v1"],
-            "bin_size_s": [0.02],
-            "time_before_s": [0.5],
-            "time_after_s": [0.5],
-        }
-    )
-    for artifact in ripple_modulation.ARTIFACT_NAMES:
-        path = thresholded_paths[artifact]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        table.to_parquet(path, index=False)
+    _write_legacy_artifacts(thresholded_paths)
     plan = ripple_modulation.plan_register_existing(
         animal_name="RatA",
         date="20240101",
         epoch="02_r1",
         region="v1",
+        ripple_modulation_id=RIPPLE_MODULATION_ID,
         existing_summary_path=thresholded_paths["summary"],
         existing_peri_ripple_firing_rate_path=thresholded_paths[
             "peri_ripple_firing_rate"

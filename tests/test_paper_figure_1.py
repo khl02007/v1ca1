@@ -50,6 +50,7 @@ from v1ca1.paper_figures.figure_1 import (
     ENCODING_COMPARISON_BIN_SIZE_S,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
+    ENCODING_MIN_MOVEMENT_FIRING_RATE_HZ,
     ENCODING_MIN_TUNING_STABILITY_CORRELATION,
     ENCODING_DPP_COMPARISON_COLORS,
     ENCODING_DPP_COMPARISONS,
@@ -63,6 +64,7 @@ from v1ca1.paper_figures.figure_1 import (
     MOVEMENT_AXIS_ARROW_MARGIN,
     MOVEMENT_AXIS_Y,
     MOTOR_DELTA_METRIC,
+    MOTOR_MIN_MOVEMENT_FIRING_RATE_HZ,
     MOTOR_MIN_TUNING_STABILITY_CORRELATION,
     MOTOR_NESTED_CV_CONFIG_TOKEN,
     MOTOR_NESTED_CV_RELATIVE_DIR,
@@ -806,7 +808,7 @@ def test_find_motor_nested_cv_path_does_not_fall_back(
         )
 
 
-def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
+def test_load_motor_delta_table_intersects_firing_rate_and_stability(
     tmp_path: Path,
 ) -> None:
     pd = pytest.importorskip("pandas")
@@ -844,7 +846,8 @@ def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
                 "center_to_right",
                 "center_to_left",
             ],
-            "stability_correlation": [0.2, 0.5, 0.49, 0.9],
+            "firing_rate_hz": [0.5, 0.5, 0.49, 2.0],
+            "stability_correlation": [0.2, 0.5, 0.6, 0.9],
         }
     ).to_parquet(stability_path)
 
@@ -854,6 +857,7 @@ def test_load_motor_delta_table_filters_registered_dark_epoch_by_stability(
         region="v1",
     )
 
+    assert MOTOR_MIN_MOVEMENT_FIRING_RATE_HZ == pytest.approx(0.5)
     assert MOTOR_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
     assert table["animal_name"].tolist() == ["L14"]
     assert table["epoch"].tolist() == ["08_r4"]
@@ -920,7 +924,7 @@ def test_find_encoding_summary_path_does_not_fall_back_to_untagged_output(
         )
 
 
-def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_columns(
+def test_load_encoding_delta_table_intersects_firing_rate_and_stability(
     tmp_path: Path,
 ) -> None:
     pd = pytest.importorskip("pandas")
@@ -954,7 +958,8 @@ def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_column
                 "center_to_right",
                 "center_to_left",
             ],
-            "stability_correlation": [0.2, 0.5, 0.49, 0.9],
+            "firing_rate_hz": [0.5, 0.5, 0.49, 2.0],
+            "stability_correlation": [0.2, 0.5, 0.6, 0.9],
         }
     ).to_parquet(stability_path)
 
@@ -974,6 +979,7 @@ def test_load_encoding_delta_table_filters_by_stability_and_negates_saved_column
         [0.1]
     )
     assert ENCODING_COMPARISON_MIN_SPIKES == 0
+    assert ENCODING_MIN_MOVEMENT_FIRING_RATE_HZ == pytest.approx(0.5)
     assert ENCODING_MIN_TUNING_STABILITY_CORRELATION == pytest.approx(0.5)
     assert table["unit"].tolist() == [11, 11]
     assert [comparison for comparison, _label, _column in ENCODING_DPP_COMPARISONS] == [

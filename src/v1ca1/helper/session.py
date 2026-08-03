@@ -735,8 +735,9 @@ def build_speed_tsd(
     position: np.ndarray,
     timestamps_position: np.ndarray,
     position_offset: int = DEFAULT_POSITION_OFFSET,
+    speed_smoothing_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> "nap.Tsd":
-    """Compute a speed Tsd for one epoch after trimming the leading position offset."""
+    """Compute smoothed speed after trimming the leading position offset."""
     import position_tools as pt
     import pynapple as nap
 
@@ -750,6 +751,12 @@ def build_speed_tsd(
             "Position offset removes all position samples for one epoch. "
             f"position count: {position.shape[0]}, position_offset: {position_offset}"
         )
+    speed_smoothing_sigma_s = float(speed_smoothing_sigma_s)
+    if (
+        not np.isfinite(speed_smoothing_sigma_s)
+        or speed_smoothing_sigma_s <= 0
+    ):
+        raise ValueError("speed_smoothing_sigma_s must be positive and finite.")
 
     epoch_position = position[position_offset:]
     epoch_timestamps = np.asarray(timestamps_position[position_offset:], dtype=float)
@@ -758,7 +765,7 @@ def build_speed_tsd(
             position=epoch_position,
             time=epoch_timestamps,
             sampling_frequency=get_position_sampling_rate(epoch_timestamps),
-            sigma=DEFAULT_SPEED_SIGMA_S,
+            sigma=speed_smoothing_sigma_s,
         ),
         dtype=float,
     )

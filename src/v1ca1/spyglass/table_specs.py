@@ -51,8 +51,7 @@ metadata_table_object_id = NULL: varchar(64)
 
 TRAJECTORY_INTERVALS_DEFINITION = """
 # One augmented-NWB trajectory selector; individual laps remain in NWB.
--> Session
-epoch: varchar(64)
+-> EpochIntervals
 trajectory_type: varchar(64)
 ---
 interval_count: int unsigned
@@ -65,8 +64,7 @@ source_object_id = NULL: varchar(64)
 
 RIPPLES_DEFINITION = """
 # One augmented-NWB ripple selector; individual events remain in NWB.
--> Session
-epoch: varchar(64)
+-> EpochIntervals
 ---
 ripple_count: int unsigned
 detector_zscore_threshold = NULL: double
@@ -83,10 +81,10 @@ source_object_id = NULL: varchar(64)
 
 POSITION_DEFINITION = """
 # One half-open augmented-NWB position slice.
--> Session
-epoch: varchar(64)
-position_type: enum('head', 'body')
+-> EpochIntervals
+position_series_name: varchar(255)
 ---
+position_role: varchar(64)
 start_index: bigint unsigned
 stop_index_exclusive: bigint unsigned
 sample_count: bigint unsigned
@@ -152,22 +150,28 @@ baseline_window_start_s: double
 baseline_window_end_s: double
 expected_detector_zscore_threshold: double
 require_speed_gated: bool
-minimum_ripple_mean_zscore = NULL: double
 heatmap_normalize: enum('max', 'zscore')
 """
 
 
 RIPPLE_MODULATION_SELECTION_DEFINITION = """
-# One ripple epoch, standard multi-output sorting group, and region.
+# One immutable ripple epoch, sorting-group snapshot, and region selection.
+ripple_modulation_id: uuid
+---
 -> Ripples
--> EpochIntervals
 -> RippleModulationParameters
 -> SortedSpikesGroup
 region: enum('v1', 'ca1')
+sorting_group_members: longblob
+sorting_group_members_sha256: char(64)
+unit_filter_include_labels: longblob
+unit_filter_exclude_labels: longblob
+unit_filter_params_sha256: char(64)
+ripple_modulation_parameters_sha256: char(64)
 """
 
 
-RIPPLE_MODULATION_COMPUTED_DEFINITION = """
+RIPPLE_MODULATION_DEFINITION = """
 # Keyed Parquet artifacts for one ripple-modulation selection.
 -> RippleModulationSelection
 ---
@@ -175,8 +179,54 @@ summary_path: filepath@analysis
 peri_ripple_firing_rate_path: filepath@analysis
 n_ripples: int unsigned
 n_units: int unsigned
+n_valid_units: int unsigned
+analysis_status: enum('valid', 'no_units', 'no_ripples', 'no_valid_units')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
+TASK_PROGRESSION_STABILITY_PARAMETERS_DEFINITION = """
+# Named numerical parameters for odd/even task-progression stability.
+task_progression_stability_param_name: varchar(64)
+---
+speed_threshold_cm_s: double
+speed_smoothing_sigma_s: double
+place_bin_size_cm: double
+"""
+
+
+TASK_PROGRESSION_STABILITY_SELECTION_DEFINITION = """
+# One immutable epoch, trajectory, graph, position, sorting, region, and parameter selection.
+task_progression_stability_id: uuid
+---
+-> TrajectoryIntervals
+-> Position
+-> WTrackGraph
+-> TaskProgressionStabilityParameters
+-> SortedSpikesGroup
+region: enum('v1', 'ca1')
 sorting_group_members: longblob
 sorting_group_members_sha256: char(64)
+unit_filter_include_labels: longblob
+unit_filter_exclude_labels: longblob
+unit_filter_params_sha256: char(64)
+task_progression_stability_parameters_sha256: char(64)
+"""
+
+
+TASK_PROGRESSION_STABILITY_DEFINITION = """
+# One all-unit QC Parquet for a trajectory-level stability selection.
+-> TaskProgressionStabilitySelection
+---
+stability_path: filepath@analysis
+n_units: int unsigned
+n_valid_units: int unsigned
+analysis_status: enum('valid', 'no_units', 'no_valid_units')
+selected_units_sha256: char(64)
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
@@ -210,8 +260,17 @@ DEFAULT_RIPPLE_MODULATION_PARAMETERS = MappingProxyType(
         "baseline_window_end_s": -0.3,
         "expected_detector_zscore_threshold": 2.0,
         "require_speed_gated": True,
-        "minimum_ripple_mean_zscore": None,
         "heatmap_normalize": "max",
+    }
+)
+
+
+DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS = MappingProxyType(
+    {
+        "task_progression_stability_param_name": "default",
+        "speed_threshold_cm_s": 4.0,
+        "speed_smoothing_sigma_s": 0.1,
+        "place_bin_size_cm": 4.0,
     }
 )
 
@@ -226,7 +285,14 @@ TABLE_DEFINITIONS = MappingProxyType(
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,
         "ripple_modulation_parameters": RIPPLE_MODULATION_PARAMETERS_DEFINITION,
         "ripple_modulation_selection": RIPPLE_MODULATION_SELECTION_DEFINITION,
-        "ripple_modulation_computed": RIPPLE_MODULATION_COMPUTED_DEFINITION,
+        "ripple_modulation": RIPPLE_MODULATION_DEFINITION,
+        "task_progression_stability_parameters": (
+            TASK_PROGRESSION_STABILITY_PARAMETERS_DEFINITION
+        ),
+        "task_progression_stability_selection": (
+            TASK_PROGRESSION_STABILITY_SELECTION_DEFINITION
+        ),
+        "task_progression_stability": TASK_PROGRESSION_STABILITY_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -235,6 +301,7 @@ TABLE_DEFINITIONS = MappingProxyType(
 __all__ = [
     "DEFAULT_ANALYSIS_NWBFILE_SCHEMA_NAME",
     "DEFAULT_RIPPLE_MODULATION_PARAMETERS",
+    "DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS",
     "DEFAULT_SCHEMA_NAME",
     "EXPECTED_SPYGLASS_GIT_COMMIT",
     "SPYGLASS_GIT_COMMIT",

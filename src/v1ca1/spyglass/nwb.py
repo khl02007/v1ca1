@@ -20,9 +20,9 @@ TRAJECTORY_INTERVALS_TABLE_NAME = "trajectory_times"
 RIPPLES_INTERVALS_TABLE_NAME = "ripples"
 POSITION_EPOCHS_TABLE_NAME = "position_epochs"
 POSITION_INTERFACE_NAME = "position"
-POSITION_SERIES_BY_TYPE = {
-    "head": "head_position",
-    "body": "body_position",
+POSITION_ROLE_BY_SERIES_NAME = {
+    "head_position": "head",
+    "body_position": "body",
 }
 WTRACK_LINEARIZATION_TABLE_NAME = "wtrack_linearization"
 SPIKE_SORTING_FIGURLS_TABLE_NAME = "spike_sorting_figurls"
@@ -796,6 +796,35 @@ def _read_ripple_detection_metadata(nwbfile: Any) -> dict[str, Any]:
         _native_scalar(speed_gated), bool
     ):
         raise ValueError("Ripple detector use_speed_gating must be boolean.")
+
+    detector_epoch_counts: dict[str, int] = {}
+    outputs = provenance.get("run_log", {}).get("record", {}).get("outputs", {})
+    selected_epochs = outputs.get("selected_epochs")
+    epoch_summaries = outputs.get("epoch_summaries")
+    if selected_epochs is not None or epoch_summaries is not None:
+        if not isinstance(selected_epochs, list) or not isinstance(
+            epoch_summaries, Mapping
+        ):
+            raise ValueError(
+                f"Ripple detector outputs in {RIPPLE_PROVENANCE_PATH} must "
+                "contain selected_epochs and epoch_summaries."
+            )
+        for raw_epoch in selected_epochs:
+            epoch = _text(raw_epoch, "selected ripple epoch")
+            if epoch in detector_epoch_counts:
+                raise ValueError(
+                    "Ripple detector selected_epochs contains duplicate "
+                    f"epoch {epoch!r}."
+                )
+            summary = epoch_summaries.get(epoch)
+            if not isinstance(summary, Mapping) or "ripple_count" not in summary:
+                raise ValueError(
+                    f"Ripple detector epoch summary is missing ripple_count for {epoch!r}."
+                )
+            ripple_count = _integer(summary["ripple_count"], "ripple_count")
+            if ripple_count < 0:
+                raise ValueError("Ripple detector ripple_count must be non-negative.")
+            detector_epoch_counts[epoch] = ripple_count
     return {
         "detector_zscore_threshold": threshold_value,
         "speed_gated": (
@@ -804,6 +833,7 @@ def _read_ripple_detection_metadata(nwbfile: Any) -> dict[str, Any]:
         "detection_parameters": dict(parameters),
         "provenance_path": RIPPLE_PROVENANCE_PATH,
         "provenance_object_id": _object_id(provenance_object),
+        "_detector_epoch_counts": detector_epoch_counts,
     }
 
 
@@ -822,6 +852,18 @@ def read_ripples(
         {"start_time", "stop_time", "epoch"},
     )
     detection_metadata = _read_ripple_detection_metadata(nwbfile)
+    detector_epoch_counts = detection_metadata.pop("_detector_epoch_counts")
+    ephys_table = _interval_table(nwbfile, EPHYS_INTERVALS_TABLE_NAME)
+    if ephys_table is None:
+        raise ValueError(
+            f"NWB file contains {RIPPLES_INTERVALS_TABLE_PATH} but not "
+            f"{EPHYS_INTERVALS_TABLE_PATH}."
+        )
+    _require_columns(ephys_table, EPHYS_INTERVALS_TABLE_PATH, {"epoch"})
+    ephys_epochs = {
+        _text(_table_cell(ephys_table, "epoch", row_index), "epoch")
+        for row_index in range(_table_length(ephys_table))
+    }
 
     counts_by_epoch: dict[str, int] = {}
     for row_index in range(_table_length(table)):
@@ -833,8 +875,34 @@ def read_ripples(
         epoch = _text(_table_cell(table, "epoch", row_index), "epoch")
         counts_by_epoch[epoch] = counts_by_epoch.get(epoch, 0) + 1
 
+    if detector_epoch_counts:
+        unknown_selected_epochs = sorted(
+            set(detector_epoch_counts).difference(ephys_epochs)
+        )
+        if unknown_selected_epochs:
+            raise ValueError(
+                "Ripple detector provenance selects epochs absent from "
+                f"{EPHYS_INTERVALS_TABLE_PATH}: {unknown_selected_epochs!r}."
+            )
+        unexpected_epochs = sorted(set(counts_by_epoch).difference(detector_epoch_counts))
+        if unexpected_epochs:
+            raise ValueError(
+                f"NWB ripples contain epochs absent from detector provenance: "
+                f"{unexpected_epochs!r}."
+            )
+        for epoch, expected_count in detector_epoch_counts.items():
+            actual_count = counts_by_epoch.get(epoch, 0)
+            if actual_count != expected_count:
+                raise ValueError(
+                    f"NWB ripple count for epoch {epoch!r} is {actual_count}, "
+                    f"but detector provenance records {expected_count}."
+                )
+        catalog_counts = detector_epoch_counts
+    else:
+        catalog_counts = counts_by_epoch
+
     rows: list[dict[str, Any]] = []
-    for epoch, ripple_count in counts_by_epoch.items():
+    for epoch, ripple_count in catalog_counts.items():
         row = {
             "epoch": epoch,
             "ripple_count": int(ripple_count),
@@ -851,7 +919,7 @@ def read_position_index(
     *,
     nwb_file_name: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Catalog half-open epoch ranges for head and body position series."""
+    """Catalog half-open epoch ranges for named head and body position series."""
     table = _interval_table(nwbfile, POSITION_EPOCHS_TABLE_NAME)
     if table is None:
         return []
@@ -881,8 +949,8 @@ def read_position_index(
             f"NWB file contains {POSITION_EPOCHS_TABLE_PATH} but not {POSITION_INTERFACE_PATH}."
         )
     spatial_series = getattr(position_interface, "spatial_series", None)
-    series_by_type: dict[str, Any] = {}
-    for position_type, series_name in POSITION_SERIES_BY_TYPE.items():
+    series_by_name: dict[str, Any] = {}
+    for series_name in POSITION_ROLE_BY_SERIES_NAME:
         series = _mapping_value(spatial_series, series_name)
         if series is None:
             raise ValueError(
@@ -892,7 +960,7 @@ def read_position_index(
             getattr(series, "unit", None),
             f"{POSITION_INTERFACE_PATH}/{series_name}",
         )
-        series_by_type[position_type] = series
+        series_by_name[series_name] = series
 
     rows: list[dict[str, Any]] = []
     seen_epochs: set[str] = set()
@@ -935,12 +1003,13 @@ def read_position_index(
             path=POSITION_EPOCHS_TABLE_PATH,
         )
 
-        for position_type, series_name in POSITION_SERIES_BY_TYPE.items():
-            series = series_by_type[position_type]
+        for series_name, position_role in POSITION_ROLE_BY_SERIES_NAME.items():
+            series = series_by_name[series_name]
             series_path = f"{POSITION_INTERFACE_PATH}/{series_name}"
             row = {
                 "epoch": epoch,
-                "position_type": position_type,
+                "position_series_name": series_name,
+                "position_role": position_role,
                 "start_index": start_index,
                 "stop_index_exclusive": stop_index,
                 "sample_count": sample_count,
@@ -1195,6 +1264,20 @@ def load_interval_set(nwbfile: Any, catalog_row: Mapping[str, Any]) -> Any:
     _require_columns(table, path, {"start_time", "stop_time"})
     selected_indices = _interval_row_indices(table, catalog_row)
     if not selected_indices:
+        expected_count = catalog_row.get(
+            "interval_count",
+            catalog_row.get("ripple_count"),
+        )
+        if path == RIPPLES_INTERVALS_TABLE_PATH and expected_count == 0:
+            intervals = nap.IntervalSet(
+                start=np.asarray([], dtype=float),
+                end=np.asarray([], dtype=float),
+                time_units="s",
+            )
+            set_info = getattr(intervals, "set_info", None)
+            if callable(set_info):
+                set_info(epoch=[])
+            return intervals
         raise ValueError(f"Catalog selectors no longer match any intervals in {path}.")
 
     expected_count = catalog_row.get("interval_count", catalog_row.get("ripple_count"))
@@ -1241,12 +1324,12 @@ def load_interval_set(nwbfile: Any, catalog_row: Mapping[str, Any]) -> Any:
     return intervals
 
 
-def _resolve_position_series(nwbfile: Any, position_type: str) -> Any:
-    """Resolve one canonical head or body SpatialSeries."""
-    if position_type not in POSITION_SERIES_BY_TYPE:
-        raise ValueError(
-            f"Unsupported position_type {position_type!r}; expected 'head' or 'body'."
-        )
+def _resolve_position_series(nwbfile: Any, position_series_name: str) -> Any:
+    """Resolve one explicitly named SpatialSeries from the position interface."""
+    position_series_name = _text(
+        position_series_name,
+        "position_series_name",
+    )
     position_interface = _processing_interface(
         nwbfile,
         "behavior",
@@ -1254,10 +1337,14 @@ def _resolve_position_series(nwbfile: Any, position_type: str) -> Any:
     )
     if position_interface is None:
         raise ValueError(f"Could not resolve NWB position interface {POSITION_INTERFACE_PATH}.")
-    series_name = POSITION_SERIES_BY_TYPE[position_type]
-    series = _mapping_value(getattr(position_interface, "spatial_series", None), series_name)
+    series = _mapping_value(
+        getattr(position_interface, "spatial_series", None),
+        position_series_name,
+    )
     if series is None:
-        raise ValueError(f"Could not resolve SpatialSeries {series_name!r}.")
+        raise ValueError(
+            f"Could not resolve SpatialSeries {position_series_name!r}."
+        )
     return series
 
 
@@ -1302,11 +1389,19 @@ def load_position(
     """Load one indexed position component as a second-based ``nap.TsdFrame``."""
     import pynapple as nap
 
-    position_type = str(catalog_row.get("position_type", ""))
-    series = _resolve_position_series(nwbfile, position_type)
+    position_series_name = _text(
+        catalog_row.get("position_series_name"),
+        "position_series_name",
+    )
+    position_role = _text(
+        catalog_row.get("position_role"),
+        "position_role",
+    )
+    series = _resolve_position_series(nwbfile, position_series_name)
+    series_path = f"{POSITION_INTERFACE_PATH}/{position_series_name}"
     _centimeter_unit(
         getattr(series, "unit", None),
-        f"{POSITION_INTERFACE_PATH}/{POSITION_SERIES_BY_TYPE[position_type]}",
+        series_path,
     )
     if catalog_row.get("spatial_unit", "cm") != "cm":
         raise ValueError("Position catalog spatial_unit must be 'cm'.")
@@ -1334,15 +1429,12 @@ def load_position(
         catalog_row,
         "source_object_id",
         series,
-        object_label=f"{position_type} position series",
+        object_label=f"{position_role} position series {position_series_name!r}",
     )
 
-    expected_series_path = (
-        f"{POSITION_INTERFACE_PATH}/{POSITION_SERIES_BY_TYPE[position_type]}"
-    )
     if catalog_row.get("source_table_path") != POSITION_EPOCHS_TABLE_PATH:
         raise ValueError("Position catalog source_table_path is not canonical.")
-    if catalog_row.get("source_object_path") != expected_series_path:
+    if catalog_row.get("source_object_path") != series_path:
         raise ValueError("Position catalog source_object_path is not canonical.")
     row_index = _integer(catalog_row.get("source_row_index"), "source_row_index")
     if row_index < 0 or row_index >= _table_length(position_table):
@@ -1351,6 +1443,17 @@ def load_position(
     epoch = _text(_table_cell(position_table, "epoch", row_index), "epoch")
     if epoch != str(catalog_row.get("epoch", "")):
         raise ValueError("Position catalog epoch does not match its source row.")
+    source_start_time, source_stop_time = _validated_interval_bounds(
+        position_table,
+        row_index=row_index,
+        path=POSITION_EPOCHS_TABLE_PATH,
+    )
+    start_time = _float(catalog_row.get("start_time"), "start_time")
+    stop_time = _float(catalog_row.get("stop_time"), "stop_time")
+    if start_time != source_start_time or stop_time != source_stop_time:
+        raise ValueError(
+            "Position catalog epoch time bounds do not match their source row."
+        )
     source_start_index = _integer(
         _table_cell(position_table, "start_index", row_index),
         "start_index",

@@ -21,7 +21,7 @@ ARTIFACT_DIRNAME = "ripple_modulation"
 ARTIFACT_NAMES = ("summary", "peri_ripple_firing_rate")
 STABLE_UNIT_COLUMNS = (
     "spikesorting_merge_id",
-    "nwb_unit_id",
+    "unit_id",
 )
 
 
@@ -120,8 +120,6 @@ def _select_epoch_ripples(ripple_table: Any, *, epoch: str) -> Any:
     if "epoch" in table.columns:
         epoch_values = table["epoch"].astype(str)
         table = table.loc[epoch_values == str(epoch)].reset_index(drop=True)
-        if table.empty:
-            raise ValueError(f"ripple_table has no detector events for epoch {epoch!r}.")
 
     missing_columns = [
         column for column in ("start_time", "end_time") if column not in table.columns
@@ -141,6 +139,46 @@ def _select_epoch_ripples(ripple_table: Any, *, epoch: str) -> Any:
     ):
         raise ValueError("Every ripple interval must have start_time < end_time.")
     return table
+
+
+def empty_ripple_modulation_result(
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    region: str,
+    n_ripples: int,
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return typed empty artifacts for a terminal no-unit/event selection."""
+    import pandas as pd
+
+    ripple_plot = _ripple_plot_module()
+    summary = pd.DataFrame(columns=ripple_plot.SUMMARY_COLUMNS)
+    peri = pd.DataFrame(columns=ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS)
+    summary = _attach_stable_unit_identity(
+        summary,
+        region_spikes={},
+        stable_unit_ids=[],
+    )
+    peri = _attach_stable_unit_identity(
+        peri,
+        region_spikes={},
+        stable_unit_ids=[],
+    )
+    return {
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(epoch),
+        "region": str(region),
+        "n_ripples": int(n_ripples),
+        "selected_ripple_table": pd.DataFrame(),
+        "summary": summary,
+        "peri_ripple_firing_rate": peri,
+        "heatmap_payload": None,
+        "stable_unit_ids": [],
+        "parameters": dict(parameters),
+    }
 
 
 def _attach_stable_unit_identity(
@@ -169,10 +207,10 @@ def _attach_stable_unit_identity(
         if missing:
             raise ValueError(f"Stable unit identity is missing fields {missing!r}.")
         merge_id = str(unit_id["spikesorting_merge_id"])
-        nwb_unit_id = str(unit_id["unit_id"])
-        if not merge_id or not nwb_unit_id:
-            raise ValueError("Stable merge and NWB unit ids must be non-empty.")
-        composite_id = f"{merge_id}:{nwb_unit_id}"
+        source_unit_id = str(unit_id["unit_id"])
+        if not merge_id or not source_unit_id:
+            raise ValueError("Stable merge and source unit ids must be non-empty.")
+        composite_id = f"{merge_id}:{source_unit_id}"
         if composite_id in composite_ids:
             raise ValueError(f"Duplicate stable unit identity {composite_id!r}.")
         composite_ids.add(composite_id)
@@ -180,15 +218,16 @@ def _attach_stable_unit_identity(
             identity_by_group_key[group_key] = (
                 composite_id,
                 merge_id,
-                nwb_unit_id,
+                source_unit_id,
             )
         except TypeError as exc:
             raise TypeError("TsGroup unit keys must be hashable.") from exc
 
     output = table.copy()
     if output.empty:
+        output["group_unit_id"] = np.asarray([], dtype=int)
         output["spikesorting_merge_id"] = np.asarray([], dtype=str)
-        output["nwb_unit_id"] = np.asarray([], dtype=str)
+        output["stable_unit_id"] = np.asarray([], dtype=str)
         return output
     if "unit_id" not in output.columns:
         raise ValueError("RippleModulation output is missing its unit_id column.")
@@ -201,9 +240,10 @@ def _attach_stable_unit_identity(
             raise ValueError(
                 f"RippleModulation output contains unknown TsGroup key {group_key!r}."
             ) from exc
-    output["unit_id"] = [identity[0] for identity in identities]
+    output["group_unit_id"] = output["unit_id"].to_numpy(copy=True)
+    output["unit_id"] = [identity[2] for identity in identities]
     output["spikesorting_merge_id"] = [identity[1] for identity in identities]
-    output["nwb_unit_id"] = [identity[2] for identity in identities]
+    output["stable_unit_id"] = [identity[0] for identity in identities]
     return output
 
 
@@ -217,7 +257,6 @@ def compute_epoch_region_ripple_modulation(
     epoch_timestamps: np.ndarray,
     region_spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]] | None = None,
-    minimum_ripple_mean_zscore: float | None = None,
     bin_size_s: float | None = None,
     time_before_s: float | None = None,
     time_after_s: float | None = None,
@@ -227,14 +266,10 @@ def compute_epoch_region_ripple_modulation(
     """Compute RippleModulation for one supplied epoch and brain region.
 
     ``ripple_table`` is expected to contain detector-qualified, speed-gated
-    events loaded from the NWB/ingestion layer.  All its events for ``epoch``
-    are used by default.  ``minimum_ripple_mean_zscore`` is the only optional
-    additional event filter and follows the existing strict ``>`` behavior.
+    events loaded from the NWB/ingestion layer. All its events for ``epoch``
+    are used; event detection criteria belong to the selected ``Ripples``
+    source row rather than this downstream computation.
     """
-    if minimum_ripple_mean_zscore is not None:
-        minimum_ripple_mean_zscore = float(minimum_ripple_mean_zscore)
-        if minimum_ripple_mean_zscore <= 0:
-            raise ValueError("minimum_ripple_mean_zscore must be positive.")
     timestamps = np.asarray(epoch_timestamps, dtype=float)
     if timestamps.ndim != 1 or timestamps.size < 2:
         raise ValueError("epoch_timestamps must contain at least two one-dimensional samples.")
@@ -250,11 +285,15 @@ def compute_epoch_region_ripple_modulation(
         baseline_window=baseline_window,
     )
     epoch_ripple_table = _select_epoch_ripples(ripple_table, epoch=epoch)
-    selected_ripple_table = ripple_plot.filter_ripple_table_by_threshold(
-        epoch_ripple_table,
-        epoch=str(epoch),
-        ripple_threshold_zscore=minimum_ripple_mean_zscore,
-    )
+    selected_ripple_table = epoch_ripple_table
+    if not selected_ripple_table.empty:
+        starts = selected_ripple_table["start_time"].to_numpy(dtype=float)
+        stops = selected_ripple_table["end_time"].to_numpy(dtype=float)
+        if np.any(starts < timestamps[0]) or np.any(stops > timestamps[-1]):
+            raise ValueError(
+                "Selected ripple intervals must lie within epoch_timestamps "
+                f"bounds {(float(timestamps[0]), float(timestamps[-1]))!r}."
+            )
 
     if selected_ripple_table.empty:
         import pandas as pd
@@ -280,7 +319,6 @@ def compute_epoch_region_ripple_modulation(
             "epoch": str(epoch),
             "region": str(region),
             "n_ripples": 0,
-            "minimum_ripple_mean_zscore": minimum_ripple_mean_zscore,
             "selected_ripple_table": selected_ripple_table,
             "summary": summary_table,
             "peri_ripple_firing_rate": peri_ripple_table,
@@ -336,7 +374,7 @@ def compute_epoch_region_ripple_modulation(
         )
         heatmap_payload = {
             **heatmap_payload,
-            "unit_ids": summary_table["unit_id"].to_numpy(dtype=object),
+            "unit_ids": summary_table["stable_unit_id"].to_numpy(dtype=object),
         }
     return {
         "animal_name": str(animal_name),
@@ -344,7 +382,6 @@ def compute_epoch_region_ripple_modulation(
         "epoch": str(epoch),
         "region": str(region),
         "n_ripples": int(n_ripples),
-        "minimum_ripple_mean_zscore": minimum_ripple_mean_zscore,
         "selected_ripple_table": selected_ripple_table,
         "summary": summary_table,
         "peri_ripple_firing_rate": peri_ripple_table,
@@ -366,50 +403,31 @@ def _validate_path_component(value: str, *, name: str) -> str:
     return value
 
 
+def _validate_uuid_component(value: Any, *, name: str) -> str:
+    """Return one canonical UUID path component."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a UUID, got {value!r}.") from exc
+
+
 def get_ripple_modulation_artifact_paths(
     *,
     animal_name: str,
     date: str,
     epoch: str,
     region: str,
+    ripple_modulation_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
-    minimum_ripple_mean_zscore: float | None = None,
-    bin_size_s: float | None = None,
-    time_before_s: float | None = None,
-    time_after_s: float | None = None,
-    response_window: tuple[float, float] | None = None,
-    baseline_window: tuple[float, float] | None = None,
-    heatmap_normalize: str | None = None,
 ) -> dict[str, Path]:
-    """Plan session-first Parquet paths without creating directories."""
+    """Plan one UUID-keyed, session-first artifact directory."""
     animal_name = _validate_path_component(animal_name, name="animal_name")
     date = _validate_path_component(date, name="date")
     epoch = _validate_path_component(epoch, name="epoch")
     region = _validate_path_component(region, name="region")
-    if minimum_ripple_mean_zscore is not None and minimum_ripple_mean_zscore <= 0:
-        raise ValueError("minimum_ripple_mean_zscore must be positive.")
-
-    ripple_plot = _ripple_plot_module()
-    parameters = _resolve_parameters(
-        bin_size_s=bin_size_s,
-        time_before_s=time_before_s,
-        time_after_s=time_after_s,
-        response_window=response_window,
-        baseline_window=baseline_window,
-        heatmap_normalize=heatmap_normalize,
-    )
-    stem = ripple_plot.build_epoch_output_stem(
-        animal_name=animal_name,
-        date=date,
-        epoch=epoch,
-        region_label=region,
-        ripple_threshold_zscore=minimum_ripple_mean_zscore,
-        bin_size_s=parameters["bin_size_s"],
-        time_before_s=parameters["time_before_s"],
-        time_after_s=parameters["time_after_s"],
-        response_window=parameters["response_window"],
-        baseline_window=parameters["baseline_window"],
-        heatmap_normalize=parameters["heatmap_normalize"],
+    selection_component = _validate_uuid_component(
+        ripple_modulation_id,
+        name="ripple_modulation_id",
     )
     output_dir = (
         Path(artifact_root)
@@ -418,12 +436,41 @@ def get_ripple_modulation_artifact_paths(
         / ARTIFACT_DIRNAME
         / epoch
         / region
+        / selection_component
     )
     return {
         "directory": output_dir,
-        "summary": output_dir / f"{stem}_summary.parquet",
-        "peri_ripple_firing_rate": output_dir
-        / f"{stem}_peri_ripple_firing_rate.parquet",
+        "summary": output_dir / "summary.parquet",
+        "peri_ripple_firing_rate": output_dir / "peri_ripple_firing_rate.parquet",
+    }
+
+
+def _legacy_artifact_names(
+    *,
+    animal_name: str,
+    date: str,
+    epoch: str,
+    region: str,
+    parameters: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return expected standalone-script names with no extra event filter."""
+    ripple_plot = _ripple_plot_module()
+    stem = ripple_plot.build_epoch_output_stem(
+        animal_name=str(animal_name),
+        date=str(date),
+        epoch=str(epoch),
+        region_label=str(region),
+        ripple_threshold_zscore=None,
+        bin_size_s=float(parameters["bin_size_s"]),
+        time_before_s=float(parameters["time_before_s"]),
+        time_after_s=float(parameters["time_after_s"]),
+        response_window=tuple(parameters["response_window"]),
+        baseline_window=tuple(parameters["baseline_window"]),
+        heatmap_normalize=str(parameters["heatmap_normalize"]),
+    )
+    return {
+        "summary": f"{stem}_summary.parquet",
+        "peri_ripple_firing_rate": f"{stem}_peri_ripple_firing_rate.parquet",
     }
 
 
@@ -515,10 +562,10 @@ def plan_register_existing(
     date: str,
     epoch: str,
     region: str,
+    ripple_modulation_id: Any,
     existing_summary_path: Path,
     existing_peri_ripple_firing_rate_path: Path,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
-    minimum_ripple_mean_zscore: float | None = None,
     bin_size_s: float | None = None,
     time_before_s: float | None = None,
     time_after_s: float | None = None,
@@ -532,28 +579,8 @@ def plan_register_existing(
         date=date,
         epoch=epoch,
         region=region,
+        ripple_modulation_id=ripple_modulation_id,
         artifact_root=artifact_root,
-        minimum_ripple_mean_zscore=minimum_ripple_mean_zscore,
-        bin_size_s=bin_size_s,
-        time_before_s=time_before_s,
-        time_after_s=time_after_s,
-        response_window=response_window,
-        baseline_window=baseline_window,
-        heatmap_normalize=heatmap_normalize,
-    )
-    all_region_paths = get_ripple_modulation_artifact_paths(
-        animal_name=animal_name,
-        date=date,
-        epoch=epoch,
-        region="all_regions",
-        artifact_root=artifact_root,
-        minimum_ripple_mean_zscore=minimum_ripple_mean_zscore,
-        bin_size_s=bin_size_s,
-        time_before_s=time_before_s,
-        time_after_s=time_after_s,
-        response_window=response_window,
-        baseline_window=baseline_window,
-        heatmap_normalize=heatmap_normalize,
     )
     parameters = _resolve_parameters(
         bin_size_s=bin_size_s,
@@ -589,15 +616,30 @@ def plan_register_existing(
             "epoch": str(epoch),
             "region": str(region),
         },
-        "minimum_ripple_mean_zscore": minimum_ripple_mean_zscore,
         "source_paths": source_paths,
         "artifact_paths": {
             name: destination_paths[name] for name in ARTIFACT_NAMES
         },
         "accepted_source_names": {
-            name: (
-                destination_paths[name].name,
-                all_region_paths[name].name,
+            name: tuple(
+                dict.fromkeys(
+                    (
+                        _legacy_artifact_names(
+                            animal_name=animal_name,
+                            date=date,
+                            epoch=epoch,
+                            region=region,
+                            parameters=parameters,
+                        )[name],
+                        _legacy_artifact_names(
+                            animal_name=animal_name,
+                            date=date,
+                            epoch=epoch,
+                            region="all_regions",
+                            parameters=parameters,
+                        )[name],
+                    )
+                )
             )
             for name in ARTIFACT_NAMES
         },
@@ -613,6 +655,7 @@ def _select_registration_rows(
     *,
     key: Mapping[str, Any],
     source: Path,
+    allow_empty: bool = False,
 ) -> Any:
     """Return only rows matching a registration key from one legacy table."""
     required_columns = ("animal_name", "date", "epoch", "region")
@@ -628,11 +671,80 @@ def _select_registration_rows(
         include &= table[column].astype(str).to_numpy() == str(key[column])
     selected = table.loc[include].reset_index(drop=True)
     if selected.empty:
+        if allow_empty and table.empty:
+            return selected
         raise ValueError(
             f"Existing RippleModulation artifact {source} has no rows for "
             f"key {dict(key)!r}."
         )
     return selected
+
+
+def _validate_registration_schema(
+    table: Any,
+    *,
+    artifact_name: str,
+    source: Path,
+) -> None:
+    """Require the complete standalone artifact schema before registration."""
+    ripple_plot = _ripple_plot_module()
+    required_columns = (
+        ripple_plot.SUMMARY_COLUMNS
+        if artifact_name == "summary"
+        else ripple_plot.PERI_RIPPLE_FIRING_RATE_COLUMNS
+    )
+    missing = [column for column in required_columns if column not in table.columns]
+    if missing:
+        raise ValueError(
+            f"Existing RippleModulation {artifact_name} artifact {source} is "
+            f"missing canonical columns: {missing!r}."
+        )
+
+
+def _validate_peri_ripple_time_grid(
+    table: Any,
+    *,
+    expected: Mapping[str, Any],
+    source: Path,
+) -> None:
+    """Require one complete, common PETH time grid for every legacy unit."""
+    if table.empty:
+        return
+    bin_size_s = float(expected["bin_size_s"])
+    expected_grid = np.arange(
+        -float(expected["time_before_s"]) + bin_size_s / 2.0,
+        float(expected["time_after_s"]),
+        bin_size_s,
+        dtype=float,
+    )
+    if not expected_grid.size:
+        raise ValueError("RippleModulation parameters produce an empty PETH grid.")
+    identity_columns = ["unit_id"]
+    if "spikesorting_merge_id" in table.columns:
+        identity_columns.insert(0, "spikesorting_merge_id")
+        if "nwb_unit_id" in table.columns:
+            identity_columns[-1] = "nwb_unit_id"
+    for identity, unit_table in table.groupby(identity_columns, sort=False):
+        observed = np.sort(unit_table["time_s"].to_numpy(dtype=float))
+        if (
+            observed.size != expected_grid.size
+            or not np.all(np.isfinite(observed))
+            or not np.allclose(
+                observed,
+                expected_grid,
+                rtol=1e-7,
+                atol=max(1e-12, bin_size_s * 1e-7),
+            )
+        ):
+            raise ValueError(
+                "Existing RippleModulation peri-ripple artifact has an "
+                f"incomplete or shifted time grid for unit {identity!r}: {source}."
+            )
+    mean_rate = table["mean_rate_hz"].to_numpy(dtype=float)
+    if not np.all(np.isfinite(mean_rate)):
+        raise ValueError(
+            "Existing RippleModulation peri-ripple mean_rate_hz values must be finite."
+        )
 
 
 def _validate_registration_parameters(
@@ -670,6 +782,7 @@ def read_planned_artifacts(
     plan: Mapping[str, Any],
     *,
     allow_unkeyed_same_path: bool = False,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     """Read and validate key-matched Parquets without writing anything."""
     import pandas as pd
@@ -703,6 +816,11 @@ def read_planned_artifacts(
                 f"one of {accepted_source_names[artifact_name]!r}."
             )
         table = pd.read_parquet(source)
+        _validate_registration_schema(
+            table,
+            artifact_name=artifact_name,
+            source=source,
+        )
         _validate_registration_parameters(
             table,
             expected=compute_parameters,
@@ -712,7 +830,14 @@ def read_planned_artifacts(
             table,
             key=key,
             source=source,
+            allow_empty=allow_empty,
         )
+        if artifact_name == "peri_ripple_firing_rate":
+            _validate_peri_ripple_time_grid(
+                selected,
+                expected=compute_parameters,
+                source=source,
+            )
         if (
             not copy.get("copy_required", True)
             and len(selected) != len(table)

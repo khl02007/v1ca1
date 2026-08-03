@@ -1602,6 +1602,9 @@ def make_figure_2(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        swap_delta_min_movement_firing_rate_hz=(
+            _figure_2.PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         swap_delta_min_tuning_stability_correlation=(
             _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),
@@ -1645,6 +1648,9 @@ def make_figure_2(
         region=quant_region,
         light_epoch=light_epoch,
         dark_epoch=dark_epoch,
+        min_movement_firing_rate_hz=(
+            _figure_2.PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
+        ),
         min_stability_correlation=(
             _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
         ),

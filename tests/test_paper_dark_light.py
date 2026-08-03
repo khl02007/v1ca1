@@ -167,7 +167,7 @@ def test_load_panel_quantification_data_reports_missing_artifacts(tmp_path: Path
         )
 
 
-def test_load_panel_h_swap_delta_table_filters_by_dark_tuning_stability(
+def test_load_panel_h_swap_delta_table_intersects_firing_rate_and_stability(
     tmp_path: Path,
 ) -> None:
     pd = pytest.importorskip("pandas")
@@ -222,6 +222,7 @@ def test_load_panel_h_swap_delta_table_filters_by_dark_tuning_stability(
                 "center_to_left",
                 "center_to_left",
             ],
+            "firing_rate_hz": [0.5, 0.5, 0.49, 0.49, 0.5, 0.5],
             "stability_correlation": [0.51, 0.50, 0.2, 0.7, 0.9, 0.99],
         }
     ).to_parquet(stability_path)
@@ -232,12 +233,13 @@ def test_load_panel_h_swap_delta_table_filters_by_dark_tuning_stability(
         region="v1",
         dark_epoch=None,
         light_epoch_pairs=(("02_r1", "06_r3"),),
+        min_movement_firing_rate_hz=0.5,
         min_tuning_stability_correlation=0.5,
     )
 
-    assert table["unit"].tolist() == [11, 13, 11, 13]
+    assert table["unit"].tolist() == [11, 12, 11, 12]
     assert table["delta_ll_bits_per_spike"].tolist() == pytest.approx(
-        [0.1, 0.3, 0.4, 0.6]
+        [0.1, 0.2, 0.4, 0.5]
     )
 
 
@@ -1854,5 +1856,4 @@ def test_setup_light_heatmap_panel_uses_figure_1_heatmap_geometry() -> None:
     assert all(patch.get_facecolor()[3] == pytest.approx(0.0) for patch in tuning_patches)
     assert all(patch.get_facecolor()[3] == pytest.approx(0.0) for patch in order_patches)
     plt.close(fig)
-
 
