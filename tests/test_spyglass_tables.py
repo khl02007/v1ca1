@@ -34,6 +34,7 @@ from v1ca1.spyglass.tables import (
     _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
+    _motor_encoding_comparison_selection_row,
     _movement_firing_rate_selection_row,
     _path_progression_decoding_selection_row,
     _path_specific_place_decoding_selection_row,
@@ -831,6 +832,77 @@ def _build_path_specific_place_decoding_selection() -> dict[str, Any]:
     )
 
 
+def _motor_encoding_selection_inputs() -> dict[str, Any]:
+    """Return internally consistent motor-encoding selection inputs."""
+    base = _dpp_encoding_selection_inputs()
+    parameters = dict(
+        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+    )
+    base["region_row"]["region_name"] = "v1"
+    base["movement_selection"]["region"] = "v1"
+    base["movement_selection"]["position_series_name"] = "head_position"
+    base["key"] = {
+        "nwb_file_name": base["movement_selection"]["nwb_file_name"],
+        "epoch": base["movement_selection"]["epoch"],
+        "region_sorted_spikes_group_id": base["key"][
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": base["key"]["movement_firing_rate_id"],
+        "primary_position_series_name": "head_position",
+        "orientation_reference_position_series_name": "body_position",
+        "motor_encoding_comparison_param_name": parameters[
+            "motor_encoding_comparison_param_name"
+        ],
+    }
+    common_position = {
+        "nwb_file_name": base["movement_selection"]["nwb_file_name"],
+        "epoch": base["movement_selection"]["epoch"],
+        "spatial_unit": "cm",
+        "start_index": 0,
+        "stop_index_exclusive": 100,
+        "sample_count": 100,
+        "analysis_start_offset_samples": 10,
+        "start_time": 1.0,
+        "stop_time": 10.0,
+        "first_frame": 0,
+        "last_frame": 99,
+        "video_series_name": "behavior_video",
+    }
+    base["position_rows"] = [
+        {
+            **common_position,
+            "position_series_name": "head_position",
+            "position_role": "head",
+        },
+        {
+            **common_position,
+            "position_series_name": "body_position",
+            "position_role": "body",
+        },
+    ]
+    base["parameters"] = parameters
+    return base
+
+
+def _build_motor_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one motor selection row from mutable fake upstream tables."""
+    return _motor_encoding_comparison_selection_row(
+        key=inputs["key"],
+        region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
+        movement_firing_rate_table=_FakeRelation(inputs["movement_result"]),
+        movement_firing_rate_selection_table=_FakeRelation(
+            inputs["movement_selection"]
+        ),
+        position_table=_FakeRowsRelation(inputs["position_rows"]),
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+    )
+
+
 def test_import_is_passive_in_fresh_interpreter() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     environment = os.environ.copy()
@@ -886,6 +958,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "path_specific_place_decoding_parameters",
         "path_specific_place_decoding_selection",
         "path_specific_place_decoding",
+        "motor_encoding_comparison_parameters",
+        "motor_encoding_comparison_selection",
+        "motor_encoding_comparison",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -910,6 +985,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "PathSpecificPlaceDecodingParameters" in schemas[0].context
     assert "PathSpecificPlaceDecodingSelection" in schemas[0].context
     assert "PathSpecificPlaceDecoding" in schemas[0].context
+    assert "MotorEncodingComparisonParameters" in schemas[0].context
+    assert "MotorEncodingComparisonSelection" in schemas[0].context
+    assert "MotorEncodingComparison" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -1208,6 +1286,40 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "register_existing",
     )
 
+    motor_parameters = bundle[
+        "motor_encoding_comparison_parameters"
+    ].definition
+    assert "outer_n_folds: smallint unsigned" in motor_parameters
+    assert "inner_n_folds: smallint unsigned" in motor_parameters
+    assert "ridge_values: longblob" in motor_parameters
+    assert "spatial_bin_sizes_cm: longblob" in motor_parameters
+    assert "minimum_movement_firing_rate_hz: double" in motor_parameters
+
+    motor_selection = bundle[
+        "motor_encoding_comparison_selection"
+    ].definition
+    assert "motor_encoding_comparison_id: uuid" in motor_selection
+    assert "-> RegionSortedSpikesGroup" in motor_selection
+    assert "-> MovementFiringRate" in motor_selection
+    assert "primary_position_series_name='position_series_name'" in (
+        motor_selection
+    )
+    assert (
+        "orientation_reference_position_series_name='position_series_name'"
+        in motor_selection
+    )
+    assert "full_w_configuration_name='configuration_name'" in motor_selection
+    assert "motor_encoding_comparison_model_spec_sha256" in motor_selection
+    assert "motor_encoding_comparison_output_rule_sha256" in motor_selection
+
+    motor_result = bundle["motor_encoding_comparison"].definition
+    assert "-> MotorEncodingComparisonSelection" in motor_result
+    assert "nested_cv_path: filepath@analysis" in motor_result
+    assert "full_refit_path: filepath@analysis" in motor_result
+    assert "selected_units_path: filepath@analysis" in motor_result
+    assert "'partial_valid'" in motor_result
+    assert hasattr(bundle["motor_encoding_comparison"], "register_existing")
+
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
     monkeypatch,
@@ -1295,6 +1407,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     similarity_parameters = bundle["tuning_similarity_parameters"]
     encoding_parameters = bundle["dpp_encoding_comparison_parameters"]
     decoding_parameters = bundle["path_progression_decoding_parameters"]
+    motor_parameters = bundle["motor_encoding_comparison_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
@@ -1302,6 +1415,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     similarity_rows = similarity_parameters.insert_presets()
     encoding_row = encoding_parameters.insert_default()
     decoding_row = decoding_parameters.insert_default()
+    motor_rows = motor_parameters.insert_presets()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -1399,6 +1513,20 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     }
     assert decoding_parameters._insert_calls == [
         (decoding_row, {"skip_duplicates": True})
+    ]
+    assert motor_rows == [
+        dict(row)
+        for row in table_specs.MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS
+    ]
+    assert [
+        row["minimum_movement_firing_rate_hz"] for row in motor_rows
+    ] == [0.5, 0.0]
+    assert all(row["evaluation_bin_size_s"] == 0.05 for row in motor_rows)
+    assert all(row["outer_n_folds"] == 5 for row in motor_rows)
+    assert all(row["inner_n_folds"] == 3 for row in motor_rows)
+    assert all(row["random_seed"] == 0 for row in motor_rows)
+    assert motor_parameters._insert_calls == [
+        (row, {"skip_duplicates": True}) for row in motor_rows
     ]
 
     with pytest.raises(TypeError, match="numeric scalar"):
@@ -3403,6 +3531,45 @@ def test_path_specific_place_decoding_selection_is_deterministic() -> None:
     )
 
 
+def test_motor_encoding_selection_is_deterministic_and_freezes_rules() -> None:
+    first = _build_motor_encoding_selection(
+        _motor_encoding_selection_inputs()
+    )
+    second = _build_motor_encoding_selection(
+        _motor_encoding_selection_inputs()
+    )
+
+    assert first == second
+    assert first["motor_encoding_comparison_id"].version == 5
+    assert first["primary_position_series_name"] == "head_position"
+    assert first[
+        "orientation_reference_position_series_name"
+    ] == "body_position"
+    assert first[
+        "motor_encoding_comparison_parameters_sha256"
+    ] == provenance_sha256(
+        dict(table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS)
+    )
+    assert first[
+        "motor_encoding_comparison_model_spec_sha256"
+    ] == provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+    )
+    assert first[
+        "motor_encoding_comparison_output_rule_sha256"
+    ] == provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+    )
+
+
+def test_motor_encoding_selection_rejects_misaligned_position_sources() -> None:
+    inputs = _motor_encoding_selection_inputs()
+    inputs["position_rows"][1]["sample_count"] = 99
+
+    with pytest.raises(ValueError, match="aligned sampling metadata"):
+        _build_motor_encoding_selection(inputs)
+
+
 def test_tuning_similarity_result_hooks_receive_fetched_selection(
     monkeypatch,
 ) -> None:
@@ -3922,6 +4089,15 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             "dpp_encoding_comparison_register_existing",
             {"encoding_comparison_path": "old-encoding.parquet"},
         ),
+        (
+            "motor_encoding_comparison",
+            "motor_encoding_comparison_id",
+            "motor_encoding_comparison_register_existing",
+            {
+                "source_nested_cv_path": "old-nested.nc",
+                "source_full_refit_path": "old-full-refit.nc",
+            },
+        ),
     ],
 )
 def test_register_existing_rejects_overwrite_before_hook(
@@ -3998,6 +4174,15 @@ def test_register_existing_rejects_overwrite_before_hook(
             "dpp_encoding_comparison_id",
             "dpp_encoding_comparison_register_existing",
             {"encoding_comparison_path": "old-encoding.parquet"},
+        ),
+        (
+            "motor_encoding_comparison",
+            "motor_encoding_comparison_id",
+            "motor_encoding_comparison_register_existing",
+            {
+                "source_nested_cv_path": "old-nested.nc",
+                "source_full_refit_path": "old-full-refit.nc",
+            },
         ),
     ],
 )
@@ -4104,6 +4289,17 @@ def test_register_existing_preflights_duplicate_before_hook(
             "dpp_encoding_comparison_compute",
             (("encoding_comparison_path", "encoding_comparison.parquet"),),
         ),
+        (
+            "motor_encoding_comparison",
+            "motor_encoding_comparison_id",
+            "motor_encoding_comparison_compute",
+            (
+                ("artifact_manifest_path", "manifest.parquet"),
+                ("selected_units_path", "selected_units.parquet"),
+                ("nested_cv_path", "nested_cv.nc"),
+                ("full_refit_path", "full_refit.nc"),
+            ),
+        ),
     ],
 )
 def test_failed_result_insert_removes_only_hook_reported_artifacts(
@@ -4187,6 +4383,18 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
                     "n_units_input": 2,
                     "n_units_eligible": 1,
                     "eligible_units_sha256": "c" * 64,
+                }
+            )
+        if table_key == "motor_encoding_comparison":
+            row.pop("n_units")
+            row.pop("n_valid_units")
+            row.update(
+                {
+                    "n_units_input": 2,
+                    "n_units_eligible": 1,
+                    "n_units_valid": 1,
+                    "n_outer_folds_expected": 5,
+                    "n_outer_folds_valid": 5,
                 }
             )
         return row

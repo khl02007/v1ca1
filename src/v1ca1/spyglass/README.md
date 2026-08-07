@@ -248,8 +248,8 @@ not create one DataJoint row per unit.
 The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
-`DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
-`PathSpecificPlaceDecoding`—there is no
+`DPPEncodingComparison`, `PathProgressionDecodingComparison`,
+`PathSpecificPlaceDecoding`, and `MotorEncodingComparison`—there is no
 `Computed` suffix. Empty but valid
 selections are recorded through explicit terminal statuses rather than being
 silently omitted.
@@ -323,6 +323,41 @@ silently removing units. Legacy true/decoded NPZ pairs can be registered only
 against an explicit current selection; their parameter assumptions and
 reconstructed fold coverage are retained as provenance.
 
+The motor encoding comparison uses:
+
+```text
+RegionSortedSpikesGroup + MovementFiringRate
+    + primary Position + orientation-reference Position
+    + four TrajectoryIntervals + four trajectory WTrackGraph rows
+    + full_w WTrackGraph + MotorEncodingComparisonParameters
+    -> MotorEncodingComparisonSelection
+    -> MotorEncodingComparison
+    -> manifest.parquet + selected_units.parquet
+       + nested_cv.nc + full_refit.nc
+```
+
+One result covers one run epoch and region. The two position series may have
+arbitrary names and roles, but they must be distinct centimeter series on the
+same timestamp grid. The primary series supplies speed, acceleration, and
+track linearization; subtracting the orientation-reference series from it
+supplies head direction and its derivatives. The primary series must also be
+the one used by the selected `MovementFiringRate` row. All path lengths and
+the generalized full-W coordinate come from the five selected NWB graph rows
+rather than an animal-name geometry lookup.
+
+The fixed family is the existing nine-model motor/DPP/place comparison. Each
+model selects ridge and, where applicable, spatial resolution by inner
+lap-wise CV inside each outer lap-wise fold. The V1 and CA1 manuscript presets
+differ only in their strict movement-firing-rate thresholds (`> 0.5` and
+`> 0.0` Hz). `nested_cv.nc` is held-out evidence. `full_refit.nc` refits the
+selected hyperparameters to all eligible samples for coefficient and
+rate-curve visualization; it is not held-out evidence. The Parquet unit audit
+maps temporary group keys to persistent sorting-output/unit identities and
+records fold-level eligibility without creating one DataJoint row per unit.
+If a population fit fails or returns non-finite parameters for only some units,
+those units are retried independently; unresolved units remain explicit invalid
+entries in the audit and do not discard finite evidence from other units.
+
 ## Artifacts and provenance
 
 New results are written under the configured `filepath@analysis` store,
@@ -366,6 +401,12 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     decoding_summary.parquet
     decoding_error_by_position.parquet
     {true,decoded}_place.npz
+
+<root>/<animal>/<date>/motor_encoding_comparison/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    nested_cv.nc
+    full_refit.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -380,8 +421,8 @@ inserts the result row. It never writes results into the source NWB.
 `MovementFiringRate` is compute-only: its Parquet and Pynapple-backed NPZ are
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
-`DPPTuningCurve`, `PathSpecificPlaceStability`, and
-`DPPEncodingComparison` and `PathSpecificPlaceDecoding` additionally provide
+`DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
+`PathSpecificPlaceDecoding`, and `MotorEncodingComparison` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
@@ -403,6 +444,10 @@ join or cross-trajectory-transfer outputs.
 The legacy filename verifies the fold count and temporal/spatial bins.
 Smoothing, random seed, and fold-level QC are not encoded, so those limitations
 are retained explicitly as caller-attested, unreconstructed provenance.
+Motor registration accepts an exact nested-CV/full-refit NetCDF pair,
+validates their shared session, region, epoch, model, parameter, and unit
+coverage, resolves temporary unit coordinates against the selected regional
+sorting group, and copies both into one immutable canonical bundle.
 Legacy registration is restricted to matching `ImportedSpikeSorting`
 selections. Registration requires complete canonical schemas; ripple
 peri-event data must also contain one complete, common time grid for every

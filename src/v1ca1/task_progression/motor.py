@@ -40,6 +40,7 @@ refit is saved for visualization rather than final inference.
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 from v1ca1.helper.cuda import (
@@ -355,9 +356,20 @@ def compute_motor_covariates(
     body_xy: np.ndarray,
     position_timestamps: np.ndarray,
     spike_counts: Any,
+    *,
+    speed_smoothing_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> dict[str, np.ndarray]:
     """Compute binned motor covariates, including head angular acceleration."""
     import pynapple as nap
+
+    speed_smoothing_sigma_s = float(speed_smoothing_sigma_s)
+    if (
+        not np.isfinite(speed_smoothing_sigma_s)
+        or speed_smoothing_sigma_s < 0.0
+    ):
+        raise ValueError(
+            "speed_smoothing_sigma_s must be finite and non-negative."
+        )
 
     sampling_rate = (len(position_timestamps) - 1) / (
         position_timestamps[-1] - position_timestamps[0]
@@ -367,7 +379,7 @@ def compute_motor_covariates(
             position=position_xy,
             time=position_timestamps,
             sampling_frequency=float(sampling_rate),
-            sigma=DEFAULT_SPEED_SIGMA_S,
+            sigma=speed_smoothing_sigma_s,
         ),
         dtype=float,
     )
@@ -667,6 +679,26 @@ def build_position_basis_config(
         animal_name,
         branch_gap_cm=generalized_place_branch_gap_cm,
     )
+    return build_position_basis_config_from_lengths(
+        trajectory_length_cm=trajectory_length_cm,
+        generalized_place_length_cm=generalized_place_length_cm,
+        spatial_bin_size_cm=spatial_bin_size_cm,
+        spline_order=spline_order,
+        generalized_place_branch_gap_cm=generalized_place_branch_gap_cm,
+    )
+
+
+def build_position_basis_config_from_lengths(
+    *,
+    trajectory_length_cm: float,
+    generalized_place_length_cm: float,
+    spatial_bin_size_cm: float,
+    spline_order: int,
+    generalized_place_branch_gap_cm: float,
+) -> dict[str, Any]:
+    """Build one basis configuration from explicitly selected graph lengths."""
+    trajectory_length_cm = float(trajectory_length_cm)
+    generalized_place_length_cm = float(generalized_place_length_cm)
     trajectory_n_splines = n_splines_from_spatial_bin_size(
         trajectory_length_cm,
         spatial_bin_size_cm,
@@ -1306,6 +1338,7 @@ def prepare_motor_epoch_data(
     movement_interval: Any,
     bin_size_s: float,
     tp_bounds: tuple[float, float] = (0.0, 1.0),
+    speed_smoothing_sigma_s: float = DEFAULT_SPEED_SIGMA_S,
 ) -> dict[str, Any]:
     """Build binned response, covariates, labels, and fit-eligible row masks."""
     import pynapple as nap
@@ -1363,6 +1396,7 @@ def prepare_motor_epoch_data(
         body_xy=np.asarray(body_position_tsd.d, dtype=float),
         position_timestamps=np.asarray(position_tsd.t, dtype=float),
         spike_counts=spike_counts,
+        speed_smoothing_sigma_s=speed_smoothing_sigma_s,
     )
 
     tp_lower, tp_upper = map(float, tp_bounds)
@@ -1924,6 +1958,102 @@ def fit_population_glm(
     return model
 
 
+def fit_population_glm_isolating_unit_failures(
+    design: np.ndarray,
+    response: np.ndarray,
+    *,
+    ridge: float,
+) -> Any:
+    """Fit a population GLM while preserving units that can fit independently."""
+    design = np.asarray(design, dtype=float)
+    response = np.asarray(response, dtype=float)
+    if response.ndim != 2 or response.shape[1] == 0:
+        raise ValueError("response must be a non-empty two-dimensional array.")
+    n_features = int(design.shape[1])
+    n_units = int(response.shape[1])
+    coefficients = np.full((n_features, n_units), np.nan, dtype=float)
+    intercepts = np.full(n_units, np.nan, dtype=float)
+    finite_units = np.zeros(n_units, dtype=bool)
+    population_error: Exception | None = None
+
+    try:
+        population_model = fit_population_glm(design, response, ridge=ridge)
+        population_coefficients = extract_model_coefficients(
+            population_model,
+            n_features,
+        )
+        population_intercepts = np.asarray(
+            population_model.intercept_,
+            dtype=float,
+        ).reshape(-1)
+        if population_coefficients.shape != (n_features, n_units):
+            raise ValueError("Population GLM coefficients have an unexpected shape.")
+        if population_intercepts.size != n_units:
+            raise ValueError("Population GLM intercepts have an unexpected shape.")
+        finite_units = np.isfinite(population_intercepts) & np.all(
+            np.isfinite(population_coefficients),
+            axis=0,
+        )
+        coefficients[:, finite_units] = population_coefficients[:, finite_units]
+        intercepts[finite_units] = population_intercepts[finite_units]
+        if np.all(finite_units):
+            return population_model
+    except Exception as exc:
+        population_error = exc
+        finite_units[:] = False
+
+    for unit_index in np.flatnonzero(~finite_units):
+        try:
+            unit_model = fit_population_glm(
+                design,
+                response[:, [unit_index]],
+                ridge=ridge,
+            )
+            unit_coefficients = extract_model_coefficients(
+                unit_model,
+                n_features,
+            )[:, 0]
+            unit_intercept = float(
+                np.asarray(unit_model.intercept_, dtype=float).reshape(-1)[0]
+            )
+            if not (
+                np.all(np.isfinite(unit_coefficients))
+                and np.isfinite(unit_intercept)
+            ):
+                continue
+            coefficients[:, unit_index] = unit_coefficients
+            intercepts[unit_index] = unit_intercept
+        except Exception:
+            continue
+    resolved_units = np.isfinite(intercepts) & np.all(
+        np.isfinite(coefficients),
+        axis=0,
+    )
+    if not np.any(resolved_units):
+        error = RuntimeError("Population GLM and every per-unit retry failed.")
+        if population_error is not None:
+            raise error from population_error
+        raise error
+    return SimpleNamespace(coef_=coefficients, intercept_=intercepts)
+
+
+def _fit_population_glm_for_policy(
+    design: np.ndarray,
+    response: np.ndarray,
+    *,
+    ridge: float,
+    isolate_unit_failures: bool,
+) -> Any:
+    """Fit a GLM using the requested fixed unit-failure policy."""
+    if isolate_unit_failures:
+        return fit_population_glm_isolating_unit_failures(
+            design,
+            response,
+            ridge=ridge,
+        )
+    return fit_population_glm(design, response, ridge=ridge)
+
+
 def score_model_on_split(
     model: PopulationGLM,
     design_test: np.ndarray,
@@ -1955,6 +2085,7 @@ def compute_hyperparameter_cv_scores(
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
+    isolate_unit_failures: bool = False,
 ) -> dict[str, Any]:
     """Return pooled lap-CV scores for ridge and spatial-bin-size candidates."""
     ridge_values = [float(value) for value in ridge_values]
@@ -2018,7 +2149,12 @@ def compute_hyperparameter_cv_scores(
                 x_train = train_design_info["designs"][model_name]
                 x_test = test_design_info["designs"][model_name]
                 for ridge_index, ridge in enumerate(ridge_values):
-                    model = fit_population_glm(x_train, response_train, ridge=ridge)
+                    model = _fit_population_glm_for_policy(
+                        x_train,
+                        response_train,
+                        ridge=ridge,
+                        isolate_unit_failures=isolate_unit_failures,
+                    )
                     ll_sum[model_index, spatial_index, ridge_index] += (
                         score_model_on_split(
                             model,
@@ -2138,6 +2274,7 @@ def score_models_on_split(
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
+    isolate_unit_failures: bool = False,
 ) -> dict[str, Any]:
     """Fit selected-ridge models on train rows and score held-out rows."""
     unit_mask = np.asarray(unit_mask, dtype=bool)
@@ -2178,10 +2315,11 @@ def score_models_on_split(
             motor_transform,
             position_basis=position_basis,
         )
-        model = fit_population_glm(
+        model = _fit_population_glm_for_policy(
             train_design_info["designs"][model_name],
             response_train,
             ridge=float(ridge_by_model[model_name]),
+            isolate_unit_failures=isolate_unit_failures,
         )
         fitted_models[model_name] = model
         ll_sum[model_index] = score_model_on_split(
@@ -2233,6 +2371,7 @@ def run_nested_lap_cv(
     motor_spline_k: int,
     motor_spline_order: int,
     print_prefix: str = "",
+    isolate_unit_failures: bool = False,
 ) -> dict[str, Any]:
     """Run nested lap-level CV with per-model population ridge selection."""
     ridge_values = [float(value) for value in ridge_values]
@@ -2319,6 +2458,7 @@ def run_nested_lap_cv(
             motor_zscore_eps=motor_zscore_eps,
             motor_spline_k=motor_spline_k,
             motor_spline_order=motor_spline_order,
+            isolate_unit_failures=isolate_unit_failures,
         )
         unit_indices = ridge_scores["unit_indices"]
         inner_info[outer_index][..., unit_indices] = ridge_scores[
@@ -2369,6 +2509,7 @@ def run_nested_lap_cv(
             motor_zscore_eps=motor_zscore_eps,
             motor_spline_k=motor_spline_k,
             motor_spline_order=motor_spline_order,
+            isolate_unit_failures=isolate_unit_failures,
         )
         outer_ll_sum[outer_index][:, split_scores["unit_indices"]] = split_scores[
             "ll_sum"
@@ -2479,6 +2620,7 @@ def fit_full_refit_models(
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
+    isolate_unit_failures: bool = False,
 ) -> dict[str, Any]:
     """Fit selected-hyperparameter models on all eligible bins for coefficients."""
     all_rows = np.asarray(data["base_keep_mask"], dtype=bool)
@@ -2513,10 +2655,11 @@ def fit_full_refit_models(
         )
         design_info_by_model[model_name] = design_info
         design = design_info["designs"][model_name]
-        model = fit_population_glm(
+        model = _fit_population_glm_for_policy(
             design,
             response,
             ridge=float(ridge_by_model[model_name]),
+            isolate_unit_failures=isolate_unit_failures,
         )
         fitted_models[model_name] = model
         coefficients[model_name] = extract_model_coefficients(model, design.shape[1])

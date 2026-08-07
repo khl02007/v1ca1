@@ -395,6 +395,125 @@ def _validate_path_specific_place_decoding_parameter_row(
     return values
 
 
+def _validate_motor_encoding_comparison_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one nine-model nested-CV motor-encoding parameter row."""
+    expected = set(
+        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "MotorEncodingComparison parameters must have exactly the "
+            f"declared fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["motor_encoding_comparison_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "motor_encoding_comparison_param_name must be a non-empty "
+            "string of at most 64 characters."
+        )
+
+    for field_name, minimum in (
+        ("outer_n_folds", 2),
+        ("inner_n_folds", 2),
+        ("motor_spline_n_basis", 1),
+        ("motor_spline_order", 1),
+        ("position_spline_order", 1),
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise TypeError(f"{field_name} must be one integer scalar.")
+        value = int(value)
+        if value < minimum or value > 65_535:
+            raise ValueError(
+                f"{field_name} must be between {minimum} and 65535."
+            )
+        values[field_name] = value
+    random_seed = values["random_seed"]
+    if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+        raise TypeError("random_seed must be one integer scalar.")
+    random_seed = int(random_seed)
+    if random_seed < 0 or random_seed > 2_147_483_647:
+        raise ValueError(
+            "random_seed must fit a non-negative signed 32-bit integer."
+        )
+    values["random_seed"] = random_seed
+
+    for field_name in (
+        "evaluation_bin_size_s",
+        "minimum_movement_firing_rate_hz",
+        "motor_zscore_eps",
+        "speed_smoothing_sigma_s",
+        "generalized_place_branch_gap_cm",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
+        values[field_name] = value
+    for field_name in (
+        "evaluation_bin_size_s",
+        "motor_zscore_eps",
+    ):
+        if values[field_name] <= 0.0:
+            raise ValueError(f"{field_name} must be positive.")
+    for field_name in (
+        "minimum_movement_firing_rate_hz",
+        "speed_smoothing_sigma_s",
+        "generalized_place_branch_gap_cm",
+    ):
+        if values[field_name] < 0.0:
+            raise ValueError(f"{field_name} must be non-negative.")
+
+    for field_name, allow_zero in (
+        ("ridge_values", True),
+        ("spatial_bin_sizes_cm", False),
+    ):
+        raw_values = values[field_name]
+        if isinstance(raw_values, (str, bytes, Mapping)):
+            raise TypeError(f"{field_name} must be a one-dimensional sequence.")
+        array = np.asarray(raw_values)
+        if array.ndim != 1 or array.size == 0:
+            raise ValueError(
+                f"{field_name} must be a non-empty one-dimensional sequence."
+            )
+        if np.issubdtype(array.dtype, np.bool_):
+            raise TypeError(f"{field_name} must contain numeric values.")
+        raw_list = array.tolist()
+        if any(isinstance(value, (bool, np.bool_)) for value in raw_list):
+            raise TypeError(f"{field_name} must contain numeric values.")
+        try:
+            numeric_values = tuple(float(value) for value in raw_list)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"{field_name} must contain numeric values."
+            ) from exc
+        if not all(math.isfinite(value) for value in numeric_values):
+            raise ValueError(f"{field_name} must contain only finite values.")
+        if allow_zero:
+            invalid = any(value < 0.0 for value in numeric_values)
+        else:
+            invalid = any(value <= 0.0 for value in numeric_values)
+        if invalid:
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise ValueError(
+                f"{field_name} must contain only {qualifier} values."
+            )
+        if len(set(numeric_values)) != len(numeric_values):
+            raise ValueError(f"{field_name} must not contain duplicates.")
+        values[field_name] = numeric_values
+
+    if values["motor_feature_mode"] not in {"zscore", "spline"}:
+        raise ValueError("motor_feature_mode must be 'zscore' or 'spline'.")
+    return values
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1962,6 +2081,320 @@ def _path_specific_place_decoding_selection_row(
     return {
         "path_specific_place_decoding_id": selection_uuid(
             "PathSpecificPlaceDecoding",
+            natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _validate_motor_position_rows(
+    *,
+    primary_position_row: Mapping[str, Any],
+    orientation_reference_position_row: Mapping[str, Any],
+) -> None:
+    """Require two distinct centimeter position series on one sample grid."""
+    primary_name = str(primary_position_row.get("position_series_name", ""))
+    reference_name = str(
+        orientation_reference_position_row.get("position_series_name", "")
+    )
+    if not primary_name or not reference_name or primary_name == reference_name:
+        raise ValueError(
+            "MotorEncodingComparison requires distinct primary and "
+            "orientation-reference position series."
+        )
+    for label, row in (
+        ("primary", primary_position_row),
+        ("orientation-reference", orientation_reference_position_row),
+    ):
+        if str(row.get("spatial_unit")) != "cm":
+            raise ValueError(
+                f"MotorEncodingComparison {label} position must use centimeters."
+            )
+    for field_name in (
+        "nwb_file_name",
+        "epoch",
+        "start_index",
+        "stop_index_exclusive",
+        "sample_count",
+        "analysis_start_offset_samples",
+        "start_time",
+        "stop_time",
+        "first_frame",
+        "last_frame",
+        "video_series_name",
+    ):
+        if str(primary_position_row.get(field_name)) != str(
+            orientation_reference_position_row.get(field_name)
+        ):
+            raise ValueError(
+                "MotorEncodingComparison position series must share aligned "
+                f"sampling metadata: {field_name}."
+            )
+
+
+def _motor_encoding_comparison_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable nine-model motor comparison."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    parameters = _validate_motor_encoding_comparison_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "motor_encoding_comparison_param_name": key[
+                    "motor_encoding_comparison_param_name"
+                ]
+            },
+        )
+    )
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "MotorEncodingComparison regional spikes and movement must "
+                f"share {field_name}."
+            )
+    if str(region_row.get("region_name")) != str(
+        movement_selection.get("region")
+    ):
+        raise ValueError(
+            "MotorEncodingComparison regional spikes and movement must "
+            "select the same region."
+        )
+    for field_name in (
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "MotorEncodingComparison regional spikes and movement must "
+                f"share frozen {field_name}."
+            )
+    if str(region_row.get("selected_units_sha256")) != str(
+        movement_result.get("selected_units_sha256")
+    ) or int(region_row.get("n_units", -1)) != int(
+        movement_result.get("n_units", -2)
+    ):
+        raise ValueError(
+            "MotorEncodingComparison regional spikes and movement must "
+            "contain identical persistent units."
+        )
+    allowed_movement_statuses = (
+        {"no_units"}
+        if int(region_row.get("n_units", -1)) == 0
+        else {"valid", "no_valid_position", "no_movement"}
+    )
+    if str(movement_result.get("analysis_status")) not in (
+        allowed_movement_statuses
+    ):
+        raise ValueError(
+            "MotorEncodingComparison movement status is incompatible with "
+            "its regional unit count."
+        )
+
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    for field_name, expected_value in (
+        ("nwb_file_name", nwb_file_name),
+        ("epoch", epoch),
+    ):
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                "MotorEncodingComparison supplied source does not match its "
+                f"MovementFiringRate: {field_name}."
+            )
+    epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    if epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("MotorEncodingComparison requires one run epoch.")
+
+    primary_position_name = str(
+        key.get(
+            "primary_position_series_name",
+            movement_selection["position_series_name"],
+        )
+    )
+    if primary_position_name != str(
+        movement_selection["position_series_name"]
+    ):
+        raise ValueError(
+            "MotorEncodingComparison primary position must be the position "
+            "used by MovementFiringRate."
+        )
+    if "orientation_reference_position_series_name" not in key:
+        raise ValueError(
+            "MotorEncodingComparison requires an explicit "
+            "orientation_reference_position_series_name."
+        )
+    orientation_reference_name = str(
+        key["orientation_reference_position_series_name"]
+    )
+    primary_position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": primary_position_name,
+        },
+    )
+    orientation_reference_position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": orientation_reference_name,
+        },
+    )
+    _validate_motor_position_rows(
+        primary_position_row=primary_position_row,
+        orientation_reference_position_row=(
+            orientation_reference_position_row
+        ),
+    )
+
+    source_fields: dict[str, Any] = {
+        "primary_position_series_name": primary_position_name,
+        "orientation_reference_position_series_name": (
+            orientation_reference_name
+        ),
+    }
+    outer_n_folds = int(parameters["outer_n_folds"])
+    inner_n_folds = int(parameters["inner_n_folds"])
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                f"MotorEncodingComparison {trajectory_field} must equal "
+                f"{trajectory_type!r}."
+            )
+        trajectory_row = _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        n_laps = int(trajectory_row.get("interval_count", -1))
+        largest_outer_test = int(math.ceil(n_laps / outer_n_folds))
+        minimum_outer_train = n_laps - largest_outer_test
+        if n_laps < outer_n_folds or minimum_outer_train < inner_n_folds:
+            raise ValueError(
+                "MotorEncodingComparison requires enough laps for outer and "
+                f"nested inner CV for {trajectory_type!r}; found {n_laps}, "
+                f"outer_n_folds={outer_n_folds}, "
+                f"inner_n_folds={inner_n_folds}."
+            )
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                "MotorEncodingComparison graph aliases must match their "
+                "trajectory types."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_row.get("coordinate_unit")) != "cm":
+            raise ValueError(
+                "MotorEncodingComparison graphs must use centimeters."
+            )
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    full_w_name = str(
+        key.get(
+            "full_w_configuration_name",
+            _DPP_FULL_GRAPH_CONFIGURATION_NAME,
+        )
+    )
+    if full_w_name != _DPP_FULL_GRAPH_CONFIGURATION_NAME:
+        raise ValueError(
+            "MotorEncodingComparison full_w_configuration_name must equal "
+            f"{_DPP_FULL_GRAPH_CONFIGURATION_NAME!r}."
+        )
+    full_w_row = _fetch1_dict(
+        wtrack_graph_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": full_w_name,
+        },
+    )
+    if str(full_w_row.get("coordinate_unit")) != "cm":
+        raise ValueError("MotorEncodingComparison graphs must use centimeters.")
+    source_fields["full_w_configuration_name"] = full_w_name
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="motor_encoding_comparison_parameters_sha256",
+    )
+    model_spec_sha256 = provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+    )
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        **source_fields,
+        "motor_encoding_comparison_param_name": parameters[
+            "motor_encoding_comparison_param_name"
+        ],
+        **parameter_snapshot,
+        "motor_encoding_comparison_model_spec_sha256": model_spec_sha256,
+        "motor_encoding_comparison_output_rule_sha256": (
+            output_rule_sha256
+        ),
+    }
+    return {
+        "motor_encoding_comparison_id": selection_uuid(
+            "MotorEncodingComparison",
             natural_key,
         ),
         **natural_key,
@@ -5794,6 +6227,299 @@ def _load_path_specific_place_decoding_spikes(
     return loaded
 
 
+def _load_motor_encoding_comparison_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate one nine-model motor-encoding selection."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    validated_selection = _motor_encoding_comparison_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["motor_encoding_comparison_id"]) != str(
+        key["motor_encoding_comparison_id"]
+    ):
+        raise ValueError("MotorEncodingComparison selection UUID is stale.")
+    parameters = _validate_motor_encoding_comparison_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="motor_encoding_comparison_parameters_sha256",
+    )
+    expected_model_spec_sha256 = provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+    )
+    if str(key.get("motor_encoding_comparison_model_spec_sha256", "")) != (
+        expected_model_spec_sha256
+    ):
+        raise ValueError(
+            "MotorEncodingComparison fixed model specification changed after "
+            "selection insertion. Create a new selection."
+        )
+    expected_output_rule_sha256 = provenance_sha256(
+        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+    )
+    if str(key.get("motor_encoding_comparison_output_rule_sha256", "")) != (
+        expected_output_rule_sha256
+    ):
+        raise ValueError(
+            "MotorEncodingComparison fixed output rule changed after selection "
+            "insertion. Create a new selection."
+        )
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(
+        session_table,
+        movement_selection,
+    )
+    region = str(region_row["region_name"])
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, movement_selection)
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError(
+            "EpochIntervals must contain finite start_time < stop_time."
+        )
+    return {
+        "selection": validated_selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_result": movement_result,
+        "movement_selection": movement_selection,
+        "movement_parameters": movement_parameters,
+        "movement": movement,
+        "epoch_row": epoch_row,
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": str(movement_selection["epoch"]),
+        "epoch_time_support": (epoch_start, epoch_stop),
+    }
+
+
+def _load_motor_encoding_comparison_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load two aligned positions, four lap sets, and five graphs from NWB."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    selection = dict(context["selection"])
+    nwb_file_name = str(selection["nwb_file_name"])
+    epoch = str(selection["epoch"])
+    primary_position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": selection[
+                "primary_position_series_name"
+            ],
+        },
+    )
+    orientation_reference_position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": selection[
+                "orientation_reference_position_series_name"
+            ],
+        },
+    )
+    _validate_motor_position_rows(
+        primary_position_row=primary_position_row,
+        orientation_reference_position_row=(
+            orientation_reference_position_row
+        ),
+    )
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": selection[
+                    f"{trajectory_type}_trajectory_type"
+                ],
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    configuration_names = (
+        *(
+            selection[f"{trajectory_type}_configuration_name"]
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        ),
+        selection["full_w_configuration_name"],
+    )
+    graph_rows = {
+        str(configuration_name): _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": configuration_name,
+            },
+        )
+        for configuration_name in configuration_names
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        primary_position = load_position(
+            nwbfile,
+            primary_position_row,
+            apply_analysis_offset=True,
+        )
+        orientation_reference_position = load_position(
+            nwbfile,
+            orientation_reference_position_row,
+            apply_analysis_offset=True,
+        )
+        primary_timestamps = np.asarray(primary_position.t, dtype=float)
+        orientation_reference_timestamps = np.asarray(
+            orientation_reference_position.t,
+            dtype=float,
+        )
+        if not np.array_equal(
+            primary_timestamps,
+            orientation_reference_timestamps,
+        ):
+            raise ValueError(
+                "MotorEncodingComparison primary and orientation-reference "
+                "position timestamps must match exactly."
+            )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            configuration_name: load_wtrack_graph(nwbfile, row)
+            for configuration_name, row in graph_rows.items()
+        }
+    return {
+        "primary_position": primary_position,
+        "orientation_reference_position": orientation_reference_position,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "primary_position_row": primary_position_row,
+        "orientation_reference_position_row": (
+            orientation_reference_position_row
+        ),
+    }
+
+
+def _load_motor_encoding_comparison_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all regional units for one motor comparison."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["epoch_time_support"],
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    if unit_digest != str(
+        context["region_row"]["selected_units_sha256"]
+    ) or unit_digest != str(
+        context["movement_result"]["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "MotorEncodingComparison regional units changed after selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "MotorEncodingComparison regional unit count changed after "
+            "selection."
+        )
+    return loaded
+
+
 def _legacy_dpp_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -5827,6 +6553,44 @@ def _legacy_dpp_unit_identity_resolver(
         resolver[resolver_key] = {
             "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
             "unit_id": str(metadata["unit_id"]),
+        }
+    return resolver
+
+
+def _legacy_motor_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Map legacy imported-sorting IDs to persistent regional identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy MotorEncodingComparison registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            "Regional spike metadata must contain one row per selected unit."
+        )
+    for group_unit_id, metadata in enumerate(metadata_rows):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                "Every selected unit requires a unique sorting_unit_id for "
+                "legacy MotorEncodingComparison registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+            "group_unit_id": str(group_unit_id),
         }
     return resolver
 
@@ -6201,6 +6965,158 @@ def _validate_path_specific_place_decoding_artifact_link(
         if Path(result_row[field_name]) != manifest_path.parent / filename:
             raise ValueError(
                 "PathSpecificPlaceDecoding result paths do not describe one "
+                f"canonical bundle: {field_name}."
+            )
+
+
+def _validate_motor_encoding_comparison_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one motor-encoding bundle to match its immutable rows."""
+    from v1ca1.spyglass.motor_encoding import (
+        ARTIFACT_DIRNAME,
+        FULL_REFIT_FILENAME,
+        MANIFEST_FILENAME,
+        NESTED_CV_FILENAME,
+        SELECTED_UNITS_FILENAME,
+        validate_motor_encoding_result,
+    )
+    from v1ca1.spyglass.selection import (
+        provenance_sha256,
+        unit_identity_sha256,
+    )
+
+    validated = validate_motor_encoding_result(bundle)
+    expected_metadata = {
+        "motor_encoding_comparison_id": selection_row[
+            "motor_encoding_comparison_id"
+        ],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "epoch": selection_row["epoch"],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated["metadata"].get(field_name)) != str(expected_value):
+            raise ValueError(
+                "MotorEncodingComparison artifact does not match its "
+                f"selection: {field_name}."
+            )
+
+    parameters = _validate_motor_encoding_comparison_parameter_row(
+        parameters_row
+    )
+    expected_parameters = {
+        "parameter_name": parameters[
+            "motor_encoding_comparison_param_name"
+        ],
+        "parameter_sha256": selection_row[
+            "motor_encoding_comparison_parameters_sha256"
+        ],
+        "model_spec_sha256": selection_row[
+            "motor_encoding_comparison_model_spec_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "motor_encoding_comparison_output_rule_sha256"
+        ],
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "motor_encoding_comparison_param_name"
+        },
+    }
+    if provenance_sha256(dict(validated["parameters"])) != provenance_sha256(
+        expected_parameters
+    ):
+        raise ValueError(
+            "MotorEncodingComparison artifact parameters disagree with its "
+            "selection."
+        )
+
+    expected_scalars = {
+        "n_units_input": int(validated["n_units_input"]),
+        "n_units_eligible": int(validated["n_units_eligible"]),
+        "n_units_valid": int(validated["n_units_valid"]),
+        "n_outer_folds_expected": int(
+            validated["n_outer_folds_expected"]
+        ),
+        "n_outer_folds_valid": int(validated["n_outer_folds_valid"]),
+        "analysis_status": str(validated["analysis_status"]),
+        "selected_units_sha256": str(
+            validated["selected_units_sha256"]
+        ),
+        "artifact_origin": str(validated["artifact_origin"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row[field_name]) != str(expected_value):
+            raise ValueError(
+                "MotorEncodingComparison result disagrees with its artifact: "
+                f"{field_name}."
+            )
+    if int(result_row["n_units_input"]) != int(region_row["n_units"]):
+        raise ValueError(
+            "MotorEncodingComparison input count disagrees with "
+            "RegionSortedSpikesGroup."
+        )
+    selected_unit_digest = unit_identity_sha256(
+        validated["selected_units"]
+        .loc[:, ["spikesorting_merge_id", "unit_id"]]
+        .to_dict("records")
+    )
+    if selected_unit_digest != str(region_row["selected_units_sha256"]):
+        raise ValueError(
+            "MotorEncodingComparison input identities disagree with "
+            "RegionSortedSpikesGroup."
+        )
+    for dataset_name in ("nested_cv", "full_refit"):
+        dataset = validated[dataset_name]
+        expected_sources = {
+            "primary_position_source": selection_row[
+                "primary_position_series_name"
+            ],
+            "orientation_reference_position_source": selection_row[
+                "orientation_reference_position_series_name"
+            ],
+        }
+        for field_name, expected_value in expected_sources.items():
+            if str(dataset.attrs.get(field_name, "")) != str(expected_value):
+                raise ValueError(
+                    "MotorEncodingComparison artifact position provenance "
+                    f"disagrees with its selection: {field_name}."
+                )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    result_id = str(selection_row["motor_encoding_comparison_id"])
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        str(selection_row["epoch"]),
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "MotorEncodingComparison manifest path does not match its "
+            "canonical session/epoch/region/UUID layout."
+        )
+    expected_paths = {
+        "selected_units_path": SELECTED_UNITS_FILENAME,
+        "nested_cv_path": NESTED_CV_FILENAME,
+        "full_refit_path": FULL_REFIT_FILENAME,
+    }
+    for field_name, filename in expected_paths.items():
+        if Path(result_row[field_name]) != manifest_path.parent / filename:
+            raise ValueError(
+                "MotorEncodingComparison result paths do not describe one "
                 f"canonical bundle: {field_name}."
             )
 
@@ -6862,6 +7778,304 @@ def _register_existing_path_specific_place_decoding_row(
     }
 
 
+def _make_motor_encoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one nine-model motor-encoding bundle."""
+    from v1ca1.spyglass.motor_encoding import (
+        compute_motor_encoding_comparison,
+        get_motor_encoding_artifact_paths,
+        write_motor_encoding_artifact,
+    )
+
+    context = _load_motor_encoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_motor_encoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_motor_encoding_comparison_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    parameters = context["parameters"]
+    selection = context["selection"]
+    result = compute_motor_encoding_comparison(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        motor_encoding_comparison_id=key[
+            "motor_encoding_comparison_id"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        primary_position=nwb_inputs["primary_position"],
+        orientation_reference_position=nwb_inputs[
+            "orientation_reference_position"
+        ],
+        primary_position_source=selection[
+            "primary_position_series_name"
+        ],
+        orientation_reference_position_source=selection[
+            "orientation_reference_position_series_name"
+        ],
+        trajectory_intervals_by_type=nwb_inputs["trajectory_intervals"],
+        graph_inputs_by_configuration=nwb_inputs["graph_inputs"],
+        movement_intervals=context["movement"]["movement_intervals"],
+        movement_firing_rate_table=context["movement"]["table"],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        parameter_name=parameters[
+            "motor_encoding_comparison_param_name"
+        ],
+        parameter_sha256=selection[
+            "motor_encoding_comparison_parameters_sha256"
+        ],
+        model_spec_sha256=selection[
+            "motor_encoding_comparison_model_spec_sha256"
+        ],
+        output_rule_sha256=selection[
+            "motor_encoding_comparison_output_rule_sha256"
+        ],
+        evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+        outer_n_folds=parameters["outer_n_folds"],
+        inner_n_folds=parameters["inner_n_folds"],
+        random_seed=parameters["random_seed"],
+        ridge_values=parameters["ridge_values"],
+        spatial_bin_sizes_cm=parameters["spatial_bin_sizes_cm"],
+        motor_feature_mode=parameters["motor_feature_mode"],
+        motor_zscore_eps=parameters["motor_zscore_eps"],
+        motor_spline_n_basis=parameters["motor_spline_n_basis"],
+        motor_spline_order=parameters["motor_spline_order"],
+        position_spline_order=parameters["position_spline_order"],
+        speed_smoothing_sigma_s=parameters[
+            "speed_smoothing_sigma_s"
+        ],
+        generalized_place_branch_gap_cm=parameters[
+            "generalized_place_branch_gap_cm"
+        ],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_motor_encoding_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        motor_encoding_comparison_id=key[
+            "motor_encoding_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_motor_encoding_artifact(
+        result,
+        artifact_dir,
+        overwrite=False,
+    )
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "nested_cv_path": str(written["nested_cv_path"]),
+        "full_refit_path": str(written["full_refit_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "n_units_input": int(result["n_units_input"]),
+        "n_units_eligible": int(result["n_units_eligible"]),
+        "n_units_valid": int(result["n_units_valid"]),
+        "n_outer_folds_expected": int(result["n_outer_folds_expected"]),
+        "n_outer_folds_valid": int(result["n_outer_folds_valid"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": str(result["selected_units_sha256"]),
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_motor_encoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    source_nested_cv_path: Path,
+    source_full_refit_path: Path,
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Validate, normalize, and copy one paired legacy motor fit."""
+    from v1ca1.spyglass.motor_encoding import (
+        get_motor_encoding_artifact_paths,
+        register_existing_motor_encoding_artifact,
+    )
+
+    context = _load_motor_encoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_motor_encoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_motor_encoding_comparison_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    resolver = _legacy_motor_unit_identity_resolver(loaded_spikes)
+    parameters = context["parameters"]
+    selection = context["selection"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_motor_encoding_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        motor_encoding_comparison_id=key[
+            "motor_encoding_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    registered = register_existing_motor_encoding_artifact(
+        source_nested_cv_path=Path(source_nested_cv_path),
+        source_full_refit_path=Path(source_full_refit_path),
+        destination_path=artifact_dir,
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        motor_encoding_comparison_id=key[
+            "motor_encoding_comparison_id"
+        ],
+        movement_firing_rate_table=context["movement"]["table"],
+        graph_inputs_by_configuration=nwb_inputs["graph_inputs"],
+        unit_identity_resolver=resolver,
+        primary_position_source=selection[
+            "primary_position_series_name"
+        ],
+        orientation_reference_position_source=selection[
+            "orientation_reference_position_series_name"
+        ],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        parameter_name=parameters[
+            "motor_encoding_comparison_param_name"
+        ],
+        parameter_sha256=selection[
+            "motor_encoding_comparison_parameters_sha256"
+        ],
+        model_spec_sha256=selection[
+            "motor_encoding_comparison_model_spec_sha256"
+        ],
+        output_rule_sha256=selection[
+            "motor_encoding_comparison_output_rule_sha256"
+        ],
+        evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+        outer_n_folds=parameters["outer_n_folds"],
+        inner_n_folds=parameters["inner_n_folds"],
+        random_seed=parameters["random_seed"],
+        ridge_values=parameters["ridge_values"],
+        spatial_bin_sizes_cm=parameters["spatial_bin_sizes_cm"],
+        motor_feature_mode=parameters["motor_feature_mode"],
+        motor_zscore_eps=parameters["motor_zscore_eps"],
+        motor_spline_n_basis=parameters["motor_spline_n_basis"],
+        motor_spline_order=parameters["motor_spline_order"],
+        position_spline_order=parameters["position_spline_order"],
+        speed_smoothing_sigma_s=parameters[
+            "speed_smoothing_sigma_s"
+        ],
+        generalized_place_branch_gap_cm=parameters[
+            "generalized_place_branch_gap_cm"
+        ],
+        source_v1ca1_git_commit=source_v1ca1_git_commit,
+        overwrite=False,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance["source_spyglass_git_commit"] = (
+        source_spyglass_git_commit
+    )
+    written = registered["artifact_paths"]
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "nested_cv_path": str(written["nested_cv_path"]),
+        "full_refit_path": str(written["full_refit_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "n_units_input": int(registered["n_units_input"]),
+        "n_units_eligible": int(registered["n_units_eligible"]),
+        "n_units_valid": int(registered["n_units_valid"]),
+        "n_outer_folds_expected": int(
+            registered["n_outer_folds_expected"]
+        ),
+        "n_outer_folds_valid": int(
+            registered["n_outer_folds_valid"]
+        ),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": str(
+            registered["selected_units_sha256"]
+        ),
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
 def _new_schema(schema_factory: Callable[..., Any], context: dict[str, Any]) -> Any:
     """Construct one schema while supporting minimal injectable factories."""
     try:
@@ -6985,6 +8199,14 @@ def _construct_tables(
         "path_specific_place_decoding_register_existing",
         _register_existing_path_specific_place_decoding_row,
     )
+    motor_encoding_comparison_compute_hook = runtime_hooks.get(
+        "motor_encoding_comparison_compute",
+        _make_motor_encoding_comparison_row,
+    )
+    motor_encoding_comparison_register_hook = runtime_hooks.get(
+        "motor_encoding_comparison_register_existing",
+        _register_existing_motor_encoding_comparison_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -7004,6 +8226,8 @@ def _construct_tables(
             path_progression_decoding_compute_hook,
             path_specific_place_decoding_compute_hook,
             path_specific_place_decoding_register_hook,
+            motor_encoding_comparison_compute_hook,
+            motor_encoding_comparison_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -9097,6 +10321,310 @@ def _construct_tables(
     PathSpecificPlaceDecoding = main_schema(PathSpecificPlaceDecoding)
     main_context["PathSpecificPlaceDecoding"] = PathSpecificPlaceDecoding
 
+    class MotorEncodingComparisonParameters(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+        )
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one motor-comparison parameter row."""
+            validated = _validate_motor_encoding_comparison_parameter_row(
+                row
+            )
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the canonical V1 and CA1 presets."""
+            return [
+                cls.insert_parameters(
+                    preset,
+                    skip_duplicates=skip_duplicates,
+                )
+                for preset in (
+                    table_specs.MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS
+                )
+            ]
+
+        @classmethod
+        def insert_default(
+            cls,
+            *,
+            region: str,
+            skip_duplicates: bool = True,
+        ) -> dict[str, Any]:
+            """Explicitly insert the manuscript preset for one region."""
+            canonical_region = _analysis_region(region)
+            preset = {
+                "v1": (
+                    table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+                ),
+                "ca1": (
+                    table_specs.MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+                ),
+            }[canonical_region]
+            return cls.insert_parameters(
+                preset,
+                skip_duplicates=skip_duplicates,
+            )
+
+    MotorEncodingComparisonParameters = main_schema(
+        MotorEncodingComparisonParameters
+    )
+    main_context["MotorEncodingComparisonParameters"] = (
+        MotorEncodingComparisonParameters
+    )
+
+    class MotorEncodingComparisonSelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION
+        )
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one motor comparison."""
+            row = _motor_encoding_comparison_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                position_table=Position,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=MotorEncodingComparisonParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    MotorEncodingComparisonSelection = main_schema(
+        MotorEncodingComparisonSelection
+    )
+    main_context["MotorEncodingComparisonSelection"] = (
+        MotorEncodingComparisonSelection
+    )
+
+    class MotorEncodingComparison(
+        spyglass_mixin,
+        dj_module.Computed,
+    ):
+        definition = table_specs.MOTOR_ENCODING_COMPARISON_DEFINITION
+        _compute_hook = staticmethod(motor_encoding_comparison_compute_hook)
+        _register_existing_hook = staticmethod(
+            motor_encoding_comparison_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one nine-model comparison bundle."""
+            selection = _fetch1_dict(
+                MotorEncodingComparisonSelection,
+                key,
+            )
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=MotorEncodingComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "motor_encoding_comparison_id": selection[
+                            "motor_encoding_comparison_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_motor_encoding_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical motor-encoding bundle."""
+            from v1ca1.spyglass.motor_encoding import (
+                load_motor_encoding_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                MotorEncodingComparisonSelection,
+                {
+                    "motor_encoding_comparison_id": row[
+                        "motor_encoding_comparison_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                MotorEncodingComparisonParameters,
+                {
+                    "motor_encoding_comparison_param_name": selection[
+                        "motor_encoding_comparison_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_motor_encoding_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_motor_encoding_comparison_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_nested_cv_path: Path | str,
+            source_full_refit_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one paired legacy motor fit and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered MotorEncodingComparison results are immutable; "
+                    "create a new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(
+                MotorEncodingComparisonSelection,
+                key,
+            )
+            result_key = {
+                "motor_encoding_comparison_id": selection[
+                    "motor_encoding_comparison_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "MotorEncodingComparison already contains this immutable "
+                    "selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_nested_cv_path=Path(source_nested_cv_path),
+                    source_full_refit_path=Path(source_full_refit_path),
+                    parameters_table=MotorEncodingComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "motor_encoding_comparison_id": selection[
+                    "motor_encoding_comparison_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    MotorEncodingComparison = main_schema(MotorEncodingComparison)
+    main_context["MotorEncodingComparison"] = MotorEncodingComparison
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -9177,6 +10705,13 @@ def _construct_tables(
             PathSpecificPlaceDecodingSelection
         ),
         "path_specific_place_decoding": PathSpecificPlaceDecoding,
+        "motor_encoding_comparison_parameters": (
+            MotorEncodingComparisonParameters
+        ),
+        "motor_encoding_comparison_selection": (
+            MotorEncodingComparisonSelection
+        ),
+        "motor_encoding_comparison": MotorEncodingComparison,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

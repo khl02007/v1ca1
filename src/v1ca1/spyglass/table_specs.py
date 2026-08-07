@@ -566,6 +566,73 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION = """
+# Named nested-CV, basis, motor-feature, and unit-filter parameters.
+motor_encoding_comparison_param_name: varchar(64)
+---
+evaluation_bin_size_s: double
+outer_n_folds: smallint unsigned
+inner_n_folds: smallint unsigned
+random_seed: int
+ridge_values: longblob
+spatial_bin_sizes_cm: longblob
+minimum_movement_firing_rate_hz: double
+motor_feature_mode: enum('zscore', 'spline')
+motor_zscore_eps: double
+motor_spline_n_basis: smallint unsigned
+motor_spline_order: smallint unsigned
+position_spline_order: smallint unsigned
+speed_smoothing_sigma_s: double
+generalized_place_branch_gap_cm: double
+"""
+
+
+MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION = """
+# One immutable epoch-level nine-model motor-encoding selection.
+motor_encoding_comparison_id: uuid
+---
+-> RegionSortedSpikesGroup
+-> MovementFiringRate
+-> Position.proj(primary_position_series_name='position_series_name')
+-> Position.proj(orientation_reference_position_series_name='position_series_name')
+-> TrajectoryIntervals.proj(center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(full_w_configuration_name='configuration_name')
+-> MotorEncodingComparisonParameters
+motor_encoding_comparison_parameters_sha256: char(64)
+motor_encoding_comparison_model_spec_sha256: char(64)
+motor_encoding_comparison_output_rule_sha256: char(64)
+"""
+
+
+MOTOR_ENCODING_COMPARISON_DEFINITION = """
+# One nested-CV and full-refit motor-encoding artifact bundle.
+-> MotorEncodingComparisonSelection
+---
+artifact_manifest_path: filepath@analysis
+nested_cv_path: filepath@analysis
+full_refit_path: filepath@analysis
+selected_units_path: filepath@analysis
+n_units_input: int unsigned
+n_units_eligible: int unsigned
+n_units_valid: int unsigned
+n_outer_folds_expected: smallint unsigned
+n_outer_folds_valid: smallint unsigned
+analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_trials', 'no_valid_position', 'no_movement', 'no_valid_units')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -771,6 +838,103 @@ PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS = (
 )
 
 
+MOTOR_ENCODING_COMPARISON_MODEL_SPEC = MappingProxyType(
+    {
+        "motor": "strict motor covariates only",
+        "motor_tp": (
+            "motor covariates plus TP group offset and TP group-specific "
+            "spline fields"
+        ),
+        "tp_only": "TP group offset plus TP group-specific spline fields",
+        "motor_place": (
+            "motor covariates plus trajectory offset and "
+            "trajectory-specific place fields"
+        ),
+        "place_only": "trajectory offset plus trajectory-specific place fields",
+        "motor_generalized_place": (
+            "motor covariates plus one generalized full-W place spline field"
+        ),
+        "generalized_place_only": (
+            "one generalized full-W place spline field"
+        ),
+        "motor_generalized_task_progression": (
+            "motor covariates plus one generalized task-progression spline field"
+        ),
+        "generalized_task_progression_only": (
+            "one generalized task-progression spline field"
+        ),
+    }
+)
+
+
+MOTOR_ENCODING_COMPARISON_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "model_names": tuple(MOTOR_ENCODING_COMPARISON_MODEL_SPEC),
+        "cross_validation": "nested_lap_level_by_trajectory_movement_only",
+        "hyperparameter_selection": (
+            "per_model_population_median_unit_information_bits_per_spike"
+        ),
+        "unit_fit_failure_policy": (
+            "retry_nonfinite_or_failed_population_units_independently"
+        ),
+        "unit_selection": (
+            "strict_greater_than_movement_firing_rate_threshold"
+        ),
+        "full_refit_role": "visualization_not_heldout_inference",
+        "primary_position_role": (
+            "speed_acceleration_and_track_linearization"
+        ),
+        "orientation_reference_role": (
+            "primary_minus_reference_head_direction"
+        ),
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "position_unit": "cm",
+    }
+)
+
+
+MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
+    {
+        "motor_encoding_comparison_param_name": (
+            "manuscript_v1_nested5x3_50ms_zscore"
+        ),
+        "evaluation_bin_size_s": 0.05,
+        "outer_n_folds": 5,
+        "inner_n_folds": 3,
+        "random_seed": 0,
+        "ridge_values": (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6),
+        "spatial_bin_sizes_cm": (2.0, 4.0, 8.0),
+        "minimum_movement_firing_rate_hz": 0.5,
+        "motor_feature_mode": "zscore",
+        "motor_zscore_eps": 1e-12,
+        "motor_spline_n_basis": 5,
+        "motor_spline_order": 4,
+        "position_spline_order": 4,
+        "speed_smoothing_sigma_s": 0.1,
+        "generalized_place_branch_gap_cm": 15.0,
+    }
+)
+
+
+MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
+    {
+        **MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
+        "motor_encoding_comparison_param_name": (
+            "manuscript_ca1_nested5x3_50ms_zscore"
+        ),
+        "minimum_movement_firing_rate_hz": 0.0,
+    }
+)
+
+
+MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS = (
+    MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
+    MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -833,6 +997,13 @@ TABLE_DEFINITIONS = MappingProxyType(
         "path_specific_place_decoding": (
             PATH_SPECIFIC_PLACE_DECODING_DEFINITION
         ),
+        "motor_encoding_comparison_parameters": (
+            MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+        ),
+        "motor_encoding_comparison_selection": (
+            MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION
+        ),
+        "motor_encoding_comparison": MOTOR_ENCODING_COMPARISON_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -850,8 +1021,13 @@ __all__ = [
     "DPP_ENCODING_COMPARISON_PARAMETER_PRESETS",
     "EXPECTED_SPYGLASS_GIT_COMMIT",
     "MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
     "MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS",
     "MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS",
+    "MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
+    "MOTOR_ENCODING_COMPARISON_MODEL_SPEC",
+    "MOTOR_ENCODING_COMPARISON_OUTPUT_RULE",
+    "MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS",
     "PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE",
     "PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS",
     "PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE",

@@ -149,6 +149,7 @@ tables["tuning_curve_parameters"].insert_presets()
 tables["tuning_similarity_parameters"].insert_presets()
 tables["dpp_encoding_comparison_parameters"].insert_presets()
 tables["path_progression_decoding_parameters"].insert_presets()
+tables["motor_encoding_comparison_parameters"].insert_presets()
 ingest_v1ca1_nwb("L1420240611_augmented.nwb", tables=tables)
 ```
 
@@ -256,6 +257,13 @@ RegionSortedSpikesGroup + MovementFiringRate
     + PathSpecificPlaceDecodingParameters
     -> PathSpecificPlaceDecodingSelection
     -> PathSpecificPlaceDecoding
+
+RegionSortedSpikesGroup + MovementFiringRate
+    + primary Position + orientation-reference Position
+    + four TrajectoryIntervals + four trajectory WTrackGraph rows
+    + full_w WTrackGraph + MotorEncodingComparisonParameters
+    -> MotorEncodingComparisonSelection
+    -> MotorEncodingComparison
 ```
 
 Its manuscript preset is five lap-wise folds, 50-ms evaluation bins, 4-cm

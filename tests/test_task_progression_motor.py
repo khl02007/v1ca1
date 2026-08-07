@@ -464,6 +464,36 @@ def test_compute_motor_covariates_includes_hd_acc_and_matches_velocity_gradient(
     assert np.allclose(covariates["hd_acc"], np.gradient(covariates["hd_vel"], dt))
 
 
+def test_compute_motor_covariates_uses_selected_speed_smoothing_sigma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+    _install_fake_pynapple(monkeypatch)
+    observed: dict[str, float] = {}
+
+    def fake_get_speed(position, time, sampling_frequency, sigma):
+        del position, sampling_frequency
+        observed["sigma"] = float(sigma)
+        return np.ones(np.asarray(time).size, dtype=float)
+
+    monkeypatch.setattr(module.pt, "get_speed", fake_get_speed)
+    timestamps = np.linspace(0.0, 0.8, 9, dtype=float)
+    spike_counts = _FakeSpikeCounts(
+        times=timestamps,
+        counts=np.ones((timestamps.size, 1), dtype=float),
+        unit_ids=np.asarray([1], dtype=int),
+    )
+    module.compute_motor_covariates(
+        position_xy=np.column_stack((timestamps, timestamps)),
+        body_xy=np.zeros((timestamps.size, 2), dtype=float),
+        position_timestamps=timestamps,
+        spike_counts=spike_counts,
+        speed_smoothing_sigma_s=0.25,
+    )
+
+    assert observed == {"sigma": 0.25}
+
+
 def test_select_run_epochs_deduplicates_requested_epochs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -568,6 +598,26 @@ def test_build_position_basis_config_uses_spatial_bin_size_and_full_w_length(
     assert config["generalized_place_n_splines"] == 5
     assert config["trajectory_bounds"] == (0.0, 1.0)
     assert config["generalized_place_bounds"] == (0.0, 17.0)
+
+
+def test_build_position_basis_config_from_selected_graph_lengths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    config = module.build_position_basis_config_from_lengths(
+        trajectory_length_cm=96.0,
+        generalized_place_length_cm=177.0,
+        spatial_bin_size_cm=4.0,
+        spline_order=4,
+        generalized_place_branch_gap_cm=15.0,
+    )
+
+    assert config["trajectory_length_cm"] == 96.0
+    assert config["generalized_place_length_cm"] == 177.0
+    assert config["trajectory_n_splines"] == 24
+    assert config["generalized_place_n_splines"] == 45
+    assert config["generalized_place_bounds"] == (0.0, 177.0)
 
 
 def test_build_model_designs_adds_no_offset_generalized_place_models(
@@ -715,6 +765,68 @@ def test_full_refit_dataset_builds_with_spline_motor_features(
         2,
     )
     assert dataset["generalized_task_progression_rate_curve_hz"].shape == (200, 2)
+
+
+def test_population_glm_unit_failure_isolation_preserves_other_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+    design = np.arange(12, dtype=float).reshape(6, 2)
+    response = np.column_stack(
+        (
+            np.full(6, 1.0),
+            np.full(6, 2.0),
+            np.full(6, 3.0),
+        )
+    )
+
+    def fake_fit(design, response, *, ridge):
+        del ridge
+        response = np.asarray(response, dtype=float)
+        if response.shape[1] > 1:
+            raise RuntimeError("population fit failed")
+        marker = float(response[0, 0])
+        if marker == 2.0:
+            raise RuntimeError("one unit failed")
+        return types.SimpleNamespace(
+            coef_=np.full((np.asarray(design).shape[1], 1), marker),
+            intercept_=np.asarray([marker]),
+        )
+
+    monkeypatch.setattr(module, "fit_population_glm", fake_fit)
+    model = module.fit_population_glm_isolating_unit_failures(
+        design,
+        response,
+        ridge=1e-3,
+    )
+
+    coefficients = module.extract_model_coefficients(model, design.shape[1])
+    assert np.all(coefficients[:, 0] == 1.0)
+    assert np.all(np.isnan(coefficients[:, 1]))
+    assert np.all(coefficients[:, 2] == 3.0)
+    assert np.allclose(model.intercept_[[0, 2]], [1.0, 3.0])
+    assert np.isnan(model.intercept_[1])
+
+
+def test_population_glm_unit_failure_isolation_raises_when_every_fit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    def fail_fit(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("fit failed")
+
+    monkeypatch.setattr(module, "fit_population_glm", fail_fit)
+    with pytest.raises(
+        RuntimeError,
+        match="Population GLM and every per-unit retry failed",
+    ):
+        module.fit_population_glm_isolating_unit_failures(
+            np.arange(12, dtype=float).reshape(6, 2),
+            np.ones((6, 2), dtype=float),
+            ridge=1e-3,
+        )
 
 
 def test_build_histogram_bin_edges_always_includes_zero(
