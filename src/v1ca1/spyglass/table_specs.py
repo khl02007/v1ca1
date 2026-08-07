@@ -633,6 +633,77 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+DARK_LIGHT_GLM_PARAMETERS_DEFINITION = """
+# Named dark/light GLM candidate-grid and unit-filter parameters.
+dark_light_glm_param_name: varchar(64)
+---
+basis_candidate_mode: enum('spatial_bin_size_cm', 'n_splines')
+basis_candidates: longblob
+bin_sizes_s: longblob
+ridges: longblob
+n_folds: smallint unsigned
+random_seed: int
+spline_order: smallint unsigned
+min_dark_firing_rate_hz: double
+min_light_firing_rate_hz: double
+use_speed: bool
+speed_feature_mode: enum('linear', 'bspline')
+n_splines_speed: smallint unsigned
+spline_order_speed: smallint unsigned
+speed_bounds = NULL: longblob
+speed_smoothing_sigma_s = 0.1: double
+"""
+
+
+DARK_LIGHT_GLM_SELECTION_DEFINITION = """
+# One immutable same-session light/dark four-model GLM selection.
+dark_light_glm_id: uuid
+---
+-> RegionSortedSpikesGroup
+-> MovementFiringRate.proj(dark_movement_firing_rate_id='movement_firing_rate_id')
+-> MovementFiringRate.proj(light_movement_firing_rate_id='movement_firing_rate_id')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_right_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
+-> DarkLightGLMParameters
+dark_light_glm_parameters_sha256: char(64)
+dark_light_glm_output_rule_sha256: char(64)
+"""
+
+
+DARK_LIGHT_GLM_DEFINITION = """
+# One coupled dark/light candidate-selection and selected-model artifact bundle.
+-> DarkLightGLMSelection
+---
+artifact_manifest_path: filepath@analysis
+selected_units_path: filepath@analysis
+selection_summary_path: filepath@analysis
+visual_model_path: filepath@analysis
+task_segment_bump_model_path: filepath@analysis
+task_segment_scalar_model_path: filepath@analysis
+task_dense_gain_model_path: filepath@analysis
+schema_version: varchar(8)
+n_units: int unsigned
+n_candidates: int unsigned
+n_selected_models: smallint unsigned
+analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -935,6 +1006,105 @@ MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS = (
 )
 
 
+DARK_LIGHT_GLM_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "model_names": (
+            "visual",
+            "task_segment_bump",
+            "task_segment_scalar",
+            "task_dense_gain",
+        ),
+        "schema_by_basis_candidate_mode": (
+            ("spatial_bin_size_cm", "5"),
+            ("n_splines", "4"),
+        ),
+        "cross_validation": "lap_level_by_trajectory_movement_only",
+        "shared_hyperparameter_selection": (
+            "visual_model_median_trajectory_unit_information_bits_per_spike"
+        ),
+        "comparison_model_candidate_policy": (
+            "selected_visual_bin_and_basis_only"
+        ),
+        "ridge_selection": "per_model_median_trajectory_unit_score",
+        "unit_selection": (
+            "strict_greater_than_dark_and_light_movement_firing_rate_thresholds"
+        ),
+        "unit_fit_failure_policy": (
+            "retry_nonfinite_or_failed_population_units_independently"
+        ),
+        "unit_fit_qc": (
+            "finite_intercept_for_all_four_models_and_four_trajectories"
+        ),
+        "speed_smoothing": "gaussian_sigma_seconds_from_frozen_parameter",
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "position_unit": "cm",
+        "selected_model_storage": "one_netcdf_per_model",
+    }
+)
+
+
+CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS = MappingProxyType(
+    {
+        "dark_light_glm_param_name": "current_v5_v1",
+        "basis_candidate_mode": "spatial_bin_size_cm",
+        "basis_candidates": (2.0, 4.0, 8.0),
+        "bin_sizes_s": (0.02, 0.05),
+        "ridges": (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6),
+        "n_folds": 5,
+        "random_seed": 47,
+        "spline_order": 4,
+        "min_dark_firing_rate_hz": 0.5,
+        "min_light_firing_rate_hz": 0.5,
+        "use_speed": True,
+        "speed_feature_mode": "linear",
+        "n_splines_speed": 5,
+        "spline_order_speed": 4,
+        "speed_bounds": None,
+        "speed_smoothing_sigma_s": 0.1,
+    }
+)
+
+
+CURRENT_V5_CA1_DARK_LIGHT_GLM_PARAMETERS = MappingProxyType(
+    {
+        **CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS,
+        "dark_light_glm_param_name": "current_v5_ca1",
+        "min_dark_firing_rate_hz": 0.0,
+        "min_light_firing_rate_hz": 0.0,
+    }
+)
+
+
+LEGACY_V4_V1_DARK_LIGHT_GLM_PARAMETERS = MappingProxyType(
+    {
+        **CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS,
+        "dark_light_glm_param_name": "legacy_v4_v1",
+        "basis_candidate_mode": "n_splines",
+        "basis_candidates": (25, 40, 60),
+    }
+)
+
+
+LEGACY_V4_CA1_DARK_LIGHT_GLM_PARAMETERS = MappingProxyType(
+    {
+        **CURRENT_V5_CA1_DARK_LIGHT_GLM_PARAMETERS,
+        "dark_light_glm_param_name": "legacy_v4_ca1",
+        "basis_candidate_mode": "n_splines",
+        "basis_candidates": (25, 40, 60),
+    }
+)
+
+
+DARK_LIGHT_GLM_PARAMETER_PRESETS = (
+    CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS,
+    CURRENT_V5_CA1_DARK_LIGHT_GLM_PARAMETERS,
+    LEGACY_V4_V1_DARK_LIGHT_GLM_PARAMETERS,
+    LEGACY_V4_CA1_DARK_LIGHT_GLM_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -1004,6 +1174,9 @@ TABLE_DEFINITIONS = MappingProxyType(
             MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION
         ),
         "motor_encoding_comparison": MOTOR_ENCODING_COMPARISON_DEFINITION,
+        "dark_light_glm_parameters": DARK_LIGHT_GLM_PARAMETERS_DEFINITION,
+        "dark_light_glm_selection": DARK_LIGHT_GLM_SELECTION_DEFINITION,
+        "dark_light_glm": DARK_LIGHT_GLM_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -1012,9 +1185,18 @@ TABLE_DEFINITIONS = MappingProxyType(
 __all__ = [
     "ABSOLUTE_OVERLAP_TUNING_SIMILARITY_PARAMETERS",
     "CORRELATION_TUNING_SIMILARITY_PARAMETERS",
+    "CURRENT_V5_CA1_DARK_LIGHT_GLM_PARAMETERS",
+    "CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS",
+    "DARK_LIGHT_GLM_DEFINITION",
+    "DARK_LIGHT_GLM_OUTPUT_RULE",
+    "DARK_LIGHT_GLM_PARAMETERS_DEFINITION",
+    "DARK_LIGHT_GLM_PARAMETER_PRESETS",
+    "DARK_LIGHT_GLM_SELECTION_DEFINITION",
     "DEFAULT_ANALYSIS_NWBFILE_SCHEMA_NAME",
     "FIGURE_1D_TUNING_CURVE_PARAMETERS",
     "LEGACY_TUNING_CURVE_PARAMETERS",
+    "LEGACY_V4_CA1_DARK_LIGHT_GLM_PARAMETERS",
+    "LEGACY_V4_V1_DARK_LIGHT_GLM_PARAMETERS",
     "DEFAULT_MOVEMENT_PARAMETERS",
     "DEFAULT_RIPPLE_MODULATION_PARAMETERS",
     "DEFAULT_SCHEMA_NAME",

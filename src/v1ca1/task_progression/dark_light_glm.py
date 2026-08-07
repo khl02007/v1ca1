@@ -1057,9 +1057,15 @@ def _fit_selected_full_model_per_traj(
     n_splines_speed: int = 5,
     spline_order_speed: int = 4,
     speed_bounds: tuple[float, float] | None = None,
+    population_glm_class: Any | None = None,
 ) -> dict[str, Any]:
     """Fit one swap-compatible model with lap-CV and a full-data refit."""
     _require_nemos()
+    glm_class = (
+        PopulationGLM
+        if population_glm_class is None
+        else population_glm_class
+    )
     n_units: int | None = None
     cv_accumulator: dict[str, np.ndarray] = {}
 
@@ -1142,7 +1148,7 @@ def _fit_selected_full_model_per_traj(
         x_train = np.concatenate([x_train_nospeed, v_train], axis=1)
         x_validation = np.concatenate([x_validation_nospeed, v_validation], axis=1)
 
-        model = PopulationGLM(
+        model = glm_class(
             "Poisson",
             regularizer="Ridge",
             regularizer_strength=float(ridge),
@@ -1209,7 +1215,7 @@ def _fit_selected_full_model_per_traj(
             speed_transform_all,
         )
     x_full = np.concatenate([x_full_nospeed, v_full], axis=1)
-    model_full = PopulationGLM(
+    model_full = glm_class(
         "Poisson",
         regularizer="Ridge",
         regularizer_strength=float(ridge),

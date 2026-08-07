@@ -264,6 +264,13 @@ RegionSortedSpikesGroup + MovementFiringRate
     + full_w WTrackGraph + MotorEncodingComparisonParameters
     -> MotorEncodingComparisonSelection
     -> MotorEncodingComparison
+
+RegionSortedSpikesGroup
+    + dark/light MovementFiringRate rows
+    + eight epoch-specific TrajectoryIntervals
+    + four shared WTrackGraph rows + DarkLightGLMParameters
+    -> DarkLightGLMSelection
+    -> DarkLightGLM
 ```
 
 Its manuscript preset is five lap-wise folds, 50-ms evaluation bins, 4-cm
@@ -278,7 +285,7 @@ The computed tables are named `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
-`PathSpecificPlaceDecoding`, without a
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`, without a
 `Computed` suffix. Each explicit
 selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
@@ -315,6 +322,17 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
     decoding_summary.parquet
     decoding_error_by_position.parquet
     {true,decoded}_place.npz
+<animal>/<date>/motor_encoding_comparison/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    nested_cv.nc
+    full_refit.nc
+<animal>/<date>/dark_light_glm/<light>_vs_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    selection_summary.nc
+    candidates/*.nc
+    selected/{model}.nc
 ```
 
 Any explicit `artifact_root` must remain within the stage configured for the

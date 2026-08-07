@@ -16,16 +16,19 @@ import pytest
 from v1ca1.spyglass import table_specs
 from v1ca1.spyglass.selection import provenance_sha256
 from v1ca1.spyglass.spikes import resolve_sorted_spikes_group_provenance
+import v1ca1.spyglass.tables as tables_module
 from v1ca1.spyglass.tables import (
     SOURCE_TABLE_KEYS,
     _analysis_region,
     _attach_registered_unit_identity,
     _construct_tables,
+    _dark_light_glm_selection_row,
     _dpp_encoding_comparison_selection_row,
     _dpp_tuning_curve_selection_row,
     _filter_registered_table,
     _intervals_to_frame,
     _legacy_dpp_unit_identity_resolver,
+    _legacy_dark_light_unit_identity_resolver,
     _load_tuning_similarity_inputs,
     _make_dpp_encoding_comparison_row,
     _make_dpp_tuning_curve_row,
@@ -41,10 +44,12 @@ from v1ca1.spyglass.tables import (
     _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
     _register_existing_dpp_encoding_comparison_row,
+    _register_existing_dark_light_glm_row,
     _stability_selection_row,
     _tuning_similarity_selection_row,
     _validate_analysis_schema_prefix,
     _validate_dpp_encoding_comparison_artifact_link,
+    _validate_dark_light_glm_parameter_row,
     _validate_frozen_sorting_snapshot,
     _validate_legacy_dpp_encoding_source_path,
     _validate_legacy_tuning_curve_inputs,
@@ -903,6 +908,155 @@ def _build_motor_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _dark_light_glm_selection_inputs() -> dict[str, Any]:
+    """Return internally consistent coupled dark/light selection inputs."""
+    nwb_file_name = "L1420240102_.nwb"
+    epochs = {"dark": "08_r4", "light": "02_r1"}
+    movement_ids = {
+        condition_name: uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"v1ca1-test-dark-light-movement:{condition_name}",
+        )
+        for condition_name in epochs
+    }
+    parameters = dict(
+        table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS
+    )
+    region_group_id = uuid.UUID("84444444-4444-5444-8444-444444444444")
+    movement_selections = {
+        movement_ids[condition_name]: {
+            "movement_firing_rate_id": movement_ids[condition_name],
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": "head_position",
+            "movement_param_name": "default",
+            "movement_parameters_sha256": "d" * 64,
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region": "v1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+        }
+        for condition_name, epoch in epochs.items()
+    }
+    movement_results = {
+        movement_id: {
+            "movement_firing_rate_id": movement_id,
+            "n_units": 3,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+        }
+        for movement_id in movement_ids.values()
+    }
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "region_sorted_spikes_group_id": region_group_id,
+        "dark_movement_firing_rate_id": movement_ids["dark"],
+        "light_movement_firing_rate_id": movement_ids["light"],
+        "dark_epoch": epochs["dark"],
+        "light_epoch": epochs["light"],
+        **{
+            f"{condition_name}_{trajectory_type}_trajectory_type": (
+                trajectory_type
+            )
+            for condition_name in ("dark", "light")
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        **{
+            f"{trajectory_type}_configuration_name": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        "dark_light_glm_param_name": parameters[
+            "dark_light_glm_param_name"
+        ],
+    }
+    return {
+        "key": key,
+        "region_row": {
+            "region_sorted_spikes_group_id": region_group_id,
+            "nwb_file_name": nwb_file_name,
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region_name": "v1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+            "n_units": 3,
+            "selected_units_sha256": "a" * 64,
+        },
+        "movement_selections": movement_selections,
+        "movement_results": movement_results,
+        "position_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "position_series_name": "head_position",
+                "spatial_unit": "cm",
+            }
+            for epoch in epochs.values()
+        ],
+        "epoch_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs["dark"],
+                "epoch_type": "run",
+                "condition": "dark",
+                "is_light": False,
+            },
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs["light"],
+                "epoch_type": "run",
+                "condition": "AB",
+                "is_light": True,
+            },
+        ],
+        "trajectory_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+                "interval_count": int(parameters["n_folds"]),
+            }
+            for epoch in epochs.values()
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "graph_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+                "coordinate_unit": "cm",
+            }
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "parameters": parameters,
+    }
+
+
+def _build_dark_light_glm_selection(
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one dark/light selection from mutable fake upstream rows."""
+    return _dark_light_glm_selection_row(
+        key=inputs["key"],
+        region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
+        movement_firing_rate_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_results"],
+        ),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_selections"],
+        ),
+        position_table=_FakeRowsRelation(inputs["position_rows"]),
+        epoch_intervals_table=_FakeRowsRelation(inputs["epoch_rows"]),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+    )
+
+
 def test_import_is_passive_in_fresh_interpreter() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     environment = os.environ.copy()
@@ -961,6 +1115,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "motor_encoding_comparison_parameters",
         "motor_encoding_comparison_selection",
         "motor_encoding_comparison",
+        "dark_light_glm_parameters",
+        "dark_light_glm_selection",
+        "dark_light_glm",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -988,6 +1145,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "MotorEncodingComparisonParameters" in schemas[0].context
     assert "MotorEncodingComparisonSelection" in schemas[0].context
     assert "MotorEncodingComparison" in schemas[0].context
+    assert "DarkLightGLMParameters" in schemas[0].context
+    assert "DarkLightGLMSelection" in schemas[0].context
+    assert "DarkLightGLM" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -1319,6 +1479,30 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "selected_units_path: filepath@analysis" in motor_result
     assert "'partial_valid'" in motor_result
     assert hasattr(bundle["motor_encoding_comparison"], "register_existing")
+
+    dark_light_parameters = bundle["dark_light_glm_parameters"].definition
+    assert "basis_candidate_mode:" in dark_light_parameters
+    assert "speed_smoothing_sigma_s = 0.1: double" in dark_light_parameters
+    dark_light_selection = bundle["dark_light_glm_selection"].definition
+    assert "dark_light_glm_id: uuid" in dark_light_selection
+    assert "dark_movement_firing_rate_id='movement_firing_rate_id'" in (
+        dark_light_selection
+    )
+    assert "light_movement_firing_rate_id='movement_firing_rate_id'" in (
+        dark_light_selection
+    )
+    assert "dark_center_to_left_trajectory_type='trajectory_type'" in (
+        dark_light_selection
+    )
+    assert "light_right_to_center_trajectory_type='trajectory_type'" in (
+        dark_light_selection
+    )
+    dark_light_result = bundle["dark_light_glm"].definition
+    assert "-> DarkLightGLMSelection" in dark_light_result
+    assert "selection_summary_path: filepath@analysis" in dark_light_result
+    assert "task_dense_gain_model_path: filepath@analysis" in dark_light_result
+    assert "'partial_valid'" in dark_light_result
+    assert hasattr(bundle["dark_light_glm"], "register_existing")
 
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
@@ -3568,6 +3752,207 @@ def test_motor_encoding_selection_rejects_misaligned_position_sources() -> None:
 
     with pytest.raises(ValueError, match="aligned sampling metadata"):
         _build_motor_encoding_selection(inputs)
+
+
+def test_dark_light_glm_parameters_and_selection_are_frozen() -> None:
+    parameters = dict(
+        table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS
+    )
+    assert _validate_dark_light_glm_parameter_row(parameters) == parameters
+    first = _build_dark_light_glm_selection(
+        _dark_light_glm_selection_inputs()
+    )
+    second = _build_dark_light_glm_selection(
+        _dark_light_glm_selection_inputs()
+    )
+
+    assert first == second
+    assert first["dark_light_glm_id"].version == 5
+    assert first["dark_epoch"] == "08_r4"
+    assert first["light_epoch"] == "02_r1"
+    assert first["dark_light_glm_parameters_sha256"] == provenance_sha256(
+        parameters
+    )
+    assert first["dark_light_glm_output_rule_sha256"] == provenance_sha256(
+        dict(table_specs.DARK_LIGHT_GLM_OUTPUT_RULE)
+    )
+
+
+def test_dark_light_glm_selection_checks_conditions_and_snapshots() -> None:
+    inputs = _dark_light_glm_selection_inputs()
+    inputs["epoch_rows"][1]["is_light"] = False
+    with pytest.raises(ValueError, match="explicit light condition"):
+        _build_dark_light_glm_selection(inputs)
+
+    inputs = _dark_light_glm_selection_inputs()
+    light_id = inputs["key"]["light_movement_firing_rate_id"]
+    inputs["movement_selections"][light_id][
+        "movement_parameters_sha256"
+    ] = "e" * 64
+    with pytest.raises(ValueError, match="frozen source snapshot"):
+        _build_dark_light_glm_selection(inputs)
+
+
+def test_dark_light_glm_selection_allows_terminal_movement_statuses() -> None:
+    inputs = _dark_light_glm_selection_inputs()
+    dark_id = inputs["key"]["dark_movement_firing_rate_id"]
+    inputs["movement_results"][dark_id]["analysis_status"] = "no_movement"
+
+    row = _build_dark_light_glm_selection(inputs)
+
+    assert row["dark_movement_firing_rate_id"] == dark_id
+
+
+def test_dark_light_legacy_resolver_requires_imported_unique_units() -> None:
+    loaded = {
+        "ts_group": {0: object(), 1: object()},
+        "unit_ids": [
+            {"spikesorting_merge_id": "merge-a", "unit_id": 10},
+            {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+        ],
+        "unit_metadata": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 10,
+                "sorting_unit_id": 101,
+            },
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 11,
+                "sorting_unit_id": 102,
+            },
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "merge_parent": "ImportedSpikeSorting",
+                "n_selected_units": 2,
+            }
+        ],
+    }
+    resolver = _legacy_dark_light_unit_identity_resolver(loaded)
+    assert resolver["101"]["stable_unit_id"] == "merge-a:10"
+    assert resolver["102"]["group_unit_id"] == "1"
+
+    loaded["member_provenance"][0]["merge_parent"] = "CurationV1"
+    with pytest.raises(ValueError, match="ImportedSpikeSorting"):
+        _legacy_dark_light_unit_identity_resolver(loaded)
+
+
+def test_dark_light_registration_uses_canonical_selected_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parameters = dict(
+        table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS
+    )
+    selection = {
+        "dark_light_glm_id": uuid.uuid4(),
+        "dark_light_glm_param_name": parameters[
+            "dark_light_glm_param_name"
+        ],
+        "dark_light_glm_parameters_sha256": provenance_sha256(parameters),
+        "dark_light_glm_output_rule_sha256": provenance_sha256(
+            dict(table_specs.DARK_LIGHT_GLM_OUTPUT_RULE)
+        ),
+        "light_epoch": "02_r1",
+        "dark_epoch": "08_r4",
+    }
+    context = {
+        "selection": selection,
+        "parameters": parameters,
+        "animal_name": "L14",
+        "date": "20240611",
+        "region": "v1",
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_dark_light_glm_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_dark_light_glm_spikes",
+        lambda **kwargs: {"unit_ids": [], "member_provenance": []},
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_dark_light_glm_nwb_inputs",
+        lambda **kwargs: {"graph_inputs": {}},
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_legacy_dark_light_unit_identity_resolver",
+        lambda loaded: {},
+    )
+
+    from v1ca1.spyglass import dark_light_glm
+
+    expected_parameters = {
+        "schema_version": "5",
+        "parameter_name": parameters["dark_light_glm_param_name"],
+        "parameter_sha256": selection[
+            "dark_light_glm_parameters_sha256"
+        ],
+        "output_rule_sha256": selection[
+            "dark_light_glm_output_rule_sha256"
+        ],
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "dark_light_glm_param_name"
+        },
+    }
+    monkeypatch.setattr(
+        dark_light_glm,
+        "register_existing_dark_light_glm_artifact",
+        lambda **kwargs: {
+            "parameters": expected_parameters,
+            "legacy_artifact_provenance": {"source": "legacy"},
+            "n_units": 1,
+            "n_candidates": 9,
+            "n_selected_models": 4,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+        },
+    )
+
+    row = _register_existing_dark_light_glm_row(
+        key=selection,
+        source_candidate_paths=[],
+        source_selected_paths_by_model={},
+        source_selection_summary_path=tmp_path / "summary.nc",
+        parameters_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        position_table=object(),
+        epoch_intervals_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        source_v1ca1_git_commit=None,
+        source_spyglass_git_commit=None,
+        artifact_root=tmp_path,
+    )
+
+    artifact_dir = (
+        tmp_path
+        / "L14"
+        / "20240611"
+        / "dark_light_glm"
+        / "02_r1_vs_08_r4"
+        / "v1"
+        / str(selection["dark_light_glm_id"])
+    )
+    assert Path(row["artifact_manifest_path"]) == (
+        artifact_dir / "manifest.parquet"
+    )
+    assert Path(row["visual_model_path"]) == (
+        artifact_dir / "selected" / "visual.nc"
+    )
 
 
 def test_tuning_similarity_result_hooks_receive_fetched_selection(

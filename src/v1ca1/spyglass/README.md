@@ -25,7 +25,8 @@ register artifacts, or write to NWB.
   provenance digests.
 - `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
-  `decoding_comparison.py`, and `path_specific_decoding.py` provide
+  `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
+  and `dark_light_glm.py` provide
   database-free computation and atomic
   artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
@@ -249,7 +250,7 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
-`PathSpecificPlaceDecoding`, and `MotorEncodingComparison`—there is no
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`—there is no
 `Computed` suffix. Empty but valid
 selections are recorded through explicit terminal statuses rather than being
 silently omitted.
@@ -358,6 +359,39 @@ If a population fit fails or returns non-finite parameters for only some units,
 those units are retried independently; unresolved units remain explicit invalid
 entries in the audit and do not discard finite evidence from other units.
 
+The dark/light GLM comparison uses:
+
+```text
+RegionSortedSpikesGroup
+    + dark MovementFiringRate + light MovementFiringRate
+    + four dark TrajectoryIntervals + four light TrajectoryIntervals
+    + four shared trajectory WTrackGraph rows + DarkLightGLMParameters
+    -> DarkLightGLMSelection
+    -> DarkLightGLM
+    -> manifest.parquet + selected_units.parquet + selection_summary.nc
+       + candidates/*.nc + selected/{model}.nc
+```
+
+One result couples one dark run, one explicitly labeled light run, and one
+region. Both movement rows must use the same NWB, sorting snapshot, region,
+unit set, and movement-parameter snapshot. Their selected position series are
+loaded indirectly to derive graph-based path progression and, when enabled,
+the speed covariate. The selection freezes all eight epoch-specific lap tables
+and the four shared centimeter W-track graphs.
+
+The four fixed models are independent dark/light fields (`visual`), a shared
+dark scaffold with segment-bump gain, the corresponding segment-scalar gain,
+and dense gain. The current v5 presets select physical spatial-bin candidates;
+explicit v4 presets exist only for honest registration of manuscript-era
+spline-count artifacts. The visual model selects the shared evaluation-bin and
+place-basis candidate, after which each comparison model selects its ridge.
+V1 and CA1 presets use strict movement-rate thresholds in both epochs of
+`> 0.5` Hz and `> 0.0` Hz, respectively. Failed population units are retried
+independently; the all-unit Parquet records whether each eligible unit has all
+16 selected model-by-trajectory fits, producing `partial_valid` when needed.
+If no unit has a complete selected fit, the same audit is retained with
+`no_valid_units` rather than leaving the selection perpetually unpopulated.
+
 ## Artifacts and provenance
 
 New results are written under the configured `filepath@analysis` store,
@@ -407,6 +441,13 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     selected_units.parquet
     nested_cv.nc
     full_refit.nc
+
+<root>/<animal>/<date>/dark_light_glm/<light>_vs_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    selection_summary.nc
+    candidates/*.nc
+    selected/{visual,task_segment_bump,task_segment_scalar,task_dense_gain}.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -422,7 +463,8 @@ inserts the result row. It never writes results into the source NWB.
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
-`PathSpecificPlaceDecoding`, and `MotorEncodingComparison` additionally provide
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`
+additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
@@ -448,6 +490,11 @@ Motor registration accepts an exact nested-CV/full-refit NetCDF pair,
 validates their shared session, region, epoch, model, parameter, and unit
 coverage, resolves temporary unit coordinates against the selected regional
 sorting group, and copies both into one immutable canonical bundle.
+Dark/light registration requires the exact visual candidate grid, the three
+comparison candidates at the selected visual basis, all four selected-model
+NetCDFs, and their selection summary. It validates v4/v5 basis semantics,
+current graph geometry, movement-rate vectors, and every imported unit before
+copying the coupled bundle.
 Legacy registration is restricted to matching `ImportedSpikeSorting`
 selections. Registration requires complete canonical schemas; ripple
 peri-event data must also contain one complete, common time grid for every

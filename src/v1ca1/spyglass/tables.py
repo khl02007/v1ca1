@@ -514,6 +514,103 @@ def _validate_motor_encoding_comparison_parameter_row(
     return values
 
 
+def _validate_dark_light_glm_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one coupled dark/light GLM parameter row exactly."""
+    from v1ca1.spyglass.dark_light_glm import (
+        validate_dark_light_glm_parameters,
+    )
+
+    expected = set(table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "DarkLightGLM parameters must have exactly the declared fields; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["dark_light_glm_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "dark_light_glm_param_name must be a non-empty string of at "
+            "most 64 characters."
+        )
+    for field_name, minimum in (
+        ("n_folds", 2),
+        ("spline_order", 1),
+        ("n_splines_speed", 1),
+        ("spline_order_speed", 1),
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise TypeError(f"{field_name} must be one integer scalar.")
+        value = int(value)
+        if value < minimum or value > 65_535:
+            raise ValueError(
+                f"{field_name} must be between {minimum} and 65535."
+            )
+        values[field_name] = value
+    random_seed = values["random_seed"]
+    if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+        raise TypeError("random_seed must be one integer scalar.")
+    random_seed = int(random_seed)
+    if random_seed < 0 or random_seed > 2_147_483_647:
+        raise ValueError(
+            "random_seed must fit a non-negative signed 32-bit integer."
+        )
+    values["random_seed"] = random_seed
+    for field_name in (
+        "min_dark_firing_rate_hz",
+        "min_light_firing_rate_hz",
+        "speed_smoothing_sigma_s",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0 or (
+            field_name == "speed_smoothing_sigma_s" and value == 0.0
+        ):
+            qualifier = (
+                "positive"
+                if field_name == "speed_smoothing_sigma_s"
+                else "non-negative"
+            )
+            raise ValueError(f"{field_name} must be {qualifier} and finite.")
+        values[field_name] = value
+    use_speed = values["use_speed"]
+    if not isinstance(use_speed, (bool, np.bool_)):
+        raise TypeError("use_speed must be one bool scalar.")
+    values["use_speed"] = bool(use_speed)
+    validated = validate_dark_light_glm_parameters(
+        basis_candidate_mode=values["basis_candidate_mode"],
+        basis_candidates=values["basis_candidates"],
+        bin_sizes_s=values["bin_sizes_s"],
+        ridges=values["ridges"],
+        n_folds=values["n_folds"],
+        random_seed=values["random_seed"],
+        spline_order=values["spline_order"],
+        min_dark_firing_rate_hz=values["min_dark_firing_rate_hz"],
+        min_light_firing_rate_hz=values["min_light_firing_rate_hz"],
+        use_speed=values["use_speed"],
+        speed_feature_mode=values["speed_feature_mode"],
+        n_splines_speed=values["n_splines_speed"],
+        spline_order_speed=values["spline_order_speed"],
+        speed_bounds=values["speed_bounds"],
+        speed_smoothing_sigma_s=values["speed_smoothing_sigma_s"],
+    )
+    return {
+        "dark_light_glm_param_name": name,
+        **{
+            field_name: validated[field_name]
+            for field_name in expected
+            if field_name != "dark_light_glm_param_name"
+        },
+    }
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -2397,6 +2494,273 @@ def _motor_encoding_comparison_selection_row(
             "MotorEncodingComparison",
             natural_key,
         ),
+        **natural_key,
+    }
+
+
+def _dark_light_glm_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable coupled dark/light GLM."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    parameters = _validate_dark_light_glm_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "dark_light_glm_param_name": key[
+                    "dark_light_glm_param_name"
+                ]
+            },
+        )
+    )
+    movement_results: dict[str, dict[str, Any]] = {}
+    movement_selections: dict[str, dict[str, Any]] = {}
+    for condition_name in ("dark", "light"):
+        movement_key = {
+            "movement_firing_rate_id": key[
+                f"{condition_name}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[condition_name] = _fetch1_dict(
+            movement_firing_rate_table,
+            movement_key,
+        )
+        movement_selections[condition_name] = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+
+    reference_selection = movement_selections["dark"]
+    reference_result = movement_results["dark"]
+    for condition_name in ("dark", "light"):
+        movement_selection = movement_selections[condition_name]
+        movement_result = movement_results[condition_name]
+        for field_name in (
+            "nwb_file_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+        ):
+            if str(region_row.get(field_name)) != str(
+                movement_selection.get(field_name)
+            ):
+                raise ValueError(
+                    "DarkLightGLM regional spikes and both movement rows must "
+                    f"share {field_name}."
+                )
+        if str(region_row.get("region_name")) != str(
+            movement_selection.get("region")
+        ):
+            raise ValueError(
+                "DarkLightGLM regional spikes and both movement rows must "
+                "select the same region."
+            )
+        for field_name in (
+            "sorting_group_members_sha256",
+            "unit_filter_params_sha256",
+        ):
+            if str(region_row.get(field_name)) != str(
+                movement_selection.get(field_name)
+            ):
+                raise ValueError(
+                    "DarkLightGLM regional spikes and both movement rows must "
+                    f"share frozen {field_name}."
+                )
+        if str(region_row.get("selected_units_sha256")) != str(
+            movement_result.get("selected_units_sha256")
+        ) or int(region_row.get("n_units", -1)) != int(
+            movement_result.get("n_units", -2)
+        ):
+            raise ValueError(
+                "DarkLightGLM regional spikes and both movement rows must "
+                "contain identical persistent units."
+            )
+        allowed_movement_statuses = (
+            {"no_units"}
+            if int(region_row.get("n_units", -1)) == 0
+            else {"valid", "no_valid_position", "no_movement"}
+        )
+        if str(movement_result.get("analysis_status")) not in (
+            allowed_movement_statuses
+        ):
+            raise ValueError(
+                "DarkLightGLM movement status is incompatible with its "
+                "regional unit count."
+            )
+        position_row = _fetch1_dict(
+            position_table,
+            {
+                "nwb_file_name": movement_selection["nwb_file_name"],
+                "epoch": movement_selection["epoch"],
+                "position_series_name": movement_selection[
+                    "position_series_name"
+                ],
+            },
+        )
+        if str(position_row.get("spatial_unit")) != "cm":
+            raise ValueError("DarkLightGLM positions must use centimeters.")
+
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+        "region",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+        "movement_param_name",
+        "movement_parameters_sha256",
+    ):
+        if str(reference_selection.get(field_name)) != str(
+            movement_selections["light"].get(field_name)
+        ):
+            raise ValueError(
+                "DarkLightGLM dark and light movement rows must share their "
+                f"frozen source snapshot: {field_name}."
+            )
+    for field_name in ("selected_units_sha256", "n_units"):
+        if str(reference_result.get(field_name)) != str(
+            movement_results["light"].get(field_name)
+        ):
+            raise ValueError(
+                "DarkLightGLM dark and light movement results must contain "
+                f"the same units: {field_name}."
+            )
+
+    nwb_file_name = str(reference_selection["nwb_file_name"])
+    epochs = {
+        condition_name: str(movement_selections[condition_name]["epoch"])
+        for condition_name in ("dark", "light")
+    }
+    if epochs["dark"] == epochs["light"]:
+        raise ValueError("DarkLightGLM requires distinct dark and light epochs.")
+    epoch_rows: dict[str, dict[str, Any]] = {}
+    for condition_name in ("dark", "light"):
+        epoch_field = f"{condition_name}_epoch"
+        if epoch_field in key and str(key[epoch_field]) != epochs[condition_name]:
+            raise ValueError(
+                f"DarkLightGLM {epoch_field} must match its MovementFiringRate."
+            )
+        epoch_row = _fetch1_dict(
+            epoch_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs[condition_name],
+            },
+        )
+        if str(epoch_row.get("epoch_type")) != "run":
+            raise ValueError("DarkLightGLM requires two explicit run epochs.")
+        epoch_rows[condition_name] = epoch_row
+    dark_is_light = epoch_rows["dark"].get("is_light")
+    if str(epoch_rows["dark"].get("condition")) != "dark" or (
+        dark_is_light is None or bool(dark_is_light)
+    ):
+        raise ValueError(
+            "DarkLightGLM dark epoch must have condition='dark' and "
+            "is_light=False."
+        )
+    light_condition = str(epoch_rows["light"].get("condition"))
+    light_is_light = epoch_rows["light"].get("is_light")
+    if light_condition not in {"AB", "BA", "gray", "bright"} or (
+        light_is_light is None or not bool(light_is_light)
+    ):
+        raise ValueError(
+            "DarkLightGLM light epoch must have an explicit light condition "
+            "and is_light=True."
+        )
+
+    source_fields: dict[str, Any] = {
+        "dark_epoch": epochs["dark"],
+        "light_epoch": epochs["light"],
+    }
+    n_folds = int(parameters["n_folds"])
+    for condition_name in ("dark", "light"):
+        for trajectory_type in _DPP_TRAJECTORY_TYPES:
+            trajectory_field = (
+                f"{condition_name}_{trajectory_type}_trajectory_type"
+            )
+            if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
+                raise ValueError(
+                    f"DarkLightGLM {trajectory_field} must equal "
+                    f"{trajectory_type!r}."
+                )
+            trajectory_row = _fetch1_dict(
+                trajectory_intervals_table,
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": epochs[condition_name],
+                    "trajectory_type": trajectory_type,
+                },
+            )
+            if int(trajectory_row.get("interval_count", -1)) < n_folds:
+                raise ValueError(
+                    "DarkLightGLM requires at least n_folds laps in every "
+                    f"epoch and trajectory; {condition_name} "
+                    f"{trajectory_type!r} has "
+                    f"{trajectory_row.get('interval_count')!r}."
+                )
+            source_fields[trajectory_field] = trajectory_type
+
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                "DarkLightGLM graph aliases must match their trajectory types."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_row.get("coordinate_unit")) != "cm":
+            raise ValueError("DarkLightGLM graphs must use centimeters.")
+        source_fields[configuration_field] = trajectory_type
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="dark_light_glm_parameters_sha256",
+    )
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.DARK_LIGHT_GLM_OUTPUT_RULE)
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "dark_movement_firing_rate_id": key[
+            "dark_movement_firing_rate_id"
+        ],
+        "light_movement_firing_rate_id": key[
+            "light_movement_firing_rate_id"
+        ],
+        **source_fields,
+        "dark_light_glm_param_name": parameters[
+            "dark_light_glm_param_name"
+        ],
+        **parameter_snapshot,
+        "dark_light_glm_output_rule_sha256": output_rule_sha256,
+    }
+    return {
+        "dark_light_glm_id": selection_uuid("DarkLightGLM", natural_key),
         **natural_key,
     }
 
@@ -6520,6 +6884,326 @@ def _load_motor_encoding_comparison_spikes(
     return loaded
 
 
+def _load_dark_light_glm_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate one coupled dark/light GLM selection."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    selection = _dark_light_glm_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+    )
+    if str(selection["dark_light_glm_id"]) != str(key["dark_light_glm_id"]):
+        raise ValueError("DarkLightGLM selection UUID is stale.")
+    parameters = _validate_dark_light_glm_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="dark_light_glm_parameters_sha256",
+    )
+    expected_output_rule_sha256 = provenance_sha256(
+        dict(table_specs.DARK_LIGHT_GLM_OUTPUT_RULE)
+    )
+    if str(key.get("dark_light_glm_output_rule_sha256", "")) != (
+        expected_output_rule_sha256
+    ):
+        raise ValueError(
+            "DarkLightGLM fixed output rule changed after selection insertion. "
+            "Create a new selection."
+        )
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    animal_name, session_date = _session_identity(session_table, selection)
+    region = str(region_row["region_name"])
+    movement_results: dict[str, dict[str, Any]] = {}
+    movement_selections: dict[str, dict[str, Any]] = {}
+    movement_parameters: dict[str, dict[str, Any]] = {}
+    movements: dict[str, dict[str, Any]] = {}
+    epoch_rows: dict[str, dict[str, Any]] = {}
+    epoch_time_support: dict[str, tuple[float, float]] = {}
+    for condition_name in ("dark", "light"):
+        movement_key = {
+            "movement_firing_rate_id": selection[
+                f"{condition_name}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[condition_name] = _fetch1_dict(
+            movement_firing_rate_table,
+            movement_key,
+        )
+        movement_selections[condition_name] = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+        movement_parameters[condition_name] = _validate_movement_parameter_row(
+            _fetch1_dict(
+                movement_parameters_table,
+                movement_selections[condition_name],
+            )
+        )
+        _validate_frozen_parameters(
+            movement_selections[condition_name],
+            movement_parameters[condition_name],
+            field_name="movement_parameters_sha256",
+        )
+        movements[condition_name] = _load_movement_result_artifacts(
+            result_row=movement_results[condition_name],
+            parameters=movement_parameters[condition_name],
+            expected_metadata={
+                "animal_name": animal_name,
+                "date": session_date,
+                "region": region,
+                "epoch": selection[f"{condition_name}_epoch"],
+            },
+        )
+        epoch_rows[condition_name] = _fetch1_dict(
+            epoch_intervals_table,
+            {
+                "nwb_file_name": selection["nwb_file_name"],
+                "epoch": selection[f"{condition_name}_epoch"],
+            },
+        )
+        epoch_start = float(epoch_rows[condition_name]["start_time"])
+        epoch_stop = float(epoch_rows[condition_name]["stop_time"])
+        if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+            epoch_stop <= epoch_start
+        ):
+            raise ValueError(
+                "EpochIntervals must contain finite start_time < stop_time."
+            )
+        epoch_time_support[condition_name] = (epoch_start, epoch_stop)
+    if movement_parameters["dark"] != movement_parameters["light"]:
+        raise ValueError(
+            "DarkLightGLM dark and light movement parameters changed after "
+            "selection."
+        )
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "movement_parameters": movement_parameters["dark"],
+        "movements": movements,
+        "epoch_rows": epoch_rows,
+        "epoch_time_support": epoch_time_support,
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+    }
+
+
+def _load_dark_light_glm_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load two positions, eight lap sets, and four graphs from one NWB."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    selection = dict(context["selection"])
+    nwb_file_name = str(selection["nwb_file_name"])
+    position_rows: dict[str, dict[str, Any]] = {}
+    trajectory_rows: dict[str, dict[str, dict[str, Any]]] = {}
+    for condition_name in ("dark", "light"):
+        movement_selection = context["movement_selections"][condition_name]
+        position_rows[condition_name] = _fetch1_dict(
+            position_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": selection[f"{condition_name}_epoch"],
+                "position_series_name": movement_selection[
+                    "position_series_name"
+                ],
+            },
+        )
+        if str(position_rows[condition_name].get("spatial_unit")) != "cm":
+            raise ValueError("DarkLightGLM positions must use centimeters.")
+        trajectory_rows[condition_name] = {
+            trajectory_type: _fetch1_dict(
+                trajectory_intervals_table,
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": selection[f"{condition_name}_epoch"],
+                    "trajectory_type": selection[
+                        f"{condition_name}_{trajectory_type}_trajectory_type"
+                    ],
+                },
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": selection[
+                    f"{trajectory_type}_configuration_name"
+                ],
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        positions = {
+            condition_name: load_position(
+                nwbfile,
+                position_rows[condition_name],
+                apply_analysis_offset=True,
+            )
+            for condition_name in ("dark", "light")
+        }
+        trajectory_intervals = {
+            condition_name: {
+                trajectory_type: load_interval_set(nwbfile, row)
+                for trajectory_type, row in trajectory_rows[
+                    condition_name
+                ].items()
+            }
+            for condition_name in ("dark", "light")
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "positions": positions,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_rows": position_rows,
+    }
+
+
+def _load_dark_light_glm_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all regional units across the selected epoch pair."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    starts = [support[0] for support in context["epoch_time_support"].values()]
+    stops = [support[1] for support in context["epoch_time_support"].values()]
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=(min(starts), max(stops)),
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    expected_digests = {
+        str(context["region_row"]["selected_units_sha256"]),
+        *(
+            str(result["selected_units_sha256"])
+            for result in context["movement_results"].values()
+        ),
+    }
+    if expected_digests != {unit_digest}:
+        raise ValueError(
+            "DarkLightGLM regional units changed after selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "DarkLightGLM regional unit count changed after selection."
+        )
+    return loaded
+
+
+def _legacy_dark_light_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Map imported-sorting unit IDs to exact persistent group identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy DarkLightGLM registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            "Regional spike metadata must contain one row per selected unit."
+        )
+    for group_unit_id, metadata in zip(
+        loaded_spikes["ts_group"].keys(),
+        metadata_rows,
+        strict=True,
+    ):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                "Every selected unit requires a unique sorting_unit_id for "
+                "legacy DarkLightGLM registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+            "stable_unit_id": (
+                f"{metadata['spikesorting_merge_id']}:{metadata['unit_id']}"
+            ),
+            "group_unit_id": str(group_unit_id),
+        }
+    return resolver
+
+
 def _legacy_dpp_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -7118,6 +7802,139 @@ def _validate_motor_encoding_comparison_artifact_link(
             raise ValueError(
                 "MotorEncodingComparison result paths do not describe one "
                 f"canonical bundle: {field_name}."
+            )
+
+
+def _validate_dark_light_glm_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one dark/light artifact bundle to match its immutable rows."""
+    from v1ca1.spyglass.dark_light_glm import (
+        ARTIFACT_DIRNAME,
+        MANIFEST_FILENAME,
+        MODEL_NAMES,
+        SCHEMA_VERSION_BY_MODE,
+        SELECTED_UNITS_FILENAME,
+        SELECTION_SUMMARY_FILENAME,
+        validate_dark_light_glm_result,
+    )
+    from v1ca1.spyglass.selection import (
+        provenance_sha256,
+        unit_identity_sha256,
+    )
+
+    validated = validate_dark_light_glm_result(bundle)
+    expected_metadata = {
+        "dark_light_glm_id": selection_row["dark_light_glm_id"],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "light_epoch": selection_row["light_epoch"],
+        "dark_epoch": selection_row["dark_epoch"],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated["metadata"].get(field_name)) != str(expected_value):
+            raise ValueError(
+                "DarkLightGLM artifact does not match its selection: "
+                f"{field_name}."
+            )
+    parameters = _validate_dark_light_glm_parameter_row(parameters_row)
+    expected_parameters = {
+        "schema_version": SCHEMA_VERSION_BY_MODE[
+            parameters["basis_candidate_mode"]
+        ],
+        "parameter_name": parameters["dark_light_glm_param_name"],
+        "parameter_sha256": selection_row[
+            "dark_light_glm_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "dark_light_glm_output_rule_sha256"
+        ],
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "dark_light_glm_param_name"
+        },
+    }
+    if provenance_sha256(dict(validated["parameters"])) != provenance_sha256(
+        expected_parameters
+    ):
+        raise ValueError(
+            "DarkLightGLM artifact parameters disagree with its selection."
+        )
+    expected_scalars = {
+        "schema_version": str(validated["parameters"]["schema_version"]),
+        "n_units": int(validated["n_units"]),
+        "n_candidates": int(validated["n_candidates"]),
+        "n_selected_models": int(validated["n_selected_models"]),
+        "analysis_status": str(validated["analysis_status"]),
+        "selected_units_sha256": str(validated["selected_units_sha256"]),
+        "artifact_origin": str(validated["artifact_origin"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row[field_name]) != str(expected_value):
+            raise ValueError(
+                "DarkLightGLM result disagrees with its artifact: "
+                f"{field_name}."
+            )
+    selected_units = validated["selected_units"]
+    selected_digest = unit_identity_sha256(
+        selected_units.loc[:, ["spikesorting_merge_id", "unit_id"]].to_dict(
+            "records"
+        )
+    )
+    if selected_digest != str(result_row["selected_units_sha256"]):
+        raise ValueError(
+            "DarkLightGLM selected-unit identities disagree with their digest."
+        )
+    if int(result_row["n_units"]) > int(region_row["n_units"]):
+        raise ValueError(
+            "DarkLightGLM selected unit count exceeds RegionSortedSpikesGroup."
+        )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    result_id = str(selection_row["dark_light_glm_id"])
+    pair_name = (
+        f"{selection_row['light_epoch']}_vs_{selection_row['dark_epoch']}"
+    )
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        pair_name,
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "DarkLightGLM manifest path does not match its canonical "
+            "session/epoch-pair/region/UUID layout."
+        )
+    expected_paths = {
+        "selected_units_path": manifest_path.parent / SELECTED_UNITS_FILENAME,
+        "selection_summary_path": (
+            manifest_path.parent / SELECTION_SUMMARY_FILENAME
+        ),
+        **{
+            f"{model_name}_model_path": (
+                manifest_path.parent / "selected" / f"{model_name}.nc"
+            )
+            for model_name in MODEL_NAMES
+        },
+    }
+    for field_name, expected_path in expected_paths.items():
+        if Path(result_row[field_name]) != expected_path:
+            raise ValueError(
+                "DarkLightGLM result paths do not describe one canonical "
+                f"bundle: {field_name}."
             )
 
 
@@ -7756,7 +8573,7 @@ def _register_existing_path_specific_place_decoding_row(
     provenance["source_spyglass_git_commit"] = (
         source_spyglass_git_commit
     )
-    written = registered["artifact_paths"]
+    written = paths
     return {
         "artifact_manifest_path": str(written["artifact_manifest_path"]),
         "selected_units_path": str(written["selected_units_path"]),
@@ -8052,7 +8869,7 @@ def _register_existing_motor_encoding_comparison_row(
     provenance["source_spyglass_git_commit"] = (
         source_spyglass_git_commit
     )
-    written = registered["artifact_paths"]
+    written = paths
     return {
         "artifact_manifest_path": str(written["artifact_manifest_path"]),
         "nested_cv_path": str(written["nested_cv_path"]),
@@ -8071,6 +8888,342 @@ def _register_existing_motor_encoding_comparison_row(
         "selected_units_sha256": str(
             registered["selected_units_sha256"]
         ),
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _make_dark_light_glm_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one coupled dark/light four-model GLM bundle."""
+    from v1ca1.spyglass.dark_light_glm import (
+        compute_dark_light_glm,
+        get_dark_light_glm_artifact_paths,
+        write_dark_light_glm_artifact,
+    )
+
+    context = _load_dark_light_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_dark_light_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_dark_light_glm_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    epoch_by_condition = {
+        condition_name: str(selection[f"{condition_name}_epoch"])
+        for condition_name in ("dark", "light")
+    }
+    position_by_epoch = {
+        epoch_by_condition[condition_name]: nwb_inputs["positions"][
+            condition_name
+        ]
+        for condition_name in ("dark", "light")
+    }
+    trajectory_intervals_by_epoch = {
+        epoch_by_condition[condition_name]: nwb_inputs[
+            "trajectory_intervals"
+        ][condition_name]
+        for condition_name in ("dark", "light")
+    }
+    movement_by_epoch = {
+        epoch_by_condition[condition_name]: context["movements"][
+            condition_name
+        ]["movement_intervals"]
+        for condition_name in ("dark", "light")
+    }
+    movement_tables = {
+        condition_name: context["movements"][condition_name]["table"]
+        for condition_name in ("dark", "light")
+    }
+    result = compute_dark_light_glm(
+        dark_light_glm_id=selection["dark_light_glm_id"],
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        light_epoch=epoch_by_condition["light"],
+        dark_epoch=epoch_by_condition["dark"],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        dark_movement_firing_rate_table=movement_tables["dark"],
+        light_movement_firing_rate_table=movement_tables["light"],
+        movement_by_epoch=movement_by_epoch,
+        trajectory_intervals_by_epoch=trajectory_intervals_by_epoch,
+        graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+        position_by_epoch=position_by_epoch,
+        parameter_name=parameters["dark_light_glm_param_name"],
+        parameter_sha256=selection["dark_light_glm_parameters_sha256"],
+        output_rule_sha256=selection["dark_light_glm_output_rule_sha256"],
+        basis_candidate_mode=parameters["basis_candidate_mode"],
+        basis_candidates=parameters["basis_candidates"],
+        bin_sizes_s=parameters["bin_sizes_s"],
+        ridges=parameters["ridges"],
+        n_folds=parameters["n_folds"],
+        random_seed=parameters["random_seed"],
+        spline_order=parameters["spline_order"],
+        min_dark_firing_rate_hz=parameters[
+            "min_dark_firing_rate_hz"
+        ],
+        min_light_firing_rate_hz=parameters[
+            "min_light_firing_rate_hz"
+        ],
+        use_speed=parameters["use_speed"],
+        speed_feature_mode=parameters["speed_feature_mode"],
+        n_splines_speed=parameters["n_splines_speed"],
+        spline_order_speed=parameters["spline_order_speed"],
+        speed_bounds=parameters["speed_bounds"],
+        speed_smoothing_sigma_s=parameters[
+            "speed_smoothing_sigma_s"
+        ],
+        sources={
+            "dark_position_series_name": context["movement_selections"][
+                "dark"
+            ]["position_series_name"],
+            "light_position_series_name": context["movement_selections"][
+                "light"
+            ]["position_series_name"],
+            **{
+                f"{trajectory_type}_configuration_name": selection[
+                    f"{trajectory_type}_configuration_name"
+                ]
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            },
+        },
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_dark_light_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        light_epoch=epoch_by_condition["light"],
+        dark_epoch=epoch_by_condition["dark"],
+        dark_light_glm_id=selection["dark_light_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_dark_light_glm_artifact(
+        result,
+        artifact_dir,
+        overwrite=False,
+    )
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "selection_summary_path": str(written["selection_summary_path"]),
+        **{
+            f"{model_name}_model_path": str(
+                written["selected_model_paths"][model_name]
+            )
+            for model_name in (
+                "visual",
+                "task_segment_bump",
+                "task_segment_scalar",
+                "task_dense_gain",
+            )
+        },
+        "schema_version": str(result["parameters"]["schema_version"]),
+        "n_units": int(result["n_units"]),
+        "n_candidates": int(result["n_candidates"]),
+        "n_selected_models": int(result["n_selected_models"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": str(result["selected_units_sha256"]),
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_dark_light_glm_row(
+    *,
+    key: Mapping[str, Any],
+    source_candidate_paths: list[Path],
+    source_selected_paths_by_model: Mapping[str, Path],
+    source_selection_summary_path: Path,
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Validate and copy one exact imported-sorting dark/light artifact set."""
+    from v1ca1.spyglass.dark_light_glm import (
+        MODEL_NAMES,
+        SCHEMA_VERSION_BY_MODE,
+        get_dark_light_glm_artifact_paths,
+        register_existing_dark_light_glm_artifact,
+    )
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    context = _load_dark_light_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_dark_light_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_dark_light_glm_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    resolver = _legacy_dark_light_unit_identity_resolver(loaded_spikes)
+    selection = context["selection"]
+    parameters = context["parameters"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_dark_light_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        light_epoch=selection["light_epoch"],
+        dark_epoch=selection["dark_epoch"],
+        dark_light_glm_id=selection["dark_light_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_dark_light_glm_artifact(
+            source_candidate_paths=[
+                Path(path) for path in source_candidate_paths
+            ],
+            source_selected_paths_by_model={
+                model_name: Path(path)
+                for model_name, path in source_selected_paths_by_model.items()
+            },
+            source_selection_summary_path=Path(
+                source_selection_summary_path
+            ),
+            destination_path=artifact_dir,
+            dark_light_glm_id=selection["dark_light_glm_id"],
+            animal_name=context["animal_name"],
+            date=context["date"],
+            region=context["region"],
+            light_epoch=selection["light_epoch"],
+            dark_epoch=selection["dark_epoch"],
+            unit_identity_resolver=resolver,
+            graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+            basis_candidate_mode=parameters["basis_candidate_mode"],
+            basis_candidates=parameters["basis_candidates"],
+            parameter_name=parameters["dark_light_glm_param_name"],
+            parameter_sha256=selection[
+                "dark_light_glm_parameters_sha256"
+            ],
+            output_rule_sha256=selection[
+                "dark_light_glm_output_rule_sha256"
+            ],
+            speed_smoothing_sigma_s=parameters[
+                "speed_smoothing_sigma_s"
+            ],
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            overwrite=False,
+        )
+        expected_parameters = {
+            "schema_version": SCHEMA_VERSION_BY_MODE[
+                parameters["basis_candidate_mode"]
+            ],
+            "parameter_name": parameters["dark_light_glm_param_name"],
+            "parameter_sha256": selection[
+                "dark_light_glm_parameters_sha256"
+            ],
+            "output_rule_sha256": selection[
+                "dark_light_glm_output_rule_sha256"
+            ],
+            **{
+                field_name: value
+                for field_name, value in parameters.items()
+                if field_name != "dark_light_glm_param_name"
+            },
+        }
+        if provenance_sha256(dict(registered["parameters"])) != (
+            provenance_sha256(expected_parameters)
+        ):
+            raise ValueError(
+                "Legacy DarkLightGLM parameters do not match the selected "
+                "parameter row."
+            )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    provenance = dict(registered["legacy_artifact_provenance"] or {})
+    provenance["source_spyglass_git_commit"] = source_spyglass_git_commit
+    written = paths
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "selection_summary_path": str(written["selection_summary_path"]),
+        **{
+            f"{model_name}_model_path": str(
+                written["selected_model_paths"][model_name]
+            )
+            for model_name in MODEL_NAMES
+        },
+        "schema_version": str(registered["parameters"]["schema_version"]),
+        "n_units": int(registered["n_units"]),
+        "n_candidates": int(registered["n_candidates"]),
+        "n_selected_models": int(registered["n_selected_models"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": str(registered["selected_units_sha256"]),
         "legacy_artifact_provenance": provenance,
         "_created_artifact_paths": created_artifact_paths,
     }
@@ -8207,6 +9360,14 @@ def _construct_tables(
         "motor_encoding_comparison_register_existing",
         _register_existing_motor_encoding_comparison_row,
     )
+    dark_light_glm_compute_hook = runtime_hooks.get(
+        "dark_light_glm_compute",
+        _make_dark_light_glm_row,
+    )
+    dark_light_glm_register_hook = runtime_hooks.get(
+        "dark_light_glm_register_existing",
+        _register_existing_dark_light_glm_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -8228,6 +9389,8 @@ def _construct_tables(
             path_specific_place_decoding_register_hook,
             motor_encoding_comparison_compute_hook,
             motor_encoding_comparison_register_hook,
+            dark_light_glm_compute_hook,
+            dark_light_glm_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -10625,6 +11788,252 @@ def _construct_tables(
     MotorEncodingComparison = main_schema(MotorEncodingComparison)
     main_context["MotorEncodingComparison"] = MotorEncodingComparison
 
+    class DarkLightGLMParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DARK_LIGHT_GLM_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one dark/light GLM parameter row."""
+            validated = _validate_dark_light_glm_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the four current and legacy presets."""
+            rows = [
+                _validate_dark_light_glm_parameter_row(parameters)
+                for parameters in table_specs.DARK_LIGHT_GLM_PARAMETER_PRESETS
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    DarkLightGLMParameters = main_schema(DarkLightGLMParameters)
+    main_context["DarkLightGLMParameters"] = DarkLightGLMParameters
+
+    class DarkLightGLMSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DARK_LIGHT_GLM_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one epoch-pair fit."""
+            row = _dark_light_glm_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                position_table=Position,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=DarkLightGLMParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    DarkLightGLMSelection = main_schema(DarkLightGLMSelection)
+    main_context["DarkLightGLMSelection"] = DarkLightGLMSelection
+
+    class DarkLightGLM(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.DARK_LIGHT_GLM_DEFINITION
+        _compute_hook = staticmethod(dark_light_glm_compute_hook)
+        _register_existing_hook = staticmethod(dark_light_glm_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one dark/light GLM bundle."""
+            selection = _fetch1_dict(DarkLightGLMSelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=DarkLightGLMParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "dark_light_glm_id": selection["dark_light_glm_id"],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_dark_light_glm_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical coupled artifact bundle."""
+            from v1ca1.spyglass.dark_light_glm import (
+                load_dark_light_glm_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                DarkLightGLMSelection,
+                {"dark_light_glm_id": row["dark_light_glm_id"]},
+            )
+            parameters = _fetch1_dict(
+                DarkLightGLMParameters,
+                {
+                    "dark_light_glm_param_name": selection[
+                        "dark_light_glm_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_dark_light_glm_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_dark_light_glm_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_candidate_paths: list[Path | str],
+            source_selected_paths_by_model: Mapping[str, Path | str],
+            source_selection_summary_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one exact legacy/current artifact set and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered DarkLightGLM results are immutable; create a "
+                    "new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(DarkLightGLMSelection, key)
+            result_key = {"dark_light_glm_id": selection["dark_light_glm_id"]}
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "DarkLightGLM already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_candidate_paths=[
+                        Path(path) for path in source_candidate_paths
+                    ],
+                    source_selected_paths_by_model={
+                        model_name: Path(path)
+                        for model_name, path in (
+                            source_selected_paths_by_model.items()
+                        )
+                    },
+                    source_selection_summary_path=Path(
+                        source_selection_summary_path
+                    ),
+                    parameters_table=DarkLightGLMParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "dark_light_glm_id": selection["dark_light_glm_id"],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    DarkLightGLM = main_schema(DarkLightGLM)
+    main_context["DarkLightGLM"] = DarkLightGLM
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -10712,6 +12121,9 @@ def _construct_tables(
             MotorEncodingComparisonSelection
         ),
         "motor_encoding_comparison": MotorEncodingComparison,
+        "dark_light_glm_parameters": DarkLightGLMParameters,
+        "dark_light_glm_selection": DarkLightGLMSelection,
+        "dark_light_glm": DarkLightGLM,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 
