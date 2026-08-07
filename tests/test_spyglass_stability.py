@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import uuid
@@ -9,6 +10,7 @@ import uuid
 import numpy as np
 import pandas as pd
 import pytest
+import xarray as xr
 
 from v1ca1.spyglass import stability
 
@@ -66,6 +68,78 @@ def _movement_firing_rate_table(
     )
 
 
+def _canonical_tuning_curve(
+    *,
+    trial_subset: str,
+    values: np.ndarray,
+    spike_counts: tuple[int, int] = (4, 4),
+    stable_unit_ids: tuple[tuple[str, str], ...] = (
+        ("merge-a", "11"),
+        ("merge-b", "22"),
+    ),
+    centers_cm: np.ndarray | None = None,
+) -> xr.DataArray:
+    """Return a minimal canonical path-specific tuning curve."""
+    values = np.asarray(values, dtype=float)
+    if centers_cm is None:
+        centers_cm = np.arange(values.shape[1], dtype=float) * 2.0 + 1.0
+    centers_cm = np.asarray(centers_cm, dtype=float)
+    step_cm = float(centers_cm[1] - centers_cm[0])
+    edges_cm = np.concatenate(
+        ([centers_cm[0] - step_cm / 2.0], centers_cm + step_cm / 2.0)
+    )
+    graph_length_cm = float(edges_cm[-1])
+    merge_ids = [merge_id for merge_id, _unit_id in stable_unit_ids]
+    unit_ids = [unit_id for _merge_id, unit_id in stable_unit_ids]
+    stable_ids = [
+        f"{merge_id}:{unit_id}"
+        for merge_id, unit_id in stable_unit_ids
+    ]
+    n_valid_units = int(np.sum(np.any(np.isfinite(values), axis=1)))
+    curve = xr.DataArray(
+        values,
+        dims=("unit", "linear_position_cm"),
+        coords={
+            "unit": stable_ids,
+            "spikesorting_merge_id": ("unit", merge_ids),
+            "unit_id": ("unit", unit_ids),
+            "stable_unit_id": ("unit", stable_ids),
+            "group_unit_id": ("unit", np.arange(len(stable_ids))),
+            "spike_count": ("unit", np.asarray(spike_counts, dtype=int)),
+            "linear_position_cm": centers_cm,
+            "path_fraction": (
+                "linear_position_cm",
+                centers_cm / graph_length_cm,
+            ),
+        },
+        name="firing_rate_hz",
+        attrs={
+            "animal_name": "L14",
+            "date": "20240611",
+            "region": "v1",
+            "epoch": "02_r1",
+            "trajectory_type": "center_to_left",
+            "trial_subset": trial_subset,
+            "binning_mode": "bin_count",
+            "bin_count": values.shape[1],
+            "sigma_bins": 0.0,
+            "graph_length_cm": graph_length_cm,
+            "bin_edges_cm_json": json.dumps(edges_cm.tolist()),
+            "n_trials": 2,
+            "support_duration_s": 2.0,
+            "n_feature_samples": 20,
+            "n_valid_position_samples": 20,
+            "n_units": len(stable_ids),
+            "n_valid_units": n_valid_units,
+            "analysis_status": "valid",
+            "units": "Hz",
+        },
+    )
+    curve.coords["linear_position_cm"].attrs["units"] = "cm"
+    curve.coords["path_fraction"].attrs["units"] = "1"
+    return curve
+
+
 def test_stability_artifact_path_is_uuid_keyed_and_session_first(
     tmp_path: Path,
 ) -> None:
@@ -77,7 +151,7 @@ def test_stability_artifact_path_is_uuid_keyed_and_session_first(
         epoch="02_r1",
         trajectory_type="center_to_left",
         region="v1",
-        task_progression_stability_id=stability_id,
+        path_specific_place_stability_id=stability_id,
         artifact_root=tmp_path,
     )
 
@@ -85,7 +159,7 @@ def test_stability_artifact_path_is_uuid_keyed_and_session_first(
         tmp_path
         / "L14"
         / "20240611"
-        / "task_progression_stability"
+        / "path_specific_place_stability"
         / "02_r1"
         / "center_to_left"
         / "v1"
@@ -100,7 +174,7 @@ def test_stability_artifact_path_is_uuid_keyed_and_session_first(
             epoch="02_r1",
             trajectory_type="center_to_left",
             region="v1",
-            task_progression_stability_id="not-a-uuid",
+            path_specific_place_stability_id="not-a-uuid",
             artifact_root=tmp_path,
         )
 
@@ -147,6 +221,130 @@ def test_empty_stability_table_has_persistent_identity_schema() -> None:
         "stability_correlation",
         "stability_status",
     }.issubset(table.columns)
+
+
+def test_stability_from_tuning_curves_uses_saved_identities_and_rates() -> None:
+    odd = _canonical_tuning_curve(
+        trial_subset="odd",
+        values=np.asarray(
+            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+        ),
+    )
+    even = _canonical_tuning_curve(
+        trial_subset="even",
+        values=np.asarray(
+            [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+        ),
+    )
+    movement_rates = _movement_firing_rate_table()
+    movement_rates.loc[1, "movement_spike_count"] = 4
+    movement_rates.loc[1, "movement_firing_rate_hz"] = 2.0
+
+    result = stability.compute_selected_stability_from_tuning_curves(
+        odd_tuning_curve=odd,
+        even_tuning_curve=even,
+        movement_firing_rate_table=movement_rates,
+    )
+
+    assert result["analysis_status"] == "valid"
+    assert result["n_units"] == 2
+    assert result["n_valid_units"] == 2
+    assert result["table"]["stable_unit_id"].tolist() == [
+        "merge-a:11",
+        "merge-b:22",
+    ]
+    assert result["table"]["group_unit_id"].tolist() == ["0", "1"]
+    assert result["table"]["firing_rate_hz"].tolist() == [1.0, 2.0]
+    assert result["table"]["stability_status"].tolist() == [
+        "valid",
+        "valid",
+    ]
+    assert np.allclose(
+        result["table"]["stability_correlation"],
+        [1.0, -1.0],
+    )
+    assert result["table"]["n_odd_spikes"].tolist() == [4, 4]
+    assert result["table"]["n_even_spikes"].tolist() == [4, 4]
+
+
+def test_stability_from_tuning_curves_applies_fixed_no_even_spikes_qc() -> None:
+    odd = _canonical_tuning_curve(
+        trial_subset="odd",
+        values=np.asarray(
+            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+        ),
+    )
+    even = _canonical_tuning_curve(
+        trial_subset="even",
+        values=np.asarray(
+            [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+        ),
+        spike_counts=(0, 4),
+    )
+    movement_rates = _movement_firing_rate_table()
+    movement_rates.loc[1, "movement_spike_count"] = 4
+    movement_rates.loc[1, "movement_firing_rate_hz"] = 2.0
+
+    result = stability.compute_selected_stability_from_tuning_curves(
+        odd_tuning_curve=odd,
+        even_tuning_curve=even,
+        movement_firing_rate_table=movement_rates,
+    )
+
+    assert result["analysis_status"] == "valid"
+    assert result["n_valid_units"] == 1
+    assert result["table"]["stability_status"].tolist() == [
+        "no_even_spikes",
+        "valid",
+    ]
+    assert np.isnan(result["table"].loc[0, "stability_correlation"])
+    assert result["table"].loc[1, "stability_correlation"] == pytest.approx(
+        -1.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("even_curve", "message"),
+    [
+        (
+            _canonical_tuning_curve(
+                trial_subset="even",
+                values=np.asarray(
+                    [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+                ),
+                stable_unit_ids=(("merge-a", "11"), ("merge-c", "33")),
+            ),
+            "same ordered unit identities",
+        ),
+        (
+            _canonical_tuning_curve(
+                trial_subset="even",
+                values=np.asarray(
+                    [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+                ),
+                centers_cm=np.asarray([1.25, 3.75, 6.25, 8.75]),
+            ),
+            "identical position bins",
+        ),
+    ],
+)
+def test_stability_from_tuning_curves_rejects_mismatched_curves(
+    even_curve: xr.DataArray,
+    message: str,
+) -> None:
+    odd = _canonical_tuning_curve(
+        trial_subset="odd",
+        values=np.asarray(
+            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        stability.compute_selected_stability_from_tuning_curves(
+            odd_tuning_curve=odd,
+            even_tuning_curve=even_curve,
+            movement_firing_rate_table=_movement_firing_rate_table(),
+        )
 
 
 def test_build_task_progression_rejects_nonselected_graph_configuration() -> None:

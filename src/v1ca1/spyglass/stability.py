@@ -1,8 +1,9 @@
-"""Database-free task-progression stability adapter and Parquet artifacts."""
+"""Database-free path-specific place-stability adapter and Parquet artifacts."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from numbers import Real
 import os
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from v1ca1.task_progression.stability import compute_trajectory_stability_table
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
-ARTIFACT_DIRNAME = "task_progression_stability"
+ARTIFACT_DIRNAME = "path_specific_place_stability"
 ARTIFACT_FILENAME = "stability.parquet"
 IDENTITY_COLUMNS = (
     "spikesorting_merge_id",
@@ -56,7 +57,7 @@ def get_stability_artifact_path(
     epoch: str,
     trajectory_type: str,
     region: str,
-    task_progression_stability_id: Any,
+    path_specific_place_stability_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> Path:
     """Return one UUID-keyed, session-first stability Parquet path."""
@@ -71,8 +72,8 @@ def get_stability_artifact_path(
         }.items()
     }
     stability_id = _uuid_component(
-        task_progression_stability_id,
-        name="task_progression_stability_id",
+        path_specific_place_stability_id,
+        name="path_specific_place_stability_id",
     )
     return (
         Path(artifact_root)
@@ -576,6 +577,278 @@ def compute_selected_stability(
     }
 
 
+def _curve_identity_table(curve: Any) -> pd.DataFrame:
+    """Return persistent unit coordinates from one canonical tuning curve."""
+    from v1ca1.spyglass.path_specific_place import (
+        validate_path_specific_place_tuning_curve,
+    )
+
+    validate_path_specific_place_tuning_curve(curve)
+    return pd.DataFrame(
+        {
+            name: np.asarray(curve.coords[name].values).astype(str)
+            for name in IDENTITY_COLUMNS
+        }
+    )
+
+
+def _validate_curve_pair(odd_curve: Any, even_curve: Any) -> pd.DataFrame:
+    """Validate one matching odd/even curve pair and return its identities."""
+    odd_identity = _curve_identity_table(odd_curve)
+    even_identity = _curve_identity_table(even_curve)
+    if str(odd_curve.attrs["trial_subset"]) != "odd" or str(
+        even_curve.attrs["trial_subset"]
+    ) != "even":
+        raise ValueError("Stability requires one odd and one even tuning curve.")
+    if not odd_identity.equals(even_identity):
+        raise ValueError(
+            "Odd and even tuning curves must contain the same ordered unit identities."
+        )
+    if tuple(odd_curve.dims) != tuple(even_curve.dims) or not np.allclose(
+        np.asarray(odd_curve.coords[odd_curve.dims[1]].values, dtype=float),
+        np.asarray(even_curve.coords[even_curve.dims[1]].values, dtype=float),
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError("Odd and even tuning curves must use identical position bins.")
+
+    shared_attributes = (
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "trajectory_type",
+        "binning_mode",
+        "sigma_bins",
+        "graph_length_cm",
+        "bin_edges_cm_json",
+        "n_units",
+    )
+    for name in shared_attributes:
+        odd_value = odd_curve.attrs[name]
+        even_value = even_curve.attrs[name]
+        if isinstance(odd_value, Real) and isinstance(even_value, Real):
+            matches = np.isclose(
+                float(odd_value),
+                float(even_value),
+                rtol=1e-10,
+                atol=1e-12,
+            )
+        else:
+            matches = str(odd_value) == str(even_value)
+        if not bool(matches):
+            raise ValueError(
+                f"Odd and even tuning curves disagree on {name}."
+            )
+    return odd_identity
+
+
+def _movement_rates_for_curve_pair(
+    table: pd.DataFrame,
+    *,
+    identity: pd.DataFrame,
+) -> dict[str, Any]:
+    """Validate and align movement firing rates to tuning-curve identities."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("movement_firing_rate_table must be a pandas DataFrame.")
+    missing = sorted(set(MOVEMENT_RATE_COLUMNS).difference(table.columns))
+    if missing:
+        raise ValueError(
+            "Movement firing-rate table is missing canonical columns "
+            f"{missing!r}."
+        )
+    expected_ids = identity["stable_unit_id"].astype(str).tolist()
+    if not expected_ids:
+        if not table.empty:
+            raise ValueError(
+                "Movement firing-rate table must be empty when tuning curves have no units."
+            )
+        return {
+            "status": "no_units",
+            "rates": pd.Series(dtype=float),
+        }
+    if table.empty:
+        raise ValueError(
+            "Movement firing-rate table must contain every tuning-curve unit."
+        )
+
+    observed = table.loc[:, MOVEMENT_RATE_COLUMNS].copy()
+    for name in ("spikesorting_merge_id", "unit_id", "stable_unit_id"):
+        observed[name] = observed[name].astype(str)
+    if observed["stable_unit_id"].duplicated().any():
+        raise ValueError("Movement firing-rate table has duplicate stable units.")
+    observed = observed.set_index("stable_unit_id", drop=False)
+    if set(observed.index) != set(expected_ids):
+        raise ValueError(
+            "Movement firing-rate identities do not match the tuning-curve units."
+        )
+    observed = observed.loc[expected_ids].reset_index(drop=True)
+    for name in ("spikesorting_merge_id", "unit_id", "stable_unit_id"):
+        if observed[name].astype(str).tolist() != identity[name].astype(str).tolist():
+            raise ValueError(
+                f"Movement firing-rate {name} does not match tuning-curve identity."
+            )
+    statuses = observed["firing_rate_status"].astype(str)
+    if statuses.nunique() != 1:
+        raise ValueError("Movement firing-rate status must be uniform across units.")
+    status = str(statuses.iloc[0])
+    if status not in MOVEMENT_RATE_STATUSES:
+        raise ValueError(f"Unknown movement firing-rate status {status!r}.")
+    rates = pd.to_numeric(
+        observed["movement_firing_rate_hz"], errors="coerce"
+    ).to_numpy(dtype=float)
+    if status == "valid":
+        if not np.all(np.isfinite(rates)) or np.any(rates < 0.0):
+            raise ValueError("Valid movement firing rates must be finite and non-negative.")
+    elif not np.all(np.isnan(rates)):
+        raise ValueError(f"{status} movement firing rates must be NaN.")
+    return {
+        "status": status,
+        "rates": pd.Series(rates, index=expected_ids, dtype=float),
+    }
+
+
+def _curve_spike_counts(curve: Any) -> pd.Series:
+    """Return validated per-unit spike counts from one computed curve."""
+    if "spike_count" not in curve.coords:
+        raise ValueError("Tuning curve is missing its per-unit spike_count coordinate.")
+    stable_ids = np.asarray(curve.coords["stable_unit_id"].values).astype(str)
+    counts = np.asarray(curve.coords["spike_count"].values, dtype=float)
+    if counts.shape != stable_ids.shape or (
+        not np.all(np.isfinite(counts))
+        or np.any(counts < 0.0)
+        or not np.allclose(counts, np.rint(counts), rtol=0.0, atol=1e-12)
+    ):
+        raise ValueError(
+            "Computed odd/even tuning curves require finite non-negative integer "
+            "spike_count coordinates."
+        )
+    return pd.Series(np.rint(counts).astype(int), index=stable_ids, dtype=int)
+
+
+def _curve_pair_trajectory_status(odd_curve: Any, even_curve: Any) -> str | None:
+    """Return the fixed trajectory-level QC status for one curve pair."""
+    from v1ca1.task_progression.stability import MIN_FEATURE_SAMPLES_PER_SPLIT
+
+    if int(odd_curve.attrs["n_trials"]) <= 0:
+        return "no_odd_trials"
+    if int(even_curve.attrs["n_trials"]) <= 0:
+        return "no_even_trials"
+    if float(odd_curve.attrs["support_duration_s"]) <= 0.0:
+        return "no_odd_movement_support"
+    if float(even_curve.attrs["support_duration_s"]) <= 0.0:
+        return "no_even_movement_support"
+    if int(odd_curve.attrs["n_valid_position_samples"]) < (
+        MIN_FEATURE_SAMPLES_PER_SPLIT
+    ):
+        return "insufficient_odd_feature_samples"
+    if int(even_curve.attrs["n_valid_position_samples"]) < (
+        MIN_FEATURE_SAMPLES_PER_SPLIT
+    ):
+        return "insufficient_even_feature_samples"
+    return None
+
+
+def compute_selected_stability_from_tuning_curves(
+    *,
+    odd_tuning_curve: Any,
+    even_tuning_curve: Any,
+    movement_firing_rate_table: pd.DataFrame,
+) -> dict[str, Any]:
+    """Compute fixed-QC stability from matching persisted odd/even curves."""
+    from v1ca1.task_progression.stability import _evaluate_stability_correlation
+
+    identity = _validate_curve_pair(odd_tuning_curve, even_tuning_curve)
+    movement = _movement_rates_for_curve_pair(
+        movement_firing_rate_table,
+        identity=identity,
+    )
+    n_units = len(identity)
+    if n_units == 0:
+        return {
+            "table": empty_stability_table(),
+            "analysis_status": "no_units",
+            "n_units": 0,
+            "n_valid_units": 0,
+        }
+
+    odd_counts = _curve_spike_counts(odd_tuning_curve)
+    even_counts = _curve_spike_counts(even_tuning_curve)
+    trajectory_status = _curve_pair_trajectory_status(
+        odd_tuning_curve,
+        even_tuning_curve,
+    )
+    if movement["status"] in {"no_valid_position", "no_movement"}:
+        trajectory_status = movement["status"]
+
+    metadata = odd_tuning_curve.attrs
+    rows: list[dict[str, Any]] = []
+    for index, unit in identity.iterrows():
+        stable_id = str(unit["stable_unit_id"])
+        n_odd_spikes = int(odd_counts.loc[stable_id])
+        n_even_spikes = int(even_counts.loc[stable_id])
+        if trajectory_status is None:
+            correlation_qc = _evaluate_stability_correlation(
+                np.asarray(odd_tuning_curve.values[index], dtype=float),
+                np.asarray(even_tuning_curve.values[index], dtype=float),
+                n_odd_spikes=n_odd_spikes,
+                n_even_spikes=n_even_spikes,
+            )
+        else:
+            correlation_qc = {
+                "stability_correlation": np.nan,
+                "stability_status": trajectory_status,
+                "n_odd_finite_bins": 0,
+                "n_even_finite_bins": 0,
+                "n_paired_finite_bins": 0,
+            }
+        rows.append(
+            {
+                **{name: str(unit[name]) for name in IDENTITY_COLUMNS},
+                "animal_name": str(metadata["animal_name"]),
+                "date": str(metadata["date"]),
+                "region": str(metadata["region"]),
+                "epoch": str(metadata["epoch"]),
+                "trajectory_type": str(metadata["trajectory_type"]),
+                "firing_rate_hz": float(movement["rates"].loc[stable_id]),
+                "stability_correlation": correlation_qc["stability_correlation"],
+                "n_odd_trials": int(odd_tuning_curve.attrs["n_trials"]),
+                "n_even_trials": int(even_tuning_curve.attrs["n_trials"]),
+                "odd_duration_s": float(
+                    odd_tuning_curve.attrs["support_duration_s"]
+                ),
+                "even_duration_s": float(
+                    even_tuning_curve.attrs["support_duration_s"]
+                ),
+                "n_odd_feature_samples": int(
+                    odd_tuning_curve.attrs["n_valid_position_samples"]
+                ),
+                "n_even_feature_samples": int(
+                    even_tuning_curve.attrs["n_valid_position_samples"]
+                ),
+                "n_odd_spikes": n_odd_spikes,
+                "n_even_spikes": n_even_spikes,
+                "n_odd_finite_bins": correlation_qc["n_odd_finite_bins"],
+                "n_even_finite_bins": correlation_qc["n_even_finite_bins"],
+                "n_paired_finite_bins": correlation_qc["n_paired_finite_bins"],
+                "stability_status": correlation_qc["stability_status"],
+            }
+        )
+    columns = empty_stability_table().columns
+    table = pd.DataFrame.from_records(rows).loc[:, columns]
+    n_valid_units = int(table["stability_status"].astype(str).eq("valid").sum())
+    if movement["status"] in {"no_valid_position", "no_movement"}:
+        analysis_status = movement["status"]
+    else:
+        analysis_status = "valid" if n_valid_units else "no_valid_units"
+    return {
+        "table": table,
+        "analysis_status": analysis_status,
+        "n_units": n_units,
+        "n_valid_units": n_valid_units,
+    }
+
+
 def write_stability_artifact(
     table: pd.DataFrame,
     path: Path,
@@ -612,6 +885,7 @@ __all__ = [
     "MOVEMENT_RATE_COLUMNS",
     "build_task_progression_from_graph",
     "compute_selected_stability",
+    "compute_selected_stability_from_tuning_curves",
     "empty_stability_table",
     "get_stability_artifact_path",
     "write_stability_artifact",

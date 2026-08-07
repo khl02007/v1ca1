@@ -21,17 +21,32 @@ from v1ca1.spyglass.tables import (
     _analysis_region,
     _attach_registered_unit_identity,
     _construct_tables,
+    _dpp_encoding_comparison_selection_row,
+    _dpp_tuning_curve_selection_row,
     _filter_registered_table,
     _intervals_to_frame,
+    _legacy_dpp_unit_identity_resolver,
+    _load_tuning_similarity_inputs,
+    _make_dpp_encoding_comparison_row,
+    _make_dpp_tuning_curve_row,
     _make_movement_firing_rate_row,
+    _make_path_progression_decoding_comparison_row,
+    _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
-    _make_task_progression_stability_row,
     _movement_firing_rate_selection_row,
+    _path_progression_decoding_selection_row,
+    _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
+    _register_existing_dpp_encoding_comparison_row,
     _stability_selection_row,
+    _tuning_similarity_selection_row,
     _validate_analysis_schema_prefix,
+    _validate_dpp_encoding_comparison_artifact_link,
     _validate_frozen_sorting_snapshot,
+    _validate_legacy_dpp_encoding_source_path,
+    _validate_legacy_tuning_curve_inputs,
     _validate_legacy_stability_schema,
+    _validate_path_progression_decoding_artifact_link,
     _validate_ripple_provenance,
 )
 from v1ca1.spyglass.spikes import _sorting_output_sessions
@@ -43,6 +58,13 @@ class _FakeTable:
         cls._insert_calls = [
             *cls.__dict__.get("_insert_calls", []),
             (dict(row), kwargs),
+        ]
+
+    @classmethod
+    def insert(cls, rows, **kwargs):
+        cls._insert_many_calls = [
+            *cls.__dict__.get("_insert_many_calls", []),
+            ([dict(row) for row in rows], kwargs),
         ]
 
 
@@ -74,6 +96,42 @@ class _FakeRelation:
         if names:
             return tuple(self.row[name] for name in names)
         return dict(self.row)
+
+
+class _RecordingRelation(_FakeRelation):
+    def __init__(self, row=None):
+        super().__init__(row)
+        self.keys = []
+
+    def __and__(self, key):
+        self.keys.append(dict(key))
+        return _FakeRelation(self.row)
+
+
+class _FakeKeyedRelation:
+    def __init__(self, key_name, rows):
+        self.key_name = key_name
+        self.rows = {key: dict(row) for key, row in rows.items()}
+
+    def __and__(self, key):
+        return _FakeRelation(self.rows[key[self.key_name]])
+
+
+class _FakeRowsRelation:
+    def __init__(self, rows):
+        self.rows = [dict(row) for row in rows]
+
+    def __and__(self, key):
+        matches = [
+            row
+            for row in self.rows
+            if all(row.get(name) == value for name, value in key.items())
+        ]
+        if len(matches) != 1:
+            raise LookupError(
+                f"Expected one row for {dict(key)!r}; found {len(matches)}."
+            )
+        return _FakeRelation(matches[0])
 
 
 class _FakeGroupUnits:
@@ -201,7 +259,7 @@ def _movement_selection_key() -> dict[str, Any]:
     }
 
 
-def _stability_selection_key() -> dict[str, Any]:
+def _tuning_curve_selection_key(*, trial_subset: str = "odd") -> dict[str, Any]:
     return {
         "nwb_file_name": "L1420240102_.nwb",
         "epoch": "02_r1",
@@ -210,8 +268,511 @@ def _stability_selection_key() -> dict[str, Any]:
         "movement_firing_rate_id": uuid.UUID(
             "33333333-3333-5333-8333-333333333333"
         ),
-        "task_progression_stability_param_name": "default",
+        "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+        "trial_subset": trial_subset,
     }
+
+
+def _dpp_tuning_curve_selection_key(
+    *,
+    turn_type: str = "left",
+    trial_subset: str = "all",
+) -> dict[str, Any]:
+    return {
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "movement_firing_rate_id": uuid.UUID(
+            "33333333-3333-5333-8333-333333333333"
+        ),
+        "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+        "turn_type": turn_type,
+        "trial_subset": trial_subset,
+    }
+
+
+def _stability_selection_key() -> dict[str, Any]:
+    return {
+        "odd_path_specific_place_tuning_curve_id": uuid.UUID(
+            "44444444-4444-5444-8444-444444444444"
+        ),
+        "even_path_specific_place_tuning_curve_id": uuid.UUID(
+            "55555555-5555-5555-8555-555555555555"
+        ),
+    }
+
+
+def _tuning_similarity_selection_key() -> dict[str, Any]:
+    return {
+        "center_to_left_tuning_curve_id": uuid.UUID(
+            "81111111-1111-5111-8111-111111111111"
+        ),
+        "center_to_right_tuning_curve_id": uuid.UUID(
+            "82222222-2222-5222-8222-222222222222"
+        ),
+        "left_to_center_tuning_curve_id": uuid.UUID(
+            "83333333-3333-5333-8333-333333333333"
+        ),
+        "right_to_center_tuning_curve_id": uuid.UUID(
+            "84444444-4444-5444-8444-444444444444"
+        ),
+        "tuning_similarity_param_name": "correlation",
+    }
+
+
+_DPP_ENCODING_TRAJECTORIES = (
+    "center_to_left",
+    "center_to_right",
+    "left_to_center",
+    "right_to_center",
+)
+
+
+def _dpp_encoding_selection_inputs() -> dict[str, Any]:
+    """Return mutable, internally consistent DPP selection inputs."""
+    movement_id = uuid.UUID("33333333-3333-5333-8333-333333333333")
+    region_group_id = uuid.UUID("61111111-1111-5111-8111-111111111111")
+    stability_ids = {
+        trajectory_type: uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"v1ca1-test-stability:{trajectory_type}",
+        )
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    curve_selections: dict[uuid.UUID, dict[str, Any]] = {}
+    stability_selections: dict[uuid.UUID, dict[str, Any]] = {}
+    for trajectory_type, stability_id in stability_ids.items():
+        curve_ids = {
+            subset: uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"v1ca1-test-curve:{trajectory_type}:{subset}",
+            )
+            for subset in ("odd", "even")
+        }
+        stability_selections[stability_id] = {
+            "path_specific_place_stability_id": stability_id,
+            "odd_path_specific_place_tuning_curve_id": curve_ids["odd"],
+            "even_path_specific_place_tuning_curve_id": curve_ids["even"],
+        }
+        for subset, curve_id in curve_ids.items():
+            curve_selections[curve_id] = {
+                "path_specific_place_tuning_curve_id": curve_id,
+                "nwb_file_name": "L1420240102_.nwb",
+                "epoch": "02_r1",
+                "trajectory_type": trajectory_type,
+                "configuration_name": trajectory_type,
+                "movement_firing_rate_id": movement_id,
+                "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+                "tuning_curve_parameters_sha256": provenance_sha256(
+                    dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+                ),
+                "trial_subset": subset,
+            }
+
+    parameters = dict(
+        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+    )
+    return {
+        "key": {
+            "region_sorted_spikes_group_id": region_group_id,
+            "movement_firing_rate_id": movement_id,
+            **{
+                f"{trajectory_type}_stability_id": stability_id
+                for trajectory_type, stability_id in stability_ids.items()
+            },
+            "dpp_encoding_comparison_param_name": parameters[
+                "dpp_encoding_comparison_param_name"
+            ],
+        },
+        "region_row": {
+            "region_sorted_spikes_group_id": region_group_id,
+            "nwb_file_name": "L1420240102_.nwb",
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region_name": "ca1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+            "n_units": 5,
+            "selected_units_sha256": "a" * 64,
+        },
+        "movement_result": {
+            "movement_firing_rate_id": movement_id,
+            "n_units": 5,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+        },
+        "movement_selection": {
+            "movement_firing_rate_id": movement_id,
+            "nwb_file_name": "L1420240102_.nwb",
+            "epoch": "02_r1",
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region": "ca1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+        },
+        "epoch_row": {
+            "nwb_file_name": "L1420240102_.nwb",
+            "epoch": "02_r1",
+            "epoch_type": "run",
+        },
+        "trajectory_rows": [
+            {
+                "nwb_file_name": "L1420240102_.nwb",
+                "epoch": "02_r1",
+                "trajectory_type": trajectory_type,
+                "interval_count": 5,
+            }
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "graph_rows": [
+            {
+                "nwb_file_name": "L1420240102_.nwb",
+                "configuration_name": configuration_name,
+                "coordinate_unit": "cm",
+            }
+            for configuration_name in (*_DPP_ENCODING_TRAJECTORIES, "full_w")
+        ],
+        "stability_results": {
+            stability_id: {
+                "path_specific_place_stability_id": stability_id,
+                "n_units": 5,
+                "analysis_status": "valid",
+                "selected_units_sha256": "a" * 64,
+            }
+            for stability_id in stability_ids.values()
+        },
+        "stability_selections": stability_selections,
+        "curve_selections": curve_selections,
+        "parameters": parameters,
+    }
+
+
+def _build_dpp_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one DPP selection row from mutable fake upstream tables."""
+    return _dpp_encoding_comparison_selection_row(
+        key=inputs["key"],
+        region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
+        movement_firing_rate_table=_FakeRelation(inputs["movement_result"]),
+        movement_firing_rate_selection_table=_FakeRelation(
+            inputs["movement_selection"]
+        ),
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        stability_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_results"],
+        ),
+        stability_selection_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_selections"],
+        ),
+        tuning_curve_selection_table=_FakeKeyedRelation(
+            "path_specific_place_tuning_curve_id",
+            inputs["curve_selections"],
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+    )
+
+
+def _dpp_encoding_runtime_inputs(
+    comparison_id: uuid.UUID,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Return selected context, imported spikes, and NWB-derived sentinels."""
+    parameters = dict(
+        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+    )
+    unit_ids = [
+        {"spikesorting_merge_id": "merge-a", "unit_id": 10},
+        {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+    ]
+    loaded_spikes = {
+        "ts_group": object(),
+        "unit_ids": unit_ids,
+        "unit_metadata": [
+            {**unit_id, "sorting_unit_id": sorting_unit_id}
+            for unit_id, sorting_unit_id in zip(
+                unit_ids,
+                (101, 102),
+                strict=True,
+            )
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "merge_parent": "ImportedSpikeSorting",
+                "n_selected_units": 2,
+            }
+        ],
+    }
+    context = {
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "ca1",
+        "epoch": "02_r1",
+        "parameters": parameters,
+        "region_row": {
+            "region_sorted_spikes_group_id": uuid.UUID(
+                "61111111-1111-5111-8111-111111111111"
+            ),
+            "n_units": 2,
+        },
+        "movement": {
+            "movement_intervals": object(),
+            "table": object(),
+        },
+        "stability_tables": {
+            trajectory_type: object()
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        "selection": {
+            "dpp_encoding_comparison_id": comparison_id,
+        },
+    }
+    nwb_inputs = {
+        "position": object(),
+        "trajectory_intervals": {
+            trajectory_type: object()
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        "graph_inputs": {
+            configuration_name: object()
+            for configuration_name in (*_DPP_ENCODING_TRAJECTORIES, "full_w")
+        },
+    }
+    return context, loaded_spikes, nwb_inputs
+
+
+def _path_progression_decoding_selection_inputs() -> dict[str, Any]:
+    """Return mutable target/cohort inputs for one decoding selection."""
+    nwb_file_name = "L1420240102_.nwb"
+    target_epoch = "02_r1"
+    cohort_epoch = "08_r4"
+    target_movement_id = uuid.UUID(
+        "71111111-1111-5111-8111-111111111111"
+    )
+    cohort_movement_id = uuid.UUID(
+        "72222222-2222-5222-8222-222222222222"
+    )
+    region_group_id = uuid.UUID(
+        "73333333-3333-5333-8333-333333333333"
+    )
+    source_specs = (
+        ("target", "", target_epoch, target_movement_id),
+        ("cohort", "cohort_", cohort_epoch, cohort_movement_id),
+    )
+    stability_ids: dict[str, uuid.UUID] = {}
+    stability_results: dict[uuid.UUID, dict[str, Any]] = {}
+    stability_selections: dict[uuid.UUID, dict[str, Any]] = {}
+    curve_selections: dict[uuid.UUID, dict[str, Any]] = {}
+    for source_name, prefix, epoch, movement_id in source_specs:
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES:
+            stability_id = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                (
+                    "v1ca1-test-decoding-stability:"
+                    f"{source_name}:{trajectory_type}"
+                ),
+            )
+            stability_ids[
+                f"{prefix}{trajectory_type}_stability_id"
+            ] = stability_id
+            curve_ids = {
+                subset: uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    (
+                        "v1ca1-test-decoding-curve:"
+                        f"{source_name}:{trajectory_type}:{subset}"
+                    ),
+                )
+                for subset in ("odd", "even")
+            }
+            stability_results[stability_id] = {
+                "path_specific_place_stability_id": stability_id,
+                "n_units": 5,
+                "analysis_status": "valid",
+                "selected_units_sha256": "a" * 64,
+            }
+            stability_selections[stability_id] = {
+                "path_specific_place_stability_id": stability_id,
+                "odd_path_specific_place_tuning_curve_id": curve_ids["odd"],
+                "even_path_specific_place_tuning_curve_id": curve_ids["even"],
+            }
+            for subset, curve_id in curve_ids.items():
+                curve_selections[curve_id] = {
+                    "path_specific_place_tuning_curve_id": curve_id,
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": epoch,
+                    "trajectory_type": trajectory_type,
+                    "configuration_name": trajectory_type,
+                    "movement_firing_rate_id": movement_id,
+                    "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+                    "tuning_curve_parameters_sha256": provenance_sha256(
+                        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+                    ),
+                    "trial_subset": subset,
+                }
+
+    movement_results = {
+        movement_id: {
+            "movement_firing_rate_id": movement_id,
+            "n_units": 5,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+        }
+        for movement_id in (target_movement_id, cohort_movement_id)
+    }
+    movement_selections = {
+        movement_id: {
+            "movement_firing_rate_id": movement_id,
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region": "ca1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+            "movement_param_name": "default",
+            "movement_parameters_sha256": "d" * 64,
+        }
+        for movement_id, epoch in (
+            (target_movement_id, target_epoch),
+            (cohort_movement_id, cohort_epoch),
+        )
+    }
+    epoch_rows = {
+        movement_id: {
+            "movement_firing_rate_id": movement_id,
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "epoch_type": "run",
+        }
+        for movement_id, epoch in (
+            (target_movement_id, target_epoch),
+            (cohort_movement_id, cohort_epoch),
+        )
+    }
+    position_rows = {
+        movement_id: {
+            "movement_firing_rate_id": movement_id,
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "spatial_unit": "cm",
+            "position_role": "head",
+            "analysis_start_offset_samples": 10,
+        }
+        for movement_id, epoch in (
+            (target_movement_id, target_epoch),
+            (cohort_movement_id, cohort_epoch),
+        )
+    }
+    parameters = dict(
+        table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
+    )
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": target_epoch,
+        "cohort_epoch": cohort_epoch,
+        "region_sorted_spikes_group_id": region_group_id,
+        "movement_firing_rate_id": target_movement_id,
+        "cohort_movement_firing_rate_id": cohort_movement_id,
+        **{
+            f"{trajectory_type}_trajectory_type": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        **{
+            f"{trajectory_type}_configuration_name": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        **stability_ids,
+        "path_progression_decoding_param_name": parameters[
+            "path_progression_decoding_param_name"
+        ],
+    }
+    return {
+        "key": key,
+        "region_row": {
+            "region_sorted_spikes_group_id": region_group_id,
+            "nwb_file_name": nwb_file_name,
+            "unit_filter_params_name": "curated_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region_name": "ca1",
+            "sorting_group_members_sha256": "b" * 64,
+            "unit_filter_params_sha256": "c" * 64,
+            "n_units": 5,
+            "selected_units_sha256": "a" * 64,
+        },
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "epoch_rows": epoch_rows,
+        "position_rows": position_rows,
+        "trajectory_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": target_epoch,
+                "trajectory_type": trajectory_type,
+                "interval_count": 5,
+            }
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "graph_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+                "coordinate_unit": "cm",
+            }
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "stability_results": stability_results,
+        "stability_selections": stability_selections,
+        "curve_selections": curve_selections,
+        "parameters": parameters,
+    }
+
+
+def _build_path_progression_decoding_selection(
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one decoding selection from fake target/cohort relations."""
+    return _path_progression_decoding_selection_row(
+        key=inputs["key"],
+        region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
+        movement_firing_rate_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_results"],
+        ),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_selections"],
+        ),
+        position_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["position_rows"],
+        ),
+        epoch_intervals_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["epoch_rows"],
+        ),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        stability_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_results"],
+        ),
+        stability_selection_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_selections"],
+        ),
+        tuning_curve_selection_table=_FakeKeyedRelation(
+            "path_specific_place_tuning_curve_id",
+            inputs["curve_selections"],
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+    )
 
 
 def test_import_is_passive_in_fresh_interpreter() -> None:
@@ -243,15 +804,29 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert tuple(key for key in bundle if key in SOURCE_TABLE_KEYS) == SOURCE_TABLE_KEYS
     assert set(bundle) == {
         *SOURCE_TABLE_KEYS,
+        "region_sorted_spikes_group",
         "movement_parameters",
         "movement_firing_rate_selection",
         "movement_firing_rate",
         "ripple_modulation_parameters",
         "ripple_modulation_selection",
         "ripple_modulation",
-        "task_progression_stability_parameters",
-        "task_progression_stability_selection",
-        "task_progression_stability",
+        "tuning_curve_parameters",
+        "tuning_similarity_parameters",
+        "path_specific_place_tuning_curve_selection",
+        "path_specific_place_tuning_curve",
+        "path_specific_place_tuning_similarity_selection",
+        "path_specific_place_tuning_similarity",
+        "dpp_tuning_curve_selection",
+        "dpp_tuning_curve",
+        "path_specific_place_stability_selection",
+        "path_specific_place_stability",
+        "dpp_encoding_comparison_parameters",
+        "dpp_encoding_comparison_selection",
+        "dpp_encoding_comparison",
+        "path_progression_decoding_parameters",
+        "path_progression_decoding_comparison_selection",
+        "path_progression_decoding_comparison",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -259,6 +834,29 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "kyuv1ca1_nwbfile",
     ]
     assert schemas[0].context["UnitSelectionParams"] is unit_selection_params
+    assert "TuningCurveParameters" in schemas[0].context
+    assert "PathSpecificPlaceTuningCurveSelection" in schemas[0].context
+    assert "PathSpecificPlaceTuningCurve" in schemas[0].context
+    assert "TuningSimilarityParameters" in schemas[0].context
+    assert "PathSpecificPlaceTuningSimilaritySelection" in schemas[0].context
+    assert "PathSpecificPlaceTuningSimilarity" in schemas[0].context
+    assert "DPPTuningCurveSelection" in schemas[0].context
+    assert "DPPTuningCurve" in schemas[0].context
+    assert "PathSpecificPlaceStabilitySelection" in schemas[0].context
+    assert "PathSpecificPlaceStability" in schemas[0].context
+    assert "RegionSortedSpikesGroup" in schemas[0].context
+    assert "DPPEncodingComparisonParameters" in schemas[0].context
+    assert "DPPEncodingComparisonSelection" in schemas[0].context
+    assert "DPPEncodingComparison" in schemas[0].context
+    assert "PathProgressionDecodingParameters" in schemas[0].context
+    assert (
+        "PathProgressionDecodingComparisonSelection" in schemas[0].context
+    )
+    assert "PathProgressionDecodingComparison" in schemas[0].context
+    legacy_stability_prefix = "".join(("TaskProgression", "Stability"))
+    assert not any(
+        name.startswith(legacy_stability_prefix) for name in schemas[0].context
+    )
     assert all(
         activation[1]["create_schema"] and activation[1]["create_tables"]
         for schema in schemas
@@ -316,27 +914,269 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "artifact_origin" not in movement_result
     assert not hasattr(bundle["movement_firing_rate"], "register_existing")
 
-    stability_selection = bundle["task_progression_stability_selection"].definition
-    assert "task_progression_stability_id: uuid" in stability_selection
-    assert "-> TrajectoryIntervals" in stability_selection
-    assert "-> WTrackGraph" in stability_selection
-    assert "-> MovementFiringRate" in stability_selection
-    assert "-> TaskProgressionStabilityParameters" in stability_selection
-    assert "-> Position" not in stability_selection
-    assert "-> SortedSpikesGroup" not in stability_selection
-    assert "sorting_group_members_sha256" not in stability_selection
+    tuning_selection = bundle[
+        "path_specific_place_tuning_curve_selection"
+    ].definition
+    assert "path_specific_place_tuning_curve_id: uuid" in tuning_selection
+    assert "-> TrajectoryIntervals" in tuning_selection
+    assert "-> WTrackGraph" in tuning_selection
+    assert "-> MovementFiringRate" in tuning_selection
+    assert "-> TuningCurveParameters" in tuning_selection
+    assert "trial_subset: enum('all', 'odd', 'even')" in tuning_selection
+    assert "tuning_curve_parameters_sha256: char(64)" in tuning_selection
+    assert "-> Position" not in tuning_selection
+    assert "-> SortedSpikesGroup" not in tuning_selection
+
+    tuning_result = bundle["path_specific_place_tuning_curve"].definition
+    assert "-> PathSpecificPlaceTuningCurveSelection" in tuning_result
+    assert "tuning_curve_path: filepath@analysis" in tuning_result
+    assert "n_trials: int unsigned" in tuning_result
+    assert "n_feature_samples: int unsigned" in tuning_result
+    assert "n_position_bins: int unsigned" in tuning_result
+    assert "'no_trials'" in tuning_result
+    assert "selected_units_sha256: char(64)" in tuning_result
+
+    similarity_parameters = bundle["tuning_similarity_parameters"].definition
+    assert "tuning_similarity_param_name: varchar(64)" in similarity_parameters
     assert (
-        "task_progression_stability_parameters_sha256: char(64)"
-        in stability_selection
+        "enum('correlation', 'absolute_overlap', 'shape_overlap')"
+        in similarity_parameters
     )
 
-    stability_result = bundle["task_progression_stability"].definition
-    assert "-> TaskProgressionStabilitySelection" in stability_result
+    similarity_selection = bundle[
+        "path_specific_place_tuning_similarity_selection"
+    ].definition
+    assert (
+        "path_specific_place_tuning_similarity_id: uuid"
+        in similarity_selection
+    )
+    for alias in (
+        "center_to_left_tuning_curve_id",
+        "center_to_right_tuning_curve_id",
+        "left_to_center_tuning_curve_id",
+        "right_to_center_tuning_curve_id",
+    ):
+        assert f"{alias}='path_specific_place_tuning_curve_id'" in (
+            similarity_selection
+        )
+    assert "-> TuningSimilarityParameters" in similarity_selection
+    assert "tuning_similarity_parameters_sha256: char(64)" in (
+        similarity_selection
+    )
+
+    similarity_result = bundle[
+        "path_specific_place_tuning_similarity"
+    ].definition
+    assert "-> PathSpecificPlaceTuningSimilaritySelection" in similarity_result
+    assert "similarity_path: filepath@analysis" in similarity_result
+    assert "n_valid_comparisons: int unsigned" in similarity_result
+    assert "n_units_with_valid_comparison: int unsigned" in similarity_result
+    assert "'no_valid_comparisons'" in similarity_result
+    assert "selected_units_sha256: char(64)" in similarity_result
+
+    dpp_selection = bundle["dpp_tuning_curve_selection"].definition
+    assert "dpp_tuning_curve_id: uuid" in dpp_selection
+    assert (
+        "outbound_trajectory_type='trajectory_type'" in dpp_selection
+    )
+    assert "inbound_trajectory_type='trajectory_type'" in dpp_selection
+    assert (
+        "outbound_configuration_name='configuration_name'" in dpp_selection
+    )
+    assert "inbound_configuration_name='configuration_name'" in dpp_selection
+    assert "-> MovementFiringRate" in dpp_selection
+    assert "-> TuningCurveParameters" in dpp_selection
+    assert "turn_type: enum('left', 'right')" in dpp_selection
+    assert "trial_subset: enum('all', 'odd', 'even')" in dpp_selection
+
+    dpp_result = bundle["dpp_tuning_curve"].definition
+    assert "-> DPPTuningCurveSelection" in dpp_result
+    assert "tuning_curve_path: filepath@analysis" in dpp_result
+    assert "n_outbound_trials: int unsigned" in dpp_result
+    assert "n_inbound_trials: int unsigned" in dpp_result
+    assert "selected_units_sha256: char(64)" in dpp_result
+
+    stability_selection = bundle[
+        "path_specific_place_stability_selection"
+    ].definition
+    assert "path_specific_place_stability_id: uuid" in stability_selection
+    assert "odd_path_specific_place_tuning_curve_id=" in stability_selection
+    assert "even_path_specific_place_tuning_curve_id=" in stability_selection
+    assert "-> TrajectoryIntervals" not in stability_selection
+    assert "-> MovementFiringRate" not in stability_selection
+    assert "-> TuningCurveParameters" not in stability_selection
+
+    stability_result = bundle["path_specific_place_stability"].definition
+    assert "-> PathSpecificPlaceStabilitySelection" in stability_result
     assert "stability_path: filepath@analysis" in stability_result
     assert "analysis_status:" in stability_result
     assert "'no_valid_position'" in stability_result
     assert "'no_movement'" in stability_result
     assert "selected_units_sha256: char(64)" in stability_result
+
+    region_group = bundle["region_sorted_spikes_group"].definition
+    assert "region_sorted_spikes_group_id: uuid" in region_group
+    assert "-> SortedSpikesGroup" in region_group
+    assert "region_name: varchar(64)" in region_group
+    assert "n_units: int unsigned" in region_group
+    assert "selected_units_sha256: char(64)" in region_group
+    assert "unit_ids" not in region_group
+
+    encoding_parameters = bundle[
+        "dpp_encoding_comparison_parameters"
+    ].definition
+    assert "evaluation_bin_size_s: double" in encoding_parameters
+    assert "spatial_bin_size_cm: double" in encoding_parameters
+    assert "minimum_movement_firing_rate_hz: double" in encoding_parameters
+    assert "minimum_stability_correlation: double" in encoding_parameters
+
+    encoding_selection = bundle[
+        "dpp_encoding_comparison_selection"
+    ].definition
+    assert "dpp_encoding_comparison_id: uuid" in encoding_selection
+    assert "-> RegionSortedSpikesGroup" in encoding_selection
+    assert "-> MovementFiringRate" in encoding_selection
+    assert "full_w_configuration_name='configuration_name'" in encoding_selection
+    for trajectory_type in (
+        "center_to_left",
+        "center_to_right",
+        "left_to_center",
+        "right_to_center",
+    ):
+        assert f"{trajectory_type}_trajectory_type='trajectory_type'" in (
+            encoding_selection
+        )
+        assert f"{trajectory_type}_configuration_name='configuration_name'" in (
+            encoding_selection
+        )
+        assert f"{trajectory_type}_stability_id=" in encoding_selection
+
+    encoding_result = bundle["dpp_encoding_comparison"].definition
+    assert "-> DPPEncodingComparisonSelection" in encoding_result
+    assert "encoding_comparison_path: filepath@analysis" in encoding_result
+    assert "n_units_input: int unsigned" in encoding_result
+    assert "n_units_eligible: int unsigned" in encoding_result
+    assert "n_units_valid: int unsigned" in encoding_result
+    assert "'no_eligible_units'" in encoding_result
+    assert "'no_valid_units'" in encoding_result
+
+    decoding_parameters = bundle[
+        "path_progression_decoding_parameters"
+    ].definition
+    assert "decoding_bin_size_s: double" in decoding_parameters
+    assert "sliding_window_size_bins: smallint unsigned" in (
+        decoding_parameters
+    )
+    assert "spatial_bin_size_cm: double" in decoding_parameters
+    assert "minimum_movement_firing_rate_hz: double" in decoding_parameters
+    assert "minimum_stability_correlation = NULL: double" in (
+        decoding_parameters
+    )
+    assert "n_folds" not in decoding_parameters
+
+    decoding_selection = bundle[
+        "path_progression_decoding_comparison_selection"
+    ].definition
+    assert "path_progression_decoding_comparison_id: uuid" in (
+        decoding_selection
+    )
+    assert "-> RegionSortedSpikesGroup" in decoding_selection
+    assert "cohort_movement_firing_rate_id='movement_firing_rate_id'" in (
+        decoding_selection
+    )
+    assert "cohort_epoch: varchar(64)" in decoding_selection
+    assert "eligibility_rule_sha256: char(64)" in decoding_selection
+    assert "transfer_spec_sha256: char(64)" in decoding_selection
+    for trajectory_type in (
+        "center_to_left",
+        "center_to_right",
+        "left_to_center",
+        "right_to_center",
+    ):
+        assert f"{trajectory_type}_trajectory_type='trajectory_type'" in (
+            decoding_selection
+        )
+        assert f"{trajectory_type}_configuration_name='configuration_name'" in (
+            decoding_selection
+        )
+        assert f"{trajectory_type}_stability_id=" in decoding_selection
+        assert f"cohort_{trajectory_type}_stability_id=" in decoding_selection
+
+    decoding_result = bundle[
+        "path_progression_decoding_comparison"
+    ].definition
+    assert "-> PathProgressionDecodingComparisonSelection" in decoding_result
+    assert "artifact_manifest_path: filepath@analysis" in decoding_result
+    assert "decoding_summary_path: filepath@analysis" in decoding_result
+    assert "unit_eligibility_path: filepath@analysis" in decoding_result
+    assert "n_transfer_pairs_expected: smallint unsigned" in decoding_result
+    assert "n_transfer_pairs_valid: smallint unsigned" in decoding_result
+    assert "'partial_valid'" in decoding_result
+    assert not hasattr(
+        bundle["path_progression_decoding_comparison"],
+        "register_existing",
+    )
+
+
+def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
+    monkeypatch,
+) -> None:
+    from v1ca1.spyglass import region_sorted_spikes
+
+    loaded_regions = []
+
+    def load_group(*, region, **_kwargs):
+        loaded_regions.append(region)
+        return {"region": region, "n_units": 2 if region == "v1" else 0}
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_load_group_unit_data",
+        load_group,
+    )
+    monkeypatch.setattr(
+        region_sorted_spikes,
+        "build_region_sorted_spikes_group_row",
+        lambda loaded: {
+            "region_sorted_spikes_group_id": uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"test-region:{loaded['region']}",
+            ),
+            "region_name": loaded["region"],
+            "n_units": loaded["n_units"],
+        },
+    )
+    bundle, _, _ = _fake_bundle()
+    table = bundle["region_sorted_spikes_group"]
+    key = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "unit_filter_params_name": "all_units",
+        "sorted_spikes_group_name": "all shanks",
+    }
+
+    rows = table.register_regions(
+        key,
+        region_names=("V1", "ca1"),
+        skip_duplicates=True,
+    )
+
+    assert loaded_regions == ["v1", "ca1"]
+    assert [row["region_name"] for row in rows] == ["v1"]
+    assert table._insert_many_calls == [
+        (rows, {"skip_duplicates": True})
+    ]
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_load_group_unit_data",
+        lambda **kwargs: {"region": kwargs["region"], "n_units": 0},
+    )
+    empty_bundle, _, _ = _fake_bundle()
+    with pytest.raises(ValueError, match="None of the requested regions"):
+        empty_bundle["region_sorted_spikes_group"].register_regions(key)
+    assert "_insert_many_calls" not in empty_bundle[
+        "region_sorted_spikes_group"
+    ].__dict__
 
 
 def test_analysis_schema_prefix_is_validated_before_activation() -> None:
@@ -360,11 +1200,17 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     bundle, _, _ = _fake_bundle()
     movement_parameters = bundle["movement_parameters"]
     ripple_parameters = bundle["ripple_modulation_parameters"]
-    stability_parameters = bundle["task_progression_stability_parameters"]
+    tuning_parameters = bundle["tuning_curve_parameters"]
+    similarity_parameters = bundle["tuning_similarity_parameters"]
+    encoding_parameters = bundle["dpp_encoding_comparison_parameters"]
+    decoding_parameters = bundle["path_progression_decoding_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
-    stability_row = stability_parameters.insert_default()
+    tuning_rows = tuning_parameters.insert_presets()
+    similarity_rows = similarity_parameters.insert_presets()
+    encoding_row = encoding_parameters.insert_default()
+    decoding_row = decoding_parameters.insert_default()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -385,15 +1231,83 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         (ripple_row, {"skip_duplicates": True})
     ]
 
-    assert stability_row == dict(
-        table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
+    assert tuning_rows == [
+        dict(row) for row in table_specs.TUNING_CURVE_PARAMETER_PRESETS
+    ]
+    assert tuning_rows == [
+        {
+            "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+            "binning_mode": "bin_size_cm",
+            "place_bin_size_cm": 4.0,
+            "position_bin_count": None,
+            "gaussian_smoothing_sigma_bins": 0.0,
+        },
+        {
+            "tuning_curve_param_name": "figure1d_50bin_sigma1p5",
+            "binning_mode": "bin_count",
+            "place_bin_size_cm": None,
+            "position_bin_count": 50,
+            "gaussian_smoothing_sigma_bins": 1.5,
+        },
+    ]
+    assert tuning_parameters._insert_calls == [
+        (row, {"skip_duplicates": True}) for row in tuning_rows
+    ]
+
+    assert similarity_rows == [
+        dict(row) for row in table_specs.TUNING_SIMILARITY_PARAMETER_PRESETS
+    ]
+    assert similarity_rows == [
+        {
+            "tuning_similarity_param_name": "correlation",
+            "similarity_metric": "correlation",
+        },
+        {
+            "tuning_similarity_param_name": "absolute_overlap",
+            "similarity_metric": "absolute_overlap",
+        },
+        {
+            "tuning_similarity_param_name": "shape_overlap",
+            "similarity_metric": "shape_overlap",
+        },
+    ]
+    assert similarity_parameters._insert_calls == [
+        (row, {"skip_duplicates": True}) for row in similarity_rows
+    ]
+
+    assert encoding_row == dict(
+        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
     )
-    assert stability_row == {
-        "task_progression_stability_param_name": "default",
-        "place_bin_size_cm": 4.0,
+    assert encoding_row == {
+        "dpp_encoding_comparison_param_name": (
+            "manuscript_5fold_50ms_4cm_sigma1"
+        ),
+        "n_folds": 5,
+        "evaluation_bin_size_s": 0.05,
+        "spatial_bin_size_cm": 4.0,
+        "gaussian_smoothing_sigma_bins": 1.0,
+        "random_seed": 47,
+        "minimum_movement_firing_rate_hz": 0.5,
+        "minimum_stability_correlation": 0.5,
     }
-    assert stability_parameters._insert_calls == [
-        (stability_row, {"skip_duplicates": True})
+    assert encoding_parameters._insert_calls == [
+        (encoding_row, {"skip_duplicates": True})
+    ]
+    assert decoding_row == dict(
+        table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
+    )
+    assert decoding_row == {
+        "path_progression_decoding_param_name": (
+            "manuscript_20ms_window4_4cm_mfr0p5"
+        ),
+        "decoding_bin_size_s": 0.02,
+        "sliding_window_size_bins": 4,
+        "spatial_bin_size_cm": 4.0,
+        "minimum_movement_firing_rate_hz": 0.5,
+        "minimum_stability_correlation": None,
+    }
+    assert decoding_parameters._insert_calls == [
+        (decoding_row, {"skip_duplicates": True})
     ]
 
     with pytest.raises(TypeError, match="numeric scalar"):
@@ -418,14 +1332,148 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         movement_parameters.insert_parameters(
             {**movement_row, "speed_smoothing_sigma_s": 0.0}
         )
+    with pytest.raises(ValueError, match="between 2 and 65535"):
+        encoding_parameters.insert_parameters(
+            {**encoding_row, "n_folds": 1}
+        )
+    with pytest.raises(ValueError, match="between -1 and 1"):
+        encoding_parameters.insert_parameters(
+            {**encoding_row, "minimum_stability_correlation": 1.1}
+        )
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        decoding_parameters.insert_parameters(
+            {**decoding_row, "sliding_window_size_bins": 0}
+        )
+    with pytest.raises(ValueError, match="positive"):
+        decoding_parameters.insert_parameters(
+            {**decoding_row, "decoding_bin_size_s": 0.0}
+        )
+    with pytest.raises(ValueError, match=r"within \[-1, 1\]"):
+        decoding_parameters.insert_parameters(
+            {**decoding_row, "minimum_stability_correlation": -1.1}
+        )
     with pytest.raises(ValueError, match="positive and finite"):
-        stability_parameters.insert_parameters(
-            {**stability_row, "place_bin_size_cm": 0.0}
+        tuning_parameters.insert_parameters(
+            {**tuning_rows[0], "place_bin_size_cm": 0.0}
+        )
+    with pytest.raises(ValueError, match="must be NULL"):
+        tuning_parameters.insert_parameters(
+            {**tuning_rows[0], "position_bin_count": 50}
+        )
+    with pytest.raises(ValueError, match="positive"):
+        tuning_parameters.insert_parameters(
+            {**tuning_rows[1], "position_bin_count": 0}
+        )
+    with pytest.raises(ValueError, match="65535"):
+        tuning_parameters.insert_parameters(
+            {**tuning_rows[1], "position_bin_count": 65_536}
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        tuning_parameters.insert_parameters(
+            {
+                **tuning_rows[1],
+                "gaussian_smoothing_sigma_bins": -0.1,
+            }
+        )
+    with pytest.raises(ValueError, match="similarity_metric"):
+        similarity_parameters.insert_parameters(
+            {
+                "tuning_similarity_param_name": "unsupported",
+                "similarity_metric": "cosine",
+            }
+        )
+    with pytest.raises(ValueError, match="exactly the declared fields"):
+        similarity_parameters.insert_parameters(
+            {
+                **similarity_rows[0],
+                "minimum_firing_rate_hz": 1.0,
+            }
         )
 
     assert _analysis_region("ca1") == "ca1"
     with pytest.raises(ValueError, match="canonical lowercase"):
         _analysis_region("CA1")
+
+
+def test_path_progression_decoding_preset_and_definitions_are_exact() -> None:
+    bundle, _, _ = _fake_bundle()
+    parameters = bundle["path_progression_decoding_parameters"]
+
+    rows = parameters.insert_presets()
+
+    expected = dict(
+        table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
+    )
+    assert tuple(
+        dict(row)
+        for row in table_specs.PATH_PROGRESSION_DECODING_PARAMETER_PRESETS
+    ) == (expected,)
+    assert rows == [expected]
+    assert parameters._insert_calls == [
+        (expected, {"skip_duplicates": True})
+    ]
+    assert dict(table_specs.PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE) == {
+        "version": 1,
+        "cohort_policy": "target_and_cohort_intersection",
+        "movement_operator": "greater_than_or_equal",
+        "stability_aggregation": "at_least_one_trajectory",
+        "stability_operator": "greater_than_or_equal",
+        "null_stability_threshold": "disabled",
+    }
+    assert dict(table_specs.PATH_PROGRESSION_DECODING_OUTPUT_RULE) == {
+        "version": 1,
+        "coordinate_unit": "normalized_path_progression",
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "error_mode": "signed",
+        "error_summary": "median_iqr",
+        "min_bin_count": 5,
+    }
+
+    selection_definition = bundle[
+        "path_progression_decoding_comparison_selection"
+    ].definition
+    assert selection_definition.count(
+        "-> PathSpecificPlaceStability.proj("
+    ) == 8
+    assert selection_definition.count(
+        "-> MovementFiringRate"
+    ) == 2
+    result = bundle["path_progression_decoding_comparison"]
+    assert result.definition == table_specs.PATH_PROGRESSION_DECODING_DEFINITION
+    assert "artifact_origin" not in result.definition
+    assert "legacy_artifact_provenance" not in result.definition
+    assert not hasattr(result, "register_existing")
+
+
+def test_legacy_tuning_registration_requires_original_position_and_movement() -> None:
+    position = {
+        "position_series_name": "head_position",
+        "position_role": "head",
+        "analysis_start_offset_samples": 10,
+    }
+    movement = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+
+    _validate_legacy_tuning_curve_inputs(
+        position_row=position,
+        movement_parameters=movement,
+    )
+
+    for changed_position in (
+        {**position, "position_series_name": "body_position"},
+        {**position, "position_role": "body"},
+        {**position, "analysis_start_offset_samples": 0},
+    ):
+        with pytest.raises(ValueError, match="cleaned DLC head position"):
+            _validate_legacy_tuning_curve_inputs(
+                position_row=changed_position,
+                movement_parameters=movement,
+            )
+    with pytest.raises(ValueError, match="movement defaults"):
+        _validate_legacy_tuning_curve_inputs(
+            position_row=position,
+            movement_parameters={**movement, "speed_threshold_cm_s": 5.0},
+        )
 
 
 def test_source_table_loaders_delegate_without_copying_arrays(monkeypatch) -> None:
@@ -592,8 +1640,8 @@ def test_movement_selection_uuid_freezes_sorting_and_parameter_values() -> None:
         )
 
 
-def test_stability_selection_uuid_captures_movement_and_parameter_values() -> None:
-    key = _stability_selection_key()
+def test_tuning_curve_selection_uuid_captures_subset_and_parameters() -> None:
+    key = _tuning_curve_selection_key()
     source = _FakeRelation({})
     epoch = _FakeRelation({"epoch_type": "run"})
     graph = _FakeRelation({"coordinate_unit": "cm"})
@@ -606,10 +1654,10 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
             **_movement_selection_key(),
         }
     )
-    parameter_values = dict(table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS)
+    parameter_values = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
     parameters = _FakeRelation(parameter_values)
 
-    row = _stability_selection_row(
+    row = _path_specific_place_tuning_curve_selection_row(
         key=key,
         epoch_intervals_table=epoch,
         trajectory_intervals_table=source,
@@ -618,7 +1666,7 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
         movement_firing_rate_selection_table=movement_selection,
         parameters_table=parameters,
     )
-    repeated = _stability_selection_row(
+    repeated = _path_specific_place_tuning_curve_selection_row(
         key=key,
         epoch_intervals_table=epoch,
         trajectory_intervals_table=source,
@@ -628,7 +1676,7 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
         parameters_table=parameters,
     )
     changed_parameter_values = {**parameter_values, "place_bin_size_cm": 5.0}
-    changed_parameters = _stability_selection_row(
+    changed_parameters = _path_specific_place_tuning_curve_selection_row(
         key=key,
         epoch_intervals_table=epoch,
         trajectory_intervals_table=source,
@@ -637,49 +1685,42 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
         movement_firing_rate_selection_table=movement_selection,
         parameters_table=_FakeRelation(changed_parameter_values),
     )
-    changed_movement_id = uuid.UUID("44444444-4444-5444-8444-444444444444")
-    changed_movement = _stability_selection_row(
-        key={**key, "movement_firing_rate_id": changed_movement_id},
+    even = _path_specific_place_tuning_curve_selection_row(
+        key={**key, "trial_subset": "even"},
         epoch_intervals_table=epoch,
         trajectory_intervals_table=source,
         wtrack_graph_table=graph,
-        movement_firing_rate_table=_FakeRelation(
-            {"movement_firing_rate_id": changed_movement_id}
-        ),
-        movement_firing_rate_selection_table=_FakeRelation(
-            {
-                "movement_firing_rate_id": changed_movement_id,
-                **_movement_selection_key(),
-            }
-        ),
+        movement_firing_rate_table=movement_result,
+        movement_firing_rate_selection_table=movement_selection,
         parameters_table=parameters,
     )
 
-    assert isinstance(row["task_progression_stability_id"], uuid.UUID)
-    assert row["task_progression_stability_id"].version == 5
-    assert row["task_progression_stability_id"] == repeated[
-        "task_progression_stability_id"
+    assert isinstance(row["path_specific_place_tuning_curve_id"], uuid.UUID)
+    assert row["path_specific_place_tuning_curve_id"].version == 5
+    assert row["path_specific_place_tuning_curve_id"] == repeated[
+        "path_specific_place_tuning_curve_id"
     ]
     assert row["trajectory_type"] == "center_to_left"
     assert row["configuration_name"] == "center_to_left"
     assert row["movement_firing_rate_id"] == key["movement_firing_rate_id"]
+    assert row["trial_subset"] == "odd"
     assert "position_series_name" not in row
     assert "sorting_group_members" not in row
-    assert row["task_progression_stability_id"] != changed_parameters[
-        "task_progression_stability_id"
+    assert row["path_specific_place_tuning_curve_id"] != changed_parameters[
+        "path_specific_place_tuning_curve_id"
     ]
-    assert row["task_progression_stability_id"] != changed_movement[
-        "task_progression_stability_id"
+    assert row["path_specific_place_tuning_curve_id"] != even[
+        "path_specific_place_tuning_curve_id"
     ]
-    assert row[
-        "task_progression_stability_parameters_sha256"
-    ] == provenance_sha256(parameter_values)
-    assert changed_parameters[
-        "task_progression_stability_parameters_sha256"
-    ] == provenance_sha256(changed_parameter_values)
+    assert row["tuning_curve_parameters_sha256"] == provenance_sha256(
+        parameter_values
+    )
+    assert changed_parameters["tuning_curve_parameters_sha256"] == (
+        provenance_sha256(changed_parameter_values)
+    )
 
     with pytest.raises(ValueError, match="configuration_name"):
-        _stability_selection_row(
+        _path_specific_place_tuning_curve_selection_row(
             key={**key, "configuration_name": "center_to_right"},
             epoch_intervals_table=epoch,
             trajectory_intervals_table=source,
@@ -690,7 +1731,7 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
         )
 
     with pytest.raises(ValueError, match="same epoch"):
-        _stability_selection_row(
+        _path_specific_place_tuning_curve_selection_row(
             key={**key, "epoch": "04_r2"},
             epoch_intervals_table=epoch,
             trajectory_intervals_table=source,
@@ -698,6 +1739,966 @@ def test_stability_selection_uuid_captures_movement_and_parameter_values() -> No
             movement_firing_rate_table=movement_result,
             movement_firing_rate_selection_table=movement_selection,
             parameters_table=parameters,
+        )
+
+
+def test_dpp_selection_freezes_fixed_pair_subset_and_parameters() -> None:
+    key = _dpp_tuning_curve_selection_key()
+    epoch = _FakeRelation({"epoch_type": "run"})
+    trajectories = _RecordingRelation({})
+    graphs = _RecordingRelation({"coordinate_unit": "cm"})
+    movement_result = _FakeRelation(
+        {"movement_firing_rate_id": key["movement_firing_rate_id"]}
+    )
+    movement_selection = _FakeRelation(
+        {
+            "movement_firing_rate_id": key["movement_firing_rate_id"],
+            **_movement_selection_key(),
+        }
+    )
+    parameter_values = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+
+    def build(selection_key, parameters=parameter_values):
+        return _dpp_tuning_curve_selection_row(
+            key=selection_key,
+            epoch_intervals_table=epoch,
+            trajectory_intervals_table=trajectories,
+            wtrack_graph_table=graphs,
+            movement_firing_rate_table=movement_result,
+            movement_firing_rate_selection_table=movement_selection,
+            parameters_table=_FakeRelation(parameters),
+        )
+
+    row = build(key)
+    repeated = build(key)
+    even = build({**key, "trial_subset": "even"})
+    right = build({**key, "turn_type": "right"})
+    changed_parameters = build(
+        key,
+        {**parameter_values, "place_bin_size_cm": 5.0},
+    )
+
+    assert isinstance(row["dpp_tuning_curve_id"], uuid.UUID)
+    assert row["dpp_tuning_curve_id"].version == 5
+    assert row["dpp_tuning_curve_id"] == repeated["dpp_tuning_curve_id"]
+    assert row["dpp_tuning_curve_id"] != even["dpp_tuning_curve_id"]
+    assert row["dpp_tuning_curve_id"] != right["dpp_tuning_curve_id"]
+    assert row["dpp_tuning_curve_id"] != changed_parameters[
+        "dpp_tuning_curve_id"
+    ]
+    assert row["outbound_trajectory_type"] == "center_to_left"
+    assert row["inbound_trajectory_type"] == "right_to_center"
+    assert row["outbound_configuration_name"] == "center_to_left"
+    assert row["inbound_configuration_name"] == "right_to_center"
+    assert row["tuning_curve_parameters_sha256"] == provenance_sha256(
+        parameter_values
+    )
+    assert {
+        tuple(sorted(key.items()))
+        for key in trajectories.keys
+    } >= {
+        tuple(
+            sorted(
+                {
+                    "nwb_file_name": key["nwb_file_name"],
+                    "epoch": key["epoch"],
+                    "trajectory_type": trajectory_type,
+                }.items()
+            )
+        )
+        for trajectory_type in ("center_to_left", "right_to_center")
+    }
+    assert {
+        tuple(sorted(source_key.items()))
+        for source_key in graphs.keys
+    } >= {
+        tuple(
+            sorted(
+                {
+                    "nwb_file_name": key["nwb_file_name"],
+                    "configuration_name": configuration_name,
+                }.items()
+            )
+        )
+        for configuration_name in ("center_to_left", "right_to_center")
+    }
+
+    with pytest.raises(ValueError, match="fixed by turn_type"):
+        build({**key, "inbound_trajectory_type": "left_to_center"})
+    with pytest.raises(ValueError, match="same epoch"):
+        build({**key, "epoch": "04_r2"})
+    with pytest.raises(ValueError, match="run epoch"):
+        _dpp_tuning_curve_selection_row(
+            key=key,
+            epoch_intervals_table=_FakeRelation({"epoch_type": "sleep"}),
+            trajectory_intervals_table=_FakeRelation({}),
+            wtrack_graph_table=graphs,
+            movement_firing_rate_table=movement_result,
+            movement_firing_rate_selection_table=movement_selection,
+            parameters_table=_FakeRelation(parameter_values),
+        )
+    with pytest.raises(ValueError, match="centimeters"):
+        _dpp_tuning_curve_selection_row(
+            key=key,
+            epoch_intervals_table=epoch,
+            trajectory_intervals_table=_FakeRelation({}),
+            wtrack_graph_table=_FakeRelation({"coordinate_unit": "m"}),
+            movement_firing_rate_table=movement_result,
+            movement_firing_rate_selection_table=movement_selection,
+            parameters_table=_FakeRelation(parameter_values),
+        )
+
+
+def test_stability_selection_identifies_one_matching_odd_even_pair() -> None:
+    key = _stability_selection_key()
+    common = {
+        key_name: value
+        for key_name, value in _tuning_curve_selection_key().items()
+        if key_name != "trial_subset"
+    }
+    parameter_hash = provenance_sha256(
+        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    )
+    curve_selections = {
+        key["odd_path_specific_place_tuning_curve_id"]: {
+            "path_specific_place_tuning_curve_id": key[
+                "odd_path_specific_place_tuning_curve_id"
+            ],
+            **common,
+            "trial_subset": "odd",
+            "tuning_curve_parameters_sha256": parameter_hash,
+        },
+        key["even_path_specific_place_tuning_curve_id"]: {
+            "path_specific_place_tuning_curve_id": key[
+                "even_path_specific_place_tuning_curve_id"
+            ],
+            **common,
+            "trial_subset": "even",
+            "tuning_curve_parameters_sha256": parameter_hash,
+        },
+    }
+    curve_results = {
+        curve_id: {
+            "path_specific_place_tuning_curve_id": curve_id,
+            "selected_units_sha256": "a" * 64,
+        }
+        for curve_id in curve_selections
+    }
+    result_table = _FakeKeyedRelation(
+        "path_specific_place_tuning_curve_id",
+        curve_results,
+    )
+    selection_table = _FakeKeyedRelation(
+        "path_specific_place_tuning_curve_id",
+        curve_selections,
+    )
+
+    row = _stability_selection_row(
+        key=key,
+        tuning_curve_table=result_table,
+        tuning_curve_selection_table=selection_table,
+    )
+    repeated = _stability_selection_row(
+        key=key,
+        tuning_curve_table=result_table,
+        tuning_curve_selection_table=selection_table,
+    )
+
+    assert isinstance(row["path_specific_place_stability_id"], uuid.UUID)
+    assert row["path_specific_place_stability_id"].version == 5
+    assert row == repeated
+    assert row["odd_path_specific_place_tuning_curve_id"] == key[
+        "odd_path_specific_place_tuning_curve_id"
+    ]
+    assert row["even_path_specific_place_tuning_curve_id"] == key[
+        "even_path_specific_place_tuning_curve_id"
+    ]
+    assert set(row) == {
+        "path_specific_place_stability_id",
+        "odd_path_specific_place_tuning_curve_id",
+        "even_path_specific_place_tuning_curve_id",
+    }
+
+    wrong_subset = {
+        curve_id: dict(selection)
+        for curve_id, selection in curve_selections.items()
+    }
+    wrong_subset[key["even_path_specific_place_tuning_curve_id"]][
+        "trial_subset"
+    ] = "all"
+    with pytest.raises(ValueError, match="matching odd and even"):
+        _stability_selection_row(
+            key=key,
+            tuning_curve_table=result_table,
+            tuning_curve_selection_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                wrong_subset,
+            ),
+        )
+
+    mismatched_results = {
+        curve_id: dict(result)
+        for curve_id, result in curve_results.items()
+    }
+    mismatched_results[key["even_path_specific_place_tuning_curve_id"]][
+        "selected_units_sha256"
+    ] = "b" * 64
+    with pytest.raises(ValueError, match="same selected units"):
+        _stability_selection_row(
+            key=key,
+            tuning_curve_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                mismatched_results,
+            ),
+            tuning_curve_selection_table=selection_table,
+        )
+
+
+def test_tuning_similarity_selection_identifies_matching_four_path_rows() -> None:
+    key = _tuning_similarity_selection_key()
+    parameter_values = dict(
+        table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS
+    )
+    tuning_parameter_hash = provenance_sha256(
+        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    )
+    curve_id_fields = {
+        "center_to_left": "center_to_left_tuning_curve_id",
+        "center_to_right": "center_to_right_tuning_curve_id",
+        "left_to_center": "left_to_center_tuning_curve_id",
+        "right_to_center": "right_to_center_tuning_curve_id",
+    }
+    common = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "movement_firing_rate_id": uuid.UUID(
+            "33333333-3333-5333-8333-333333333333"
+        ),
+        "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+        "trial_subset": "all",
+        "tuning_curve_parameters_sha256": tuning_parameter_hash,
+    }
+    curve_selections = {
+        key[field_name]: {
+            "path_specific_place_tuning_curve_id": key[field_name],
+            **common,
+            "trajectory_type": trajectory_type,
+            "configuration_name": trajectory_type,
+        }
+        for trajectory_type, field_name in curve_id_fields.items()
+    }
+    curve_results = {
+        curve_id: {
+            "path_specific_place_tuning_curve_id": curve_id,
+            "selected_units_sha256": "a" * 64,
+            "n_units": 5,
+            "n_position_bins": 25,
+        }
+        for curve_id in curve_selections
+    }
+
+    def build(
+        selection_key=key,
+        *,
+        selections=curve_selections,
+        results=curve_results,
+        parameters=parameter_values,
+    ):
+        return _tuning_similarity_selection_row(
+            key=selection_key,
+            tuning_curve_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                results,
+            ),
+            tuning_curve_selection_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                selections,
+            ),
+            parameters_table=_FakeRelation(parameters),
+        )
+
+    row = build()
+    repeated = build()
+    shape_parameters = dict(
+        table_specs.SHAPE_OVERLAP_TUNING_SIMILARITY_PARAMETERS
+    )
+    shape = build(
+        {**key, "tuning_similarity_param_name": "shape_overlap"},
+        parameters=shape_parameters,
+    )
+
+    assert isinstance(
+        row["path_specific_place_tuning_similarity_id"],
+        uuid.UUID,
+    )
+    assert row["path_specific_place_tuning_similarity_id"].version == 5
+    assert row == repeated
+    assert row["path_specific_place_tuning_similarity_id"] != shape[
+        "path_specific_place_tuning_similarity_id"
+    ]
+    for field_name in curve_id_fields.values():
+        assert row[field_name] == key[field_name]
+    assert row["tuning_similarity_param_name"] == "correlation"
+    assert row["tuning_similarity_parameters_sha256"] == provenance_sha256(
+        parameter_values
+    )
+    assert set(row) == {
+        "path_specific_place_tuning_similarity_id",
+        *curve_id_fields.values(),
+        "tuning_similarity_param_name",
+        "tuning_similarity_parameters_sha256",
+    }
+
+    wrong_subset = {
+        curve_id: dict(selection)
+        for curve_id, selection in curve_selections.items()
+    }
+    wrong_subset[key["right_to_center_tuning_curve_id"]][
+        "trial_subset"
+    ] = "odd"
+    with pytest.raises(ValueError, match="four all-trial"):
+        build(selections=wrong_subset)
+
+    wrong_alias = {
+        curve_id: dict(selection)
+        for curve_id, selection in curve_selections.items()
+    }
+    wrong_alias[key["left_to_center_tuning_curve_id"]][
+        "trajectory_type"
+    ] = "right_to_center"
+    with pytest.raises(ValueError, match="aliases must match"):
+        build(selections=wrong_alias)
+
+    mismatched_results = {
+        curve_id: dict(result)
+        for curve_id, result in curve_results.items()
+    }
+    mismatched_results[key["center_to_right_tuning_curve_id"]][
+        "selected_units_sha256"
+    ] = "b" * 64
+    with pytest.raises(ValueError, match="same selected_units_sha256"):
+        build(results=mismatched_results)
+
+
+def test_dpp_encoding_selection_uuid_freezes_exact_upstream_rows() -> None:
+    inputs = _dpp_encoding_selection_inputs()
+
+    row = _build_dpp_encoding_selection(inputs)
+    repeated = _build_dpp_encoding_selection(
+        _dpp_encoding_selection_inputs()
+    )
+
+    assert isinstance(row["dpp_encoding_comparison_id"], uuid.UUID)
+    assert row["dpp_encoding_comparison_id"].version == 5
+    assert row == repeated
+    assert row["nwb_file_name"] == "L1420240102_.nwb"
+    assert row["epoch"] == "02_r1"
+    assert row["region_sorted_spikes_group_id"] == inputs["key"][
+        "region_sorted_spikes_group_id"
+    ]
+    assert row["movement_firing_rate_id"] == inputs["key"][
+        "movement_firing_rate_id"
+    ]
+    for trajectory_type in _DPP_ENCODING_TRAJECTORIES:
+        assert row[f"{trajectory_type}_trajectory_type"] == trajectory_type
+        assert row[f"{trajectory_type}_configuration_name"] == trajectory_type
+        assert row[f"{trajectory_type}_stability_id"] == inputs["key"][
+            f"{trajectory_type}_stability_id"
+        ]
+    assert row["full_w_configuration_name"] == "full_w"
+    assert row["dpp_encoding_comparison_parameters_sha256"] == (
+        provenance_sha256(inputs["parameters"])
+    )
+
+    alternate = _dpp_encoding_selection_inputs()
+    alternate_name = "same_values_alternate_name"
+    alternate["parameters"][
+        "dpp_encoding_comparison_param_name"
+    ] = alternate_name
+    alternate["key"]["dpp_encoding_comparison_param_name"] = alternate_name
+    alternate_row = _build_dpp_encoding_selection(alternate)
+    assert row["dpp_encoding_comparison_id"] != alternate_row[
+        "dpp_encoding_comparison_id"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    [
+        ("session", "same nwb_file_name"),
+        ("epoch", "slot: epoch"),
+        ("supplied_session", "MovementFiringRate: nwb_file_name"),
+        ("supplied_epoch", "MovementFiringRate: epoch"),
+        ("region", "same region"),
+        ("group", "same sorted_spikes_group_name"),
+        ("group_snapshot", "same frozen sorting_group_members_sha256"),
+        ("filter_snapshot", "same frozen unit_filter_params_sha256"),
+        ("trajectory_alias", "center_to_left_trajectory_type must equal"),
+        ("graph_alias", "center_to_left_configuration_name must equal"),
+        ("stability_slot", "stability input.*trajectory_type"),
+        ("stability_unit_count", "same unit count"),
+        ("stability_status", "stability inputs must be valid"),
+        ("legacy_curve", "stability input.*tuning_curve_param_name"),
+        (
+            "legacy_curve_hash",
+            "stability input.*tuning_curve_parameters_sha256",
+        ),
+        ("trial_subset", "stability input.*trial_subset"),
+    ],
+)
+def test_dpp_encoding_selection_rejects_mismatched_upstreams(
+    mismatch: str,
+    message: str,
+) -> None:
+    inputs = _dpp_encoding_selection_inputs()
+    center_left_stability_id = inputs["key"][
+        "center_to_left_stability_id"
+    ]
+    center_left_stability = inputs["stability_selections"][
+        center_left_stability_id
+    ]
+    center_left_odd_id = center_left_stability[
+        "odd_path_specific_place_tuning_curve_id"
+    ]
+
+    if mismatch == "session":
+        inputs["region_row"]["nwb_file_name"] = "L1520240102_.nwb"
+    elif mismatch == "epoch":
+        inputs["curve_selections"][center_left_odd_id]["epoch"] = "04_r2"
+    elif mismatch == "supplied_session":
+        inputs["key"]["nwb_file_name"] = "L1520240102_.nwb"
+    elif mismatch == "supplied_epoch":
+        inputs["key"]["epoch"] = "04_r2"
+    elif mismatch == "region":
+        inputs["region_row"]["region_name"] = "v1"
+    elif mismatch == "group":
+        inputs["region_row"]["sorted_spikes_group_name"] = "subset"
+    elif mismatch == "group_snapshot":
+        inputs["region_row"]["sorting_group_members_sha256"] = "d" * 64
+    elif mismatch == "filter_snapshot":
+        inputs["region_row"]["unit_filter_params_sha256"] = "d" * 64
+    elif mismatch == "trajectory_alias":
+        inputs["key"]["center_to_left_trajectory_type"] = "center_to_right"
+    elif mismatch == "graph_alias":
+        inputs["key"]["center_to_left_configuration_name"] = "full_w"
+    elif mismatch == "stability_slot":
+        inputs["key"]["right_to_center_stability_id"] = (
+            center_left_stability_id
+        )
+    elif mismatch == "stability_unit_count":
+        inputs["stability_results"][center_left_stability_id]["n_units"] = 4
+    elif mismatch == "stability_status":
+        inputs["stability_results"][center_left_stability_id][
+            "analysis_status"
+        ] = "no_movement"
+    elif mismatch == "legacy_curve":
+        inputs["curve_selections"][center_left_odd_id][
+            "tuning_curve_param_name"
+        ] = "figure1d_50bin_sigma1p5"
+    elif mismatch == "legacy_curve_hash":
+        inputs["curve_selections"][center_left_odd_id][
+            "tuning_curve_parameters_sha256"
+        ] = "d" * 64
+    elif mismatch == "trial_subset":
+        inputs["curve_selections"][center_left_odd_id]["trial_subset"] = "all"
+    else:  # pragma: no cover - protects future parametrization edits
+        raise AssertionError(f"Unhandled mismatch {mismatch!r}.")
+
+    with pytest.raises(ValueError, match=message):
+        _build_dpp_encoding_selection(inputs)
+
+
+@pytest.mark.parametrize(
+    ("source", "missing_name"),
+    [
+        ("trajectory_rows", "right_to_center"),
+        ("graph_rows", "full_w"),
+    ],
+)
+def test_dpp_encoding_selection_requires_all_trajectory_and_graph_rows(
+    source: str,
+    missing_name: str,
+) -> None:
+    inputs = _dpp_encoding_selection_inputs()
+    identity_field = (
+        "trajectory_type"
+        if source == "trajectory_rows"
+        else "configuration_name"
+    )
+    inputs[source] = [
+        row
+        for row in inputs[source]
+        if row[identity_field] != missing_name
+    ]
+
+    with pytest.raises(LookupError, match=missing_name):
+        _build_dpp_encoding_selection(inputs)
+
+
+def test_path_progression_decoding_selection_uuid_freezes_shared_cohort() -> None:
+    from v1ca1.spyglass.decoding_comparison import TRANSFER_SPEC_SHA256
+    from v1ca1.spyglass.selection import selection_uuid
+
+    inputs = _path_progression_decoding_selection_inputs()
+    row = _build_path_progression_decoding_selection(inputs)
+    repeated = _build_path_progression_decoding_selection(
+        _path_progression_decoding_selection_inputs()
+    )
+
+    assert isinstance(
+        row["path_progression_decoding_comparison_id"],
+        uuid.UUID,
+    )
+    assert row["path_progression_decoding_comparison_id"].version == 5
+    assert row == repeated
+    assert row["nwb_file_name"] == "L1420240102_.nwb"
+    assert row["epoch"] == "02_r1"
+    assert row["cohort_epoch"] == "08_r4"
+    assert row["movement_firing_rate_id"] == inputs["key"][
+        "movement_firing_rate_id"
+    ]
+    assert row["cohort_movement_firing_rate_id"] == inputs["key"][
+        "cohort_movement_firing_rate_id"
+    ]
+    for prefix in ("", "cohort_"):
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES:
+            assert row[f"{prefix}{trajectory_type}_stability_id"] == (
+                inputs["key"][
+                    f"{prefix}{trajectory_type}_stability_id"
+                ]
+            )
+    assert row["path_progression_decoding_parameters_sha256"] == (
+        provenance_sha256(inputs["parameters"])
+    )
+    assert row["eligibility_rule_sha256"] == provenance_sha256(
+        dict(table_specs.PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE)
+    )
+    assert row["transfer_spec_sha256"] == TRANSFER_SPEC_SHA256
+    assert row["decoding_output_rule_sha256"] == provenance_sha256(
+        dict(table_specs.PATH_PROGRESSION_DECODING_OUTPUT_RULE)
+    )
+    natural_key = {
+        name: value
+        for name, value in row.items()
+        if name != "path_progression_decoding_comparison_id"
+    }
+    assert row["path_progression_decoding_comparison_id"] == selection_uuid(
+        "PathProgressionDecodingComparison",
+        natural_key,
+    )
+
+
+def test_path_progression_decoding_artifact_link_checks_session_and_all_units(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from v1ca1.spyglass import decoding_comparison as decoding
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    result_id = uuid.UUID("74444444-4444-5444-8444-444444444444")
+    parameters = dict(
+        table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
+    )
+    selection = {
+        "path_progression_decoding_comparison_id": result_id,
+        "epoch": "02_r1",
+        "cohort_epoch": "08_r4",
+        "path_progression_decoding_param_name": parameters[
+            "path_progression_decoding_param_name"
+        ],
+        "path_progression_decoding_parameters_sha256": provenance_sha256(
+            parameters
+        ),
+        "eligibility_rule_sha256": provenance_sha256(
+            dict(table_specs.PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE)
+        ),
+        "transfer_spec_sha256": decoding.TRANSFER_SPEC_SHA256,
+        "decoding_output_rule_sha256": provenance_sha256(
+            dict(table_specs.PATH_PROGRESSION_DECODING_OUTPUT_RULE)
+        ),
+    }
+    identities = pd.DataFrame(
+        {
+            "spikesorting_merge_id": ["merge-a", "merge-b"],
+            "unit_id": ["1", "2"],
+        }
+    )
+    input_digest = unit_identity_sha256(identities.to_dict("records"))
+    region = {
+        "region_name": "ca1",
+        "n_units": 2,
+        "selected_units_sha256": input_digest,
+    }
+    artifact_dir = (
+        tmp_path
+        / "L14"
+        / "20240102"
+        / decoding.ARTIFACT_DIRNAME
+        / "02_r1"
+        / "ca1"
+        / str(result_id)
+    )
+    bundle = {"path": artifact_dir, "unit_eligibility": identities}
+    summary = {
+        "path_progression_decoding_comparison_id": str(result_id),
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "ca1",
+        "epoch": "02_r1",
+        "cohort_epoch": "08_r4",
+        "parameter_name": parameters[
+            "path_progression_decoding_param_name"
+        ],
+        "parameter_sha256": selection[
+            "path_progression_decoding_parameters_sha256"
+        ],
+        "eligibility_rule_sha256": selection[
+            "eligibility_rule_sha256"
+        ],
+        "transfer_spec_sha256": selection["transfer_spec_sha256"],
+        "decoding_output_rule_sha256": selection[
+            "decoding_output_rule_sha256"
+        ],
+        "n_units_input": 2,
+        "n_units_eligible": 1,
+        "n_transfer_pairs_expected": 16,
+        "n_transfer_pairs_valid": 16,
+        "n_decoded_samples": 100,
+        "analysis_status": "valid",
+        "eligible_units_sha256": "e" * 64,
+    }
+    result = {
+        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+        "decoding_summary_path": str(
+            artifact_dir / "decoding_summary.parquet"
+        ),
+        "unit_eligibility_path": str(
+            artifact_dir / "unit_eligibility.parquet"
+        ),
+        **{
+            name: summary[name]
+            for name in (
+                "n_units_input",
+                "n_units_eligible",
+                "n_transfer_pairs_expected",
+                "n_transfer_pairs_valid",
+                "n_decoded_samples",
+                "analysis_status",
+                "eligible_units_sha256",
+            )
+        },
+    }
+    monkeypatch.setattr(
+        decoding,
+        "summarize_decoding_artifact_bundle",
+        lambda loaded: dict(summary),
+    )
+
+    _validate_path_progression_decoding_artifact_link(
+        bundle=bundle,
+        result_row=result,
+        selection_row=selection,
+        parameters_row=parameters,
+        region_row=region,
+        animal_name="L14",
+        date="20240102",
+    )
+
+    wrong_session_dir = (
+        tmp_path
+        / "L15"
+        / "20240103"
+        / decoding.ARTIFACT_DIRNAME
+        / "02_r1"
+        / "ca1"
+        / str(result_id)
+    )
+    with pytest.raises(
+        ValueError, match="canonical session/epoch/region/UUID layout"
+    ):
+        _validate_path_progression_decoding_artifact_link(
+            bundle={**bundle, "path": wrong_session_dir},
+            result_row={
+                **result,
+                "artifact_manifest_path": str(
+                    wrong_session_dir / "manifest.parquet"
+                ),
+                "decoding_summary_path": str(
+                    wrong_session_dir / "decoding_summary.parquet"
+                ),
+                "unit_eligibility_path": str(
+                    wrong_session_dir / "unit_eligibility.parquet"
+                ),
+            },
+            selection_row=selection,
+            parameters_row=parameters,
+            region_row=region,
+            animal_name="L14",
+            date="20240102",
+        )
+
+    changed_identities = identities.copy()
+    changed_identities.loc[1, "unit_id"] = "3"
+    with pytest.raises(ValueError, match="input identities disagree"):
+        _validate_path_progression_decoding_artifact_link(
+            bundle={**bundle, "unit_eligibility": changed_identities},
+            result_row=result,
+            selection_row=selection,
+            parameters_row=parameters,
+            region_row=region,
+            animal_name="L14",
+            date="20240102",
+        )
+
+
+def test_path_progression_decoding_selection_accepts_empty_regional_source() -> None:
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    inputs = _path_progression_decoding_selection_inputs()
+    empty_digest = unit_identity_sha256([])
+    inputs["region_row"].update(
+        n_units=0,
+        selected_units_sha256=empty_digest,
+    )
+    for result in inputs["movement_results"].values():
+        result.update(
+            n_units=0,
+            analysis_status="no_units",
+            selected_units_sha256=empty_digest,
+        )
+    for result in inputs["stability_results"].values():
+        result.update(
+            n_units=0,
+            analysis_status="no_units",
+            selected_units_sha256=empty_digest,
+        )
+
+    row = _build_path_progression_decoding_selection(inputs)
+
+    assert row["nwb_file_name"] == "L1420240102_.nwb"
+    assert row["epoch"] == "02_r1"
+
+
+def test_empty_stability_artifact_can_support_empty_decoding_source(
+    tmp_path: Path,
+) -> None:
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.stability import (
+        ARTIFACT_FILENAME,
+        empty_stability_table,
+    )
+    from v1ca1.spyglass.tables import _load_dpp_stability_artifact
+
+    stability_id = uuid.UUID("75555555-5555-5555-8555-555555555555")
+    artifact_path = tmp_path / str(stability_id) / ARTIFACT_FILENAME
+    artifact_path.parent.mkdir()
+    empty_stability_table().to_parquet(artifact_path, index=False)
+
+    table = _load_dpp_stability_artifact(
+        result_row={
+            "path_specific_place_stability_id": stability_id,
+            "stability_path": str(artifact_path),
+            "n_units": 0,
+            "n_valid_units": 0,
+            "analysis_status": "no_units",
+            "selected_units_sha256": unit_identity_sha256([]),
+        },
+        trajectory_type="center_to_left",
+        animal_name="L14",
+        date="20240102",
+        region="ca1",
+        epoch="02_r1",
+    )
+
+    assert table.empty
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        ("nwb_file_name", "L1520240102_.nwb", "nwb_file_name"),
+        ("epoch", "04_r2", "epoch"),
+        ("cohort_epoch", "06_r3", "cohort_epoch"),
+        (
+            "center_to_left_trajectory_type",
+            "center_to_right",
+            "center_to_left_trajectory_type must equal",
+        ),
+        (
+            "center_to_left_configuration_name",
+            "right_to_center",
+            "graph aliases must match",
+        ),
+    ],
+)
+def test_path_progression_decoding_selection_rejects_key_mismatch(
+    field_name: str,
+    bad_value: str,
+    message: str,
+) -> None:
+    inputs = _path_progression_decoding_selection_inputs()
+    inputs["key"][field_name] = bad_value
+
+    with pytest.raises(ValueError, match=message):
+        _build_path_progression_decoding_selection(inputs)
+
+
+def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
+    tmp_path: Path,
+) -> None:
+    from v1ca1.spyglass.encoding_comparison import (
+        empty_encoding_comparison_table,
+        summarize_encoding_comparison_table,
+    )
+
+    comparison_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "v1ca1-test-dpp-artifact-link",
+    )
+    table = empty_encoding_comparison_table()
+    result_row = {
+        **summarize_encoding_comparison_table(table),
+        "n_units_input": 5,
+        "encoding_comparison_path": str(
+            tmp_path
+            / "L14"
+            / "20240102"
+            / "dpp_encoding_comparison"
+            / "02_r1"
+            / "ca1"
+            / str(comparison_id)
+            / "encoding_comparison.parquet"
+        ),
+    }
+    selection_row = {
+        "dpp_encoding_comparison_id": comparison_id,
+        "epoch": "02_r1",
+        "dpp_encoding_comparison_parameters_sha256": provenance_sha256(
+            dict(table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS)
+        ),
+    }
+
+    _validate_dpp_encoding_comparison_artifact_link(
+        table=table,
+        result_row=result_row,
+        selection_row=selection_row,
+        parameters_row=dict(
+            table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+        ),
+        region_row={"region_name": "ca1", "n_units": 5},
+        animal_name="L14",
+        date="20240102",
+    )
+
+    with pytest.raises(ValueError, match="n_units_eligible"):
+        _validate_dpp_encoding_comparison_artifact_link(
+            table=table,
+            result_row={**result_row, "n_units_eligible": 1},
+            selection_row=selection_row,
+            parameters_row=dict(
+                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+            ),
+            region_row={"region_name": "ca1", "n_units": 5},
+            animal_name="L14",
+            date="20240102",
+        )
+    with pytest.raises(ValueError, match="artifact path does not match"):
+        _validate_dpp_encoding_comparison_artifact_link(
+            table=table,
+            result_row={
+                **result_row,
+                "encoding_comparison_path": str(
+                    tmp_path / str(uuid.uuid4()) / "encoding_comparison.parquet"
+                ),
+            },
+            selection_row=selection_row,
+            parameters_row=dict(
+                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+            ),
+            region_row={"region_name": "ca1", "n_units": 5},
+            animal_name="L14",
+            date="20240102",
+        )
+
+
+def test_similarity_input_loader_rejects_stale_tuning_parameters(
+    monkeypatch,
+) -> None:
+    from v1ca1.spyglass import path_specific_place
+
+    curve_id_fields = {
+        "center_to_left": "center_to_left_tuning_curve_id",
+        "center_to_right": "center_to_right_tuning_curve_id",
+        "left_to_center": "left_to_center_tuning_curve_id",
+        "right_to_center": "right_to_center_tuning_curve_id",
+    }
+    curve_ids = {
+        trajectory_type: uuid.uuid4()
+        for trajectory_type in curve_id_fields
+    }
+    key = {
+        "path_specific_place_tuning_similarity_id": uuid.uuid4(),
+        **{
+            field_name: curve_ids[trajectory_type]
+            for trajectory_type, field_name in curve_id_fields.items()
+        },
+        "tuning_similarity_param_name": "correlation",
+        "tuning_similarity_parameters_sha256": provenance_sha256(
+            dict(table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS)
+        ),
+    }
+    curve_results = {
+        curve_id: {
+            "path_specific_place_tuning_curve_id": curve_id,
+            "tuning_curve_path": f"/unused/{trajectory_type}.nc",
+        }
+        for trajectory_type, curve_id in curve_ids.items()
+    }
+    curve_selections = {
+        curve_id: {
+            "path_specific_place_tuning_curve_id": curve_id,
+            "tuning_curve_param_name": "legacy_4cm_unsmoothed",
+            "tuning_curve_parameters_sha256": "0" * 64,
+        }
+        for curve_id in curve_ids.values()
+    }
+    monkeypatch.setitem(
+        _load_tuning_similarity_inputs.__globals__,
+        "_tuning_similarity_selection_row",
+        lambda **kwargs: dict(key),
+    )
+    monkeypatch.setitem(
+        _load_tuning_similarity_inputs.__globals__,
+        "_validate_tuning_curve_artifact_link",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        path_specific_place,
+        "load_path_specific_place_artifact",
+        lambda path: SimpleNamespace(attrs={}),
+    )
+
+    with pytest.raises(ValueError, match="parameters changed after selection"):
+        _load_tuning_similarity_inputs(
+            key=key,
+            parameters_table=_FakeRelation(
+                dict(table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS)
+            ),
+            tuning_curve_parameters_table=_FakeRelation(
+                dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+            ),
+            tuning_curve_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                curve_results,
+            ),
+            tuning_curve_selection_table=_FakeKeyedRelation(
+                "path_specific_place_tuning_curve_id",
+                curve_selections,
+            ),
+            movement_firing_rate_table=object(),
+            movement_firing_rate_selection_table=object(),
+            movement_parameters_table=object(),
+            session_table=object(),
         )
 
 
@@ -748,21 +2749,47 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             artifact_root=None,
         )
 
-    stability_parameters = dict(
-        table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
-    )
-    stability_selection = {
-        **_stability_selection_key(),
-        "task_progression_stability_id": uuid.uuid4(),
-        "task_progression_stability_parameters_sha256": provenance_sha256(
-            stability_parameters
+    tuning_parameters = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    tuning_selection = {
+        **_tuning_curve_selection_key(),
+        "path_specific_place_tuning_curve_id": uuid.uuid4(),
+        "tuning_curve_parameters_sha256": provenance_sha256(
+            tuning_parameters
         ),
     }
     with pytest.raises(ValueError, match="parameters changed after selection"):
-        _make_task_progression_stability_row(
-            key=stability_selection,
+        _make_path_specific_place_tuning_curve_row(
+            key=tuning_selection,
             parameters_table=_FakeRelation(
-                {**stability_parameters, "place_bin_size_cm": 5.0}
+                {**tuning_parameters, "place_bin_size_cm": 5.0}
+            ),
+            epoch_intervals_table=object(),
+            trajectory_intervals_table=object(),
+            position_table=object(),
+            wtrack_graph_table=object(),
+            movement_firing_rate_table=object(),
+            movement_firing_rate_selection_table=object(),
+            movement_parameters_table=object(),
+            session_table=object(),
+            sorted_spikes_group=object(),
+            unit_selection_params=object(),
+            spike_sorting_output=object(),
+            nwbfile_table=object(),
+            artifact_root=None,
+        )
+
+    dpp_selection = {
+        **_dpp_tuning_curve_selection_key(),
+        "dpp_tuning_curve_id": uuid.uuid4(),
+        "tuning_curve_parameters_sha256": provenance_sha256(
+            tuning_parameters
+        ),
+    }
+    with pytest.raises(ValueError, match="parameters changed after selection"):
+        _make_dpp_tuning_curve_row(
+            key=dpp_selection,
+            parameters_table=_FakeRelation(
+                {**tuning_parameters, "place_bin_size_cm": 5.0}
             ),
             epoch_intervals_table=object(),
             trajectory_intervals_table=object(),
@@ -784,13 +2811,18 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     ripple_id = uuid.UUID("11111111-1111-5111-8111-111111111111")
     stability_id = uuid.UUID("22222222-2222-5222-8222-222222222222")
     movement_id = uuid.UUID("33333333-3333-5333-8333-333333333333")
+    tuning_curve_id = uuid.UUID("66666666-6666-5666-8666-666666666666")
     ripple_selection = {"ripple_modulation_id": ripple_id, **_ripple_selection_key()}
     movement_selection = {
         "movement_firing_rate_id": movement_id,
         **_movement_selection_key(),
     }
+    tuning_curve_selection = {
+        "path_specific_place_tuning_curve_id": tuning_curve_id,
+        **_tuning_curve_selection_key(trial_subset="all"),
+    }
     stability_selection = {
-        "task_progression_stability_id": stability_id,
+        "path_specific_place_stability_id": stability_id,
         **_stability_selection_key(),
     }
     calls = []
@@ -833,6 +2865,34 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
             "selected_units_sha256": "a" * 64,
         }
 
+    def tuning_curve_compute(**kwargs):
+        calls.append(("tuning_curve_compute", kwargs))
+        return {
+            "tuning_curve_path": "/analysis/tuning_curve.nc",
+            "n_units": 2,
+            "n_valid_units": 2,
+            "n_trials": 5,
+            "support_duration_s": 12.5,
+            "n_feature_samples": 125,
+            "n_position_bins": 25,
+            "analysis_status": "valid",
+            "selected_units_sha256": "b" * 64,
+        }
+
+    def tuning_curve_register(**kwargs):
+        calls.append(("tuning_curve_register", kwargs))
+        return {
+            "tuning_curve_path": "/analysis/keyed-tuning-curve.nc",
+            "n_units": 2,
+            "n_valid_units": 2,
+            "n_trials": 5,
+            "support_duration_s": 12.5,
+            "n_feature_samples": 125,
+            "n_position_bins": 25,
+            "analysis_status": "valid",
+            "selected_units_sha256": "b" * 64,
+        }
+
     def stability_compute(**kwargs):
         calls.append(("stability_compute", kwargs))
         return {
@@ -860,8 +2920,13 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         if table.__name__ == "MovementFiringRateSelection":
             assert key == {"movement_firing_rate_id": movement_id}
             return dict(movement_selection)
-        if table.__name__ == "TaskProgressionStabilitySelection":
-            assert key == {"task_progression_stability_id": stability_id}
+        if table.__name__ == "PathSpecificPlaceTuningCurveSelection":
+            assert key == {
+                "path_specific_place_tuning_curve_id": tuning_curve_id
+            }
+            return dict(tuning_curve_selection)
+        if table.__name__ == "PathSpecificPlaceStabilitySelection":
+            assert key == {"path_specific_place_stability_id": stability_id}
             return dict(stability_selection)
         raise AssertionError(f"Unexpected fetch from {table.__name__}")
 
@@ -876,14 +2941,19 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
             "ripple_modulation_compute": ripple_compute,
             "ripple_modulation_register_existing": ripple_register,
             "movement_firing_rate_compute": movement_compute,
-            "task_progression_stability_compute": stability_compute,
-            "task_progression_stability_register_existing": stability_register,
+            "path_specific_place_tuning_curve_compute": tuning_curve_compute,
+            "path_specific_place_tuning_curve_register_existing": (
+                tuning_curve_register
+            ),
+            "path_specific_place_stability_compute": stability_compute,
+            "path_specific_place_stability_register_existing": stability_register,
         }
     )
 
     ripple = bundle["ripple_modulation"]
     movement = bundle["movement_firing_rate"]
-    stability = bundle["task_progression_stability"]
+    tuning_curve = bundle["path_specific_place_tuning_curve"]
+    stability = bundle["path_specific_place_stability"]
     ripple().make({"ripple_modulation_id": ripple_id})
     ripple.register_existing(
         {"ripple_modulation_id": ripple_id},
@@ -892,9 +2962,15 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         source_v1ca1_git_commit="source-v1-commit",
     )
     movement().make({"movement_firing_rate_id": movement_id})
-    stability().make({"task_progression_stability_id": stability_id})
+    tuning_curve().make({"path_specific_place_tuning_curve_id": tuning_curve_id})
+    tuning_curve.register_existing(
+        {"path_specific_place_tuning_curve_id": tuning_curve_id},
+        tuning_curve_path="old-tuning-curve.nc",
+        source_v1ca1_git_commit="source-v1-commit",
+    )
+    stability().make({"path_specific_place_stability_id": stability_id})
     stability.register_existing(
-        {"task_progression_stability_id": stability_id},
+        {"path_specific_place_stability_id": stability_id},
         stability_path="old-stability.parquet",
         source_v1ca1_git_commit="source-v1-commit",
     )
@@ -903,20 +2979,25 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         "ripple_compute",
         "ripple_register",
         "movement_compute",
+        "tuning_curve_compute",
+        "tuning_curve_register",
         "stability_compute",
         "stability_register",
     ]
     assert calls[0][1]["key"] == ripple_selection
     assert calls[1][1]["key"] == ripple_selection
     assert calls[2][1]["key"] == movement_selection
-    assert calls[3][1]["key"] == stability_selection
-    assert calls[4][1]["key"] == stability_selection
+    assert calls[3][1]["key"] == tuning_curve_selection
+    assert calls[4][1]["key"] == tuning_curve_selection
+    assert calls[5][1]["key"] == stability_selection
+    assert calls[6][1]["key"] == stability_selection
     assert calls[1][1]["overwrite"] is False
     assert calls[4][1]["overwrite"] is False
-    assert all(
-        kwargs["unit_selection_params"] is unit_selection_params
-        for _, kwargs in calls
-    )
+    assert calls[6][1]["overwrite"] is False
+    for call_index in (0, 1, 2, 3, 4):
+        assert calls[call_index][1][
+            "unit_selection_params"
+        ] is unit_selection_params
     assert ripple._insert_calls[0][0]["ripple_modulation_id"] == ripple_id
     assert ripple._insert_calls[1][0]["artifact_origin"] == "registered_existing"
     assert ripple._insert_calls[1][1] == {
@@ -934,8 +3015,27 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         assert calls[call_index][1]["movement_parameters_table"] is bundle[
             "movement_parameters"
         ]
+        assert calls[call_index][1]["parameters_table"] is bundle[
+            "tuning_curve_parameters"
+        ]
+    assert tuning_curve._insert_calls[0][0][
+        "path_specific_place_tuning_curve_id"
+    ] == tuning_curve_id
+    assert (
+        tuning_curve._insert_calls[1][0]["artifact_origin"]
+        == "registered_existing"
+    )
+    assert tuning_curve._insert_calls[1][1] == {
+        "skip_duplicates": False,
+        "allow_direct_insert": True,
+    }
+    for call_index in (5, 6):
+        assert calls[call_index][1]["tuning_curve_table"] is tuning_curve
+        assert calls[call_index][1][
+            "tuning_curve_selection_table"
+        ] is bundle["path_specific_place_tuning_curve_selection"]
     assert stability._insert_calls[0][0][
-        "task_progression_stability_id"
+        "path_specific_place_stability_id"
     ] == stability_id
     assert stability._insert_calls[1][0]["artifact_origin"] == "registered_existing"
     assert stability._insert_calls[1][1] == {
@@ -944,9 +3044,731 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     }
     assert all(
         row["runtime_spyglass_git_commit"] == "runtime-spyglass-commit"
-        for result in (ripple, movement, stability)
+        for result in (ripple, movement, tuning_curve, stability)
         for row, _kwargs in result._insert_calls
     )
+
+
+def test_dpp_result_hooks_receive_fetched_selection(monkeypatch) -> None:
+    selection_id = uuid.UUID("77777777-7777-5777-8777-777777777777")
+    selection = {
+        "dpp_tuning_curve_id": selection_id,
+        **_dpp_tuning_curve_selection_key(),
+        "outbound_trajectory_type": "center_to_left",
+        "inbound_trajectory_type": "right_to_center",
+        "outbound_configuration_name": "center_to_left",
+        "inbound_configuration_name": "right_to_center",
+    }
+    calls = []
+
+    def result_row(path: str) -> dict[str, Any]:
+        return {
+            "tuning_curve_path": path,
+            "n_units": 2,
+            "n_valid_units": 2,
+            "n_trials": 7,
+            "n_outbound_trials": 4,
+            "n_inbound_trials": 3,
+            "support_duration_s": 12.5,
+            "n_feature_samples": 125,
+            "n_position_bins": 41,
+            "analysis_status": "valid",
+            "selected_units_sha256": "d" * 64,
+        }
+
+    def compute(**kwargs):
+        calls.append(("compute", kwargs))
+        return result_row("/analysis/dpp-tuning-curve.nc")
+
+    def register(**kwargs):
+        calls.append(("register", kwargs))
+        return result_row("/analysis/keyed-dpp-tuning-curve.nc")
+
+    def fetch_selection(table, key):
+        assert table.__name__ == "DPPTuningCurveSelection"
+        assert key == {"dpp_tuning_curve_id": selection_id}
+        return dict(selection)
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        fetch_selection,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_spyglass_git_commit",
+        lambda: "runtime-spyglass-commit",
+    )
+    bundle, _, unit_selection_params = _fake_bundle(
+        runtime_hooks={
+            "dpp_tuning_curve_compute": compute,
+            "dpp_tuning_curve_register_existing": register,
+        }
+    )
+    result = bundle["dpp_tuning_curve"]
+
+    result().make({"dpp_tuning_curve_id": selection_id})
+    result.register_existing(
+        {"dpp_tuning_curve_id": selection_id},
+        tuning_curve_path="old-dpp-tuning-curve.nc",
+    )
+
+    assert [name for name, _kwargs in calls] == ["compute", "register"]
+    assert all(call["key"] == selection for _name, call in calls)
+    assert calls[1][1]["overwrite"] is False
+    for _name, call in calls:
+        assert call["parameters_table"] is bundle["tuning_curve_parameters"]
+        assert call["movement_firing_rate_table"] is bundle[
+            "movement_firing_rate"
+        ]
+        assert call["unit_selection_params"] is unit_selection_params
+    assert result._insert_calls[0][0]["dpp_tuning_curve_id"] == selection_id
+    assert result._insert_calls[0][0]["artifact_origin"] == "computed"
+    assert result._insert_calls[1][0]["artifact_origin"] == (
+        "registered_existing"
+    )
+    assert result._insert_calls[1][1] == {
+        "skip_duplicates": False,
+        "allow_direct_insert": True,
+    }
+
+
+def test_path_progression_decoding_make_uses_default_and_injected_hook(
+    monkeypatch,
+) -> None:
+    comparison_id = uuid.UUID("86666666-6666-5666-8666-666666666666")
+    selection = {
+        "path_progression_decoding_comparison_id": comparison_id,
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "cohort_epoch": "08_r4",
+    }
+    default_bundle, _, _ = _fake_bundle()
+    assert default_bundle[
+        "path_progression_decoding_comparison"
+    ]._compute_hook is _make_path_progression_decoding_comparison_row
+
+    calls = []
+
+    def compute(**kwargs):
+        calls.append(kwargs)
+        return {
+            "artifact_manifest_path": "/analysis/manifest.parquet",
+            "decoding_summary_path": "/analysis/decoding-summary.parquet",
+            "unit_eligibility_path": "/analysis/unit-eligibility.parquet",
+            "n_units_input": 5,
+            "n_units_eligible": 3,
+            "n_transfer_pairs_expected": 16,
+            "n_transfer_pairs_valid": 16,
+            "n_decoded_samples": 1000,
+            "analysis_status": "valid",
+            "eligible_units_sha256": "e" * 64,
+        }
+
+    def fetch_selection(table, key):
+        assert table.__name__ == (
+            "PathProgressionDecodingComparisonSelection"
+        )
+        assert key == {
+            "path_progression_decoding_comparison_id": comparison_id
+        }
+        return dict(selection)
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        fetch_selection,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_v1ca1_git_commit",
+        lambda: "runtime-v1ca1-commit",
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_spyglass_git_commit",
+        lambda: "runtime-spyglass-commit",
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_progression_decoding_comparison_compute": compute,
+        }
+    )
+    result = bundle["path_progression_decoding_comparison"]
+
+    result().make(
+        {"path_progression_decoding_comparison_id": comparison_id}
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["key"] == selection
+    assert call["parameters_table"] is bundle[
+        "path_progression_decoding_parameters"
+    ]
+    assert call["region_sorted_spikes_group_table"] is bundle[
+        "region_sorted_spikes_group"
+    ]
+    assert call["movement_firing_rate_table"] is bundle[
+        "movement_firing_rate"
+    ]
+    assert call["stability_table"] is bundle[
+        "path_specific_place_stability"
+    ]
+    assert call["artifact_root"] == Path("/analysis")
+    inserted, insert_kwargs = result._insert_calls[0]
+    assert insert_kwargs == {}
+    assert inserted == {
+        "path_progression_decoding_comparison_id": comparison_id,
+        "artifact_manifest_path": "/analysis/manifest.parquet",
+        "decoding_summary_path": "/analysis/decoding-summary.parquet",
+        "unit_eligibility_path": "/analysis/unit-eligibility.parquet",
+        "n_units_input": 5,
+        "n_units_eligible": 3,
+        "n_transfer_pairs_expected": 16,
+        "n_transfer_pairs_valid": 16,
+        "n_decoded_samples": 1000,
+        "analysis_status": "valid",
+        "eligible_units_sha256": "e" * 64,
+        "runtime_v1ca1_git_commit": "runtime-v1ca1-commit",
+        "runtime_spyglass_git_commit": "runtime-spyglass-commit",
+    }
+    assert "artifact_origin" not in inserted
+    assert not hasattr(result, "register_existing")
+
+
+def test_path_progression_decoding_failed_insert_removes_new_bundle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    comparison_id = uuid.UUID("87777777-7777-5777-8777-777777777777")
+    artifact_dir = tmp_path / str(comparison_id)
+    retained_path = tmp_path / "preexisting.parquet"
+    retained_path.write_bytes(b"keep")
+
+    def compute(**_kwargs):
+        artifact_dir.mkdir()
+        paths = {
+            "artifact_manifest_path": artifact_dir / "manifest.parquet",
+            "decoding_summary_path": artifact_dir / "decoding-summary.parquet",
+            "unit_eligibility_path": artifact_dir / "unit-eligibility.parquet",
+        }
+        for path in paths.values():
+            path.write_bytes(b"new")
+        return {
+            **{name: str(path) for name, path in paths.items()},
+            "n_units_input": 5,
+            "n_units_eligible": 3,
+            "n_transfer_pairs_expected": 16,
+            "n_transfer_pairs_valid": 16,
+            "n_decoded_samples": 1000,
+            "analysis_status": "valid",
+            "eligible_units_sha256": "e" * 64,
+            "_created_artifact_paths": [str(artifact_dir)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {
+            "path_progression_decoding_comparison_id": comparison_id
+        },
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_progression_decoding_comparison_compute": compute,
+        }
+    )
+    result = bundle["path_progression_decoding_comparison"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make(
+            {"path_progression_decoding_comparison_id": comparison_id}
+        )
+
+    assert not artifact_dir.exists()
+    assert retained_path.read_bytes() == b"keep"
+
+
+def test_tuning_similarity_result_hooks_receive_fetched_selection(
+    monkeypatch,
+) -> None:
+    selection_id = uuid.UUID("85555555-5555-5555-8555-555555555555")
+    selection = {
+        "path_specific_place_tuning_similarity_id": selection_id,
+        **_tuning_similarity_selection_key(),
+        "tuning_similarity_parameters_sha256": provenance_sha256(
+            dict(table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS)
+        ),
+    }
+    calls = []
+
+    def result_row(path: str) -> dict[str, Any]:
+        return {
+            "similarity_path": path,
+            "n_units": 3,
+            "n_valid_comparisons": 10,
+            "n_units_with_valid_comparison": 3,
+            "analysis_status": "valid",
+            "selected_units_sha256": "e" * 64,
+        }
+
+    def compute(**kwargs):
+        calls.append(("compute", kwargs))
+        return result_row("/analysis/tuning-similarity.parquet")
+
+    def register(**kwargs):
+        calls.append(("register", kwargs))
+        return {
+            **result_row("/analysis/keyed-tuning-similarity.parquet"),
+            "legacy_artifact_provenance": {"source": "all_units"},
+        }
+
+    def fetch_selection(table, key):
+        assert table.__name__ == "PathSpecificPlaceTuningSimilaritySelection"
+        assert key == {
+            "path_specific_place_tuning_similarity_id": selection_id
+        }
+        return dict(selection)
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        fetch_selection,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_spyglass_git_commit",
+        lambda: "runtime-spyglass-commit",
+    )
+    bundle, _, unit_selection_params = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_tuning_similarity_compute": compute,
+            "path_specific_place_tuning_similarity_register_existing": register,
+        }
+    )
+    result = bundle["path_specific_place_tuning_similarity"]
+
+    result().make(
+        {"path_specific_place_tuning_similarity_id": selection_id}
+    )
+    result.register_existing(
+        {"path_specific_place_tuning_similarity_id": selection_id},
+        similarity_path="old-tuning-similarity-all_units.parquet",
+        source_v1ca1_git_commit="source-v1-commit",
+    )
+
+    assert [name for name, _kwargs in calls] == ["compute", "register"]
+    assert all(call["key"] == selection for _name, call in calls)
+    assert calls[1][1]["overwrite"] is False
+    for _name, call in calls:
+        assert call["parameters_table"] is bundle[
+            "tuning_similarity_parameters"
+        ]
+        assert call["tuning_curve_table"] is bundle[
+            "path_specific_place_tuning_curve"
+        ]
+        assert call["movement_firing_rate_table"] is bundle[
+            "movement_firing_rate"
+        ]
+    assert calls[1][1]["tuning_curve_parameters_table"] is bundle[
+        "tuning_curve_parameters"
+    ]
+    assert calls[1][1]["unit_selection_params"] is unit_selection_params
+    assert result._insert_calls[0][0][
+        "path_specific_place_tuning_similarity_id"
+    ] == selection_id
+    assert result._insert_calls[0][0]["artifact_origin"] == "computed"
+    assert result._insert_calls[1][0]["artifact_origin"] == (
+        "registered_existing"
+    )
+    assert result._insert_calls[1][0]["legacy_artifact_provenance"] == {
+        "source": "all_units"
+    }
+    assert result._insert_calls[1][1] == {
+        "skip_duplicates": False,
+        "allow_direct_insert": True,
+    }
+    assert all(
+        row["runtime_spyglass_git_commit"] == "runtime-spyglass-commit"
+        for row, _kwargs in result._insert_calls
+        )
+
+
+def test_legacy_dpp_encoding_filename_attests_encoded_parameters(
+    tmp_path: Path,
+) -> None:
+    parameters = dict(
+        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+    )
+    expected = (
+        tmp_path
+        / "v1_08_r4_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
+    )
+
+    assert _validate_legacy_dpp_encoding_source_path(
+        expected,
+        region="v1",
+        epoch="08_r4",
+        parameters=parameters,
+    ) == expected
+    with pytest.raises(ValueError, match="expected"):
+        _validate_legacy_dpp_encoding_source_path(
+            tmp_path
+            / "v1_08_r4_cv5_bin0p02s_placebin4cm_encoding_summary.parquet",
+            region="v1",
+            epoch="08_r4",
+            parameters=parameters,
+        )
+
+
+def test_legacy_dpp_unit_resolver_requires_imported_unique_sorting_ids() -> None:
+    loaded = {
+        "unit_ids": [
+            {"spikesorting_merge_id": "merge-a", "unit_id": 10},
+            {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+        ],
+        "unit_metadata": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 10,
+                "sorting_unit_id": 101,
+            },
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 11,
+                "sorting_unit_id": 102,
+            },
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "merge_parent": "ImportedSpikeSorting",
+                "n_selected_units": 2,
+            }
+        ],
+    }
+
+    assert _legacy_dpp_unit_identity_resolver(loaded) == {
+        "101": {"spikesorting_merge_id": "merge-a", "unit_id": "10"},
+        "102": {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
+    }
+    duplicate = {
+        **loaded,
+        "unit_metadata": [
+            loaded["unit_metadata"][0],
+            {**loaded["unit_metadata"][1], "sorting_unit_id": 101},
+        ],
+    }
+    with pytest.raises(ValueError, match="unique sorting_unit_id"):
+        _legacy_dpp_unit_identity_resolver(duplicate)
+    curated = {
+        **loaded,
+        "member_provenance": [
+            {
+                **loaded["member_provenance"][0],
+                "merge_parent": "CurationV1",
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="non-imported"):
+        _legacy_dpp_unit_identity_resolver(curated)
+
+
+def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from v1ca1.spyglass import encoding_comparison
+
+    comparison_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "v1ca1-test-dpp-compute-wiring",
+    )
+    context, loaded_spikes, nwb_inputs = _dpp_encoding_runtime_inputs(
+        comparison_id
+    )
+    calls: dict[str, Any] = {}
+    result_table = object()
+    expected_path = (
+        tmp_path
+        / "L14"
+        / "20240102"
+        / "dpp_encoding_comparison"
+        / "02_r1"
+        / "ca1"
+        / str(comparison_id)
+        / "encoding_comparison.parquet"
+    )
+
+    monkeypatch.setitem(
+        _make_dpp_encoding_comparison_row.__globals__,
+        "_load_dpp_encoding_comparison_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setitem(
+        _make_dpp_encoding_comparison_row.__globals__,
+        "_load_dpp_encoding_comparison_spikes",
+        lambda **kwargs: loaded_spikes,
+    )
+    monkeypatch.setitem(
+        _make_dpp_encoding_comparison_row.__globals__,
+        "_load_dpp_encoding_comparison_nwb_inputs",
+        lambda **kwargs: nwb_inputs,
+    )
+
+    def compute(**kwargs):
+        calls["compute"] = kwargs
+        return {
+            "table": result_table,
+            "n_units_eligible": 2,
+            "n_units_valid": 1,
+            "analysis_status": "valid",
+            "eligible_units_sha256": "d" * 64,
+        }
+
+    def write(table, path):
+        calls["write"] = {"table": table, "path": Path(path)}
+        return Path(path)
+
+    monkeypatch.setattr(
+        encoding_comparison,
+        "compute_selected_dpp_encoding_comparison",
+        compute,
+    )
+    monkeypatch.setattr(
+        encoding_comparison,
+        "write_encoding_comparison_artifact",
+        write,
+    )
+
+    row = _make_dpp_encoding_comparison_row(
+        key={"dpp_encoding_comparison_id": comparison_id},
+        parameters_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        epoch_intervals_table=object(),
+        position_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        stability_table=object(),
+        stability_selection_table=object(),
+        tuning_curve_selection_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        artifact_root=tmp_path,
+    )
+
+    compute_call = calls["compute"]
+    assert {
+        name: compute_call[name]
+        for name in (
+            "n_folds",
+            "evaluation_bin_size_s",
+            "spatial_bin_size_cm",
+            "gaussian_smoothing_sigma_bins",
+            "random_seed",
+            "minimum_movement_firing_rate_hz",
+            "minimum_stability_correlation",
+        )
+    } == {
+        name: context["parameters"][name]
+        for name in (
+            "n_folds",
+            "evaluation_bin_size_s",
+            "spatial_bin_size_cm",
+            "gaussian_smoothing_sigma_bins",
+            "random_seed",
+            "minimum_movement_firing_rate_hz",
+            "minimum_stability_correlation",
+        )
+    }
+    assert compute_call["spikes"] is loaded_spikes["ts_group"]
+    assert compute_call["stable_unit_ids"] is loaded_spikes["unit_ids"]
+    assert compute_call["position"] is nwb_inputs["position"]
+    assert compute_call["trajectory_intervals_by_type"] is nwb_inputs[
+        "trajectory_intervals"
+    ]
+    assert compute_call["graph_inputs_by_configuration"] is nwb_inputs[
+        "graph_inputs"
+    ]
+    assert compute_call["movement_intervals"] is context["movement"][
+        "movement_intervals"
+    ]
+    assert compute_call["movement_firing_rate_table"] is context[
+        "movement"
+    ]["table"]
+    assert compute_call["stability_tables_by_trajectory"] is context[
+        "stability_tables"
+    ]
+    assert compute_call["dpp_encoding_comparison_id"] == comparison_id
+    assert calls["write"] == {"table": result_table, "path": expected_path}
+    assert row == {
+        "encoding_comparison_path": str(expected_path),
+        "n_units_input": 2,
+        "n_units_eligible": 2,
+        "n_units_valid": 1,
+        "analysis_status": "valid",
+        "eligible_units_sha256": "d" * 64,
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": [str(expected_path)],
+    }
+
+
+def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from v1ca1.spyglass import encoding_comparison
+
+    comparison_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "v1ca1-test-dpp-register-wiring",
+    )
+    context, loaded_spikes, _nwb_inputs = _dpp_encoding_runtime_inputs(
+        comparison_id
+    )
+    source_path = (
+        tmp_path
+        / "ca1_02_r1_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
+    )
+    destination = (
+        tmp_path
+        / "analysis"
+        / "L14"
+        / "20240102"
+        / "dpp_encoding_comparison"
+        / "02_r1"
+        / "ca1"
+        / str(comparison_id)
+        / "encoding_comparison.parquet"
+    )
+    base_provenance = {
+        "source_path": str(source_path),
+        "legacy_schema": "encoding_summary",
+    }
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setitem(
+        _register_existing_dpp_encoding_comparison_row.__globals__,
+        "_load_dpp_encoding_comparison_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setitem(
+        _register_existing_dpp_encoding_comparison_row.__globals__,
+        "_load_dpp_encoding_comparison_spikes",
+        lambda **kwargs: loaded_spikes,
+    )
+
+    def register(**kwargs):
+        calls["register"] = kwargs
+        return {
+            "path": destination,
+            "n_units_eligible": 2,
+            "n_units_valid": 1,
+            "analysis_status": "valid",
+            "eligible_units_sha256": "e" * 64,
+            "legacy_artifact_provenance": base_provenance,
+            "_created_artifact_paths": [str(destination)],
+        }
+
+    monkeypatch.setattr(
+        encoding_comparison,
+        "register_existing_encoding_comparison_artifact",
+        register,
+    )
+
+    row = _register_existing_dpp_encoding_comparison_row(
+        key={"dpp_encoding_comparison_id": comparison_id},
+        encoding_comparison_path=source_path,
+        overwrite=False,
+        parameters_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        epoch_intervals_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        stability_table=object(),
+        stability_selection_table=object(),
+        tuning_curve_selection_table=object(),
+        session_table=object(),
+        source_v1ca1_git_commit="source-v1-commit",
+        source_spyglass_git_commit="source-spyglass-commit",
+        artifact_root=tmp_path / "analysis",
+    )
+
+    register_call = calls["register"]
+    assert register_call["source_path"] == source_path
+    assert register_call["destination_path"] == destination
+    assert register_call["unit_identity_resolver"] == {
+        "101": {"spikesorting_merge_id": "merge-a", "unit_id": "10"},
+        "102": {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
+    }
+    assert register_call["spikes"] is loaded_spikes["ts_group"]
+    assert register_call["stable_unit_ids"] is loaded_spikes["unit_ids"]
+    assert register_call["movement_firing_rate_table"] is context[
+        "movement"
+    ]["table"]
+    assert register_call["stability_tables_by_trajectory"] is context[
+        "stability_tables"
+    ]
+    assert register_call["source_v1ca1_git_commit"] == "source-v1-commit"
+    parameter_names = (
+        "n_folds",
+        "evaluation_bin_size_s",
+        "spatial_bin_size_cm",
+        "gaussian_smoothing_sigma_bins",
+        "random_seed",
+        "minimum_movement_firing_rate_hz",
+        "minimum_stability_correlation",
+    )
+    assert {
+        name: register_call[name] for name in parameter_names
+    } == {
+        name: context["parameters"][name] for name in parameter_names
+    }
+
+    expected_provenance = {
+        **base_provenance,
+        "source_spyglass_git_commit": "source-spyglass-commit",
+        "assumed_parameters": context["parameters"],
+        "source_parameter_validation": {
+            "verified_from_filename": [
+                "n_folds",
+                "evaluation_bin_size_s",
+                "spatial_bin_size_cm",
+            ],
+            "recomputed_from_upstream": [
+                "minimum_movement_firing_rate_hz",
+                "minimum_stability_correlation",
+            ],
+            "caller_attested_not_encoded_in_legacy_artifact": [
+                "gaussian_smoothing_sigma_bins",
+                "random_seed",
+            ],
+        },
+        "source_fold_qc_validation": (
+            "not_reconstructable_from_legacy_summary"
+        ),
+    }
+    assert row == {
+        "encoding_comparison_path": str(destination),
+        "n_units_input": 2,
+        "n_units_eligible": 2,
+        "n_units_valid": 1,
+        "analysis_status": "valid",
+        "eligible_units_sha256": "e" * 64,
+        "legacy_artifact_provenance": expected_provenance,
+        "_created_artifact_paths": [str(destination)],
+    }
 
 
 @pytest.mark.parametrize(
@@ -962,10 +3784,34 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
             },
         ),
         (
-            "task_progression_stability",
-            "task_progression_stability_id",
-            "task_progression_stability_register_existing",
+            "path_specific_place_tuning_curve",
+            "path_specific_place_tuning_curve_id",
+            "path_specific_place_tuning_curve_register_existing",
+            {"tuning_curve_path": "old-tuning-curve.nc"},
+        ),
+        (
+            "dpp_tuning_curve",
+            "dpp_tuning_curve_id",
+            "dpp_tuning_curve_register_existing",
+            {"tuning_curve_path": "old-dpp-tuning-curve.nc"},
+        ),
+        (
+            "path_specific_place_tuning_similarity",
+            "path_specific_place_tuning_similarity_id",
+            "path_specific_place_tuning_similarity_register_existing",
+            {"similarity_path": "old-similarity-all_units.parquet"},
+        ),
+        (
+            "path_specific_place_stability",
+            "path_specific_place_stability_id",
+            "path_specific_place_stability_register_existing",
             {"stability_path": "old-stability.parquet"},
+        ),
+        (
+            "dpp_encoding_comparison",
+            "dpp_encoding_comparison_id",
+            "dpp_encoding_comparison_register_existing",
+            {"encoding_comparison_path": "old-encoding.parquet"},
         ),
     ],
 )
@@ -1015,10 +3861,34 @@ def test_register_existing_rejects_overwrite_before_hook(
             },
         ),
         (
-            "task_progression_stability",
-            "task_progression_stability_id",
-            "task_progression_stability_register_existing",
+            "path_specific_place_tuning_curve",
+            "path_specific_place_tuning_curve_id",
+            "path_specific_place_tuning_curve_register_existing",
+            {"tuning_curve_path": "old-tuning-curve.nc"},
+        ),
+        (
+            "dpp_tuning_curve",
+            "dpp_tuning_curve_id",
+            "dpp_tuning_curve_register_existing",
+            {"tuning_curve_path": "old-dpp-tuning-curve.nc"},
+        ),
+        (
+            "path_specific_place_tuning_similarity",
+            "path_specific_place_tuning_similarity_id",
+            "path_specific_place_tuning_similarity_register_existing",
+            {"similarity_path": "old-similarity-all_units.parquet"},
+        ),
+        (
+            "path_specific_place_stability",
+            "path_specific_place_stability_id",
+            "path_specific_place_stability_register_existing",
             {"stability_path": "old-stability.parquet"},
+        ),
+        (
+            "dpp_encoding_comparison",
+            "dpp_encoding_comparison_id",
+            "dpp_encoding_comparison_register_existing",
+            {"encoding_comparison_path": "old-encoding.parquet"},
         ),
     ],
 )
@@ -1096,10 +3966,34 @@ def test_register_existing_preflights_duplicate_before_hook(
             ),
         ),
         (
-            "task_progression_stability",
-            "task_progression_stability_id",
-            "task_progression_stability_compute",
+            "path_specific_place_tuning_curve",
+            "path_specific_place_tuning_curve_id",
+            "path_specific_place_tuning_curve_compute",
+            (("tuning_curve_path", "tuning_curve.nc"),),
+        ),
+        (
+            "dpp_tuning_curve",
+            "dpp_tuning_curve_id",
+            "dpp_tuning_curve_compute",
+            (("tuning_curve_path", "dpp_tuning_curve.nc"),),
+        ),
+        (
+            "path_specific_place_tuning_similarity",
+            "path_specific_place_tuning_similarity_id",
+            "path_specific_place_tuning_similarity_compute",
+            (("similarity_path", "tuning_similarity.parquet"),),
+        ),
+        (
+            "path_specific_place_stability",
+            "path_specific_place_stability_id",
+            "path_specific_place_stability_compute",
             (("stability_path", "stability.parquet"),),
+        ),
+        (
+            "dpp_encoding_comparison",
+            "dpp_encoding_comparison_id",
+            "dpp_encoding_comparison_compute",
+            (("encoding_comparison_path", "encoding_comparison.parquet"),),
         ),
     ],
 )
@@ -1148,6 +4042,42 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
                     "n_units_with_spikes": 1,
                     "movement_interval_count": 2,
                     "movement_duration_s": 5.0,
+                }
+            )
+        if table_key in {
+            "path_specific_place_tuning_curve",
+            "dpp_tuning_curve",
+        }:
+            row.update(
+                {
+                    "n_trials": 3,
+                    "support_duration_s": 5.0,
+                    "n_feature_samples": 50,
+                    "n_position_bins": 25,
+                }
+            )
+        if table_key == "dpp_tuning_curve":
+            row.update(
+                {
+                    "n_outbound_trials": 2,
+                    "n_inbound_trials": 1,
+                }
+            )
+        if table_key == "path_specific_place_tuning_similarity":
+            row.update(
+                {
+                    "n_valid_comparisons": 4,
+                    "n_units_with_valid_comparison": 1,
+                }
+            )
+        if table_key == "dpp_encoding_comparison":
+            row.pop("n_units")
+            row.pop("selected_units_sha256")
+            row.update(
+                {
+                    "n_units_input": 2,
+                    "n_units_eligible": 1,
+                    "eligible_units_sha256": "c" * 64,
                 }
             )
         return row

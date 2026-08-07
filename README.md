@@ -145,7 +145,10 @@ dj.config["custom"] = custom
 tables = activate()  # Explicit schema/table declaration; no data insertion.
 tables["ripple_modulation_parameters"].insert_default()
 tables["movement_parameters"].insert_default()
-tables["task_progression_stability_parameters"].insert_default()
+tables["tuning_curve_parameters"].insert_presets()
+tables["tuning_similarity_parameters"].insert_presets()
+tables["dpp_encoding_comparison_parameters"].insert_presets()
+tables["path_progression_decoding_parameters"].insert_presets()
 ingest_v1ca1_nwb("L1420240611_augmented.nwb", tables=tables)
 ```
 
@@ -192,6 +195,14 @@ unit identity is `(spikesorting_merge_id, unit_id)`; the Pynapple group keys
 used during computation are temporary. Custom tables do not store one row per
 unit.
 
+`RegionSortedSpikesGroup` is an explicitly registered logical view of a
+standard sorting group for one normalized region. Its UUIDv5 freezes source
+membership, unit-label filters, region, and the selected-unit identity digest;
+the row stores only hashes, snapshots, and a unit count. It creates neither
+per-unit database rows nor artifact files. `register_regions()` performs the
+insertion, while `load_spikes()` reloads and verifies the standard sources.
+Importing `v1ca1.spyglass` or calling `activate()` does neither operation.
+
 The implemented table flows are:
 
 ```text
@@ -206,13 +217,54 @@ Position + MovementParameters
     -> MovementFiringRate
 
 TrajectoryIntervals + WTrackGraph + MovementFiringRate
-    + TaskProgressionStabilityParameters
-    -> TaskProgressionStabilitySelection
-    -> TaskProgressionStability
+    + TuningCurveParameters + trial_subset
+    -> PathSpecificPlaceTuningCurveSelection
+    -> PathSpecificPlaceTuningCurve
+
+two same-turn TrajectoryIntervals + their WTrackGraph rows
+    + MovementFiringRate + TuningCurveParameters + trial_subset
+    -> DPPTuningCurveSelection
+    -> DPPTuningCurve
+
+odd PathSpecificPlaceTuningCurve + even PathSpecificPlaceTuningCurve
+    -> PathSpecificPlaceStabilitySelection
+    -> PathSpecificPlaceStability
+
+four matching all-trial PathSpecificPlaceTuningCurve rows
+    + TuningSimilarityParameters
+    -> PathSpecificPlaceTuningSimilaritySelection
+    -> PathSpecificPlaceTuningSimilarity
+
+RegionSortedSpikesGroup + MovementFiringRate
+    + four TrajectoryIntervals + four trajectory WTrackGraph rows
+    + full_w WTrackGraph
+    + four PathSpecificPlaceStability rows backed by
+      legacy_4cm_unsmoothed odd/even curves
+    + DPPEncodingComparisonParameters
+    -> DPPEncodingComparisonSelection
+    -> DPPEncodingComparison
+
+RegionSortedSpikesGroup
+    + target/cohort MovementFiringRate and eight matching stability rows
+    + target four TrajectoryIntervals and four WTrackGraph rows
+    + PathProgressionDecodingParameters
+    -> PathProgressionDecodingComparisonSelection
+    -> PathProgressionDecodingComparison
 ```
 
-The computed tables are named `RippleModulation`, `MovementFiringRate`, and
-`TaskProgressionStability`, without a `Computed` suffix. Each explicit
+Its manuscript preset is five lap-wise folds, 50-ms evaluation bins, 4-cm
+spatial bins, one-bin Gaussian smoothing, random seed 47, movement firing rate
+at least 0.5 Hz, and stability at least 0.5 on at least one trajectory. The
+standalone `task_progression.encoding_comparison` default remains 20 ms; the
+Spyglass preset makes the manuscript-specific 50-ms choice explicit.
+Each trajectory receives a deterministic independent lap shuffle. Bins and
+smoothing are restarted at every concatenated path or DPP block boundary.
+
+The computed tables are named `RippleModulation`, `MovementFiringRate`,
+`PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
+`DPPTuningCurve`, `PathSpecificPlaceStability`,
+`DPPEncodingComparison`, and `PathProgressionDecodingComparison`, without a
+`Computed` suffix. Each explicit
 selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
 to those Manual parameter values and requires a new selection. Results use
@@ -225,9 +277,26 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
 <animal>/<date>/movement_firing_rate/<epoch>/<region>/<uuid>/
     movement_firing_rate.parquet
     movement_intervals.npz
-<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/
+<animal>/<date>/path_specific_place_tuning_curve/<epoch>/<trajectory>/<subset>/<region>/<uuid>/
+    tuning_curve.nc
+<animal>/<date>/dpp_tuning_curve/<epoch>/<turn>/<subset>/<region>/<uuid>/
+    tuning_curve.nc
+<animal>/<date>/path_specific_place_tuning_similarity/<epoch>/<region>/<metric>/<uuid>/
+    similarity.parquet
+<animal>/<date>/path_specific_place_stability/<epoch>/<trajectory>/<region>/<uuid>/
     stability.parquet
+<animal>/<date>/dpp_encoding_comparison/<epoch>/<region>/<uuid>/
+    encoding_comparison.parquet
+<animal>/<date>/path_progression_decoding_comparison/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    unit_eligibility.parquet
+    decoding_summary.parquet
+    cross_path_error_by_position.parquet
+    cross_<family>_<source>_to_<target>_{true,decoded}.npz
 ```
+
+Any explicit `artifact_root` must remain within the stage configured for the
+DataJoint `analysis` store so its paths are valid for `filepath@analysis`.
 
 The canonical `Ripples` source contains speed-gated events detected at the
 2.0 z-score threshold. The default `RippleModulationParameters` validates that
@@ -243,16 +312,86 @@ firing-rate prefilter: a zero-spike unit has a valid 0 Hz rate whenever valid
 movement support exists. Sleep epochs are allowed when the selected Position
 series exists. Its result statuses are `valid`, `no_units`,
 `no_valid_position`, and `no_movement`; the latter two retain one
-undefined-rate QC row per selected unit. `TaskProgressionStability.make()` loads
-these saved artifacts through its upstream `MovementFiringRate` row and does
-not recompute speed, movement support, or firing rates.
+undefined-rate QC row per selected unit.
+`DPPTuningCurve` uses fixed same-turn pairs: `center_to_left` plus
+`right_to_center` for left turns and `center_to_right` plus `left_to_center`
+for right turns. It selects odd/even trials independently within each source
+trajectory and pools normalized, direction-aligned samples and movement
+support before estimating one curve; it does not average two separately
+estimated curves. Both source interval and graph rows remain explicit in the
+selection, and the paired graph paths must have one common physical length for
+the shared centimeter-bin interpretation.
+`PathSpecificPlaceStability.make()` loads the matching persisted odd/even
+tuning curves and their shared upstream `MovementFiringRate` row; it does not
+recompute position linearization, speed, movement support, firing rates, or
+tuning curves.
+`PathSpecificPlaceTuningSimilarity` has one result row per session, epoch,
+region, tuning configuration, metric, and matching set of four all-trial path
+curves. Its metrics are `correlation`, `absolute_overlap`, and
+`shape_overlap`; the Parquet contains four unit/path-pair rows per unit. It
+copies upstream `movement_firing_rate_hz` without filtering. DPPI,
+significance, and cross-epoch aggregation remain downstream figure or analysis
+logic.
 
-Calling `make()` computes from NWB and the selected sorting group. Calling
-`register_existing()` on `RippleModulation` or `TaskProgressionStability`
-validates and partitions a compatible legacy artifact, copies it into the same
-canonical output layout, and inserts the result without rerunning the analysis.
+`DPPEncodingComparison` refits training-fold tuning curves for
+four fixed Poisson encoding models: path-specific physical place,
+direction-independent absolute place on the full W-track, same-turn DPP, and
+start-to-goal distance-to-reward. Its eligible-unit Parquet stores persistent
+identity, movement rate and four stability values, total held-out log
+likelihoods in nats, null-relative information in bits per spike,
+DPP-minus-alternative contrasts, and explicit model/unit QC. Units remain rows
+in the artifact, not rows in DataJoint.
+
+`PathProgressionDecodingComparison` computes the fixed 16 directed
+cross-path Bayesian transfers on normalized start-to-goal path progression.
+Each result is one target epoch and region, while an explicit cohort epoch
+defines a symmetric target/cohort intersection of eligible persistent units.
+The default preset uses 20-ms decode bins, a four-bin sliding window, 4-cm
+path bins, movement firing rate at least 0.5 Hz in both epochs, and no
+stability threshold. Supplying a stability threshold additionally requires at
+least one passing trajectory in each epoch. This auditable shared-population
+policy intentionally differs from the legacy manuscript workflow, which
+selected units from the dark epoch alone. Path-specific-place decoding is not
+bundled because the legacy workflow used a different unit population for it.
+The selected stability rows remain explicit dependencies when filtering is
+disabled so their values can be retained for audit without affecting the
+cohort. Persistent sorting-output/unit identities—not ephemeral Pynapple
+group keys—link units across epochs and reloads. Eligibility, transfer, and
+fixed output-summary rules are independently hashed into the selection.
+The Pynapple NPZ timestamps are seconds on the augmented NWB's ephys timestamp
+reference; true and decoded time grids are allowed to differ.
+
+Calling `make()` computes from its selected upstream rows and artifacts; the
+source-loading stages ultimately derive their data from NWB and the selected
+sorting group. Calling
+`register_existing()` on `RippleModulation`, `PathSpecificPlaceTuningCurve`,
+`PathSpecificPlaceTuningSimilarity`, `DPPTuningCurve`,
+`PathSpecificPlaceStability`, or `DPPEncodingComparison` validates a
+compatible legacy artifact, copies
+the selected content into the canonical output layout, and inserts the result
+without rerunning the analysis. Legacy tuning-curve
+registration is limited to the all-trial, 4 cm unsmoothed preset; odd/even
+curves are computed from NWB. Registration additionally requires the legacy
+cleaned-DLC `head_position`, its 10-sample offset, and the 4.0 cm/s,
+0.1 s-sigma movement defaults; selections with other inputs are recomputed.
+Similarity registration accepts a complete `*_all_units.parquet` source only
+for the legacy 4 cm unsmoothed, all-trial tuning configuration and a matching
+imported sorting selection.
+`DPPEncodingComparison.register_existing()` validates one legacy
+epoch summary against its regional group, movement rates, four stability
+inputs, parameters, and exact eligible-unit set, converts per-spike legacy
+likelihoods to total nats, and copies the canonical Parquet into the path above.
+The legacy filename must verify the fold count and temporal/spatial bins;
+smoothing, random seed, and fold-level QC are not encoded, so registration
+records those limitations explicitly rather than claiming they were
+reconstructed from the file.
+It does not register legacy cross-epoch joins or cross-trajectory-transfer
+outputs.
 `MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle
-atomically. Legacy registration is limited to matching imported sorting
+atomically. `PathProgressionDecodingComparison` is also compute-only: legacy
+decoding NPZs omit selected-unit identities, sorting and graph snapshots,
+parameters, and output hashes, so they cannot support scientifically exact
+`register_existing()` validation. Legacy registration elsewhere is limited to matching imported sorting
 outputs. It requires the complete canonical Parquet schemas and, for
 peri-ripple firing rates, one complete common time grid per unit. Canonical
 empty artifacts are retained as `no_units` or `no_ripples` terminal results.

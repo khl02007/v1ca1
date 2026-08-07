@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from datetime import date, datetime
 import hashlib
 import math
-from numbers import Real
+from numbers import Integral, Real
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -29,6 +29,17 @@ SOURCE_TABLE_KEYS = (
     "wtrack_graph",
     "spike_sorting_figurl",
 )
+
+_LEGACY_TUNING_POSITION_SERIES_NAME = "head_position"
+_LEGACY_TUNING_POSITION_ROLE = "head"
+_LEGACY_TUNING_POSITION_OFFSET_SAMPLES = 10
+_DPP_TRAJECTORY_TYPES = (
+    "center_to_left",
+    "center_to_right",
+    "left_to_center",
+    "right_to_center",
+)
+_DPP_FULL_GRAPH_CONFIGURATION_NAME = "full_w"
 
 
 def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -104,31 +115,229 @@ def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-def _validate_stability_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and copy one TaskProgressionStability parameter row."""
-    expected = set(table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS)
+def _validate_tuning_curve_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one shared tuning-curve binning and smoothing parameter row."""
+    expected = set(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
     missing = sorted(expected.difference(row))
     extra = sorted(set(row).difference(expected))
     if missing or extra:
         raise ValueError(
-            "TaskProgressionStability parameters must have exactly the declared "
+            "TuningCurve parameters must have exactly the declared "
             f"fields; missing={missing!r}, extra={extra!r}."
         )
     values = dict(row)
-    name = values["task_progression_stability_param_name"]
+    name = values["tuning_curve_param_name"]
     if not isinstance(name, str) or not name.strip() or len(name) > 64:
         raise ValueError(
-            "task_progression_stability_param_name must be a non-empty string "
+            "tuning_curve_param_name must be a non-empty string "
             "of at most 64 characters."
         )
-    for field_name in ("place_bin_size_cm",):
+    mode = values["binning_mode"]
+    if mode not in {"bin_size_cm", "bin_count"}:
+        raise ValueError("binning_mode must be 'bin_size_cm' or 'bin_count'.")
+
+    sigma = values["gaussian_smoothing_sigma_bins"]
+    if isinstance(sigma, bool) or not isinstance(sigma, Real):
+        raise TypeError("gaussian_smoothing_sigma_bins must be one numeric scalar.")
+    sigma = float(sigma)
+    if not math.isfinite(sigma) or sigma < 0:
+        raise ValueError(
+            "gaussian_smoothing_sigma_bins must be finite and non-negative."
+        )
+    values["gaussian_smoothing_sigma_bins"] = sigma
+
+    bin_size = values["place_bin_size_cm"]
+    bin_count = values["position_bin_count"]
+    if mode == "bin_size_cm":
+        if isinstance(bin_size, bool) or not isinstance(bin_size, Real):
+            raise TypeError("place_bin_size_cm must be one numeric scalar.")
+        bin_size = float(bin_size)
+        if not math.isfinite(bin_size) or bin_size <= 0:
+            raise ValueError("place_bin_size_cm must be positive and finite.")
+        if bin_count is not None:
+            raise ValueError(
+                "position_bin_count must be NULL when binning_mode is bin_size_cm."
+            )
+        values["place_bin_size_cm"] = bin_size
+    else:
+        if bin_size is not None:
+            raise ValueError(
+                "place_bin_size_cm must be NULL when binning_mode is bin_count."
+            )
+        if isinstance(bin_count, bool) or not isinstance(bin_count, Integral):
+            raise TypeError("position_bin_count must be one integer scalar.")
+        if int(bin_count) <= 0 or int(bin_count) > 65_535:
+            raise ValueError(
+                "position_bin_count must be a positive integer no larger than 65535."
+            )
+        values["position_bin_count"] = int(bin_count)
+    return values
+
+
+def _validate_tuning_similarity_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one fixed path-specific tuning-similarity metric row."""
+    expected = set(table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "TuningSimilarity parameters must have exactly the declared "
+            f"fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["tuning_similarity_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "tuning_similarity_param_name must be a non-empty string "
+            "of at most 64 characters."
+        )
+    metric = values["similarity_metric"]
+    supported_metrics = {
+        parameters["similarity_metric"]
+        for parameters in table_specs.TUNING_SIMILARITY_PARAMETER_PRESETS
+    }
+    if metric not in supported_metrics:
+        raise ValueError(
+            f"similarity_metric must be one of {sorted(supported_metrics)!r}."
+        )
+    return values
+
+
+def _validate_dpp_encoding_comparison_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one four-model DPP encoding-comparison parameter row."""
+    expected = set(table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "DPPEncodingComparison parameters must have exactly the declared "
+            f"fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["dpp_encoding_comparison_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "dpp_encoding_comparison_param_name must be a non-empty string "
+            "of at most 64 characters."
+        )
+
+    n_folds = values["n_folds"]
+    if isinstance(n_folds, bool) or not isinstance(n_folds, Integral):
+        raise TypeError("n_folds must be one integer scalar.")
+    n_folds = int(n_folds)
+    if n_folds < 2 or n_folds > 65_535:
+        raise ValueError("n_folds must be between 2 and 65535.")
+    values["n_folds"] = n_folds
+
+    random_seed = values["random_seed"]
+    if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+        raise TypeError("random_seed must be one integer scalar.")
+    random_seed = int(random_seed)
+    if random_seed < 0 or random_seed > 2_147_483_647:
+        raise ValueError("random_seed must fit a non-negative signed 32-bit integer.")
+    values["random_seed"] = random_seed
+
+    for field_name in (
+        "evaluation_bin_size_s",
+        "spatial_bin_size_cm",
+        "gaussian_smoothing_sigma_bins",
+        "minimum_movement_firing_rate_hz",
+        "minimum_stability_correlation",
+    ):
         value = values[field_name]
         if isinstance(value, bool) or not isinstance(value, Real):
             raise TypeError(f"{field_name} must be one numeric scalar.")
         value = float(value)
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{field_name} must be positive and finite.")
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
         values[field_name] = value
+    for field_name in ("evaluation_bin_size_s", "spatial_bin_size_cm"):
+        if values[field_name] <= 0.0:
+            raise ValueError(f"{field_name} must be positive.")
+    for field_name in (
+        "gaussian_smoothing_sigma_bins",
+        "minimum_movement_firing_rate_hz",
+    ):
+        if values[field_name] < 0.0:
+            raise ValueError(f"{field_name} must be non-negative.")
+    if not -1.0 <= values["minimum_stability_correlation"] <= 1.0:
+        raise ValueError(
+            "minimum_stability_correlation must be between -1 and 1."
+        )
+    return values
+
+
+def _validate_path_progression_decoding_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one path-progression Bayesian-decoding parameter row."""
+    expected = set(
+        table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "PathProgressionDecoding parameters must have exactly the "
+            f"declared fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["path_progression_decoding_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "path_progression_decoding_param_name must be a non-empty "
+            "string of at most 64 characters."
+        )
+
+    for field_name, minimum in (("sliding_window_size_bins", 1),):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise TypeError(f"{field_name} must be one integer scalar.")
+        value = int(value)
+        if value < minimum or value > 65_535:
+            raise ValueError(
+                f"{field_name} must be between {minimum} and 65535."
+            )
+        values[field_name] = value
+
+    for field_name in (
+        "decoding_bin_size_s",
+        "spatial_bin_size_cm",
+        "minimum_movement_firing_rate_hz",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
+        values[field_name] = value
+    for field_name in ("decoding_bin_size_s", "spatial_bin_size_cm"):
+        if values[field_name] <= 0.0:
+            raise ValueError(f"{field_name} must be positive.")
+    if values["minimum_movement_firing_rate_hz"] < 0.0:
+        raise ValueError(
+            "minimum_movement_firing_rate_hz must be non-negative."
+        )
+
+    stability = values["minimum_stability_correlation"]
+    if stability is not None:
+        if isinstance(stability, bool) or not isinstance(stability, Real):
+            raise TypeError(
+                "minimum_stability_correlation must be NULL or one numeric scalar."
+            )
+        stability = float(stability)
+        if not math.isfinite(stability) or not -1.0 <= stability <= 1.0:
+            raise ValueError(
+                "minimum_stability_correlation must be NULL or finite within [-1, 1]."
+            )
+        values["minimum_stability_correlation"] = stability
     return values
 
 
@@ -165,6 +374,51 @@ def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     if values["speed_smoothing_sigma_s"] <= 0:
         raise ValueError("speed_smoothing_sigma_s must be positive.")
     return values
+
+
+def _validate_legacy_tuning_curve_inputs(
+    *,
+    position_row: Mapping[str, Any],
+    movement_parameters: Mapping[str, Any],
+) -> None:
+    """Require inputs compatible with the legacy tuning-curve workflow."""
+    expected_position = {
+        "position_series_name": _LEGACY_TUNING_POSITION_SERIES_NAME,
+        "position_role": _LEGACY_TUNING_POSITION_ROLE,
+        "analysis_start_offset_samples": (
+            _LEGACY_TUNING_POSITION_OFFSET_SAMPLES
+        ),
+    }
+    for field_name, expected_value in expected_position.items():
+        if str(position_row.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "Legacy tuning-curve registration requires cleaned DLC head "
+                f"position with a 10-sample analysis offset; {field_name}="
+                f"{position_row.get(field_name)!r}."
+            )
+
+    expected_movement = table_specs.DEFAULT_MOVEMENT_PARAMETERS
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+    ):
+        actual = movement_parameters.get(field_name)
+        expected = expected_movement[field_name]
+        try:
+            matches = math.isclose(
+                float(actual),
+                float(expected),
+                rel_tol=1e-10,
+                abs_tol=1e-12,
+            )
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            raise ValueError(
+                "Legacy tuning-curve registration requires the legacy "
+                f"movement defaults; {field_name}={actual!r}, expected "
+                f"{expected!r}."
+            )
 
 
 def _fetch1_dict(table: Any, key: Mapping[str, Any]) -> dict[str, Any]:
@@ -240,13 +494,22 @@ def _file_sha256(path: Path) -> str:
 
 
 def _remove_created_artifacts(paths: list[str]) -> None:
-    """Remove newly created files and their now-empty immediate directory."""
+    """Remove newly created files or UUID bundle directories after failure."""
     parents: set[Path] = set()
     for raw_path in paths:
         path = Path(raw_path)
         parents.add(path.parent)
         if path.is_file():
             path.unlink()
+        elif path.is_dir() and not path.is_symlink():
+            import shutil
+            import uuid
+
+            try:
+                uuid.UUID(path.name)
+            except ValueError:
+                continue
+            shutil.rmtree(path)
     for parent in parents:
         try:
             parent.rmdir()
@@ -537,7 +800,7 @@ def _movement_firing_rate_selection_row(
     }
 
 
-def _stability_selection_row(
+def _path_specific_place_tuning_curve_selection_row(
     *,
     key: Mapping[str, Any],
     epoch_intervals_table: Any,
@@ -547,7 +810,7 @@ def _stability_selection_row(
     movement_firing_rate_selection_table: Any,
     parameters_table: Any,
 ) -> dict[str, Any]:
-    """Validate and identify one immutable trajectory-stability selection."""
+    """Validate and identify one immutable path-specific tuning selection."""
     from v1ca1.spyglass.selection import selection_uuid
 
     movement_key = {
@@ -562,47 +825,1081 @@ def _stability_selection_row(
         supplied = key.get(field_name, movement_selection[field_name])
         if str(supplied) != str(movement_selection[field_name]):
             raise ValueError(
-                "TaskProgressionStability and MovementFiringRate must select "
+                "PathSpecificPlaceTuningCurve and MovementFiringRate must select "
                 f"the same {field_name}."
             )
+    trial_subset = str(key["trial_subset"])
+    if trial_subset not in {"all", "odd", "even"}:
+        raise ValueError("trial_subset must be 'all', 'odd', or 'even'.")
     natural_key = {
         "nwb_file_name": movement_selection["nwb_file_name"],
         "epoch": movement_selection["epoch"],
         "trajectory_type": key["trajectory_type"],
         "configuration_name": key["configuration_name"],
         "movement_firing_rate_id": key["movement_firing_rate_id"],
-        "task_progression_stability_param_name": key[
-            "task_progression_stability_param_name"
-        ],
+        "tuning_curve_param_name": key["tuning_curve_param_name"],
+        "trial_subset": trial_subset,
     }
     epoch_row = _fetch1_dict(epoch_intervals_table, natural_key)
     _fetch1_dict(trajectory_intervals_table, natural_key)
     graph_row = _fetch1_dict(wtrack_graph_table, natural_key)
-    parameters = _validate_stability_parameter_row(
+    parameters = _validate_tuning_curve_parameter_row(
         _fetch1_dict(parameters_table, natural_key)
     )
     if natural_key["trajectory_type"] != natural_key["configuration_name"]:
         raise ValueError(
-            "TaskProgressionStability requires configuration_name to equal "
+            "PathSpecificPlaceTuningCurve requires configuration_name to equal "
             "trajectory_type."
         )
     if epoch_row.get("epoch_type") not in (None, "run"):
-        raise ValueError("TaskProgressionStability requires a run epoch.")
+        raise ValueError("PathSpecificPlaceTuningCurve requires a run epoch.")
     if graph_row.get("coordinate_unit") != "cm":
-        raise ValueError("TaskProgressionStability graph must use centimeters.")
+        raise ValueError("PathSpecificPlaceTuningCurve graph must use centimeters.")
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
-        field_name="task_progression_stability_parameters_sha256",
+        field_name="tuning_curve_parameters_sha256",
     )
     identity_payload = {**natural_key, **parameter_snapshot}
     return {
-        "task_progression_stability_id": selection_uuid(
-            "TaskProgressionStability",
+        "path_specific_place_tuning_curve_id": selection_uuid(
+            "PathSpecificPlaceTuningCurve",
             identity_payload,
         ),
         **natural_key,
         **parameter_snapshot,
     }
+
+
+def _dpp_tuning_curve_selection_row(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable same-turn DPP selection."""
+    from v1ca1.spyglass.dpp import TURN_TYPES, get_dpp_trajectory_pair
+    from v1ca1.spyglass.selection import selection_uuid
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    for field_name in ("nwb_file_name", "epoch"):
+        supplied = key.get(field_name, movement_selection[field_name])
+        if str(supplied) != str(movement_selection[field_name]):
+            raise ValueError(
+                "DPPTuningCurve and MovementFiringRate must select the same "
+                f"{field_name}."
+            )
+
+    turn_type = str(key["turn_type"])
+    if turn_type not in TURN_TYPES:
+        raise ValueError(f"turn_type must be one of {TURN_TYPES!r}.")
+    trial_subset = str(key["trial_subset"])
+    if trial_subset not in {"all", "odd", "even"}:
+        raise ValueError("trial_subset must be 'all', 'odd', or 'even'.")
+
+    outbound_trajectory, inbound_trajectory = get_dpp_trajectory_pair(turn_type)
+    expected_sources = {
+        "outbound_trajectory_type": outbound_trajectory,
+        "inbound_trajectory_type": inbound_trajectory,
+        "outbound_configuration_name": outbound_trajectory,
+        "inbound_configuration_name": inbound_trajectory,
+    }
+    for field_name, expected_value in expected_sources.items():
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                f"DPPTuningCurve {field_name} is fixed by turn_type="
+                f"{turn_type!r} and must equal {expected_value!r}."
+            )
+
+    nwb_file_name = movement_selection["nwb_file_name"]
+    epoch = movement_selection["epoch"]
+    source_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+    }
+    epoch_row = _fetch1_dict(epoch_intervals_table, source_key)
+    for trajectory_type in (outbound_trajectory, inbound_trajectory):
+        _fetch1_dict(
+            trajectory_intervals_table,
+            {**source_key, "trajectory_type": trajectory_type},
+        )
+    graph_rows = [
+        _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": configuration_name,
+            },
+        )
+        for configuration_name in (
+            outbound_trajectory,
+            inbound_trajectory,
+        )
+    ]
+    parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {"tuning_curve_param_name": key["tuning_curve_param_name"]},
+        )
+    )
+    if epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("DPPTuningCurve requires a run epoch.")
+    if any(row.get("coordinate_unit") != "cm" for row in graph_rows):
+        raise ValueError("DPPTuningCurve graphs must use centimeters.")
+
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        **expected_sources,
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        "tuning_curve_param_name": key["tuning_curve_param_name"],
+        "turn_type": turn_type,
+        "trial_subset": trial_subset,
+    }
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="tuning_curve_parameters_sha256",
+    )
+    identity_payload = {**natural_key, **parameter_snapshot}
+    return {
+        "dpp_tuning_curve_id": selection_uuid(
+            "DPPTuningCurve",
+            identity_payload,
+        ),
+        **natural_key,
+        **parameter_snapshot,
+    }
+
+
+def _stability_selection_row(
+    *,
+    key: Mapping[str, Any],
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one odd/even path-specific curve pair."""
+    from v1ca1.spyglass.selection import selection_uuid
+
+    curve_ids = {
+        subset: key[f"{subset}_path_specific_place_tuning_curve_id"]
+        for subset in ("odd", "even")
+    }
+    curve_results: dict[str, dict[str, Any]] = {}
+    curve_selections: dict[str, dict[str, Any]] = {}
+    for subset, curve_id in curve_ids.items():
+        curve_key = {"path_specific_place_tuning_curve_id": curve_id}
+        curve_results[subset] = _fetch1_dict(tuning_curve_table, curve_key)
+        curve_selections[subset] = _fetch1_dict(
+            tuning_curve_selection_table,
+            curve_key,
+        )
+        if str(curve_selections[subset].get("trial_subset")) != subset:
+            raise ValueError(
+                "PathSpecificPlaceStability requires matching odd and even "
+                "PathSpecificPlaceTuningCurve rows."
+            )
+
+    shared_fields = (
+        "nwb_file_name",
+        "epoch",
+        "trajectory_type",
+        "configuration_name",
+        "movement_firing_rate_id",
+        "tuning_curve_param_name",
+        "tuning_curve_parameters_sha256",
+    )
+    for field_name in shared_fields:
+        if str(curve_selections["odd"].get(field_name)) != str(
+            curve_selections["even"].get(field_name)
+        ):
+            raise ValueError(
+                "Odd and even PathSpecificPlaceTuningCurve rows must share "
+                f"the same {field_name}."
+            )
+    if str(curve_results["odd"].get("selected_units_sha256")) != str(
+        curve_results["even"].get("selected_units_sha256")
+    ):
+        raise ValueError(
+            "Odd and even PathSpecificPlaceTuningCurve rows must contain the "
+            "same selected units."
+        )
+
+    identity_payload = {
+        "odd_path_specific_place_tuning_curve_id": curve_ids["odd"],
+        "even_path_specific_place_tuning_curve_id": curve_ids["even"],
+    }
+    return {
+        "path_specific_place_stability_id": selection_uuid(
+            "PathSpecificPlaceStability",
+            identity_payload,
+        ),
+        **identity_payload,
+    }
+
+
+def _tuning_similarity_selection_row(
+    *,
+    key: Mapping[str, Any],
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable four-path similarity selection."""
+    from v1ca1.spyglass.selection import selection_uuid
+
+    curve_id_fields = {
+        "center_to_left": "center_to_left_tuning_curve_id",
+        "center_to_right": "center_to_right_tuning_curve_id",
+        "left_to_center": "left_to_center_tuning_curve_id",
+        "right_to_center": "right_to_center_tuning_curve_id",
+    }
+    curve_results: dict[str, dict[str, Any]] = {}
+    curve_selections: dict[str, dict[str, Any]] = {}
+    curve_ids: dict[str, Any] = {}
+    for trajectory_type, field_name in curve_id_fields.items():
+        curve_id = key[field_name]
+        curve_key = {"path_specific_place_tuning_curve_id": curve_id}
+        curve_results[trajectory_type] = _fetch1_dict(
+            tuning_curve_table,
+            curve_key,
+        )
+        curve_selections[trajectory_type] = _fetch1_dict(
+            tuning_curve_selection_table,
+            curve_key,
+        )
+        selection = curve_selections[trajectory_type]
+        if str(selection.get("trajectory_type")) != trajectory_type:
+            raise ValueError(
+                "PathSpecificPlaceTuningSimilarity curve aliases must match "
+                f"their trajectory types; {field_name} selected "
+                f"{selection.get('trajectory_type')!r}."
+            )
+        if str(selection.get("configuration_name")) != trajectory_type:
+            raise ValueError(
+                "PathSpecificPlaceTuningSimilarity requires each graph "
+                "configuration to match its trajectory type."
+            )
+        if str(selection.get("trial_subset")) != "all":
+            raise ValueError(
+                "PathSpecificPlaceTuningSimilarity requires four all-trial "
+                "PathSpecificPlaceTuningCurve rows."
+            )
+        curve_ids[field_name] = curve_id
+
+    reference_trajectory = "center_to_left"
+    reference_selection = curve_selections[reference_trajectory]
+    reference_result = curve_results[reference_trajectory]
+    shared_selection_fields = (
+        "nwb_file_name",
+        "epoch",
+        "movement_firing_rate_id",
+        "tuning_curve_param_name",
+        "tuning_curve_parameters_sha256",
+    )
+    for trajectory_type, selection in curve_selections.items():
+        for field_name in shared_selection_fields:
+            if str(selection.get(field_name)) != str(
+                reference_selection.get(field_name)
+            ):
+                raise ValueError(
+                    "PathSpecificPlaceTuningSimilarity curves must share "
+                    f"the same {field_name}; mismatch for {trajectory_type!r}."
+                )
+        result = curve_results[trajectory_type]
+        for field_name in (
+            "selected_units_sha256",
+            "n_units",
+            "n_position_bins",
+        ):
+            if str(result.get(field_name)) != str(reference_result.get(field_name)):
+                raise ValueError(
+                    "PathSpecificPlaceTuningSimilarity curves must share "
+                    f"the same {field_name}; mismatch for {trajectory_type!r}."
+                )
+
+    parameters = _validate_tuning_similarity_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "tuning_similarity_param_name": key[
+                    "tuning_similarity_param_name"
+                ]
+            },
+        )
+    )
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="tuning_similarity_parameters_sha256",
+    )
+    natural_key = {
+        **curve_ids,
+        "tuning_similarity_param_name": parameters[
+            "tuning_similarity_param_name"
+        ],
+        **parameter_snapshot,
+    }
+    return {
+        "path_specific_place_tuning_similarity_id": selection_uuid(
+            "PathSpecificPlaceTuningSimilarity",
+            natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _dpp_encoding_comparison_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable four-model encoding selection."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    region_key = {
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ]
+    }
+    region_row = _fetch1_dict(region_sorted_spikes_group_table, region_key)
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    if str(movement_result.get("analysis_status")) != "valid":
+        raise ValueError(
+            "DPPEncodingComparison requires a valid MovementFiringRate row."
+        )
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "RegionSortedSpikesGroup and MovementFiringRate must share "
+                f"the same {field_name}."
+            )
+    if str(region_row.get("region_name")) != str(
+        movement_selection.get("region")
+    ):
+        raise ValueError(
+            "RegionSortedSpikesGroup and MovementFiringRate must select the "
+            "same region."
+        )
+    for field_name in (
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "RegionSortedSpikesGroup and MovementFiringRate must share "
+                f"the same frozen {field_name}."
+            )
+    if str(region_row.get("selected_units_sha256")) != str(
+        movement_result.get("selected_units_sha256")
+    ):
+        raise ValueError(
+            "RegionSortedSpikesGroup and MovementFiringRate must contain the "
+            "same persistent units."
+        )
+    if int(region_row.get("n_units", -1)) != int(
+        movement_result.get("n_units", -2)
+    ):
+        raise ValueError(
+            "RegionSortedSpikesGroup and MovementFiringRate unit counts disagree."
+        )
+
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    for field_name, expected_value in (
+        ("nwb_file_name", nwb_file_name),
+        ("epoch", epoch),
+    ):
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                "DPPEncodingComparison supplied source does not match its "
+                f"MovementFiringRate: {field_name}."
+            )
+    epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    if epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("DPPEncodingComparison requires a run epoch.")
+
+    parameters = _validate_dpp_encoding_comparison_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "dpp_encoding_comparison_param_name": key[
+                    "dpp_encoding_comparison_param_name"
+                ]
+            },
+        )
+    )
+    source_key = {"nwb_file_name": nwb_file_name, "epoch": epoch}
+    source_fields: dict[str, Any] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        supplied_trajectory = str(key.get(trajectory_field, trajectory_type))
+        if supplied_trajectory != trajectory_type:
+            raise ValueError(
+                f"DPPEncodingComparison {trajectory_field} must equal "
+                f"{trajectory_type!r}."
+            )
+        trajectory_row = _fetch1_dict(
+            trajectory_intervals_table,
+            {**source_key, "trajectory_type": trajectory_type},
+        )
+        if int(trajectory_row.get("interval_count", -1)) < parameters["n_folds"]:
+            raise ValueError(
+                f"DPPEncodingComparison requires at least {parameters['n_folds']} "
+                f"laps for {trajectory_type!r}."
+            )
+        configuration_field = f"{trajectory_type}_configuration_name"
+        supplied_configuration = str(
+            key.get(configuration_field, trajectory_type)
+        )
+        if supplied_configuration != trajectory_type:
+            raise ValueError(
+                f"DPPEncodingComparison {configuration_field} must equal "
+                f"{trajectory_type!r}."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if graph_row.get("coordinate_unit") != "cm":
+            raise ValueError("DPPEncodingComparison graphs must use centimeters.")
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    full_w_name = str(
+        key.get(
+            "full_w_configuration_name",
+            _DPP_FULL_GRAPH_CONFIGURATION_NAME,
+        )
+    )
+    if full_w_name != _DPP_FULL_GRAPH_CONFIGURATION_NAME:
+        raise ValueError(
+            "DPPEncodingComparison full_w_configuration_name must equal "
+            f"{_DPP_FULL_GRAPH_CONFIGURATION_NAME!r}."
+        )
+    full_w_row = _fetch1_dict(
+        wtrack_graph_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": full_w_name,
+        },
+    )
+    if full_w_row.get("coordinate_unit") != "cm":
+        raise ValueError("DPPEncodingComparison graphs must use centimeters.")
+    source_fields["full_w_configuration_name"] = full_w_name
+
+    stability_fields: dict[str, Any] = {}
+    legacy_tuning_parameters_sha256 = provenance_sha256(
+        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    )
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        field_name = f"{trajectory_type}_stability_id"
+        stability_id = key[field_name]
+        stability_key = {
+            "path_specific_place_stability_id": stability_id
+        }
+        stability_result = _fetch1_dict(stability_table, stability_key)
+        stability_selection = _fetch1_dict(
+            stability_selection_table,
+            stability_key,
+        )
+        if str(stability_result.get("selected_units_sha256")) != str(
+            movement_result.get("selected_units_sha256")
+        ):
+            raise ValueError(
+                "DPPEncodingComparison stability and movement rows must "
+                "contain the same persistent units."
+            )
+        if int(stability_result.get("n_units", -1)) != int(
+            movement_result.get("n_units", -2)
+        ):
+            raise ValueError(
+                "DPPEncodingComparison stability and movement rows must "
+                "contain the same unit count."
+            )
+        if str(stability_result.get("analysis_status")) not in {
+            "valid",
+            "no_valid_units",
+        }:
+            raise ValueError(
+                "DPPEncodingComparison stability inputs must be valid or "
+                "no_valid_units when their MovementFiringRate is valid."
+            )
+        for subset in ("odd", "even"):
+            curve_id = stability_selection[
+                f"{subset}_path_specific_place_tuning_curve_id"
+            ]
+            curve_selection = _fetch1_dict(
+                tuning_curve_selection_table,
+                {"path_specific_place_tuning_curve_id": curve_id},
+            )
+            expected = {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+                "configuration_name": trajectory_type,
+                "movement_firing_rate_id": key["movement_firing_rate_id"],
+                "tuning_curve_param_name": (
+                    table_specs.LEGACY_TUNING_CURVE_PARAMETERS[
+                        "tuning_curve_param_name"
+                    ]
+                ),
+                "tuning_curve_parameters_sha256": (
+                    legacy_tuning_parameters_sha256
+                ),
+                "trial_subset": subset,
+            }
+            for expected_field, expected_value in expected.items():
+                if str(curve_selection.get(expected_field)) != str(
+                    expected_value
+                ):
+                    raise ValueError(
+                        "DPPEncodingComparison stability input does not match "
+                        f"its {trajectory_type!r} slot: {expected_field}."
+                    )
+        stability_fields[field_name] = stability_id
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="dpp_encoding_comparison_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        **source_fields,
+        **stability_fields,
+        "dpp_encoding_comparison_param_name": parameters[
+            "dpp_encoding_comparison_param_name"
+        ],
+        **parameter_snapshot,
+    }
+    return {
+        "dpp_encoding_comparison_id": selection_uuid(
+            "DPPEncodingComparison",
+            natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _path_progression_decoding_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable shared-cohort decoder selection."""
+    from v1ca1.spyglass.decoding_comparison import TRANSFER_SPEC_SHA256
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    region_key = {
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ]
+    }
+    region_row = _fetch1_dict(region_sorted_spikes_group_table, region_key)
+    parameters = _validate_path_progression_decoding_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "path_progression_decoding_param_name": key[
+                    "path_progression_decoding_param_name"
+                ]
+            },
+        )
+    )
+
+    movement_sources: dict[str, dict[str, Any]] = {}
+    for source_name, id_field in (
+        ("target", "movement_firing_rate_id"),
+        ("cohort", "cohort_movement_firing_rate_id"),
+    ):
+        movement_key = {"movement_firing_rate_id": key[id_field]}
+        result = _fetch1_dict(movement_firing_rate_table, movement_key)
+        selection = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+        movement_status = str(result.get("analysis_status"))
+        expected_movement_status = (
+            "no_units" if int(region_row.get("n_units", -1)) == 0 else "valid"
+        )
+        if movement_status != expected_movement_status:
+            raise ValueError(
+                "PathProgressionDecodingComparison requires target and cohort "
+                "MovementFiringRate rows matching the regional unit count."
+            )
+        for field_name in (
+            "nwb_file_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+        ):
+            if str(region_row.get(field_name)) != str(selection.get(field_name)):
+                raise ValueError(
+                    "RegionSortedSpikesGroup and decoding movement sources "
+                    f"must share {field_name}."
+                )
+        if str(region_row.get("region_name")) != str(selection.get("region")):
+            raise ValueError(
+                "RegionSortedSpikesGroup and decoding movement sources must "
+                "select the same region."
+            )
+        for field_name in (
+            "sorting_group_members_sha256",
+            "unit_filter_params_sha256",
+        ):
+            if str(region_row.get(field_name)) != str(selection.get(field_name)):
+                raise ValueError(
+                    "RegionSortedSpikesGroup and decoding movement sources "
+                    f"must share the frozen {field_name}."
+                )
+        if str(region_row.get("selected_units_sha256")) != str(
+            result.get("selected_units_sha256")
+        ) or int(region_row.get("n_units", -1)) != int(
+            result.get("n_units", -2)
+        ):
+            raise ValueError(
+                "RegionSortedSpikesGroup and decoding movement sources must "
+                "contain the same persistent units."
+            )
+        epoch_row = _fetch1_dict(epoch_intervals_table, selection)
+        if epoch_row.get("epoch_type") not in (None, "run"):
+            raise ValueError(
+                "PathProgressionDecodingComparison requires run epochs."
+            )
+        position_row = _fetch1_dict(position_table, selection)
+        if str(position_row.get("spatial_unit")) != "cm":
+            raise ValueError(
+                "PathProgressionDecodingComparison position must use centimeters."
+            )
+        movement_sources[source_name] = {
+            "id_field": id_field,
+            "result": result,
+            "selection": selection,
+            "epoch_row": epoch_row,
+            "position_row": position_row,
+        }
+
+    target = movement_sources["target"]
+    cohort = movement_sources["cohort"]
+    target_selection = target["selection"]
+    cohort_selection = cohort["selection"]
+    if str(target_selection["nwb_file_name"]) != str(
+        cohort_selection["nwb_file_name"]
+    ):
+        raise ValueError(
+            "Target and cohort movement sources must belong to the same NWB file."
+        )
+    for field_name in (
+        "movement_param_name",
+        "movement_parameters_sha256",
+    ):
+        if str(target_selection.get(field_name)) != str(
+            cohort_selection.get(field_name)
+        ):
+            raise ValueError(
+                "Target and cohort movement sources must share the same "
+                f"{field_name}."
+            )
+    for field_name in ("position_role", "analysis_start_offset_samples"):
+        if str(target["position_row"].get(field_name)) != str(
+            cohort["position_row"].get(field_name)
+        ):
+            raise ValueError(
+                "Target and cohort movement sources must use the same "
+                f"{field_name}."
+            )
+
+    nwb_file_name = str(target_selection["nwb_file_name"])
+    epoch = str(target_selection["epoch"])
+    cohort_epoch = str(cohort_selection["epoch"])
+    for field_name, expected_value in (
+        ("nwb_file_name", nwb_file_name),
+        ("epoch", epoch),
+        ("cohort_epoch", cohort_epoch),
+    ):
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                "PathProgressionDecodingComparison supplied source does not "
+                f"match its movement rows: {field_name}."
+            )
+
+    source_key = {"nwb_file_name": nwb_file_name, "epoch": epoch}
+    source_fields: dict[str, Any] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                f"PathProgressionDecodingComparison {trajectory_field} must "
+                f"equal {trajectory_type!r}."
+            )
+        trajectory_row = _fetch1_dict(
+            trajectory_intervals_table,
+            {**source_key, "trajectory_type": trajectory_type},
+        )
+        if int(trajectory_row.get("interval_count", -1)) < 1:
+            raise ValueError(
+                "PathProgressionDecodingComparison requires at least one "
+                f"lap for {trajectory_type!r}."
+            )
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                "PathProgressionDecodingComparison graph aliases must match "
+                "their trajectory types."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_row.get("coordinate_unit")) != "cm":
+            raise ValueError(
+                "PathProgressionDecodingComparison graphs must use centimeters."
+            )
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    legacy_parameters_sha256 = provenance_sha256(
+        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    )
+    stability_fields: dict[str, Any] = {}
+    for source_name, prefix in (("target", ""), ("cohort", "cohort_")):
+        movement_source = movement_sources[source_name]
+        movement_id = key[movement_source["id_field"]]
+        source_epoch = str(movement_source["selection"]["epoch"])
+        for trajectory_type in _DPP_TRAJECTORY_TYPES:
+            field_name = f"{prefix}{trajectory_type}_stability_id"
+            stability_key = {
+                "path_specific_place_stability_id": key[field_name]
+            }
+            stability_result = _fetch1_dict(stability_table, stability_key)
+            stability_selection = _fetch1_dict(
+                stability_selection_table,
+                stability_key,
+            )
+            if str(stability_result.get("selected_units_sha256")) != str(
+                movement_source["result"].get("selected_units_sha256")
+            ) or int(stability_result.get("n_units", -1)) != int(
+                movement_source["result"].get("n_units", -2)
+            ):
+                raise ValueError(
+                    "PathProgressionDecodingComparison stability and movement "
+                    "sources must contain identical persistent units."
+                )
+            allowed_stability_statuses = (
+                {"no_units"}
+                if int(region_row.get("n_units", -1)) == 0
+                else {"valid", "no_valid_units"}
+            )
+            if str(stability_result.get("analysis_status")) not in (
+                allowed_stability_statuses
+            ):
+                raise ValueError(
+                    "PathProgressionDecodingComparison stability sources must "
+                    "be valid or no_valid_units."
+                )
+            for subset in ("odd", "even"):
+                curve_id = stability_selection[
+                    f"{subset}_path_specific_place_tuning_curve_id"
+                ]
+                curve_selection = _fetch1_dict(
+                    tuning_curve_selection_table,
+                    {"path_specific_place_tuning_curve_id": curve_id},
+                )
+                expected = {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": source_epoch,
+                    "trajectory_type": trajectory_type,
+                    "configuration_name": trajectory_type,
+                    "movement_firing_rate_id": movement_id,
+                    "tuning_curve_param_name": (
+                        table_specs.LEGACY_TUNING_CURVE_PARAMETERS[
+                            "tuning_curve_param_name"
+                        ]
+                    ),
+                    "tuning_curve_parameters_sha256": legacy_parameters_sha256,
+                    "trial_subset": subset,
+                }
+                for expected_field, expected_value in expected.items():
+                    if str(curve_selection.get(expected_field)) != str(
+                        expected_value
+                    ):
+                        raise ValueError(
+                            "PathProgressionDecodingComparison stability input "
+                            f"does not match {source_name} {trajectory_type!r}: "
+                            f"{expected_field}."
+                        )
+            stability_fields[field_name] = key[field_name]
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="path_progression_decoding_parameters_sha256",
+    )
+    eligibility_rule_sha256 = provenance_sha256(
+        dict(table_specs.PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE)
+    )
+    decoding_output_rule_sha256 = provenance_sha256(
+        dict(table_specs.PATH_PROGRESSION_DECODING_OUTPUT_RULE)
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        "cohort_movement_firing_rate_id": key[
+            "cohort_movement_firing_rate_id"
+        ],
+        **source_fields,
+        **stability_fields,
+        "path_progression_decoding_param_name": parameters[
+            "path_progression_decoding_param_name"
+        ],
+        "cohort_epoch": cohort_epoch,
+        **parameter_snapshot,
+        "eligibility_rule_sha256": eligibility_rule_sha256,
+        "transfer_spec_sha256": TRANSFER_SPEC_SHA256,
+        "decoding_output_rule_sha256": decoding_output_rule_sha256,
+    }
+    return {
+        "path_progression_decoding_comparison_id": selection_uuid(
+            "PathProgressionDecodingComparison",
+            natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _tuning_curve_artifact_attributes(
+    selection: Mapping[str, Any],
+    *,
+    selected_units_sha256: str,
+) -> dict[str, str]:
+    """Return NetCDF-safe identity linking one curve to its selection row."""
+    field_names = (
+        "path_specific_place_tuning_curve_id",
+        "nwb_file_name",
+        "epoch",
+        "trajectory_type",
+        "configuration_name",
+        "movement_firing_rate_id",
+        "tuning_curve_param_name",
+        "trial_subset",
+        "tuning_curve_parameters_sha256",
+    )
+    return {
+        **{field_name: str(selection[field_name]) for field_name in field_names},
+        "selected_units_sha256": str(selected_units_sha256),
+    }
+
+
+def _validate_tuning_curve_artifact_link(
+    *,
+    curve: Any,
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+) -> None:
+    """Require one canonical curve to match its DataJoint selection and row."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    expected_attributes = _tuning_curve_artifact_attributes(
+        selection_row,
+        selected_units_sha256=str(result_row["selected_units_sha256"]),
+    )
+    for field_name, expected_value in expected_attributes.items():
+        if str(curve.attrs.get(field_name, "")) != str(expected_value):
+            raise ValueError(
+                "PathSpecificPlaceTuningCurve artifact does not match its "
+                f"DataJoint row: {field_name}."
+            )
+    expected_scalars = {
+        "n_units": int(curve.attrs["n_units"]),
+        "n_valid_units": int(curve.attrs["n_valid_units"]),
+        "n_trials": int(curve.attrs["n_trials"]),
+        "n_feature_samples": int(curve.attrs["n_feature_samples"]),
+        "n_position_bins": int(curve.sizes[curve.dims[1]]),
+        "analysis_status": str(curve.attrs["analysis_status"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row[field_name]) != str(expected_value):
+            raise ValueError(
+                "PathSpecificPlaceTuningCurve result metadata disagrees with "
+                f"its artifact: {field_name}."
+            )
+    if not math.isclose(
+        float(result_row["support_duration_s"]),
+        float(curve.attrs["support_duration_s"]),
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "PathSpecificPlaceTuningCurve result metadata disagrees with its "
+            "artifact: support_duration_s."
+        )
+    curve_unit_ids = [
+        {
+            "spikesorting_merge_id": merge_id,
+            "unit_id": unit_id,
+        }
+        for merge_id, unit_id in zip(
+            np.asarray(curve.coords["spikesorting_merge_id"].values).astype(str),
+            np.asarray(curve.coords["unit_id"].values).astype(str),
+            strict=True,
+        )
+    ]
+    if unit_identity_sha256(curve_unit_ids) != str(
+        result_row["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceTuningCurve unit identities disagree with its "
+            "selected-unit digest."
+        )
+
+
+def _dpp_tuning_curve_artifact_attributes(
+    selection: Mapping[str, Any],
+    *,
+    selected_units_sha256: str,
+) -> dict[str, str]:
+    """Return NetCDF-safe identity linking one DPP curve to its selection."""
+    field_names = (
+        "dpp_tuning_curve_id",
+        "nwb_file_name",
+        "epoch",
+        "outbound_trajectory_type",
+        "inbound_trajectory_type",
+        "outbound_configuration_name",
+        "inbound_configuration_name",
+        "movement_firing_rate_id",
+        "tuning_curve_param_name",
+        "turn_type",
+        "trial_subset",
+        "tuning_curve_parameters_sha256",
+    )
+    return {
+        **{field_name: str(selection[field_name]) for field_name in field_names},
+        "selected_units_sha256": str(selected_units_sha256),
+    }
+
+
+def _validate_dpp_tuning_curve_artifact_link(
+    *,
+    curve: Any,
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+) -> None:
+    """Require one canonical DPP curve to match its selection and result."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    expected_attributes = _dpp_tuning_curve_artifact_attributes(
+        selection_row,
+        selected_units_sha256=str(result_row["selected_units_sha256"]),
+    )
+    for field_name, expected_value in expected_attributes.items():
+        if str(curve.attrs.get(field_name, "")) != expected_value:
+            raise ValueError(
+                "DPPTuningCurve artifact does not match its DataJoint row: "
+                f"{field_name}."
+            )
+    expected_scalars = {
+        "n_units": int(curve.attrs["n_units"]),
+        "n_valid_units": int(curve.attrs["n_valid_units"]),
+        "n_trials": int(curve.attrs["n_trials"]),
+        "n_outbound_trials": int(curve.attrs["n_outbound_trials"]),
+        "n_inbound_trials": int(curve.attrs["n_inbound_trials"]),
+        "n_feature_samples": int(curve.attrs["n_feature_samples"]),
+        "n_position_bins": int(curve.sizes[curve.dims[1]]),
+        "analysis_status": str(curve.attrs["analysis_status"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row[field_name]) != str(expected_value):
+            raise ValueError(
+                "DPPTuningCurve result metadata disagrees with its artifact: "
+                f"{field_name}."
+            )
+    if not math.isclose(
+        float(result_row["support_duration_s"]),
+        float(curve.attrs["support_duration_s"]),
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "DPPTuningCurve result metadata disagrees with its artifact: "
+            "support_duration_s."
+        )
+    curve_unit_ids = [
+        {
+            "spikesorting_merge_id": merge_id,
+            "unit_id": unit_id,
+        }
+        for merge_id, unit_id in zip(
+            np.asarray(curve.coords["spikesorting_merge_id"].values).astype(str),
+            np.asarray(curve.coords["unit_id"].values).astype(str),
+            strict=True,
+        )
+    ]
+    if unit_identity_sha256(curve_unit_ids) != str(
+        result_row["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "DPPTuningCurve unit identities disagree with its selected-unit "
+            "digest."
+        )
 
 
 def _sorted_spikes_group_key(key: Mapping[str, Any]) -> dict[str, Any]:
@@ -1382,7 +2679,7 @@ def _load_movement_result_artifacts(
     }
 
 
-def _make_task_progression_stability_row(
+def _make_path_specific_place_tuning_curve_row(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -1400,7 +2697,7 @@ def _make_task_progression_stability_row(
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
-    """Compute and write one trajectory-level stability result."""
+    """Compute and write one trial-subset path-specific tuning curve."""
     import pynwb
 
     from v1ca1.spyglass.nwb import (
@@ -1408,21 +2705,36 @@ def _make_task_progression_stability_row(
         load_position,
         load_wtrack_graph,
     )
-    from v1ca1.spyglass.selection import unit_identity_sha256
-    from v1ca1.spyglass.stability import (
-        compute_selected_stability,
-        get_stability_artifact_path,
-        write_stability_artifact,
+    from v1ca1.spyglass.path_specific_place import (
+        compute_selected_path_specific_place_tuning_curve,
+        get_path_specific_place_artifact_path,
+        write_path_specific_place_artifact,
     )
+    from v1ca1.spyglass.selection import unit_identity_sha256
 
-    parameters = _validate_stability_parameter_row(
+    parameters = _validate_tuning_curve_parameter_row(
         _fetch1_dict(parameters_table, key)
     )
     _validate_frozen_parameters(
         key,
         parameters,
-        field_name="task_progression_stability_parameters_sha256",
+        field_name="tuning_curve_parameters_sha256",
     )
+    validated_selection = _path_specific_place_tuning_curve_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["path_specific_place_tuning_curve_id"]) != str(
+        key["path_specific_place_tuning_curve_id"]
+    ):
+        raise ValueError("PathSpecificPlaceTuningCurve selection UUID is stale.")
     movement_key = {
         "movement_firing_rate_id": key["movement_firing_rate_id"]
     }
@@ -1449,7 +2761,8 @@ def _make_task_progression_stability_row(
     graph_row = _fetch1_dict(wtrack_graph_table, context)
     if str(key["trajectory_type"]) != str(key["configuration_name"]):
         raise ValueError(
-            "TaskProgressionStability graph configuration must match trajectory_type."
+            "PathSpecificPlaceTuningCurve graph configuration must match "
+            "trajectory_type."
         )
     animal_name, session_date = _session_identity(session_table, context)
     epoch_start = float(epoch_row["start_time"])
@@ -1486,30 +2799,26 @@ def _make_task_progression_stability_row(
         },
     )
 
+    nwb_path = Path(
+        nwbfile_table.get_abs_path(str(movement_selection["nwb_file_name"]))
+    )
     position = None
-    trajectory_interval = None
-    graph_inputs: dict[str, Any] = {}
-    if movement["analysis_status"] == "valid":
-        nwb_path = Path(
-            nwbfile_table.get_abs_path(
-                str(movement_selection["nwb_file_name"])
-            )
-        )
-        with pynwb.NWBHDF5IO(
-            str(nwb_path),
-            mode="r",
-            load_namespaces=True,
-        ) as io:
-            nwbfile = io.read()
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        trajectory_interval = load_interval_set(nwbfile, trajectory_row)
+        graph_inputs = load_wtrack_graph(nwbfile, graph_row)
+        if movement["analysis_status"] == "valid":
             position = load_position(
                 nwbfile,
                 position_row,
                 apply_analysis_offset=True,
             )
-            trajectory_interval = load_interval_set(nwbfile, trajectory_row)
-            graph_inputs = load_wtrack_graph(nwbfile, graph_row)
 
-    result = compute_selected_stability(
+    result = compute_selected_path_specific_place_tuning_curve(
         animal_name=animal_name,
         date=session_date,
         region=_analysis_region(movement_selection["region"]),
@@ -1518,11 +2827,396 @@ def _make_task_progression_stability_row(
         spikes=loaded_spikes["ts_group"],
         stable_unit_ids=loaded_spikes["unit_ids"],
         position=position,
-        trajectory_interval=trajectory_interval,
+        trajectory_intervals=trajectory_interval,
         graph_inputs=graph_inputs,
-        movement_interval=movement["movement_intervals"],
+        movement_intervals=movement["movement_intervals"],
+        movement_analysis_status=movement["analysis_status"],
+        bin_size_cm=parameters["place_bin_size_cm"],
+        bin_count=parameters["position_bin_count"],
+        sigma_bins=parameters["gaussian_smoothing_sigma_bins"],
+        trial_subset=str(key["trial_subset"]),
+    )
+    result["tuning_curve"].attrs.update(
+        _tuning_curve_artifact_attributes(
+            key,
+            selected_units_sha256=selected_units_sha256,
+        )
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    artifact_path = get_path_specific_place_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(movement_selection["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        trial_subset=str(key["trial_subset"]),
+        region=_analysis_region(movement_selection["region"]),
+        path_specific_place_tuning_curve_id=key[
+            "path_specific_place_tuning_curve_id"
+        ],
+        **path_kwargs,
+    )
+    created_artifact_paths = [] if artifact_path.exists() else [str(artifact_path)]
+    written_path = write_path_specific_place_artifact(
+        result["tuning_curve"],
+        artifact_path,
+    )
+    return {
+        "tuning_curve_path": str(written_path),
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "n_trials": int(result["n_trials"]),
+        "support_duration_s": float(result["support_duration_s"]),
+        "n_feature_samples": int(result["n_feature_samples"]),
+        "n_position_bins": int(result["n_position_bins"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": selected_units_sha256,
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _make_dpp_tuning_curve_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    position_table: Any,
+    wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one trial-subset DPP tuning curve."""
+    import pynwb
+
+    from v1ca1.spyglass.dpp import (
+        compute_selected_dpp_tuning_curve,
+        get_dpp_artifact_path,
+        get_dpp_trajectory_pair,
+        write_dpp_artifact,
+    )
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="tuning_curve_parameters_sha256",
+    )
+    validated_selection = _dpp_tuning_curve_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["dpp_tuning_curve_id"]) != str(
+        key["dpp_tuning_curve_id"]
+    ):
+        raise ValueError("DPPTuningCurve selection UUID is stale.")
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    context = {**key, **movement_selection}
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, context)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, context)
+    position_row = _fetch1_dict(position_table, context)
+    trajectory_pair = get_dpp_trajectory_pair(str(key["turn_type"]))
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": movement_selection["nwb_file_name"],
+                "epoch": movement_selection["epoch"],
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in trajectory_pair
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": movement_selection["nwb_file_name"],
+                "configuration_name": trajectory_type,
+            },
+        )
+        for trajectory_type in trajectory_pair
+    }
+    animal_name, session_date = _session_identity(session_table, context)
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
+
+    loaded_spikes = _load_group_spikes(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=context,
+        region=_analysis_region(movement_selection["region"]),
+        time_support=(epoch_start, epoch_stop),
+    )
+    _validate_frozen_sorting_snapshot(movement_selection, loaded_spikes)
+    selected_units_sha256 = unit_identity_sha256(loaded_spikes["unit_ids"])
+    if selected_units_sha256 != str(
+        movement_result["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": _analysis_region(movement_selection["region"]),
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+
+    nwb_path = Path(
+        nwbfile_table.get_abs_path(str(movement_selection["nwb_file_name"]))
+    )
+    position = None
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+        if movement["analysis_status"] == "valid":
+            position = load_position(
+                nwbfile,
+                position_row,
+                apply_analysis_offset=True,
+            )
+
+    result = compute_selected_dpp_tuning_curve(
+        animal_name=animal_name,
+        date=session_date,
+        region=_analysis_region(movement_selection["region"]),
+        epoch=str(movement_selection["epoch"]),
+        turn_type=str(key["turn_type"]),
+        trial_subset=str(key["trial_subset"]),
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=position,
+        trajectory_intervals_by_type=trajectory_intervals,
+        graph_inputs_by_trajectory=graph_inputs,
+        movement_intervals=movement["movement_intervals"],
+        movement_analysis_status=movement["analysis_status"],
+        bin_size_cm=parameters["place_bin_size_cm"],
+        bin_count=parameters["position_bin_count"],
+        sigma_bins=parameters["gaussian_smoothing_sigma_bins"],
+    )
+    result["tuning_curve"].attrs.update(
+        _dpp_tuning_curve_artifact_attributes(
+            key,
+            selected_units_sha256=selected_units_sha256,
+        )
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    artifact_path = get_dpp_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(movement_selection["epoch"]),
+        turn_type=str(key["turn_type"]),
+        trial_subset=str(key["trial_subset"]),
+        region=_analysis_region(movement_selection["region"]),
+        dpp_tuning_curve_id=key["dpp_tuning_curve_id"],
+        **path_kwargs,
+    )
+    created_artifact_paths = [] if artifact_path.exists() else [str(artifact_path)]
+    written_path = write_dpp_artifact(
+        result["tuning_curve"],
+        artifact_path,
+    )
+    return {
+        "tuning_curve_path": str(written_path),
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "n_trials": int(result["n_trials"]),
+        "n_outbound_trials": int(result["n_outbound_trials"]),
+        "n_inbound_trials": int(result["n_inbound_trials"]),
+        "support_duration_s": float(result["support_duration_s"]),
+        "n_feature_samples": int(result["n_feature_samples"]),
+        "n_position_bins": int(result["n_position_bins"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": selected_units_sha256,
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _make_path_specific_place_stability_row(
+    *,
+    key: Mapping[str, Any],
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute stability from one persisted odd/even tuning-curve pair."""
+    from v1ca1.spyglass.path_specific_place import (
+        load_path_specific_place_artifact,
+    )
+    from v1ca1.spyglass.stability import (
+        compute_selected_stability_from_tuning_curves,
+        get_stability_artifact_path,
+        write_stability_artifact,
+    )
+
+    validated_selection = _stability_selection_row(
+        key=key,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+    )
+    if str(validated_selection["path_specific_place_stability_id"]) != str(
+        key["path_specific_place_stability_id"]
+    ):
+        raise ValueError("PathSpecificPlaceStability selection UUID is stale.")
+    curve_results: dict[str, dict[str, Any]] = {}
+    curve_selections: dict[str, dict[str, Any]] = {}
+    curves: dict[str, Any] = {}
+    for subset in ("odd", "even"):
+        curve_key = {
+            "path_specific_place_tuning_curve_id": key[
+                f"{subset}_path_specific_place_tuning_curve_id"
+            ]
+        }
+        curve_results[subset] = _fetch1_dict(tuning_curve_table, curve_key)
+        curve_selections[subset] = _fetch1_dict(
+            tuning_curve_selection_table,
+            curve_key,
+        )
+        if str(curve_selections[subset]["trial_subset"]) != subset:
+            raise ValueError(
+                "PathSpecificPlaceStability requires matching odd and even curves."
+            )
+        curves[subset] = load_path_specific_place_artifact(
+            Path(curve_results[subset]["tuning_curve_path"])
+        )
+        _validate_tuning_curve_artifact_link(
+            curve=curves[subset],
+            result_row=curve_results[subset],
+            selection_row=curve_selections[subset],
+        )
+
+    odd_selection = curve_selections["odd"]
+    movement_key = {
+        "movement_firing_rate_id": odd_selection["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(
+        session_table,
+        movement_selection,
+    )
+    region = _analysis_region(movement_selection["region"])
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    selected_units_sha256 = str(movement_result["selected_units_sha256"])
+    for subset in ("odd", "even"):
+        curve = curves[subset]
+        expected_metadata = {
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+            "trajectory_type": str(odd_selection["trajectory_type"]),
+            "trial_subset": subset,
+        }
+        for field_name, expected_value in expected_metadata.items():
+            if str(curve.attrs[field_name]) != str(expected_value):
+                raise ValueError(
+                    "PathSpecificPlaceTuningCurve artifact does not match its "
+                    f"selection: {field_name}."
+                )
+        if str(curve_results[subset]["selected_units_sha256"]) != (
+            selected_units_sha256
+        ):
+            raise ValueError(
+                "Odd/even tuning curves and MovementFiringRate must contain "
+                "the same selected units."
+            )
+    result = compute_selected_stability_from_tuning_curves(
+        odd_tuning_curve=curves["odd"],
+        even_tuning_curve=curves["even"],
         movement_firing_rate_table=movement["table"],
-        place_bin_size_cm=parameters["place_bin_size_cm"],
     )
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
@@ -1531,9 +3225,11 @@ def _make_task_progression_stability_row(
         animal_name=animal_name,
         date=session_date,
         epoch=str(movement_selection["epoch"]),
-        trajectory_type=str(key["trajectory_type"]),
-        region=_analysis_region(movement_selection["region"]),
-        task_progression_stability_id=key["task_progression_stability_id"],
+        trajectory_type=str(odd_selection["trajectory_type"]),
+        region=region,
+        path_specific_place_stability_id=key[
+            "path_specific_place_stability_id"
+        ],
         **path_kwargs,
     )
     created_artifact_paths = [] if artifact_path.exists() else [str(artifact_path)]
@@ -1547,6 +3243,1081 @@ def _make_task_progression_stability_row(
         "artifact_origin": "computed",
         "legacy_artifact_provenance": None,
         "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _load_tuning_similarity_inputs(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    tuning_curve_parameters_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and cross-check the four curves and shared movement artifact."""
+    from v1ca1.spyglass.path_specific_place import (
+        load_path_specific_place_artifact,
+    )
+
+    validated_selection = _tuning_similarity_selection_row(
+        key=key,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        parameters_table=parameters_table,
+    )
+    if str(
+        validated_selection["path_specific_place_tuning_similarity_id"]
+    ) != str(key["path_specific_place_tuning_similarity_id"]):
+        raise ValueError(
+            "PathSpecificPlaceTuningSimilarity selection UUID is stale."
+        )
+    parameters = _validate_tuning_similarity_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "tuning_similarity_param_name": key[
+                    "tuning_similarity_param_name"
+                ]
+            },
+        )
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="tuning_similarity_parameters_sha256",
+    )
+
+    curve_id_fields = {
+        "center_to_left": "center_to_left_tuning_curve_id",
+        "center_to_right": "center_to_right_tuning_curve_id",
+        "left_to_center": "left_to_center_tuning_curve_id",
+        "right_to_center": "right_to_center_tuning_curve_id",
+    }
+    curve_results: dict[str, dict[str, Any]] = {}
+    curve_selections: dict[str, dict[str, Any]] = {}
+    curves: dict[str, Any] = {}
+    for trajectory_type, field_name in curve_id_fields.items():
+        curve_key = {
+            "path_specific_place_tuning_curve_id": key[field_name]
+        }
+        result_row = _fetch1_dict(tuning_curve_table, curve_key)
+        selection_row = _fetch1_dict(
+            tuning_curve_selection_table,
+            curve_key,
+        )
+        curve = load_path_specific_place_artifact(
+            Path(result_row["tuning_curve_path"])
+        )
+        _validate_tuning_curve_artifact_link(
+            curve=curve,
+            result_row=result_row,
+            selection_row=selection_row,
+        )
+        curve_results[trajectory_type] = result_row
+        curve_selections[trajectory_type] = selection_row
+        curves[trajectory_type] = curve
+
+    reference_selection = curve_selections["center_to_left"]
+    tuning_curve_parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(tuning_curve_parameters_table, reference_selection)
+    )
+    _validate_frozen_parameters(
+        reference_selection,
+        tuning_curve_parameters,
+        field_name="tuning_curve_parameters_sha256",
+    )
+    movement_key = {
+        "movement_firing_rate_id": reference_selection[
+            "movement_firing_rate_id"
+        ]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(
+        session_table,
+        movement_selection,
+    )
+    region = _analysis_region(movement_selection["region"])
+    epoch = str(movement_selection["epoch"])
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": epoch,
+        },
+    )
+    selected_units_sha256 = str(movement_result["selected_units_sha256"])
+    expected_curve_metadata = {
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": epoch,
+        "trial_subset": "all",
+    }
+    for trajectory_type, curve in curves.items():
+        if str(curve_results[trajectory_type]["selected_units_sha256"]) != (
+            selected_units_sha256
+        ):
+            raise ValueError(
+                "All four tuning curves and MovementFiringRate must contain "
+                "the same selected units."
+            )
+        metadata = {
+            **expected_curve_metadata,
+            "trajectory_type": trajectory_type,
+        }
+        for field_name, expected_value in metadata.items():
+            if str(curve.attrs.get(field_name, "")) != str(expected_value):
+                raise ValueError(
+                    "PathSpecificPlaceTuningCurve artifact does not match the "
+                    f"shared similarity selection: {field_name}."
+                )
+
+    return {
+        "parameters": parameters,
+        "tuning_curve_parameters": tuning_curve_parameters,
+        "curves": curves,
+        "curve_results": curve_results,
+        "curve_selections": curve_selections,
+        "movement_result": movement_result,
+        "movement_selection": movement_selection,
+        "movement_parameters": movement_parameters,
+        "movement_table": movement["table"],
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": epoch,
+        "selected_units_sha256": selected_units_sha256,
+    }
+
+
+def _validate_tuning_similarity_artifact_link(
+    *,
+    table: Any,
+    result_row: Mapping[str, Any],
+    similarity_metric: str,
+) -> None:
+    """Require one canonical similarity artifact to match its result row."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.tuning_similarity import (
+        summarize_tuning_similarity_table,
+    )
+
+    summary = summarize_tuning_similarity_table(table)
+    for field_name in (
+        "n_units",
+        "n_valid_comparisons",
+        "n_units_with_valid_comparison",
+        "analysis_status",
+    ):
+        if str(result_row[field_name]) != str(summary[field_name]):
+            raise ValueError(
+                "PathSpecificPlaceTuningSimilarity result metadata disagrees "
+                f"with its artifact: {field_name}."
+            )
+    if not table.empty:
+        metrics = table["similarity_metric"].astype(str).unique().tolist()
+        if metrics != [str(similarity_metric)]:
+            raise ValueError(
+                "PathSpecificPlaceTuningSimilarity artifact does not match "
+                "its selected metric."
+            )
+    identities = (
+        table.loc[:, ["spikesorting_merge_id", "unit_id", "stable_unit_id"]]
+        .drop_duplicates("stable_unit_id")
+        .to_dict("records")
+    )
+    if unit_identity_sha256(identities) != str(
+        result_row["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceTuningSimilarity unit identities disagree with "
+            "its selected-unit digest."
+        )
+
+
+def _make_path_specific_place_tuning_similarity_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    tuning_curve_parameters_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write four path comparisons for every selected unit."""
+    from v1ca1.spyglass.tuning_similarity import (
+        compute_tuning_similarity_from_curves,
+        get_tuning_similarity_artifact_path,
+        write_tuning_similarity_artifact,
+    )
+
+    inputs = _load_tuning_similarity_inputs(
+        key=key,
+        parameters_table=parameters_table,
+        tuning_curve_parameters_table=tuning_curve_parameters_table,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        session_table=session_table,
+    )
+    result = compute_tuning_similarity_from_curves(
+        tuning_curves_by_trajectory=inputs["curves"],
+        movement_firing_rate_table=inputs["movement_table"],
+        similarity_metric=inputs["parameters"]["similarity_metric"],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    artifact_path = get_tuning_similarity_artifact_path(
+        animal_name=inputs["animal_name"],
+        date=inputs["date"],
+        epoch=inputs["epoch"],
+        region=inputs["region"],
+        similarity_metric=inputs["parameters"]["similarity_metric"],
+        path_specific_place_tuning_similarity_id=key[
+            "path_specific_place_tuning_similarity_id"
+        ],
+        **path_kwargs,
+    )
+    created_artifact_paths = [] if artifact_path.exists() else [str(artifact_path)]
+    written_path = write_tuning_similarity_artifact(
+        result["table"],
+        artifact_path,
+    )
+    return {
+        "similarity_path": str(written_path),
+        "n_units": int(result["n_units"]),
+        "n_valid_comparisons": int(result["n_valid_comparisons"]),
+        "n_units_with_valid_comparison": int(
+            result["n_units_with_valid_comparison"]
+        ),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": inputs["selected_units_sha256"],
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_path_specific_place_tuning_similarity_row(
+    *,
+    key: Mapping[str, Any],
+    similarity_path: Path,
+    overwrite: bool,
+    parameters_table: Any,
+    tuning_curve_parameters_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Validate and register one matching complete legacy similarity file."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.spikes import resolve_merge_parent
+    from v1ca1.spyglass.tuning_similarity import (
+        get_tuning_similarity_artifact_path,
+        register_existing_tuning_similarity_artifact,
+    )
+
+    inputs = _load_tuning_similarity_inputs(
+        key=key,
+        parameters_table=parameters_table,
+        tuning_curve_parameters_table=tuning_curve_parameters_table,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        session_table=session_table,
+    )
+    tuning_curve_parameters = inputs["tuning_curve_parameters"]
+    if tuning_curve_parameters != dict(
+        table_specs.LEGACY_TUNING_CURVE_PARAMETERS
+    ):
+        raise ValueError(
+            "Legacy tuning-similarity registration requires four "
+            "legacy_4cm_unsmoothed tuning curves."
+        )
+    default_movement = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    for field_name in (
+        "speed_threshold_cm_s",
+        "speed_smoothing_sigma_s",
+    ):
+        if not math.isclose(
+            float(inputs["movement_parameters"][field_name]),
+            float(default_movement[field_name]),
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "Legacy tuning-similarity registration requires the default "
+                f"movement parameters; {field_name} differs."
+            )
+
+    context = {**key, **inputs["movement_selection"]}
+    loaded_units = _load_group_unit_data(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=context,
+        region=inputs["region"],
+        allow_empty=True,
+    )
+    _validate_frozen_sorting_snapshot(inputs["movement_selection"], loaded_units)
+    selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
+    if selected_units_sha256 != inputs["selected_units_sha256"]:
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    non_imported = [
+        str(merge_id)
+        for merge_id in loaded_units["merge_ids"]
+        if resolve_merge_parent(spike_sorting_output, {"merge_id": merge_id})
+        != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy tuning-similarity registration is restricted to matching "
+            f"ImportedSpikeSorting outputs; found {non_imported!r}."
+        )
+
+    unit_identity_resolver: dict[str, dict[str, Any]] = {}
+    for metadata in loaded_units["unit_metadata"]:
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in unit_identity_resolver:
+            raise ValueError(
+                "Every imported selected unit requires a unique "
+                "sorting_unit_id for legacy tuning-similarity registration."
+            )
+        unit_identity_resolver[resolver_key] = {
+            "spikesorting_merge_id": metadata["spikesorting_merge_id"],
+            "unit_id": metadata["unit_id"],
+        }
+    if len(unit_identity_resolver) != len(loaded_units["unit_ids"]):
+        raise ValueError(
+            "Every imported selected unit requires one legacy identity."
+        )
+
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    destination = get_tuning_similarity_artifact_path(
+        animal_name=inputs["animal_name"],
+        date=inputs["date"],
+        epoch=inputs["epoch"],
+        region=inputs["region"],
+        similarity_metric=inputs["parameters"]["similarity_metric"],
+        path_specific_place_tuning_similarity_id=key[
+            "path_specific_place_tuning_similarity_id"
+        ],
+        **path_kwargs,
+    )
+    registered = register_existing_tuning_similarity_artifact(
+        source_path=Path(similarity_path),
+        destination_path=destination,
+        tuning_curves_by_trajectory=inputs["curves"],
+        movement_firing_rate_table=inputs["movement_table"],
+        similarity_metric=inputs["parameters"]["similarity_metric"],
+        unit_identity_resolver=unit_identity_resolver,
+        overwrite=overwrite,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance.update(
+        {
+            "source_v1ca1_git_commit": source_v1ca1_git_commit,
+            "source_spyglass_git_commit": source_spyglass_git_commit,
+            "assumed_parameters": {
+                "movement": inputs["movement_parameters"],
+                "tuning_curve": tuning_curve_parameters,
+                "tuning_similarity": inputs["parameters"],
+            },
+        }
+    )
+    return {
+        "similarity_path": str(registered["similarity_path"]),
+        "n_units": int(registered["n_units"]),
+        "n_valid_comparisons": int(registered["n_valid_comparisons"]),
+        "n_units_with_valid_comparison": int(
+            registered["n_units_with_valid_comparison"]
+        ),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": selected_units_sha256,
+        "artifact_origin": "registered_existing",
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": list(
+            registered.get("_created_artifact_paths", ())
+        ),
+    }
+
+
+def _register_existing_path_specific_place_tuning_curve_row(
+    *,
+    key: Mapping[str, Any],
+    tuning_curve_path: Path,
+    overwrite: bool,
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    position_table: Any,
+    wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Subset and normalize one legacy all-trial place-tuning artifact."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+    from v1ca1.spyglass.path_specific_place import (
+        build_path_specific_linear_position,
+        get_path_specific_place_artifact_path,
+        graph_length_from_inputs,
+        register_existing_path_specific_place_artifact,
+        select_trial_subset_intervals,
+    )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.spikes import resolve_merge_parent
+
+    parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="tuning_curve_parameters_sha256",
+    )
+    validated_selection = _path_specific_place_tuning_curve_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["path_specific_place_tuning_curve_id"]) != str(
+        key["path_specific_place_tuning_curve_id"]
+    ):
+        raise ValueError("PathSpecificPlaceTuningCurve selection UUID is stale.")
+    if str(key["trial_subset"]) != "all":
+        raise ValueError(
+            "Legacy tuning-curve registration is only available for trial_subset='all'."
+        )
+    legacy_parameters = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    if any(parameters[name] != legacy_parameters[name] for name in parameters):
+        raise ValueError(
+            "Legacy tuning-curve registration requires the "
+            "legacy_4cm_unsmoothed parameter preset."
+        )
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    context = {**key, **movement_selection}
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, context)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, context)
+    trajectory_row = _fetch1_dict(trajectory_intervals_table, context)
+    position_row = _fetch1_dict(position_table, context)
+    graph_row = _fetch1_dict(wtrack_graph_table, context)
+    _validate_legacy_tuning_curve_inputs(
+        position_row=position_row,
+        movement_parameters=movement_parameters,
+    )
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
+    animal_name, session_date = _session_identity(session_table, context)
+    region = _analysis_region(movement_selection["region"])
+    loaded_units = _load_group_unit_data(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=context,
+        region=region,
+        allow_empty=True,
+    )
+    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
+    if selected_units_sha256 != str(movement_result["selected_units_sha256"]):
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    non_imported = [
+        str(merge_id)
+        for merge_id in loaded_units["merge_ids"]
+        if resolve_merge_parent(spike_sorting_output, {"merge_id": merge_id})
+        != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy tuning-curve registration is restricted to matching "
+            f"ImportedSpikeSorting outputs; found {non_imported!r}."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    if movement["analysis_status"] not in {"valid", "no_units"}:
+        raise ValueError(
+            "A legacy tuning curve cannot represent an upstream terminal "
+            f"movement status {movement['analysis_status']!r}."
+        )
+
+    nwb_path = Path(
+        nwbfile_table.get_abs_path(str(movement_selection["nwb_file_name"]))
+    )
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        trajectory_intervals = load_interval_set(nwbfile, trajectory_row)
+        graph_inputs = load_wtrack_graph(nwbfile, graph_row)
+        position = (
+            load_position(
+                nwbfile,
+                position_row,
+                apply_analysis_offset=True,
+            )
+            if movement["analysis_status"] == "valid"
+            else None
+        )
+    selected_trials = select_trial_subset_intervals(trajectory_intervals, "all")
+    n_trials = len(np.asarray(selected_trials.start).reshape(-1))
+    support = selected_trials.intersect(movement["movement_intervals"])
+    support_duration_s = float(support.tot_length())
+    graph_length_cm = graph_length_from_inputs(
+        graph_inputs,
+        trajectory_type=str(key["trajectory_type"]),
+    )
+    n_feature_samples = 0
+    n_valid_position_samples = 0
+    if movement["analysis_status"] == "valid":
+        linear_position, computed_length = build_path_specific_linear_position(
+            position=position,
+            trajectory_intervals=trajectory_intervals,
+            graph_inputs=graph_inputs,
+            trajectory_type=str(key["trajectory_type"]),
+        )
+        if not math.isclose(
+            graph_length_cm,
+            computed_length,
+            rel_tol=1e-10,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("Linearization and WTrackGraph lengths disagree.")
+        feature_values = np.asarray(
+            linear_position.restrict(support).d,
+            dtype=float,
+        ).reshape(-1)
+        n_feature_samples = len(feature_values)
+        n_valid_position_samples = int(
+            np.count_nonzero(np.isfinite(feature_values))
+        )
+
+    unit_identity_resolver: dict[Any, dict[str, Any]] = {}
+    for group_unit_id, metadata in enumerate(loaded_units["unit_metadata"]):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        if sorting_unit_id is None or sorting_unit_id in unit_identity_resolver:
+            raise ValueError(
+                "Every imported selected unit requires a unique sorting_unit_id "
+                "for legacy tuning-curve registration."
+            )
+        unit_identity_resolver[sorting_unit_id] = {
+            "spikesorting_merge_id": metadata["spikesorting_merge_id"],
+            "unit_id": metadata["unit_id"],
+            "group_unit_id": group_unit_id,
+            "sorting_unit_id": sorting_unit_id,
+        }
+
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    destination = get_path_specific_place_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(movement_selection["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        trial_subset="all",
+        region=region,
+        path_specific_place_tuning_curve_id=key[
+            "path_specific_place_tuning_curve_id"
+        ],
+        **path_kwargs,
+    )
+    registered = register_existing_path_specific_place_artifact(
+        source_path=Path(tuning_curve_path),
+        destination_path=destination,
+        unit_identity_resolver=unit_identity_resolver,
+        animal_name=animal_name,
+        date=session_date,
+        region=region,
+        epoch=str(movement_selection["epoch"]),
+        trajectory_type=str(key["trajectory_type"]),
+        graph_length_cm=graph_length_cm,
+        n_trials=n_trials,
+        support_duration_s=support_duration_s,
+        n_feature_samples=n_feature_samples,
+        n_valid_position_samples=n_valid_position_samples,
+        bin_size_cm=parameters["place_bin_size_cm"],
+        bin_count=parameters["position_bin_count"],
+        sigma_bins=parameters["gaussian_smoothing_sigma_bins"],
+        artifact_attributes=_tuning_curve_artifact_attributes(
+            key,
+            selected_units_sha256=selected_units_sha256,
+        ),
+        overwrite=overwrite,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance.update(
+        {
+            "source_v1ca1_git_commit": source_v1ca1_git_commit,
+            "source_spyglass_git_commit": source_spyglass_git_commit,
+            "assumed_parameters": {
+                "position": {
+                    field_name: position_row[field_name]
+                    for field_name in (
+                        "position_series_name",
+                        "position_role",
+                        "analysis_start_offset_samples",
+                    )
+                },
+                "movement": movement_parameters,
+                "tuning_curve": parameters,
+            },
+        }
+    )
+    return {
+        "tuning_curve_path": str(registered["tuning_curve_path"]),
+        "n_units": int(registered["n_units"]),
+        "n_valid_units": int(registered["n_valid_units"]),
+        "n_trials": int(registered["n_trials"]),
+        "support_duration_s": float(registered["support_duration_s"]),
+        "n_feature_samples": int(registered["n_feature_samples"]),
+        "n_position_bins": int(registered["n_position_bins"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": selected_units_sha256,
+        "artifact_origin": "registered_existing",
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": list(
+            registered.get("_created_artifact_paths", ())
+        ),
+    }
+
+
+def _register_existing_dpp_tuning_curve_row(
+    *,
+    key: Mapping[str, Any],
+    tuning_curve_path: Path,
+    overwrite: bool,
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    position_table: Any,
+    wtrack_graph_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    session_table: Any,
+    sorted_spikes_group: Any,
+    unit_selection_params: Any,
+    spike_sorting_output: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Subset and normalize one legacy all-trial DPP tuning artifact."""
+    import pynwb
+
+    from v1ca1.spyglass.dpp import (
+        common_graph_length_from_inputs,
+        get_dpp_artifact_path,
+        get_dpp_trajectory_pair,
+        register_existing_dpp_artifact,
+        select_dpp_trial_intervals,
+    )
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.spikes import resolve_merge_parent
+    from v1ca1.spyglass.stability import build_task_progression_from_graph
+
+    parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="tuning_curve_parameters_sha256",
+    )
+    validated_selection = _dpp_tuning_curve_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["dpp_tuning_curve_id"]) != str(
+        key["dpp_tuning_curve_id"]
+    ):
+        raise ValueError("DPPTuningCurve selection UUID is stale.")
+    if str(key["trial_subset"]) != "all":
+        raise ValueError(
+            "Legacy DPP tuning-curve registration is only available for "
+            "trial_subset='all'."
+        )
+    legacy_parameters = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    if any(parameters[name] != legacy_parameters[name] for name in parameters):
+        raise ValueError(
+            "Legacy DPP tuning-curve registration requires the "
+            "legacy_4cm_unsmoothed parameter preset."
+        )
+
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(movement_firing_rate_table, movement_key)
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    context = {**key, **movement_selection}
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, context)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, context)
+    position_row = _fetch1_dict(position_table, context)
+    _validate_legacy_tuning_curve_inputs(
+        position_row=position_row,
+        movement_parameters=movement_parameters,
+    )
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
+    animal_name, session_date = _session_identity(session_table, context)
+    region = _analysis_region(movement_selection["region"])
+    loaded_units = _load_group_unit_data(
+        sorted_spikes_group=sorted_spikes_group,
+        unit_selection_params=unit_selection_params,
+        spike_sorting_output=spike_sorting_output,
+        key=context,
+        region=region,
+        allow_empty=True,
+    )
+    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
+    if selected_units_sha256 != str(movement_result["selected_units_sha256"]):
+        raise ValueError(
+            "MovementFiringRate selected units changed after computation."
+        )
+    non_imported = [
+        str(merge_id)
+        for merge_id in loaded_units["merge_ids"]
+        if resolve_merge_parent(spike_sorting_output, {"merge_id": merge_id})
+        != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy DPP tuning-curve registration is restricted to matching "
+            f"ImportedSpikeSorting outputs; found {non_imported!r}."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    if movement["analysis_status"] not in {"valid", "no_units"}:
+        raise ValueError(
+            "A legacy DPP curve cannot represent an upstream terminal "
+            f"movement status {movement['analysis_status']!r}."
+        )
+
+    trajectory_pair = get_dpp_trajectory_pair(str(key["turn_type"]))
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": movement_selection["nwb_file_name"],
+                "epoch": movement_selection["epoch"],
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in trajectory_pair
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": movement_selection["nwb_file_name"],
+                "configuration_name": trajectory_type,
+            },
+        )
+        for trajectory_type in trajectory_pair
+    }
+    nwb_path = Path(
+        nwbfile_table.get_abs_path(str(movement_selection["nwb_file_name"]))
+    )
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+        position = (
+            load_position(
+                nwbfile,
+                position_row,
+                apply_analysis_offset=True,
+            )
+            if movement["analysis_status"] == "valid"
+            else None
+        )
+
+    selected_intervals, _pooled_intervals = select_dpp_trial_intervals(
+        trajectory_intervals,
+        turn_type=str(key["turn_type"]),
+        trial_subset="all",
+    )
+    support_by_trajectory = {
+        trajectory_type: intervals.intersect(movement["movement_intervals"])
+        for trajectory_type, intervals in selected_intervals.items()
+    }
+    n_trials_by_trajectory = {
+        trajectory_type: len(np.asarray(intervals.start).reshape(-1))
+        for trajectory_type, intervals in selected_intervals.items()
+    }
+    support_duration_s_by_trajectory = {
+        trajectory_type: float(intervals.tot_length())
+        for trajectory_type, intervals in support_by_trajectory.items()
+    }
+    common_length, graph_lengths = common_graph_length_from_inputs(
+        graph_inputs,
+        turn_type=str(key["turn_type"]),
+    )
+    feature_counts = {trajectory_type: 0 for trajectory_type in trajectory_pair}
+    valid_counts = {trajectory_type: 0 for trajectory_type in trajectory_pair}
+    if movement["analysis_status"] == "valid":
+        for trajectory_type in trajectory_pair:
+            progression, computed_length = build_task_progression_from_graph(
+                position=position,
+                trajectory_interval=selected_intervals[trajectory_type],
+                graph_inputs=graph_inputs[trajectory_type],
+                trajectory_type=trajectory_type,
+            )
+            if not math.isclose(
+                common_length,
+                computed_length,
+                rel_tol=1e-10,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "Linearization and validated DPP graph lengths disagree."
+                )
+            values = np.asarray(
+                progression.restrict(support_by_trajectory[trajectory_type]).d,
+                dtype=float,
+            ).reshape(-1)
+            feature_counts[trajectory_type] = len(values)
+            valid_counts[trajectory_type] = int(
+                np.count_nonzero(np.isfinite(values))
+            )
+
+    unit_identity_resolver: dict[Any, dict[str, Any]] = {}
+    for group_unit_id, metadata in enumerate(loaded_units["unit_metadata"]):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        if sorting_unit_id is None or sorting_unit_id in unit_identity_resolver:
+            raise ValueError(
+                "Every imported selected unit requires a unique sorting_unit_id "
+                "for legacy DPP tuning-curve registration."
+            )
+        unit_identity_resolver[sorting_unit_id] = {
+            "spikesorting_merge_id": metadata["spikesorting_merge_id"],
+            "unit_id": metadata["unit_id"],
+            "group_unit_id": group_unit_id,
+            "sorting_unit_id": sorting_unit_id,
+        }
+
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    destination = get_dpp_artifact_path(
+        animal_name=animal_name,
+        date=session_date,
+        epoch=str(movement_selection["epoch"]),
+        turn_type=str(key["turn_type"]),
+        trial_subset="all",
+        region=region,
+        dpp_tuning_curve_id=key["dpp_tuning_curve_id"],
+        **path_kwargs,
+    )
+    registered = register_existing_dpp_artifact(
+        source_path=Path(tuning_curve_path),
+        destination_path=destination,
+        unit_identity_resolver=unit_identity_resolver,
+        animal_name=animal_name,
+        date=session_date,
+        region=region,
+        epoch=str(movement_selection["epoch"]),
+        turn_type=str(key["turn_type"]),
+        common_graph_length_cm=common_length,
+        graph_length_cm_by_trajectory=graph_lengths,
+        n_trials_by_trajectory=n_trials_by_trajectory,
+        support_duration_s_by_trajectory=(
+            support_duration_s_by_trajectory
+        ),
+        n_feature_samples_by_trajectory=feature_counts,
+        n_valid_position_samples_by_trajectory=valid_counts,
+        bin_size_cm=parameters["place_bin_size_cm"],
+        bin_count=parameters["position_bin_count"],
+        sigma_bins=parameters["gaussian_smoothing_sigma_bins"],
+        artifact_attributes=_dpp_tuning_curve_artifact_attributes(
+            key,
+            selected_units_sha256=selected_units_sha256,
+        ),
+        overwrite=overwrite,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance.update(
+        {
+            "source_v1ca1_git_commit": source_v1ca1_git_commit,
+            "source_spyglass_git_commit": source_spyglass_git_commit,
+            "assumed_parameters": {
+                "position": {
+                    field_name: position_row[field_name]
+                    for field_name in (
+                        "position_series_name",
+                        "position_role",
+                        "analysis_start_offset_samples",
+                    )
+                },
+                "movement": movement_parameters,
+                "tuning_curve": parameters,
+            },
+        }
+    )
+    return {
+        "tuning_curve_path": str(registered["tuning_curve_path"]),
+        "n_units": int(registered["n_units"]),
+        "n_valid_units": int(registered["n_valid_units"]),
+        "n_trials": int(registered["n_trials"]),
+        "n_outbound_trials": int(registered["n_outbound_trials"]),
+        "n_inbound_trials": int(registered["n_inbound_trials"]),
+        "support_duration_s": float(registered["support_duration_s"]),
+        "n_feature_samples": int(registered["n_feature_samples"]),
+        "n_position_bins": int(registered["n_position_bins"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": selected_units_sha256,
+        "artifact_origin": "registered_existing",
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": list(
+            registered.get("_created_artifact_paths", ())
+        ),
     }
 
 
@@ -1570,12 +4341,14 @@ def _validate_legacy_stability_schema(table: Any) -> None:
         )
 
 
-def _register_existing_task_progression_stability_row(
+def _register_existing_path_specific_place_stability_row(
     *,
     key: Mapping[str, Any],
     stability_path: Path,
     overwrite: bool,
-    parameters_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_parameters_table: Any,
     movement_parameters_table: Any,
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
@@ -1592,37 +4365,65 @@ def _register_existing_task_progression_stability_row(
 
     from v1ca1.spyglass.selection import unit_identity_sha256
     from v1ca1.spyglass.spikes import resolve_merge_parent
+    from v1ca1.spyglass.path_specific_place import (
+        load_path_specific_place_artifact,
+    )
     from v1ca1.spyglass.stability import (
+        compute_selected_stability_from_tuning_curves,
         empty_stability_table,
         get_stability_artifact_path,
         write_stability_artifact,
     )
 
-    parameters = _validate_stability_parameter_row(
-        _fetch1_dict(parameters_table, key)
+    validated_selection = _stability_selection_row(
+        key=key,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+    )
+    if str(validated_selection["path_specific_place_stability_id"]) != str(
+        key["path_specific_place_stability_id"]
+    ):
+        raise ValueError("PathSpecificPlaceStability selection UUID is stale.")
+    curve_results: dict[str, dict[str, Any]] = {}
+    curve_selections: dict[str, dict[str, Any]] = {}
+    curves: dict[str, Any] = {}
+    for subset in ("odd", "even"):
+        curve_key = {
+            "path_specific_place_tuning_curve_id": key[
+                f"{subset}_path_specific_place_tuning_curve_id"
+            ]
+        }
+        curve_results[subset] = _fetch1_dict(tuning_curve_table, curve_key)
+        curve_selections[subset] = _fetch1_dict(
+            tuning_curve_selection_table,
+            curve_key,
+        )
+        curves[subset] = load_path_specific_place_artifact(
+            Path(curve_results[subset]["tuning_curve_path"])
+        )
+        _validate_tuning_curve_artifact_link(
+            curve=curves[subset],
+            result_row=curve_results[subset],
+            selection_row=curve_selections[subset],
+        )
+    curve_selection = curve_selections["odd"]
+    parameters = _validate_tuning_curve_parameter_row(
+        _fetch1_dict(tuning_curve_parameters_table, curve_selection)
     )
     _validate_frozen_parameters(
-        key,
+        curve_selection,
         parameters,
-        field_name="task_progression_stability_parameters_sha256",
+        field_name="tuning_curve_parameters_sha256",
     )
-    default_stability_parameters = dict(
-        table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS
-    )
-    for field_name in ("place_bin_size_cm",):
-        if not math.isclose(
-            parameters[field_name],
-            default_stability_parameters[field_name],
-            rel_tol=1e-12,
-            abs_tol=1e-12,
-        ):
-            raise ValueError(
-                "Legacy stability registration is only valid for the regenerated "
-                f"default parameters; {field_name} differs."
-            )
+    legacy_parameters = dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    if any(parameters[name] != legacy_parameters[name] for name in parameters):
+        raise ValueError(
+            "Legacy stability registration requires odd/even curves with the "
+            "legacy_4cm_unsmoothed parameter preset."
+        )
 
     movement_key = {
-        "movement_firing_rate_id": key["movement_firing_rate_id"]
+        "movement_firing_rate_id": curve_selection["movement_firing_rate_id"]
     }
     movement_result = _fetch1_dict(
         movement_firing_rate_table,
@@ -1632,7 +4433,7 @@ def _register_existing_task_progression_stability_row(
         movement_firing_rate_selection_table,
         movement_key,
     )
-    context = {**key, **movement_selection}
+    context = {**curve_selection, **movement_selection}
     movement_parameters = _validate_movement_parameter_row(
         _fetch1_dict(movement_parameters_table, context)
     )
@@ -1706,7 +4507,7 @@ def _register_existing_task_progression_stability_row(
         "animal_name": animal_name,
         "date": session_date,
         "epoch": str(movement_selection["epoch"]),
-        "trajectory_type": str(key["trajectory_type"]),
+        "trajectory_type": str(curve_selection["trajectory_type"]),
         "region": region,
     }
     include = np.ones(len(table), dtype=bool)
@@ -1735,6 +4536,22 @@ def _register_existing_task_progression_stability_row(
             unit_metadata=loaded_units["unit_metadata"],
             artifact_name="stability",
         )
+        curve_group_ids = pd.Series(
+            np.asarray(curves["odd"].coords["group_unit_id"].values).astype(
+                str
+            ),
+            index=np.asarray(
+                curves["odd"].coords["stable_unit_id"].values
+            ).astype(str),
+        )
+        selected["group_unit_id"] = (
+            selected["stable_unit_id"].astype(str).map(curve_group_ids)
+        )
+        if selected["group_unit_id"].isna().any():
+            raise ValueError(
+                "Existing stability units do not map to the upstream tuning "
+                "curve group identities."
+            )
     else:
         selected = empty_stability_table()
     selected_units = set(selected["stable_unit_id"].astype(str))
@@ -1742,6 +4559,17 @@ def _register_existing_task_progression_stability_row(
         f"{unit['spikesorting_merge_id']}:{unit['unit_id']}"
         for unit in loaded_units["unit_ids"]
     }
+    for subset in ("odd", "even"):
+        curve_units = set(
+            np.asarray(curves[subset].coords["stable_unit_id"].values).astype(str)
+        )
+        if curve_units != expected_units or str(
+            curve_results[subset]["selected_units_sha256"]
+        ) != selected_units_sha256:
+            raise ValueError(
+                "Odd/even tuning-curve artifacts do not contain exactly the "
+                "selected SortedSpikesGroup units."
+            )
     if len(selected) != len(selected_units) or selected_units != expected_units:
         raise ValueError(
             "Existing stability partition must contain exactly one row per "
@@ -1780,6 +4608,63 @@ def _register_existing_task_progression_stability_row(
                 "Existing stability firing_rate_hz does not match the upstream "
                 "MovementFiringRate artifact."
             )
+    expected_result = compute_selected_stability_from_tuning_curves(
+        odd_tuning_curve=curves["odd"],
+        even_tuning_curve=curves["even"],
+        movement_firing_rate_table=movement["table"],
+    )
+    canonical_columns = list(empty_stability_table().columns)
+    missing_canonical = sorted(set(canonical_columns).difference(selected.columns))
+    if missing_canonical:
+        raise ValueError(
+            "Existing stability artifact is missing normalized columns "
+            f"{missing_canonical!r}."
+        )
+    selected_for_validation = (
+        selected.loc[:, canonical_columns]
+        .sort_values("stable_unit_id", kind="stable")
+        .reset_index(drop=True)
+    )
+    expected_for_validation = (
+        expected_result["table"]
+        .loc[:, canonical_columns]
+        .sort_values("stable_unit_id", kind="stable")
+        .reset_index(drop=True)
+    )
+    string_columns = (
+        "spikesorting_merge_id",
+        "unit_id",
+        "stable_unit_id",
+        "group_unit_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "trajectory_type",
+        "stability_status",
+    )
+    for column in string_columns:
+        selected_for_validation[column] = selected_for_validation[column].astype(
+            str
+        )
+        expected_for_validation[column] = expected_for_validation[column].astype(
+            str
+        )
+    try:
+        pd.testing.assert_frame_equal(
+            selected_for_validation,
+            expected_for_validation,
+            check_dtype=False,
+            check_exact=False,
+            rtol=1e-9,
+            atol=1e-12,
+        )
+    except AssertionError as exc:
+        raise ValueError(
+            "Existing stability artifact does not match stability recomputed "
+            "from the selected odd/even tuning curves."
+        ) from exc
+    selected = selected_for_validation
     ordered_identity = [
         "spikesorting_merge_id",
         "unit_id",
@@ -1815,9 +4700,11 @@ def _register_existing_task_progression_stability_row(
         animal_name=animal_name,
         date=session_date,
         epoch=str(movement_selection["epoch"]),
-        trajectory_type=str(key["trajectory_type"]),
+        trajectory_type=str(curve_selection["trajectory_type"]),
         region=region,
-        task_progression_stability_id=key["task_progression_stability_id"],
+        path_specific_place_stability_id=key[
+            "path_specific_place_stability_id"
+        ],
         **path_kwargs,
     )
     created_artifact_paths = [] if destination.exists() else [str(destination)]
@@ -1840,9 +4727,1307 @@ def _register_existing_task_progression_stability_row(
             "source_spyglass_git_commit": source_spyglass_git_commit,
             "assumed_parameters": {
                 "movement": movement_parameters,
-                "stability": parameters,
+                "tuning_curve": parameters,
             },
         },
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _load_dpp_stability_artifact(
+    *,
+    result_row: Mapping[str, Any],
+    trajectory_type: str,
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+) -> Any:
+    """Load and cross-check one selected stability Parquet."""
+    import pandas as pd
+
+    from v1ca1.spyglass.selection import unit_identity_sha256
+    from v1ca1.spyglass.stability import (
+        ARTIFACT_FILENAME,
+        empty_stability_table,
+    )
+
+    path = Path(result_row["stability_path"])
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"PathSpecificPlaceStability artifact not found: {path}"
+        )
+    stability_id = str(result_row["path_specific_place_stability_id"])
+    if path.name != ARTIFACT_FILENAME or path.parent.name != stability_id:
+        raise ValueError(
+            "PathSpecificPlaceStability artifact path does not contain its "
+            "result UUID."
+        )
+    table = pd.read_parquet(path)
+    missing = sorted(set(empty_stability_table().columns).difference(table))
+    if missing:
+        raise ValueError(
+            "PathSpecificPlaceStability artifact is missing canonical "
+            f"columns {missing!r}."
+        )
+    if table["stable_unit_id"].astype(str).duplicated().any():
+        raise ValueError(
+            "PathSpecificPlaceStability artifact has duplicate stable units."
+        )
+    if len(table) != int(result_row["n_units"]):
+        raise ValueError(
+            "PathSpecificPlaceStability result unit count disagrees with its "
+            "artifact."
+        )
+    n_valid = int(table["stability_status"].astype(str).eq("valid").sum())
+    if n_valid != int(result_row["n_valid_units"]):
+        raise ValueError(
+            "PathSpecificPlaceStability valid-unit count disagrees with its "
+            "artifact."
+        )
+    expected_status = "valid" if n_valid else (
+        "no_units" if table.empty else "no_valid_units"
+    )
+    if str(result_row["analysis_status"]) != expected_status:
+        raise ValueError(
+            "PathSpecificPlaceStability status disagrees with its artifact."
+        )
+    identities = table.loc[
+        :, ["spikesorting_merge_id", "unit_id"]
+    ].to_dict("records")
+    if unit_identity_sha256(identities) != str(
+        result_row["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceStability unit identities disagree with its "
+            "result digest."
+        )
+    expected_metadata = {
+        "animal_name": animal_name,
+        "date": date,
+        "region": region,
+        "epoch": epoch,
+        "trajectory_type": trajectory_type,
+    }
+    if not table.empty:
+        for field_name, expected_value in expected_metadata.items():
+            observed = table[field_name].astype(str).unique().tolist()
+            if observed != [str(expected_value)]:
+                raise ValueError(
+                    "PathSpecificPlaceStability artifact does not match the "
+                    f"DPP selection: {field_name}."
+                )
+    return table
+
+
+def _load_dpp_encoding_comparison_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate shared inputs for one encoding comparison."""
+    validated_selection = _dpp_encoding_comparison_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["dpp_encoding_comparison_id"]) != str(
+        key["dpp_encoding_comparison_id"]
+    ):
+        raise ValueError("DPPEncodingComparison selection UUID is stale.")
+    parameters = _validate_dpp_encoding_comparison_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="dpp_encoding_comparison_parameters_sha256",
+    )
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(
+        session_table,
+        movement_selection,
+    )
+    region = str(region_row["region_name"])
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    if movement["analysis_status"] != "valid":
+        raise ValueError(
+            "DPPEncodingComparison requires valid movement support."
+        )
+    epoch_row = _fetch1_dict(epoch_intervals_table, movement_selection)
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError(
+            "EpochIntervals must contain finite start_time < stop_time."
+        )
+
+    stability_tables: dict[str, Any] = {}
+    stability_rows: dict[str, dict[str, Any]] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        stability_key = {
+            "path_specific_place_stability_id": key[
+                f"{trajectory_type}_stability_id"
+            ]
+        }
+        stability_row = _fetch1_dict(stability_table, stability_key)
+        stability_tables[trajectory_type] = _load_dpp_stability_artifact(
+            result_row=stability_row,
+            trajectory_type=trajectory_type,
+            animal_name=animal_name,
+            date=session_date,
+            region=region,
+            epoch=str(movement_selection["epoch"]),
+        )
+        stability_rows[trajectory_type] = stability_row
+    return {
+        "selection": validated_selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_result": movement_result,
+        "movement_selection": movement_selection,
+        "movement_parameters": movement_parameters,
+        "movement": movement,
+        "epoch_row": epoch_row,
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": str(movement_selection["epoch"]),
+        "epoch_time_support": (epoch_start, epoch_stop),
+        "stability_tables": stability_tables,
+        "stability_rows": stability_rows,
+    }
+
+
+def _load_dpp_encoding_comparison_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Open one source NWB and load the selected position, laps, and graphs."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    movement_selection = dict(context["movement_selection"])
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    position_row = _fetch1_dict(position_table, movement_selection)
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    configuration_names = (*_DPP_TRAJECTORY_TYPES, _DPP_FULL_GRAPH_CONFIGURATION_NAME)
+    graph_rows = {
+        configuration_name: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": configuration_name,
+            },
+        )
+        for configuration_name in configuration_names
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile,
+            position_row,
+            apply_analysis_offset=True,
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            configuration_name: load_wtrack_graph(nwbfile, row)
+            for configuration_name, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_row": position_row,
+    }
+
+
+def _load_dpp_encoding_comparison_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify the regional units selected for one comparison."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["epoch_time_support"],
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    expected_digest = str(context["region_row"]["selected_units_sha256"])
+    if unit_digest != expected_digest or unit_digest != str(
+        context["movement_result"]["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "DPPEncodingComparison regional units changed after selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "DPPEncodingComparison regional unit count changed after selection."
+        )
+    return loaded
+
+
+def _load_path_progression_decoding_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate one shared-cohort cross-path decoder selection."""
+    validated_selection = _path_progression_decoding_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["path_progression_decoding_comparison_id"]) != str(
+        key["path_progression_decoding_comparison_id"]
+    ):
+        raise ValueError(
+            "PathProgressionDecodingComparison selection UUID is stale."
+        )
+    parameters = _validate_path_progression_decoding_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="path_progression_decoding_parameters_sha256",
+    )
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    animal_name, session_date = _session_identity(session_table, key)
+    region = str(region_row["region_name"])
+
+    movement_sources: dict[str, dict[str, Any]] = {}
+    for source_name, id_field in (
+        ("target", "movement_firing_rate_id"),
+        ("cohort", "cohort_movement_firing_rate_id"),
+    ):
+        movement_key = {"movement_firing_rate_id": key[id_field]}
+        result = _fetch1_dict(movement_firing_rate_table, movement_key)
+        selection = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+        movement_parameters = _validate_movement_parameter_row(
+            _fetch1_dict(movement_parameters_table, selection)
+        )
+        _validate_frozen_parameters(
+            selection,
+            movement_parameters,
+            field_name="movement_parameters_sha256",
+        )
+        movement = _load_movement_result_artifacts(
+            result_row=result,
+            parameters=movement_parameters,
+            expected_metadata={
+                "animal_name": animal_name,
+                "date": session_date,
+                "region": region,
+                "epoch": str(selection["epoch"]),
+            },
+        )
+        expected_movement_status = (
+            "no_units" if int(region_row["n_units"]) == 0 else "valid"
+        )
+        if movement["analysis_status"] != expected_movement_status:
+            raise ValueError(
+                "PathProgressionDecodingComparison movement support does not "
+                "match the regional unit count."
+            )
+        epoch_row = _fetch1_dict(epoch_intervals_table, selection)
+        epoch_start = float(epoch_row["start_time"])
+        epoch_stop = float(epoch_row["stop_time"])
+        if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+            epoch_stop <= epoch_start
+        ):
+            raise ValueError(
+                "EpochIntervals must contain finite start_time < stop_time."
+            )
+        movement_sources[source_name] = {
+            "result": result,
+            "selection": selection,
+            "parameters": movement_parameters,
+            "movement": movement,
+            "epoch_row": epoch_row,
+            "epoch_time_support": (epoch_start, epoch_stop),
+        }
+
+    stability_tables: dict[str, dict[str, Any]] = {
+        "target": {},
+        "cohort": {},
+    }
+    stability_rows: dict[str, dict[str, dict[str, Any]]] = {
+        "target": {},
+        "cohort": {},
+    }
+    for source_name, prefix in (("target", ""), ("cohort", "cohort_")):
+        source = movement_sources[source_name]
+        source_epoch = str(source["selection"]["epoch"])
+        for trajectory_type in _DPP_TRAJECTORY_TYPES:
+            stability_key = {
+                "path_specific_place_stability_id": key[
+                    f"{prefix}{trajectory_type}_stability_id"
+                ]
+            }
+            result_row = _fetch1_dict(stability_table, stability_key)
+            stability_tables[source_name][trajectory_type] = (
+                _load_dpp_stability_artifact(
+                    result_row=result_row,
+                    trajectory_type=trajectory_type,
+                    animal_name=animal_name,
+                    date=session_date,
+                    region=region,
+                    epoch=source_epoch,
+                )
+            )
+            stability_rows[source_name][trajectory_type] = result_row
+
+    return {
+        "selection": validated_selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_sources": movement_sources,
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": str(movement_sources["target"]["selection"]["epoch"]),
+        "cohort_epoch": str(
+            movement_sources["cohort"]["selection"]["epoch"]
+        ),
+        "epoch_time_support": movement_sources["target"][
+            "epoch_time_support"
+        ],
+        "stability_tables": stability_tables,
+        "stability_rows": stability_rows,
+    }
+
+
+def _load_path_progression_decoding_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load target-epoch position, laps, and four path graphs from NWB."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    movement_selection = dict(
+        context["movement_sources"]["target"]["selection"]
+    )
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    position_row = _fetch1_dict(position_table, movement_selection)
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile,
+            position_row,
+            apply_analysis_offset=True,
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_row": position_row,
+    }
+
+
+def _load_path_progression_decoding_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify regional units for one target decoding epoch."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["epoch_time_support"],
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    expected_digest = str(context["region_row"]["selected_units_sha256"])
+    source_results = context["movement_sources"]
+    if unit_digest != expected_digest or any(
+        unit_digest
+        != str(source_results[source_name]["result"]["selected_units_sha256"])
+        for source_name in ("target", "cohort")
+    ):
+        raise ValueError(
+            "PathProgressionDecodingComparison regional units changed after "
+            "selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "PathProgressionDecodingComparison regional unit count changed "
+            "after selection."
+        )
+    return loaded
+
+
+def _legacy_dpp_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Map unique augmented-NWB sorting IDs to persistent unit identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy DPP encoding-comparison registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            "Regional spike metadata must contain one row per selected unit."
+        )
+    for metadata in metadata_rows:
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                "Every selected unit requires a unique sorting_unit_id for "
+                "legacy DPP encoding-comparison registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+        }
+    return resolver
+
+
+def _validate_legacy_dpp_encoding_source_path(
+    path: Path,
+    *,
+    region: str,
+    epoch: str,
+    parameters: Mapping[str, Any],
+) -> Path:
+    """Require legacy filenames to attest their encoded fit parameters."""
+    from v1ca1.task_progression.encoding_comparison import (
+        format_encoding_binning_token,
+    )
+
+    source = Path(path)
+    binning_token = format_encoding_binning_token(
+        bin_size_s=parameters["evaluation_bin_size_s"],
+        place_bin_size_cm=parameters["spatial_bin_size_cm"],
+    )
+    expected_name = (
+        f"{region}_{epoch}_cv{parameters['n_folds']}_{binning_token}_"
+        "encoding_summary.parquet"
+    )
+    if source.name != expected_name:
+        raise ValueError(
+            "Legacy DPP encoding-comparison filename does not encode the "
+            "selected region, epoch, fold count, and evaluation/spatial bin "
+            f"sizes; expected {expected_name!r}."
+        )
+    return source
+
+
+def _validate_dpp_encoding_comparison_artifact_link(
+    *,
+    table: Any,
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one canonical comparison artifact to match its result row."""
+    from v1ca1.spyglass.encoding_comparison import (
+        ARTIFACT_DIRNAME,
+        ARTIFACT_FILENAME,
+        summarize_encoding_comparison_table,
+    )
+
+    parameters = _validate_dpp_encoding_comparison_parameter_row(
+        parameters_row
+    )
+    _validate_frozen_parameters(
+        selection_row,
+        parameters,
+        field_name="dpp_encoding_comparison_parameters_sha256",
+    )
+    summary = summarize_encoding_comparison_table(table)
+    for field_name in (
+        "n_units_eligible",
+        "n_units_valid",
+        "analysis_status",
+        "eligible_units_sha256",
+    ):
+        if str(result_row[field_name]) != str(summary[field_name]):
+            raise ValueError(
+                "DPPEncodingComparison result metadata disagrees with its "
+                f"artifact: {field_name}."
+            )
+    if int(result_row["n_units_input"]) != int(region_row["n_units"]):
+        raise ValueError(
+            "DPPEncodingComparison input-unit count disagrees with its "
+            "RegionSortedSpikesGroup."
+        )
+    if int(result_row["n_units_input"]) < int(summary["n_units_eligible"]):
+        raise ValueError(
+            "DPPEncodingComparison n_units_input cannot be smaller than the "
+            "eligible-unit count."
+        )
+
+    comparison_id = str(selection_row["dpp_encoding_comparison_id"])
+    if not table.empty:
+        artifact_ids = (
+            table["dpp_encoding_comparison_id"].astype(str).unique().tolist()
+        )
+        if artifact_ids != [comparison_id]:
+            raise ValueError(
+                "DPPEncodingComparison artifact does not match its selection "
+                "UUID."
+            )
+        expected_metadata = {
+            "animal_name": animal_name,
+            "date": date,
+            "region": region_row["region_name"],
+            "epoch": selection_row["epoch"],
+        }
+        for field_name, expected_value in expected_metadata.items():
+            observed = table[field_name].astype(str).unique().tolist()
+            if observed != [str(expected_value)]:
+                raise ValueError(
+                    "DPPEncodingComparison artifact does not match its "
+                    f"selection: {field_name}."
+                )
+        for field_name in (
+            "n_folds",
+            "evaluation_bin_size_s",
+            "spatial_bin_size_cm",
+            "gaussian_smoothing_sigma_bins",
+            "random_seed",
+            "minimum_movement_firing_rate_hz",
+            "minimum_stability_correlation",
+        ):
+            observed = table[field_name].iloc[0]
+            expected = parameters[field_name]
+            if isinstance(expected, Integral):
+                matches = int(observed) == int(expected)
+            else:
+                matches = math.isclose(
+                    float(observed),
+                    float(expected),
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            if not matches:
+                raise ValueError(
+                    "DPPEncodingComparison artifact does not match its "
+                    f"selected parameters: {field_name}."
+                )
+
+    artifact_path = Path(result_row["encoding_comparison_path"])
+    expected_path_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        str(selection_row["epoch"]),
+        str(region_row["region_name"]),
+        comparison_id,
+        ARTIFACT_FILENAME,
+    )
+    if tuple(artifact_path.parts[-len(expected_path_tail) :]) != (
+        expected_path_tail
+    ):
+        raise ValueError(
+            "DPPEncodingComparison artifact path does not match its session, "
+            "epoch, region, and selection UUID."
+        )
+
+
+def _validate_path_progression_decoding_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one canonical decoding bundle to match its DataJoint rows."""
+    from v1ca1.spyglass.decoding_comparison import (
+        ARTIFACT_DIRNAME,
+        ELIGIBILITY_FILENAME,
+        MANIFEST_FILENAME,
+        METRICS_FILENAME,
+        summarize_decoding_artifact_bundle,
+    )
+
+    parameters = _validate_path_progression_decoding_parameter_row(
+        parameters_row
+    )
+    _validate_frozen_parameters(
+        selection_row,
+        parameters,
+        field_name="path_progression_decoding_parameters_sha256",
+    )
+    summary = summarize_decoding_artifact_bundle(bundle)
+    for field_name in (
+        "n_units_input",
+        "n_units_eligible",
+        "n_transfer_pairs_expected",
+        "n_transfer_pairs_valid",
+        "n_decoded_samples",
+        "analysis_status",
+        "eligible_units_sha256",
+    ):
+        if str(result_row[field_name]) != str(summary[field_name]):
+            raise ValueError(
+                "PathProgressionDecodingComparison result metadata "
+                f"disagrees with its artifact: {field_name}."
+            )
+    if int(result_row["n_units_input"]) != int(region_row["n_units"]):
+        raise ValueError(
+            "PathProgressionDecodingComparison input count disagrees with "
+            "RegionSortedSpikesGroup."
+        )
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    input_units_sha256 = unit_identity_sha256(
+        bundle["unit_eligibility"]
+        .loc[:, ["spikesorting_merge_id", "unit_id"]]
+        .to_dict("records")
+    )
+    if input_units_sha256 != str(region_row["selected_units_sha256"]):
+        raise ValueError(
+            "PathProgressionDecodingComparison input identities disagree "
+            "with RegionSortedSpikesGroup."
+        )
+
+    expected_metadata = {
+        "path_progression_decoding_comparison_id": selection_row[
+            "path_progression_decoding_comparison_id"
+        ],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "epoch": selection_row["epoch"],
+        "cohort_epoch": selection_row["cohort_epoch"],
+        "parameter_name": selection_row[
+            "path_progression_decoding_param_name"
+        ],
+        "parameter_sha256": selection_row[
+            "path_progression_decoding_parameters_sha256"
+        ],
+        "eligibility_rule_sha256": selection_row[
+            "eligibility_rule_sha256"
+        ],
+        "transfer_spec_sha256": selection_row["transfer_spec_sha256"],
+        "decoding_output_rule_sha256": selection_row[
+            "decoding_output_rule_sha256"
+        ],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(summary[field_name]) != str(expected_value):
+            raise ValueError(
+                "PathProgressionDecodingComparison artifact does not match "
+                f"its selection: {field_name}."
+            )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    summary_path = Path(result_row["decoding_summary_path"])
+    eligibility_path = Path(result_row["unit_eligibility_path"])
+    result_id = str(selection_row["path_progression_decoding_comparison_id"])
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        str(selection_row["epoch"]),
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "PathProgressionDecodingComparison manifest path does not match "
+            "its canonical session/epoch/region/UUID layout."
+        )
+    if summary_path != manifest_path.parent / METRICS_FILENAME or (
+        eligibility_path != manifest_path.parent / ELIGIBILITY_FILENAME
+    ):
+        raise ValueError(
+            "PathProgressionDecodingComparison result paths do not describe "
+            "one canonical artifact bundle."
+        )
+    if Path(bundle["path"]) != manifest_path.parent:
+        raise ValueError(
+            "Loaded decoding bundle path disagrees with the result row."
+        )
+
+
+def _make_dpp_encoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    epoch_intervals_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one strict four-model encoding comparison."""
+    from v1ca1.spyglass.encoding_comparison import (
+        compute_selected_dpp_encoding_comparison,
+        get_encoding_comparison_artifact_path,
+        write_encoding_comparison_artifact,
+    )
+
+    context = _load_dpp_encoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_dpp_encoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_dpp_encoding_comparison_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    parameters = context["parameters"]
+    result = compute_selected_dpp_encoding_comparison(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=nwb_inputs["position"],
+        trajectory_intervals_by_type=nwb_inputs["trajectory_intervals"],
+        graph_inputs_by_configuration=nwb_inputs["graph_inputs"],
+        movement_intervals=context["movement"]["movement_intervals"],
+        movement_firing_rate_table=context["movement"]["table"],
+        stability_tables_by_trajectory=context["stability_tables"],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
+        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        n_folds=parameters["n_folds"],
+        evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+        spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
+        gaussian_smoothing_sigma_bins=parameters[
+            "gaussian_smoothing_sigma_bins"
+        ],
+        random_seed=parameters["random_seed"],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    artifact_path = get_encoding_comparison_artifact_path(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        **path_kwargs,
+    )
+    created_artifact_paths = (
+        [] if artifact_path.exists() else [str(artifact_path)]
+    )
+    written_path = write_encoding_comparison_artifact(
+        result["table"],
+        artifact_path,
+    )
+    return {
+        "encoding_comparison_path": str(written_path),
+        "n_units_input": int(context["region_row"]["n_units"]),
+        "n_units_eligible": int(result["n_units_eligible"]),
+        "n_units_valid": int(result["n_units_valid"]),
+        "analysis_status": str(result["analysis_status"]),
+        "eligible_units_sha256": str(result["eligible_units_sha256"]),
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_dpp_encoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    encoding_comparison_path: Path,
+    overwrite: bool,
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    session_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Normalize and register one exact-coverage legacy comparison."""
+    from v1ca1.spyglass.encoding_comparison import (
+        get_encoding_comparison_artifact_path,
+        register_existing_encoding_comparison_artifact,
+    )
+
+    if overwrite:
+        raise ValueError(
+            "Registered DPPEncodingComparison artifacts are immutable."
+        )
+    context = _load_dpp_encoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_dpp_encoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    resolver = _legacy_dpp_unit_identity_resolver(loaded_spikes)
+    parameters = context["parameters"]
+    source_path = _validate_legacy_dpp_encoding_source_path(
+        Path(encoding_comparison_path),
+        region=context["region"],
+        epoch=context["epoch"],
+        parameters=parameters,
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    destination = get_encoding_comparison_artifact_path(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        **path_kwargs,
+    )
+    registered = register_existing_encoding_comparison_artifact(
+        source_path=source_path,
+        destination_path=destination,
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        movement_firing_rate_table=context["movement"]["table"],
+        stability_tables_by_trajectory=context["stability_tables"],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
+        unit_identity_resolver=resolver,
+        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        n_folds=parameters["n_folds"],
+        evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+        spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
+        gaussian_smoothing_sigma_bins=parameters[
+            "gaussian_smoothing_sigma_bins"
+        ],
+        random_seed=parameters["random_seed"],
+        source_v1ca1_git_commit=source_v1ca1_git_commit,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance["source_spyglass_git_commit"] = source_spyglass_git_commit
+    provenance["assumed_parameters"] = dict(parameters)
+    provenance["source_parameter_validation"] = {
+        "verified_from_filename": [
+            "n_folds",
+            "evaluation_bin_size_s",
+            "spatial_bin_size_cm",
+        ],
+        "recomputed_from_upstream": [
+            "minimum_movement_firing_rate_hz",
+            "minimum_stability_correlation",
+        ],
+        "caller_attested_not_encoded_in_legacy_artifact": [
+            "gaussian_smoothing_sigma_bins",
+            "random_seed",
+        ],
+    }
+    provenance["source_fold_qc_validation"] = (
+        "not_reconstructable_from_legacy_summary"
+    )
+    return {
+        "encoding_comparison_path": str(registered["path"]),
+        "n_units_input": int(context["region_row"]["n_units"]),
+        "n_units_eligible": int(registered["n_units_eligible"]),
+        "n_units_valid": int(registered["n_units_valid"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "eligible_units_sha256": str(
+            registered["eligible_units_sha256"]
+        ),
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": list(
+            registered.get("_created_artifact_paths", ())
+        ),
+    }
+
+
+def _make_path_progression_decoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one shared-cohort cross-path decoding bundle."""
+    from v1ca1.spyglass.decoding_comparison import (
+        compute_path_progression_decoding_comparison,
+        get_decoding_artifact_paths,
+        write_decoding_artifact_bundle,
+    )
+
+    context = _load_path_progression_decoding_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_path_progression_decoding_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_path_progression_decoding_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    parameters = context["parameters"]
+    result = compute_path_progression_decoding_comparison(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        cohort_epoch=context["cohort_epoch"],
+        path_progression_decoding_comparison_id=key[
+            "path_progression_decoding_comparison_id"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        target_movement_firing_rate_table=context["movement_sources"][
+            "target"
+        ]["movement"]["table"],
+        cohort_movement_firing_rate_table=context["movement_sources"][
+            "cohort"
+        ]["movement"]["table"],
+        target_stability_tables_by_trajectory=context["stability_tables"][
+            "target"
+        ],
+        cohort_stability_tables_by_trajectory=context["stability_tables"][
+            "cohort"
+        ],
+        position=nwb_inputs["position"],
+        trajectory_intervals=nwb_inputs["trajectory_intervals"],
+        graph_inputs=nwb_inputs["graph_inputs"],
+        movement_interval=context["movement_sources"]["target"][
+            "movement"
+        ]["intervals"],
+        decoding_bin_size_s=parameters["decoding_bin_size_s"],
+        sliding_window_size_bins=parameters["sliding_window_size_bins"],
+        spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
+        parameter_name=parameters["path_progression_decoding_param_name"],
+        parameter_sha256=key[
+            "path_progression_decoding_parameters_sha256"
+        ],
+        eligibility_rule_sha256=key["eligibility_rule_sha256"],
+        transfer_spec_sha256=key["transfer_spec_sha256"],
+        decoding_output_rule_sha256=key[
+            "decoding_output_rule_sha256"
+        ],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_decoding_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        cohort_epoch=context["cohort_epoch"],
+        region=context["region"],
+        path_progression_decoding_comparison_id=key[
+            "path_progression_decoding_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_decoding_artifact_bundle(
+        result,
+        paths,
+        overwrite=False,
+    )
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "decoding_summary_path": str(written["decoding_summary_path"]),
+        "unit_eligibility_path": str(written["unit_eligibility_path"]),
+        "n_units_input": int(result["n_units_input"]),
+        "n_units_eligible": int(result["n_units_eligible"]),
+        "n_transfer_pairs_expected": int(
+            result["n_transfer_pairs_expected"]
+        ),
+        "n_transfer_pairs_valid": int(result["n_transfer_pairs_valid"]),
+        "n_decoded_samples": int(result["n_decoded_samples"]),
+        "analysis_status": str(result["analysis_status"]),
+        "eligible_units_sha256": str(result["eligible_units_sha256"]),
         "_created_artifact_paths": created_artifact_paths,
     }
 
@@ -1918,13 +6103,49 @@ def _construct_tables(
         "movement_firing_rate_compute",
         _make_movement_firing_rate_row,
     )
+    tuning_curve_compute_hook = runtime_hooks.get(
+        "path_specific_place_tuning_curve_compute",
+        _make_path_specific_place_tuning_curve_row,
+    )
+    tuning_curve_register_hook = runtime_hooks.get(
+        "path_specific_place_tuning_curve_register_existing",
+        _register_existing_path_specific_place_tuning_curve_row,
+    )
+    tuning_similarity_compute_hook = runtime_hooks.get(
+        "path_specific_place_tuning_similarity_compute",
+        _make_path_specific_place_tuning_similarity_row,
+    )
+    tuning_similarity_register_hook = runtime_hooks.get(
+        "path_specific_place_tuning_similarity_register_existing",
+        _register_existing_path_specific_place_tuning_similarity_row,
+    )
+    dpp_tuning_curve_compute_hook = runtime_hooks.get(
+        "dpp_tuning_curve_compute",
+        _make_dpp_tuning_curve_row,
+    )
+    dpp_tuning_curve_register_hook = runtime_hooks.get(
+        "dpp_tuning_curve_register_existing",
+        _register_existing_dpp_tuning_curve_row,
+    )
     stability_compute_hook = runtime_hooks.get(
-        "task_progression_stability_compute",
-        _make_task_progression_stability_row,
+        "path_specific_place_stability_compute",
+        _make_path_specific_place_stability_row,
     )
     stability_register_hook = runtime_hooks.get(
-        "task_progression_stability_register_existing",
-        _register_existing_task_progression_stability_row,
+        "path_specific_place_stability_register_existing",
+        _register_existing_path_specific_place_stability_row,
+    )
+    dpp_encoding_comparison_compute_hook = runtime_hooks.get(
+        "dpp_encoding_comparison_compute",
+        _make_dpp_encoding_comparison_row,
+    )
+    dpp_encoding_comparison_register_hook = runtime_hooks.get(
+        "dpp_encoding_comparison_register_existing",
+        _register_existing_dpp_encoding_comparison_row,
+    )
+    path_progression_decoding_compute_hook = runtime_hooks.get(
+        "path_progression_decoding_comparison_compute",
+        _make_path_progression_decoding_comparison_row,
     )
     if not all(
         callable(hook)
@@ -1932,8 +6153,17 @@ def _construct_tables(
             ripple_compute_hook,
             ripple_register_hook,
             movement_compute_hook,
+            tuning_curve_compute_hook,
+            tuning_curve_register_hook,
+            tuning_similarity_compute_hook,
+            tuning_similarity_register_hook,
+            dpp_tuning_curve_compute_hook,
+            dpp_tuning_curve_register_hook,
             stability_compute_hook,
             stability_register_hook,
+            dpp_encoding_comparison_compute_hook,
+            dpp_encoding_comparison_register_hook,
+            path_progression_decoding_compute_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -2059,6 +6289,77 @@ def _construct_tables(
 
     SpikeSortingFigurl = main_schema(SpikeSortingFigurl)
     main_context["SpikeSortingFigurl"] = SpikeSortingFigurl
+
+    class RegionSortedSpikesGroup(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.REGION_SORTED_SPIKES_GROUP_DEFINITION
+
+        @classmethod
+        def register_regions(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            region_names: tuple[str, ...] = ("v1", "ca1"),
+            skip_duplicates: bool = False,
+        ) -> list[dict[str, Any]]:
+            """Register nonempty logical region views of one sorted group."""
+            from v1ca1.spyglass.region_sorted_spikes import (
+                build_region_sorted_spikes_group_row,
+                normalize_region,
+            )
+
+            normalized_regions = tuple(
+                normalize_region(region) for region in region_names
+            )
+            if not normalized_regions:
+                raise ValueError("region_names must contain at least one region.")
+            if len(set(normalized_regions)) != len(normalized_regions):
+                raise ValueError("region_names must contain unique values.")
+            group_key = _sorted_spikes_group_key(key)
+            rows: list[dict[str, Any]] = []
+            for region_name in normalized_regions:
+                loaded = _load_group_unit_data(
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    key=group_key,
+                    region=region_name,
+                    allow_empty=True,
+                )
+                if int(loaded["n_units"]) == 0:
+                    continue
+                row = build_region_sorted_spikes_group_row(loaded)
+                rows.append(row)
+            if not rows:
+                raise ValueError(
+                    "None of the requested regions contains units in the "
+                    "selected SortedSpikesGroup."
+                )
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+        @classmethod
+        def load_spikes(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            time_support: Any | tuple[float, float] | None = None,
+        ) -> dict[str, Any]:
+            """Reload and verify one registered regional sorting view."""
+            from v1ca1.spyglass.region_sorted_spikes import (
+                reload_region_sorted_spikes_group,
+            )
+
+            row = _fetch1_dict(cls, key)
+            return reload_region_sorted_spikes_group(
+                row,
+                sorted_spikes_group=sorted_spikes_group,
+                unit_selection_params=unit_selection_params,
+                spike_sorting_output=spike_sorting_output,
+                time_support=time_support,
+            )
+
+    RegionSortedSpikesGroup = main_schema(RegionSortedSpikesGroup)
+    main_context["RegionSortedSpikesGroup"] = RegionSortedSpikesGroup
 
     class MovementParameters(spyglass_mixin, dj_module.Manual):
         definition = table_specs.MOVEMENT_PARAMETERS_DEFINITION
@@ -2338,8 +6639,8 @@ def _construct_tables(
     RippleModulation = main_schema(RippleModulation)
     main_context["RippleModulation"] = RippleModulation
 
-    class TaskProgressionStabilityParameters(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.TASK_PROGRESSION_STABILITY_PARAMETERS_DEFINITION
+    class TuningCurveParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.TUNING_CURVE_PARAMETERS_DEFINITION
 
         @classmethod
         def insert_parameters(
@@ -2348,28 +6649,69 @@ def _construct_tables(
             *,
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
-            """Validate and insert one numerical stability parameter set."""
-            validated = _validate_stability_parameter_row(row)
+            """Validate and insert one tuning-curve parameter set."""
+            validated = _validate_tuning_curve_parameter_row(row)
             cls.insert1(validated, skip_duplicates=skip_duplicates)
             return validated
 
         @classmethod
-        def insert_default(cls, *, skip_duplicates: bool = True) -> dict[str, Any]:
-            """Explicitly insert the canonical stability parameters."""
-            return cls.insert_parameters(
-                table_specs.DEFAULT_TASK_PROGRESSION_STABILITY_PARAMETERS,
-                skip_duplicates=skip_duplicates,
-            )
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the documented legacy and Figure 1D presets."""
+            return [
+                cls.insert_parameters(
+                    parameters,
+                    skip_duplicates=skip_duplicates,
+                )
+                for parameters in table_specs.TUNING_CURVE_PARAMETER_PRESETS
+            ]
 
-    TaskProgressionStabilityParameters = main_schema(
-        TaskProgressionStabilityParameters
-    )
-    main_context["TaskProgressionStabilityParameters"] = (
-        TaskProgressionStabilityParameters
-    )
+    TuningCurveParameters = main_schema(TuningCurveParameters)
+    main_context["TuningCurveParameters"] = TuningCurveParameters
 
-    class TaskProgressionStabilitySelection(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.TASK_PROGRESSION_STABILITY_SELECTION_DEFINITION
+    class TuningSimilarityParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.TUNING_SIMILARITY_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one fixed tuning-similarity metric."""
+            validated = _validate_tuning_similarity_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the three documented similarity metrics."""
+            return [
+                cls.insert_parameters(
+                    parameters,
+                    skip_duplicates=skip_duplicates,
+                )
+                for parameters in table_specs.TUNING_SIMILARITY_PARAMETER_PRESETS
+            ]
+
+    TuningSimilarityParameters = main_schema(TuningSimilarityParameters)
+    main_context["TuningSimilarityParameters"] = TuningSimilarityParameters
+
+    class PathSpecificPlaceTuningCurveSelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.PATH_SPECIFIC_PLACE_TUNING_CURVE_SELECTION_DEFINITION
+        )
 
         @classmethod
         def insert_selection(
@@ -2378,8 +6720,8 @@ def _construct_tables(
             *,
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
-            """Validate, freeze, identify, and insert one stability selection."""
-            row = _stability_selection_row(
+            """Validate, freeze, identify, and insert one curve selection."""
+            row = _path_specific_place_tuning_curve_selection_row(
                 key=key,
                 epoch_intervals_table=EpochIntervals,
                 trajectory_intervals_table=TrajectoryIntervals,
@@ -2388,30 +6730,33 @@ def _construct_tables(
                 movement_firing_rate_selection_table=(
                     MovementFiringRateSelection
                 ),
-                parameters_table=TaskProgressionStabilityParameters,
+                parameters_table=TuningCurveParameters,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
 
-    TaskProgressionStabilitySelection = main_schema(
-        TaskProgressionStabilitySelection
+    PathSpecificPlaceTuningCurveSelection = main_schema(
+        PathSpecificPlaceTuningCurveSelection
     )
-    main_context["TaskProgressionStabilitySelection"] = (
-        TaskProgressionStabilitySelection
+    main_context["PathSpecificPlaceTuningCurveSelection"] = (
+        PathSpecificPlaceTuningCurveSelection
     )
 
-    class TaskProgressionStability(spyglass_mixin, dj_module.Computed):
-        definition = table_specs.TASK_PROGRESSION_STABILITY_DEFINITION
-        _compute_hook = staticmethod(stability_compute_hook)
-        _register_existing_hook = staticmethod(stability_register_hook)
+    class PathSpecificPlaceTuningCurve(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.PATH_SPECIFIC_PLACE_TUNING_CURVE_DEFINITION
+        _compute_hook = staticmethod(tuning_curve_compute_hook)
+        _register_existing_hook = staticmethod(tuning_curve_register_hook)
 
         def make(self, key: Mapping[str, Any]) -> None:
-            """Compute, write, and insert one selected stability artifact."""
-            selection = _fetch1_dict(TaskProgressionStabilitySelection, key)
+            """Compute, write, and insert one selected tuning curve."""
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningCurveSelection,
+                key,
+            )
             row = dict(
                 self._compute_hook(
                     key=selection,
-                    parameters_table=TaskProgressionStabilityParameters,
+                    parameters_table=TuningCurveParameters,
                     epoch_intervals_table=EpochIntervals,
                     trajectory_intervals_table=TrajectoryIntervals,
                     position_table=Position,
@@ -2435,8 +6780,589 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        "task_progression_stability_id": selection[
-                            "task_progression_stability_id"
+                        "path_specific_place_tuning_curve_id": selection[
+                            "path_specific_place_tuning_curve_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_tuning_curve(cls, key: Mapping[str, Any]) -> Any:
+            """Load and validate one canonical tuning-curve DataArray."""
+            from v1ca1.spyglass.path_specific_place import (
+                load_path_specific_place_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningCurveSelection,
+                {
+                    "path_specific_place_tuning_curve_id": row[
+                        "path_specific_place_tuning_curve_id"
+                    ]
+                },
+            )
+            curve = load_path_specific_place_artifact(
+                Path(row["tuning_curve_path"])
+            )
+            _validate_tuning_curve_artifact_link(
+                curve=curve,
+                result_row=row,
+                selection_row=selection,
+            )
+            return curve
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            tuning_curve_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one matching legacy all-trial NetCDF and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered PathSpecificPlaceTuningCurve results are "
+                    "immutable; create a new selection instead of overwriting "
+                    "an artifact."
+                )
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningCurveSelection,
+                key,
+            )
+            result_key = {
+                "path_specific_place_tuning_curve_id": selection[
+                    "path_specific_place_tuning_curve_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "PathSpecificPlaceTuningCurve already contains this "
+                    "immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    tuning_curve_path=Path(tuning_curve_path),
+                    overwrite=False,
+                    parameters_table=TuningCurveParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    position_table=Position,
+                    wtrack_graph_table=WTrackGraph,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "path_specific_place_tuning_curve_id": selection[
+                    "path_specific_place_tuning_curve_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    PathSpecificPlaceTuningCurve = main_schema(
+        PathSpecificPlaceTuningCurve
+    )
+    main_context["PathSpecificPlaceTuningCurve"] = (
+        PathSpecificPlaceTuningCurve
+    )
+
+    class PathSpecificPlaceTuningSimilaritySelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.PATH_SPECIFIC_PLACE_TUNING_SIMILARITY_SELECTION_DEFINITION
+        )
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one similarity selection."""
+            row = _tuning_similarity_selection_row(
+                key=key,
+                tuning_curve_table=PathSpecificPlaceTuningCurve,
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                parameters_table=TuningSimilarityParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    PathSpecificPlaceTuningSimilaritySelection = main_schema(
+        PathSpecificPlaceTuningSimilaritySelection
+    )
+    main_context["PathSpecificPlaceTuningSimilaritySelection"] = (
+        PathSpecificPlaceTuningSimilaritySelection
+    )
+
+    class PathSpecificPlaceTuningSimilarity(
+        spyglass_mixin,
+        dj_module.Computed,
+    ):
+        definition = table_specs.PATH_SPECIFIC_PLACE_TUNING_SIMILARITY_DEFINITION
+        _compute_hook = staticmethod(tuning_similarity_compute_hook)
+        _register_existing_hook = staticmethod(tuning_similarity_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one all-unit similarity artifact."""
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningSimilaritySelection,
+                key,
+            )
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=TuningSimilarityParameters,
+                    tuning_curve_parameters_table=TuningCurveParameters,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "path_specific_place_tuning_similarity_id": selection[
+                            "path_specific_place_tuning_similarity_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_similarity(cls, key: Mapping[str, Any]) -> Any:
+            """Load and cross-check one canonical all-unit similarity Parquet."""
+            from v1ca1.spyglass.tuning_similarity import (
+                load_tuning_similarity_artifact,
+                validate_tuning_similarity_against_inputs,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningSimilaritySelection,
+                {
+                    "path_specific_place_tuning_similarity_id": row[
+                        "path_specific_place_tuning_similarity_id"
+                    ]
+                },
+            )
+            inputs = _load_tuning_similarity_inputs(
+                key=selection,
+                parameters_table=TuningSimilarityParameters,
+                tuning_curve_parameters_table=TuningCurveParameters,
+                tuning_curve_table=PathSpecificPlaceTuningCurve,
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                movement_parameters_table=MovementParameters,
+                session_table=session_table,
+            )
+            table = load_tuning_similarity_artifact(
+                Path(row["similarity_path"])
+            )
+            validate_tuning_similarity_against_inputs(
+                table,
+                tuning_curves_by_trajectory=inputs["curves"],
+                movement_firing_rate_table=inputs["movement_table"],
+                similarity_metric=inputs["parameters"]["similarity_metric"],
+            )
+            _validate_tuning_similarity_artifact_link(
+                table=table,
+                result_row=row,
+                similarity_metric=inputs["parameters"]["similarity_metric"],
+            )
+            return table
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            similarity_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate one complete all-unit legacy Parquet and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered PathSpecificPlaceTuningSimilarity results are "
+                    "immutable; create a new selection instead of overwriting "
+                    "an artifact."
+                )
+            selection = _fetch1_dict(
+                PathSpecificPlaceTuningSimilaritySelection,
+                key,
+            )
+            result_key = {
+                "path_specific_place_tuning_similarity_id": selection[
+                    "path_specific_place_tuning_similarity_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "PathSpecificPlaceTuningSimilarity already contains this "
+                    "immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    similarity_path=Path(similarity_path),
+                    overwrite=False,
+                    parameters_table=TuningSimilarityParameters,
+                    tuning_curve_parameters_table=TuningCurveParameters,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "path_specific_place_tuning_similarity_id": selection[
+                    "path_specific_place_tuning_similarity_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    PathSpecificPlaceTuningSimilarity = main_schema(
+        PathSpecificPlaceTuningSimilarity
+    )
+    main_context["PathSpecificPlaceTuningSimilarity"] = (
+        PathSpecificPlaceTuningSimilarity
+    )
+
+    class DPPTuningCurveSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DPP_TUNING_CURVE_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one DPP selection."""
+            row = _dpp_tuning_curve_selection_row(
+                key=key,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                parameters_table=TuningCurveParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    DPPTuningCurveSelection = main_schema(DPPTuningCurveSelection)
+    main_context["DPPTuningCurveSelection"] = DPPTuningCurveSelection
+
+    class DPPTuningCurve(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.DPP_TUNING_CURVE_DEFINITION
+        _compute_hook = staticmethod(dpp_tuning_curve_compute_hook)
+        _register_existing_hook = staticmethod(dpp_tuning_curve_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one selected DPP tuning curve."""
+            selection = _fetch1_dict(DPPTuningCurveSelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=TuningCurveParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    position_table=Position,
+                    wtrack_graph_table=WTrackGraph,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "dpp_tuning_curve_id": selection[
+                            "dpp_tuning_curve_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_tuning_curve(cls, key: Mapping[str, Any]) -> Any:
+            """Load and validate one canonical DPP tuning DataArray."""
+            from v1ca1.spyglass.dpp import load_dpp_artifact
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                DPPTuningCurveSelection,
+                {"dpp_tuning_curve_id": row["dpp_tuning_curve_id"]},
+            )
+            curve = load_dpp_artifact(Path(row["tuning_curve_path"]))
+            _validate_dpp_tuning_curve_artifact_link(
+                curve=curve,
+                result_row=row,
+                selection_row=selection,
+            )
+            return curve
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            tuning_curve_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one matching legacy all-trial DPP and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered DPPTuningCurve results are immutable; create "
+                    "a new selection instead of overwriting an artifact."
+                )
+            selection = _fetch1_dict(DPPTuningCurveSelection, key)
+            result_key = {
+                "dpp_tuning_curve_id": selection["dpp_tuning_curve_id"]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "DPPTuningCurve already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    tuning_curve_path=Path(tuning_curve_path),
+                    overwrite=False,
+                    parameters_table=TuningCurveParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    position_table=Position,
+                    wtrack_graph_table=WTrackGraph,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    sorted_spikes_group=sorted_spikes_group,
+                    unit_selection_params=unit_selection_params,
+                    spike_sorting_output=spike_sorting_output,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "dpp_tuning_curve_id": selection["dpp_tuning_curve_id"],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    DPPTuningCurve = main_schema(DPPTuningCurve)
+    main_context["DPPTuningCurve"] = DPPTuningCurve
+
+    class PathSpecificPlaceStabilitySelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.PATH_SPECIFIC_PLACE_STABILITY_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one stability selection."""
+            row = _stability_selection_row(
+                key=key,
+                tuning_curve_table=PathSpecificPlaceTuningCurve,
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    PathSpecificPlaceStabilitySelection = main_schema(
+        PathSpecificPlaceStabilitySelection
+    )
+    main_context["PathSpecificPlaceStabilitySelection"] = (
+        PathSpecificPlaceStabilitySelection
+    )
+
+    class PathSpecificPlaceStability(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.PATH_SPECIFIC_PLACE_STABILITY_DEFINITION
+        _compute_hook = staticmethod(stability_compute_hook)
+        _register_existing_hook = staticmethod(stability_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one selected stability artifact."""
+            selection = _fetch1_dict(PathSpecificPlaceStabilitySelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "path_specific_place_stability_id": selection[
+                            "path_specific_place_stability_id"
                         ],
                         **row,
                         "artifact_origin": "computed",
@@ -2462,13 +7388,13 @@ def _construct_tables(
             """Filter the complete legacy Parquet and insert one result row."""
             if overwrite:
                 raise ValueError(
-                    "Registered TaskProgressionStability results are immutable; "
+                    "Registered PathSpecificPlaceStability results are immutable; "
                     "create a new selection instead of overwriting an artifact."
                 )
-            selection = _fetch1_dict(TaskProgressionStabilitySelection, key)
+            selection = _fetch1_dict(PathSpecificPlaceStabilitySelection, key)
             result_key = {
-                "task_progression_stability_id": selection[
-                    "task_progression_stability_id"
+                "path_specific_place_stability_id": selection[
+                    "path_specific_place_stability_id"
                 ]
             }
             existing = _existing_result_row(cls, result_key)
@@ -2476,14 +7402,19 @@ def _construct_tables(
                 if skip_duplicates:
                     return existing
                 raise ValueError(
-                    "TaskProgressionStability already contains this immutable selection."
+                    "PathSpecificPlaceStability already contains this "
+                    "immutable selection."
                 )
             artifact_row = dict(
                 cls._register_existing_hook(
                     key=selection,
                     stability_path=Path(stability_path),
                     overwrite=False,
-                    parameters_table=TaskProgressionStabilityParameters,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    tuning_curve_parameters_table=TuningCurveParameters,
                     movement_parameters_table=MovementParameters,
                     movement_firing_rate_table=MovementFiringRate,
                     movement_firing_rate_selection_table=(
@@ -2502,8 +7433,8 @@ def _construct_tables(
                 artifact_row.pop("_created_artifact_paths", ())
             )
             row = {
-                "task_progression_stability_id": selection[
-                    "task_progression_stability_id"
+                "path_specific_place_stability_id": selection[
+                    "path_specific_place_stability_id"
                 ],
                 **artifact_row,
                 "artifact_origin": "registered_existing",
@@ -2521,8 +7452,515 @@ def _construct_tables(
                 raise
             return row
 
-    TaskProgressionStability = main_schema(TaskProgressionStability)
-    main_context["TaskProgressionStability"] = TaskProgressionStability
+    PathSpecificPlaceStability = main_schema(PathSpecificPlaceStability)
+    main_context["PathSpecificPlaceStability"] = PathSpecificPlaceStability
+
+    class DPPEncodingComparisonParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DPP_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one encoding-comparison parameter row."""
+            validated = _validate_dpp_encoding_comparison_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the canonical encoding presets."""
+            return [
+                cls.insert_parameters(
+                    preset,
+                    skip_duplicates=skip_duplicates,
+                )
+                for preset in table_specs.DPP_ENCODING_COMPARISON_PARAMETER_PRESETS
+            ]
+
+        @classmethod
+        def insert_default(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> dict[str, Any]:
+            """Explicitly insert the manuscript 50-ms preset."""
+            return cls.insert_parameters(
+                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    DPPEncodingComparisonParameters = main_schema(
+        DPPEncodingComparisonParameters
+    )
+    main_context["DPPEncodingComparisonParameters"] = (
+        DPPEncodingComparisonParameters
+    )
+
+    class DPPEncodingComparisonSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DPP_ENCODING_COMPARISON_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one comparison."""
+            row = _dpp_encoding_comparison_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                stability_table=PathSpecificPlaceStability,
+                stability_selection_table=(
+                    PathSpecificPlaceStabilitySelection
+                ),
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                parameters_table=DPPEncodingComparisonParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    DPPEncodingComparisonSelection = main_schema(
+        DPPEncodingComparisonSelection
+    )
+    main_context["DPPEncodingComparisonSelection"] = (
+        DPPEncodingComparisonSelection
+    )
+
+    class DPPEncodingComparison(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.DPP_ENCODING_COMPARISON_DEFINITION
+        _compute_hook = staticmethod(dpp_encoding_comparison_compute_hook)
+        _register_existing_hook = staticmethod(
+            dpp_encoding_comparison_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one four-model comparison."""
+            selection = _fetch1_dict(DPPEncodingComparisonSelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=DPPEncodingComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    position_table=Position,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    stability_table=PathSpecificPlaceStability,
+                    stability_selection_table=(
+                        PathSpecificPlaceStabilitySelection
+                    ),
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "dpp_encoding_comparison_id": selection[
+                            "dpp_encoding_comparison_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_encoding_comparison(
+            cls,
+            key: Mapping[str, Any],
+        ) -> Any:
+            """Load and validate one canonical comparison Parquet."""
+            from v1ca1.spyglass.encoding_comparison import (
+                load_encoding_comparison_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                DPPEncodingComparisonSelection,
+                {
+                    "dpp_encoding_comparison_id": row[
+                        "dpp_encoding_comparison_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                DPPEncodingComparisonParameters,
+                {
+                    "dpp_encoding_comparison_param_name": selection[
+                        "dpp_encoding_comparison_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            table = load_encoding_comparison_artifact(
+                Path(row["encoding_comparison_path"])
+            )
+            _validate_dpp_encoding_comparison_artifact_link(
+                table=table,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return table
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            encoding_comparison_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one exact-coverage legacy artifact and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered DPPEncodingComparison results are immutable; "
+                    "create a new selection instead of overwriting an artifact."
+                )
+            selection = _fetch1_dict(DPPEncodingComparisonSelection, key)
+            result_key = {
+                "dpp_encoding_comparison_id": selection[
+                    "dpp_encoding_comparison_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "DPPEncodingComparison already contains this immutable "
+                    "selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    encoding_comparison_path=Path(
+                        encoding_comparison_path
+                    ),
+                    overwrite=False,
+                    parameters_table=DPPEncodingComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    stability_table=PathSpecificPlaceStability,
+                    stability_selection_table=(
+                        PathSpecificPlaceStabilitySelection
+                    ),
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    session_table=session_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "dpp_encoding_comparison_id": selection[
+                    "dpp_encoding_comparison_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    DPPEncodingComparison = main_schema(DPPEncodingComparison)
+    main_context["DPPEncodingComparison"] = DPPEncodingComparison
+
+    class PathProgressionDecodingParameters(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.PATH_PROGRESSION_DECODING_PARAMETERS_DEFINITION
+        )
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one cross-path decoding parameter row."""
+            validated = _validate_path_progression_decoding_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the canonical decoding presets."""
+            return [
+                cls.insert_parameters(
+                    preset,
+                    skip_duplicates=skip_duplicates,
+                )
+                for preset in (
+                    table_specs.PATH_PROGRESSION_DECODING_PARAMETER_PRESETS
+                )
+            ]
+
+        @classmethod
+        def insert_default(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> dict[str, Any]:
+            """Explicitly insert the manuscript-compatible decoding preset."""
+            return cls.insert_parameters(
+                table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    PathProgressionDecodingParameters = main_schema(
+        PathProgressionDecodingParameters
+    )
+    main_context["PathProgressionDecodingParameters"] = (
+        PathProgressionDecodingParameters
+    )
+
+    class PathProgressionDecodingComparisonSelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = table_specs.PATH_PROGRESSION_DECODING_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one decoding selection."""
+            row = _path_progression_decoding_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                position_table=Position,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                stability_table=PathSpecificPlaceStability,
+                stability_selection_table=(
+                    PathSpecificPlaceStabilitySelection
+                ),
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                parameters_table=PathProgressionDecodingParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    PathProgressionDecodingComparisonSelection = main_schema(
+        PathProgressionDecodingComparisonSelection
+    )
+    main_context["PathProgressionDecodingComparisonSelection"] = (
+        PathProgressionDecodingComparisonSelection
+    )
+
+    class PathProgressionDecodingComparison(
+        spyglass_mixin,
+        dj_module.Computed,
+    ):
+        definition = table_specs.PATH_PROGRESSION_DECODING_DEFINITION
+        _compute_hook = staticmethod(path_progression_decoding_compute_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one shared-cohort decoder bundle."""
+            selection = _fetch1_dict(
+                PathProgressionDecodingComparisonSelection,
+                key,
+            )
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=PathProgressionDecodingParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    stability_table=PathSpecificPlaceStability,
+                    stability_selection_table=(
+                        PathSpecificPlaceStabilitySelection
+                    ),
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "path_progression_decoding_comparison_id": selection[
+                            "path_progression_decoding_comparison_id"
+                        ],
+                        **row,
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_decoding_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical cross-path decoding bundle."""
+            from v1ca1.spyglass.decoding_comparison import (
+                load_decoding_artifact_bundle,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                PathProgressionDecodingComparisonSelection,
+                {
+                    "path_progression_decoding_comparison_id": row[
+                        "path_progression_decoding_comparison_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                PathProgressionDecodingParameters,
+                {
+                    "path_progression_decoding_param_name": selection[
+                        "path_progression_decoding_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_decoding_artifact_bundle(
+                Path(row["artifact_manifest_path"])
+            )
+            _validate_path_progression_decoding_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+    PathProgressionDecodingComparison = main_schema(
+        PathProgressionDecodingComparison
+    )
+    main_context["PathProgressionDecodingComparison"] = (
+        PathProgressionDecodingComparison
+    )
 
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
@@ -2558,19 +7996,45 @@ def _construct_tables(
         "position": Position,
         "wtrack_graph": WTrackGraph,
         "spike_sorting_figurl": SpikeSortingFigurl,
+        "region_sorted_spikes_group": RegionSortedSpikesGroup,
         "movement_parameters": MovementParameters,
         "movement_firing_rate_selection": MovementFiringRateSelection,
         "movement_firing_rate": MovementFiringRate,
         "ripple_modulation_parameters": RippleModulationParameters,
         "ripple_modulation_selection": RippleModulationSelection,
         "ripple_modulation": RippleModulation,
-        "task_progression_stability_parameters": (
-            TaskProgressionStabilityParameters
+        "tuning_curve_parameters": TuningCurveParameters,
+        "tuning_similarity_parameters": TuningSimilarityParameters,
+        "path_specific_place_tuning_curve_selection": (
+            PathSpecificPlaceTuningCurveSelection
         ),
-        "task_progression_stability_selection": (
-            TaskProgressionStabilitySelection
+        "path_specific_place_tuning_curve": PathSpecificPlaceTuningCurve,
+        "path_specific_place_tuning_similarity_selection": (
+            PathSpecificPlaceTuningSimilaritySelection
         ),
-        "task_progression_stability": TaskProgressionStability,
+        "path_specific_place_tuning_similarity": (
+            PathSpecificPlaceTuningSimilarity
+        ),
+        "dpp_tuning_curve_selection": DPPTuningCurveSelection,
+        "dpp_tuning_curve": DPPTuningCurve,
+        "path_specific_place_stability_selection": (
+            PathSpecificPlaceStabilitySelection
+        ),
+        "path_specific_place_stability": PathSpecificPlaceStability,
+        "dpp_encoding_comparison_parameters": (
+            DPPEncodingComparisonParameters
+        ),
+        "dpp_encoding_comparison_selection": DPPEncodingComparisonSelection,
+        "dpp_encoding_comparison": DPPEncodingComparison,
+        "path_progression_decoding_parameters": (
+            PathProgressionDecodingParameters
+        ),
+        "path_progression_decoding_comparison_selection": (
+            PathProgressionDecodingComparisonSelection
+        ),
+        "path_progression_decoding_comparison": (
+            PathProgressionDecodingComparison
+        ),
         "analysis_nwbfile": AnalysisNwbfile,
     }
 
@@ -2589,6 +8053,8 @@ def activate(
 
     Activation declares tables only.  It never calls ``insert_default``,
     ``populate``, ``make``, or ``register_existing``.
+    A custom ``artifact_root`` must be inside the configured ``analysis``
+    external-store stage so DataJoint can accept ``filepath@analysis`` values.
     """
     import datajoint as dj
 

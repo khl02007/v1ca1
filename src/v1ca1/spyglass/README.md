@@ -19,10 +19,14 @@ register artifacts, or write to NWB.
 - `spikes.py` is the shared adapter for `SortedSpikesGroup`,
   `UnitSelectionParams`, and `SpikeSortingOutput` parents. It loads canonical
   ephys-referenced seconds and provides Pynapple and SpikeInterface adapters.
+- `region_sorted_spikes.py` freezes a region-specific logical view of one
+  standard sorting group without materializing units or spike times.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
-- `movement.py`, `ripple_modulation.py`, and `stability.py` provide
-  database-free computation and atomic artifact writing.
+- `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
+  `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`, and
+  `decoding_comparison.py` provide database-free computation and atomic
+  artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
@@ -61,6 +65,15 @@ ephys-referenced seconds. Persistent unit identity is
 `(spikesorting_merge_id, unit_id)`; consecutive Pynapple `TsGroup` keys are
 temporary computation keys only. There is no project table with one database
 row per unit.
+
+`RegionSortedSpikesGroup` registers an immutable logical view of one standard
+sorting group for one region. Its UUIDv5 covers the source group, group
+membership, unit-label filters, normalized region, and selected-unit identity
+digest. The row stores only those snapshots and the unit count: it creates no
+per-unit rows, spike arrays, or artifact files. `register_regions()` is the
+explicit insertion operation and skips requested regions with no units;
+`load_spikes()` reloads the standard sources and rejects any changed snapshot.
+Importing the package or calling `activate()` does not register regional views.
 
 An explicit `insert_selection()` snapshots the sorting-group membership,
 unit-label filters, and a SHA-256 digest of every selected parameter value. The
@@ -126,33 +139,165 @@ one of:
   movement support exceeds the threshold; selected units are retained with
   undefined rates and the IntervalSet is empty.
 
-Task-progression stability uses:
+Path-specific place tuning and stability use:
 
 ```text
 TrajectoryIntervals + WTrackGraph + MovementFiringRate
-    + TaskProgressionStabilityParameters
-    -> TaskProgressionStabilitySelection (task_progression_stability_id)
-    -> TaskProgressionStability
+    + TuningCurveParameters + trial_subset
+    -> PathSpecificPlaceTuningCurveSelection
+    -> PathSpecificPlaceTuningCurve
+
+odd PathSpecificPlaceTuningCurve + even PathSpecificPlaceTuningCurve
+    -> PathSpecificPlaceStabilitySelection
+    -> PathSpecificPlaceStability
     -> stability.parquet
+
+four matching all-trial PathSpecificPlaceTuningCurve rows
+    + TuningSimilarityParameters
+    -> PathSpecificPlaceTuningSimilaritySelection
+    -> PathSpecificPlaceTuningSimilarity
+    -> similarity.parquet
 ```
 
-Each result covers one epoch, trajectory, graph configuration, named position
-series, region, sorting group, and parameter set. The graph configuration must
-match the trajectory. Its `make()` loads the saved movement IntervalSet and
-all-unit firing-rate Parquet through the selected `MovementFiringRate` row; it
-does not recompute speed, movement support, or firing rates. Consequently,
-`TaskProgressionStabilityParameters` contains only the place-bin size. The
-stability Parquet retains every selected unit, including undefined
-correlations, with explicit QC/status columns; firing-rate and stability
-thresholds remain downstream selection choices. `no_units`,
+Each tuning row covers one epoch, trajectory, graph configuration, named
+position series, region, sorting group, parameter set, and `all`, `odd`, or
+`even` trials. The graph configuration must match the trajectory. Its `make()`
+loads the saved movement IntervalSet and all-unit firing-rate Parquet through
+the selected `MovementFiringRate` row; it does not recompute speed or movement
+support. The NetCDF DataArray retains every selected unit and records stable
+unit identity, physical path position in centimeters, normalized path
+fraction, subset spike counts, trial/support metadata, and fixed QC status.
+
+`TuningCurveParameters` provides an explicit legacy-compatible 4 cm,
+unsmoothed preset and the Figure 1D 50-bin, 1.5-bin Gaussian-smoothed preset.
+`PathSpecificPlaceStability` has no separate numerical parameter table: each
+row consumes a matching persisted odd/even tuning-curve pair and applies fixed
+QC rules. The stability Parquet retains every selected unit, including
+undefined correlations, with explicit QC/status columns; firing-rate and
+stability thresholds remain downstream selection choices. `no_units`,
 `no_valid_position`, and `no_movement` propagate from the movement result;
 otherwise stability reports `valid` when at least one unit has a valid
 correlation and `no_valid_units` when none does.
 
-The computed table names are `RippleModulation`, `MovementFiringRate`, and
-`TaskProgressionStability`—there is no `Computed` suffix. Empty but valid
+Each tuning-similarity result is one session, epoch, region, tuning
+configuration, similarity metric, and matching set of four all-trial curves.
+The supported metrics are `correlation`, `absolute_overlap`, and
+`shape_overlap`. Its Parquet has one row per unit and path-pair comparison—four
+rows per unit for the two turn and two arm comparisons. It retains undefined
+scores with QC and copies `movement_firing_rate_hz` from the shared upstream
+movement result without filtering units. DPPI, significance testing, and
+cross-epoch aggregation remain downstream analysis or figure logic.
+
+Directional path progression (DPP) tuning uses:
+
+```text
+outbound TrajectoryIntervals + inbound TrajectoryIntervals
+    + their two WTrackGraph rows + MovementFiringRate
+    + TuningCurveParameters + turn_type + trial_subset
+    -> DPPTuningCurveSelection
+    -> DPPTuningCurve
+```
+
+Each DPP row is one epoch, left- or right-turn pair, and `all`, `odd`, or
+`even` trial subset. The fixed left pair is `center_to_left` plus
+`right_to_center`; the fixed right pair is `center_to_right` plus
+`left_to_center`. Odd/even trials are selected independently within each
+constituent trajectory. Their normalized, direction-aligned position samples
+and movement support are then pooled before a single tuning curve is
+estimated—constituent tuning curves are never averaged. Both source interval
+and graph rows are explicit foreign keys, so the database enforces a common
+NWB session and epoch and the artifact records separate constituent trial and
+support summaries. The two graph paths must have one common physical length;
+this preserves the legacy interpretation of a shared centimeter bin size on
+the pooled normalized coordinate.
+
+The DPP encoding comparison uses:
+
+```text
+RegionSortedSpikesGroup + MovementFiringRate
+    + four TrajectoryIntervals + four trajectory WTrackGraph rows
+    + full_w WTrackGraph
+    + four PathSpecificPlaceStability rows backed by
+      legacy_4cm_unsmoothed odd/even curves
+    + DPPEncodingComparisonParameters
+    -> DPPEncodingComparisonSelection
+    -> DPPEncodingComparison
+    -> encoding_comparison.parquet
+```
+
+The manuscript preset fixes five lap-wise folds, 50-ms evaluation bins, 4-cm
+spatial bins, one-bin Gaussian smoothing, and random seed 47. It selects units
+with epoch-wide movement firing rate at least 0.5 Hz and stability correlation
+at least 0.5 on at least one of the four trajectories. These criteria are
+explicit parameters of this eligible-unit comparison; the upstream movement
+and stability artifacts remain complete all-unit results. The standalone
+`task_progression.encoding_comparison` command retains its general 20-ms
+default, so the 50-ms choice is selected explicitly by this preset.
+Each trajectory receives a deterministic independent lap shuffle, and neither
+spatial bins nor Gaussian smoothing cross concatenated path or DPP boundaries.
+
+Training-fold tuning curves are refit for four fixed Poisson encoding models:
+path-specific physical place, direction-independent absolute place on the
+full W-track, same-turn DPP, and start-to-goal distance-to-reward. One Parquet
+row per eligible unit records persistent identity, eligibility inputs, total
+held-out log likelihoods in nats, information relative to the null model in
+bits per spike, DPP-minus-alternative contrasts, and model/unit QC. It does
+not create one DataJoint row per unit.
+
+The computed table names are `RippleModulation`, `MovementFiringRate`,
+`PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
+`DPPTuningCurve`, `PathSpecificPlaceStability`,
+`DPPEncodingComparison`, and `PathProgressionDecodingComparison`—there is no
+`Computed` suffix. Empty but valid
 selections are recorded through explicit terminal statuses rather than being
 silently omitted.
+Its explicit selection and parameter rows do not populate it automatically.
+
+Cross-path path-progression decoding uses:
+
+```text
+RegionSortedSpikesGroup
+    + target MovementFiringRate + four target stability rows
+    + cohort MovementFiringRate + four cohort stability rows
+    + target four TrajectoryIntervals + four WTrackGraph rows
+    + PathProgressionDecodingParameters
+    -> PathProgressionDecodingComparisonSelection
+    -> PathProgressionDecodingComparison
+    -> manifest.parquet + unit_eligibility.parquet
+       + decoding_summary.parquet + Pynapple true/decoded NPZ files
+```
+
+Each result remains one target epoch and region. The selection also names one
+cohort epoch. Selecting the target epoch as its own cohort performs ordinary
+single-epoch filtering. Reciprocal light-to-dark and dark-to-light selections
+derive the same symmetric intersection of eligible persistent units, so the
+two population decoders cannot silently use different neural populations.
+The per-unit eligibility audit is a Parquet artifact, not one DataJoint row
+per unit.
+
+The manuscript-compatible scalar preset uses 20-ms decode bins, a four-bin
+sliding window, 4-cm path bins, movement firing rate at least 0.5 Hz in both
+epochs, and no stability threshold. If a stability threshold is supplied, a
+unit must meet it on at least one trajectory in each epoch. This symmetric
+cohort is an intentional new policy: the legacy manuscript workflow selected
+units from the dark epoch alone and reused them in both epochs. The policy and
+fixed 16-pair transfer specification are hashed into every selection UUID.
+The eight selected stability rows remain explicit upstream dependencies even
+when the threshold is disabled; their correlations are retained in the unit
+eligibility audit but do not affect eligibility. Fixed coordinate and binned-
+error summary semantics are frozen by a separate output-rule hash.
+
+The 16 directed transfers comprise same-turn/cross-arm,
+opposite-turn/same-arm, flipped opposite-turn/same-arm, and
+same-inbound-or-outbound/cross-arm comparisons. All use normalized
+start-to-goal path progression and one shared eligible population. This table
+does not bundle the legacy within-epoch path-specific-place decoder, which
+used a different unit population and belongs in a separate future result.
+Cross-epoch and reload joins use persistent sorting-output/unit identities;
+ephemeral Pynapple `TsGroup` keys are stored only as local artifact metadata.
+All NPZ timestamps are seconds on the augmented NWB's ephys timestamp
+reference; true-position and decoded grids may differ and are aligned by
+interpolation when errors are summarized.
 
 ## Artifacts and provenance
 
@@ -168,22 +313,75 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     movement_firing_rate.parquet
     movement_intervals.npz
 
-<root>/<animal>/<date>/task_progression_stability/<epoch>/<trajectory>/<region>/<uuid>/
+<root>/<animal>/<date>/path_specific_place_tuning_curve/<epoch>/<trajectory>/<subset>/<region>/<uuid>/
+    tuning_curve.nc
+
+<root>/<animal>/<date>/dpp_tuning_curve/<epoch>/<turn>/<subset>/<region>/<uuid>/
+    tuning_curve.nc
+
+<root>/<animal>/<date>/path_specific_place_tuning_similarity/<epoch>/<region>/<metric>/<uuid>/
+    similarity.parquet
+
+<root>/<animal>/<date>/path_specific_place_stability/<epoch>/<trajectory>/<region>/<uuid>/
     stability.parquet
+
+<root>/<animal>/<date>/dpp_encoding_comparison/<epoch>/<region>/<uuid>/
+    encoding_comparison.parquet
+
+<root>/<animal>/<date>/path_progression_decoding_comparison/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    unit_eligibility.parquet
+    decoding_summary.parquet
+    cross_path_error_by_position.parquet
+    cross_<family>_<source>_to_<target>_{true,decoded}.npz
 ```
+
+If `activate(artifact_root=...)` is used, that root must remain inside the
+stage configured for DataJoint's `analysis` store; otherwise DataJoint cannot
+insert the resulting `filepath@analysis` value. Fixed-width centimeter bins
+retain the legacy padded final edge. Consequently, `path_fraction` is exactly
+the centimeter bin center divided by graph length and its last value may be
+slightly greater than 1.
 
 `make()` computes from the selected sources, writes a new artifact bundle, and
 inserts the result row. It never writes results into the source NWB.
 `MovementFiringRate` is compute-only: its Parquet and Pynapple-backed NPZ are
-written and validated together. `RippleModulation` and
-`TaskProgressionStability` additionally provide `register_existing()`, which
-validates and partitions matching legacy Parquets, copies the selected content
-into the same canonical path, and inserts a result row without rerunning the
-analysis. Legacy registration is restricted to matching
-`ImportedSpikeSorting` selections. Registration requires complete canonical
-schemas; ripple peri-event data must also contain one complete, common time
-grid for every unit. Canonical empty artifacts are accepted and recorded with
-the applicable `no_units` or `no_ripples` terminal status.
+written and validated together. `RippleModulation`,
+`PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
+`DPPTuningCurve`, `PathSpecificPlaceStability`, and
+`DPPEncodingComparison` additionally provide `register_existing()`, which
+validates matching legacy artifacts, copies selected content into the
+canonical path, and inserts a result row without rerunning the analysis.
+Tuning-curve registration accepts only the legacy-compatible all-trial preset;
+odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
+`head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,
+0.1 s-sigma movement defaults; a different position or movement definition
+must be recomputed.
+Similarity registration accepts only a complete `*_all_units.parquet` source
+for the legacy 4 cm unsmoothed, all-trial tuning configuration and matching
+imported sorting selection; it validates all four comparisons for every
+selected unit before copying the canonical result.
+`DPPEncodingComparison.register_existing()` accepts one
+matching legacy epoch summary, resolves it against the selected regional
+group, movement rates, and four stability rows, validates the exact eligible
+unit set, converts legacy per-spike likelihoods to canonical total nats, and
+copies it to the UUID-keyed path. It does not register the legacy light/dark
+join or cross-trajectory-transfer outputs.
+The legacy filename verifies the fold count and temporal/spatial bins.
+Smoothing, random seed, and fold-level QC are not encoded, so those limitations
+are retained explicitly as caller-attested, unreconstructed provenance.
+Legacy registration is restricted to matching `ImportedSpikeSorting`
+selections. Registration requires complete canonical schemas; ripple
+peri-event data must also contain one complete, common time grid for every
+unit. Canonical empty artifacts are accepted and recorded with the applicable
+terminal status.
+
+`PathProgressionDecodingComparison` is compute-only. Legacy decoding NPZ
+files contain decoded values and times but no selected-unit identities,
+sorting snapshot, parameters, graph identifiers, or output checksums. The
+untagged manuscript runs also lack companion selected-unit audit tables, so a
+normal `register_existing()` could not prove equivalence and is deliberately
+not exposed.
 
 UUID-keyed destinations and result rows are immutable. `register_existing()`
 rejects `overwrite=True` and checks for an existing row before calling the

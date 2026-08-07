@@ -6,8 +6,10 @@ This workflow treats within-epoch trajectory-pair similarity as the primary
 analysis product. For each selected run epoch and region, it computes direct
 same-turn and same-arm similarity scores for each sufficiently active unit,
 adds pooled within-family summaries, and writes one long-form parquet table
-plus summary figures. Optionally, it also estimates per-unit significance for
-the direct pairwise rows using circular spike-time shifts on the concatenated
+plus summary figures. The optional all-unit mode instead retains every unit
+and direct comparison with explicit QC, without changing the legacy outputs.
+Optionally, the legacy mode can also estimate per-unit significance for the
+direct pairwise rows using circular spike-time shifts on the concatenated
 movement axis.
 
 An optional secondary comparison mode can then compare the same similarity
@@ -37,6 +39,20 @@ from v1ca1.task_progression._session import (
     get_task_progression_output_dir,
     prepare_task_progression_session,
 )
+from v1ca1.task_progression.similarity import (
+    DIRECT_COMPARISON_LABELS,
+    DIRECT_COMPARISON_SPECS,
+    LABEL_TO_SPEC,
+    SIDE_TO_DIRECT_LABELS,
+    SIMILARITY_METRICS,
+    SIMILARITY_QC_COLUMNS,
+    compute_similarity_score,
+    compute_similarity_score_with_qc,
+    flip_curve_if_requested as _flip_curve_if_requested,
+    get_similarity_axis_label,
+    get_similarity_axis_limits,
+    interpolate_nans,
+)
 
 
 DEFAULT_REGION_FR_THRESHOLDS = {"v1": 0.5, "ca1": 0.0}
@@ -44,6 +60,7 @@ DEFAULT_N_SHUFFLES = 1000
 DEFAULT_SHUFFLE_SEED = 47
 DEFAULT_MIN_SHIFT_FRACTION = 0.1
 P_VALUE_THRESHOLD = 0.05
+ALL_UNITS_OUTPUT_SUFFIX = "_all_units"
 SIGNIFICANCE_COLUMNS = (
     "p_value",
     "q_value",
@@ -54,40 +71,6 @@ SIGNIFICANCE_COLUMNS = (
     "n_shuffles",
     "n_null_valid",
 )
-DIRECT_COMPARISON_SPECS = (
-    {
-        "comparison_family": "same_turn",
-        "comparison_label": "left_turn",
-        "side": "left",
-        "trajectory_a": "center_to_left",
-        "trajectory_b": "right_to_center",
-        "flip_trajectory_b": False,
-    },
-    {
-        "comparison_family": "same_turn",
-        "comparison_label": "right_turn",
-        "side": "right",
-        "trajectory_a": "center_to_right",
-        "trajectory_b": "left_to_center",
-        "flip_trajectory_b": False,
-    },
-    {
-        "comparison_family": "same_arm",
-        "comparison_label": "left_arm",
-        "side": "left",
-        "trajectory_a": "center_to_left",
-        "trajectory_b": "left_to_center",
-        "flip_trajectory_b": True,
-    },
-    {
-        "comparison_family": "same_arm",
-        "comparison_label": "right_arm",
-        "side": "right",
-        "trajectory_a": "center_to_right",
-        "trajectory_b": "right_to_center",
-        "flip_trajectory_b": True,
-    },
-)
 POOLED_COMPARISON_SPECS = (
     {
         "comparison_family": "same_turn",
@@ -97,9 +80,6 @@ POOLED_COMPARISON_SPECS = (
         "comparison_family": "same_arm",
         "comparison_label": "pooled_same_arm",
     },
-)
-DIRECT_COMPARISON_LABELS = tuple(
-    spec["comparison_label"] for spec in DIRECT_COMPARISON_SPECS
 )
 POOLED_COMPARISON_LABELS = tuple(
     spec["comparison_label"] for spec in POOLED_COMPARISON_SPECS
@@ -112,34 +92,6 @@ COMPARISON_LABEL_ORDER = (
     "pooled_same_turn",
     "pooled_same_arm",
 )
-SIDE_TO_DIRECT_LABELS = {
-    "left": ("left_turn", "left_arm"),
-    "right": ("right_turn", "right_arm"),
-}
-LABEL_TO_SPEC = {
-    spec["comparison_label"]: spec for spec in DIRECT_COMPARISON_SPECS
-}
-
-
-def interpolate_nans(values: np.ndarray) -> np.ndarray:
-    """Linearly interpolate NaN values in one 1D tuning curve."""
-    values = np.asarray(values, dtype=float)
-    if values.ndim != 1:
-        raise ValueError(f"Expected a 1D tuning curve, got shape {values.shape}.")
-    if np.all(np.isnan(values)):
-        return np.nan_to_num(values)
-
-    nans = np.isnan(values)
-    if not np.any(nans):
-        return values
-
-    output = values.copy()
-    output[nans] = np.interp(
-        np.flatnonzero(nans),
-        np.flatnonzero(~nans),
-        values[~nans],
-    )
-    return output
 
 
 def _require_statsmodels() -> None:
@@ -316,111 +268,56 @@ def compute_q_values(p_values: pd.Series) -> pd.Series:
     return q_values
 
 
-def compute_similarity_score(
-    curve_a: np.ndarray,
-    curve_b: np.ndarray,
-    similarity_metric: str,
-    eps: float = 1e-12,
-) -> float:
-    """Return one similarity score for a pair of tuning curves."""
-    curve_a = np.asarray(interpolate_nans(curve_a), dtype=float)
-    curve_b = np.asarray(interpolate_nans(curve_b), dtype=float)
-
-    valid = np.isfinite(curve_a) & np.isfinite(curve_b)
-    if not np.any(valid):
-        return np.nan
-
-    curve_a = curve_a[valid]
-    curve_b = curve_b[valid]
-
-    if similarity_metric == "correlation":
-        if np.std(curve_a) <= eps or np.std(curve_b) <= eps:
-            return np.nan
-        return float(np.corrcoef(curve_a, curve_b)[0, 1])
-
-    if similarity_metric == "absolute_overlap":
-        union = float(np.maximum(curve_a, curve_b).sum())
-        if union <= eps:
-            return np.nan
-        intersection = float(np.minimum(curve_a, curve_b).sum())
-        return intersection / union
-
-    if similarity_metric == "shape_overlap":
-        sum_a = float(curve_a.sum())
-        sum_b = float(curve_b.sum())
-        if sum_a <= eps or sum_b <= eps:
-            return np.nan
-        prob_a = curve_a / sum_a
-        prob_b = curve_b / sum_b
-        return float(np.minimum(prob_a, prob_b).sum())
-
-    raise ValueError(f"Unsupported similarity metric: {similarity_metric!r}")
-
-
-def _flip_curve_if_requested(curve: np.ndarray, *, should_flip: bool) -> np.ndarray:
-    """Return one tuning curve, optionally reversed along the task axis."""
-    array = np.asarray(curve, dtype=float)
-    if should_flip:
-        return np.asarray(array[::-1], dtype=float)
-    return array
-
-
-def get_similarity_axis_limits(similarity_metric: str) -> tuple[float, float]:
-    """Return axis limits appropriate for the requested similarity metric."""
-    if similarity_metric == "correlation":
-        return -1.0, 1.0
-    return 0.0, 1.0
-
-
-def get_similarity_axis_label(similarity_metric: str) -> str:
-    """Return a human-readable similarity label for figures."""
-    if similarity_metric == "correlation":
-        return "Correlation"
-    if similarity_metric == "absolute_overlap":
-        return "Absolute overlap"
-    if similarity_metric == "shape_overlap":
-        return "Shape overlap"
-    return "Similarity"
-
-
-def _empty_similarity_table() -> pd.DataFrame:
+def _empty_similarity_table(*, include_qc: bool = False) -> pd.DataFrame:
     """Return an empty long-form similarity table with the expected schema."""
-    return pd.DataFrame(
-        {
-            "unit": pd.Series(dtype=int),
-            "region": pd.Series(dtype=str),
-            "epoch": pd.Series(dtype=str),
-            "comparison_family": pd.Series(dtype=str),
-            "comparison_label": pd.Series(dtype=str),
-            "side": pd.Series(dtype=object),
-            "trajectory_a": pd.Series(dtype=object),
-            "trajectory_b": pd.Series(dtype=object),
-            "flip_trajectory_b": pd.Series(dtype=object),
-            "firing_rate_hz": pd.Series(dtype=float),
-            "similarity": pd.Series(dtype=float),
-        }
-    )
+    columns: dict[str, pd.Series] = {
+        "unit": pd.Series(dtype=int),
+        "region": pd.Series(dtype=str),
+        "epoch": pd.Series(dtype=str),
+        "comparison_family": pd.Series(dtype=str),
+        "comparison_label": pd.Series(dtype=str),
+        "side": pd.Series(dtype=object),
+        "trajectory_a": pd.Series(dtype=object),
+        "trajectory_b": pd.Series(dtype=object),
+        "flip_trajectory_b": pd.Series(dtype=object),
+        "firing_rate_hz": pd.Series(dtype=float),
+        "similarity": pd.Series(dtype=float),
+    }
+    if include_qc:
+        columns.update(
+            {
+                "n_trajectory_a_finite_bins": pd.Series(dtype=int),
+                "n_trajectory_b_finite_bins": pd.Series(dtype=int),
+                "n_paired_finite_bins": pd.Series(dtype=int),
+                "similarity_status": pd.Series(dtype=str),
+            }
+        )
+    return pd.DataFrame(columns)
 
 
-def _empty_comparison_table() -> pd.DataFrame:
+def _empty_comparison_table(*, include_qc: bool = False) -> pd.DataFrame:
     """Return an empty long-form comparison table with the expected schema."""
-    return pd.DataFrame(
-        {
-            "unit": pd.Series(dtype=int),
-            "region": pd.Series(dtype=str),
-            "epoch_a": pd.Series(dtype=str),
-            "epoch_b": pd.Series(dtype=str),
-            "comparison_family": pd.Series(dtype=str),
-            "comparison_label": pd.Series(dtype=str),
-            "side": pd.Series(dtype=object),
-            "trajectory_a": pd.Series(dtype=object),
-            "trajectory_b": pd.Series(dtype=object),
-            "flip_trajectory_b": pd.Series(dtype=object),
-            "similarity_epoch_a": pd.Series(dtype=float),
-            "similarity_epoch_b": pd.Series(dtype=float),
-            "delta_similarity": pd.Series(dtype=float),
-        }
-    )
+    columns: dict[str, pd.Series] = {
+        "unit": pd.Series(dtype=int),
+        "region": pd.Series(dtype=str),
+        "epoch_a": pd.Series(dtype=str),
+        "epoch_b": pd.Series(dtype=str),
+        "comparison_family": pd.Series(dtype=str),
+        "comparison_label": pd.Series(dtype=str),
+        "side": pd.Series(dtype=object),
+        "trajectory_a": pd.Series(dtype=object),
+        "trajectory_b": pd.Series(dtype=object),
+        "flip_trajectory_b": pd.Series(dtype=object),
+        "similarity_epoch_a": pd.Series(dtype=float),
+        "similarity_epoch_b": pd.Series(dtype=float),
+        "delta_similarity": pd.Series(dtype=float),
+    }
+    if include_qc:
+        for column in SIMILARITY_QC_COLUMNS:
+            dtype = str if column == "similarity_status" else int
+            columns[f"{column}_epoch_a"] = pd.Series(dtype=dtype)
+            columns[f"{column}_epoch_b"] = pd.Series(dtype=dtype)
+    return pd.DataFrame(columns)
 
 
 def deduplicate_requested_epochs(selected_epochs: list[str] | None) -> list[str] | None:
@@ -494,8 +391,34 @@ def compute_epoch_similarity_table(
     epoch_firing_rates: pd.Series,
     firing_rate_threshold_hz: float,
     similarity_metric: str,
+    retain_all_units: bool = False,
 ) -> pd.DataFrame:
     """Compute one long-form per-epoch similarity table for one region."""
+    selected_units = np.array([], dtype=int)
+    if retain_all_units:
+        selected_units = np.asarray(
+            [int(unit) for unit in epoch_firing_rates.index],
+            dtype=int,
+        )
+        if len(np.unique(selected_units)) != len(selected_units):
+            raise ValueError("Epoch firing-rate unit identifiers must be unique.")
+        selected_units = np.sort(selected_units)
+        for trajectory_type, tuning_curve in tuning_curves_by_trajectory.items():
+            curve_units = np.asarray(
+                tuning_curve.coords["unit"].values,
+                dtype=int,
+            )
+            if len(np.unique(curve_units)) != len(curve_units):
+                raise ValueError(
+                    f"Tuning curve {trajectory_type!r} has duplicate unit identifiers."
+                )
+            if not np.array_equal(np.sort(curve_units), selected_units):
+                raise ValueError(
+                    "--retain-all-units requires every trajectory tuning curve "
+                    "to contain exactly the epoch firing-rate units; mismatch for "
+                    f"{trajectory_type!r}."
+                )
+
     rows: list[dict[str, Any]] = []
     for spec in DIRECT_COMPARISON_SPECS:
         trajectory_a = str(spec["trajectory_a"])
@@ -505,11 +428,21 @@ def compute_epoch_similarity_table(
 
         units_a = np.asarray(tuning_curve_a.coords["unit"].values, dtype=int)
         units_b = np.asarray(tuning_curve_b.coords["unit"].values, dtype=int)
-        common_units = np.intersect1d(units_a, units_b)
+        comparison_units = (
+            selected_units
+            if retain_all_units
+            else np.intersect1d(units_a, units_b)
+        )
 
-        for unit in common_units:
+        for unit in comparison_units:
             firing_rate_hz = float(epoch_firing_rates.get(int(unit), np.nan))
-            if not np.isfinite(firing_rate_hz) or firing_rate_hz <= firing_rate_threshold_hz:
+            if (
+                not retain_all_units
+                and (
+                    not np.isfinite(firing_rate_hz)
+                    or firing_rate_hz <= firing_rate_threshold_hz
+                )
+            ):
                 continue
 
             curve_a = np.asarray(tuning_curve_a.sel(unit=unit).values, dtype=float)
@@ -517,32 +450,47 @@ def compute_epoch_similarity_table(
                 tuning_curve_b.sel(unit=unit).values,
                 should_flip=bool(spec["flip_trajectory_b"]),
             )
-            similarity = compute_similarity_score(
-                curve_a,
-                curve_b,
-                similarity_metric=similarity_metric,
-            )
-            if not np.isfinite(similarity):
+            if retain_all_units:
+                similarity_result = compute_similarity_score_with_qc(
+                    curve_a,
+                    curve_b,
+                    similarity_metric=similarity_metric,
+                )
+                similarity = float(similarity_result["similarity"])
+            else:
+                similarity_result = {}
+                similarity = compute_similarity_score(
+                    curve_a,
+                    curve_b,
+                    similarity_metric=similarity_metric,
+                )
+            if not retain_all_units and not np.isfinite(similarity):
                 continue
 
-            rows.append(
-                {
-                    "unit": int(unit),
-                    "region": region,
-                    "epoch": epoch,
-                    "comparison_family": str(spec["comparison_family"]),
-                    "comparison_label": str(spec["comparison_label"]),
-                    "side": str(spec["side"]),
-                    "trajectory_a": trajectory_a,
-                    "trajectory_b": trajectory_b,
-                    "flip_trajectory_b": bool(spec["flip_trajectory_b"]),
-                    "firing_rate_hz": firing_rate_hz,
-                    "similarity": float(similarity),
-                }
-            )
+            row = {
+                "unit": int(unit),
+                "region": region,
+                "epoch": epoch,
+                "comparison_family": str(spec["comparison_family"]),
+                "comparison_label": str(spec["comparison_label"]),
+                "side": str(spec["side"]),
+                "trajectory_a": trajectory_a,
+                "trajectory_b": trajectory_b,
+                "flip_trajectory_b": bool(spec["flip_trajectory_b"]),
+                "firing_rate_hz": firing_rate_hz,
+                "similarity": float(similarity),
+            }
+            if retain_all_units:
+                row.update(
+                    {
+                        column: similarity_result[column]
+                        for column in SIMILARITY_QC_COLUMNS
+                    }
+                )
+            rows.append(row)
 
     if not rows:
-        return _empty_similarity_table()
+        return _empty_similarity_table(include_qc=retain_all_units)
 
     table = pd.DataFrame(rows)
     table["comparison_label"] = pd.Categorical(
@@ -554,6 +502,17 @@ def compute_epoch_similarity_table(
         ["unit", "comparison_label"],
         kind="stable",
     ).reset_index(drop=True)
+
+
+def finalize_epoch_similarity_table(
+    similarity_table: pd.DataFrame,
+    *,
+    retain_all_units: bool,
+) -> pd.DataFrame:
+    """Return direct-only all-unit rows or legacy pooled summaries."""
+    if retain_all_units:
+        return similarity_table.copy()
+    return append_pooled_similarity_rows(similarity_table)
 
 
 def append_pooled_similarity_rows(similarity_table: pd.DataFrame) -> pd.DataFrame:
@@ -715,8 +674,20 @@ def build_epoch_comparison_table(
     epoch_b: str,
 ) -> pd.DataFrame:
     """Join two per-epoch tables on shared units and matching comparison labels."""
+    expected_qc_columns = set(SIMILARITY_QC_COLUMNS)
+    qc_columns_a = expected_qc_columns.intersection(epoch_table_a.columns)
+    qc_columns_b = expected_qc_columns.intersection(epoch_table_b.columns)
+    if (qc_columns_a or qc_columns_b) and (
+        qc_columns_a != expected_qc_columns
+        or qc_columns_b != expected_qc_columns
+    ):
+        raise ValueError(
+            "Cross-epoch similarity comparison requires either the complete "
+            "all-unit QC schema on both epoch tables or no QC columns."
+        )
+    include_qc = bool(qc_columns_a)
     if epoch_table_a.empty or epoch_table_b.empty:
-        return _empty_comparison_table()
+        return _empty_comparison_table(include_qc=include_qc)
 
     join_columns = ["unit", "comparison_family", "comparison_label"]
     metadata_columns = [
@@ -742,6 +713,12 @@ def build_epoch_comparison_table(
         }
     )
 
+    for column in SIMILARITY_QC_COLUMNS:
+        if column in epoch_table_a.columns:
+            left[f"{column}_epoch_a"] = epoch_table_a[column].to_numpy()
+        if column in epoch_table_b.columns:
+            right[f"{column}_epoch_b"] = epoch_table_b[column].to_numpy()
+
     for column in SIGNIFICANCE_COLUMNS:
         if column in epoch_table_a.columns:
             left[f"{column}_epoch_a"] = epoch_table_a[column].to_numpy()
@@ -755,7 +732,7 @@ def build_epoch_comparison_table(
         validate="one_to_one",
     )
     if comparison.empty:
-        return _empty_comparison_table()
+        return _empty_comparison_table(include_qc=include_qc)
 
     comparison.insert(1, "region", region)
     comparison.insert(2, "epoch_a", epoch_a)
@@ -954,6 +931,11 @@ def plot_epoch_comparison(
     plt.close(fig)
 
 
+def _all_units_output_suffix(retain_all_units: bool) -> str:
+    """Return the collision-safe suffix for complete all-unit outputs."""
+    return ALL_UNITS_OUTPUT_SUFFIX if retain_all_units else ""
+
+
 def save_epoch_similarity_table(
     similarity_table: pd.DataFrame,
     *,
@@ -961,9 +943,14 @@ def save_epoch_similarity_table(
     region: str,
     epoch: str,
     similarity_metric: str,
+    retain_all_units: bool = False,
 ) -> Path:
     """Write one per-epoch long-form similarity table as parquet."""
-    output_path = data_dir / f"{region}_{epoch}_{similarity_metric}_within_epoch_similarity.parquet"
+    suffix = _all_units_output_suffix(retain_all_units)
+    output_path = (
+        data_dir
+        / f"{region}_{epoch}_{similarity_metric}_within_epoch_similarity{suffix}.parquet"
+    )
     similarity_table.to_parquet(output_path)
     return output_path
 
@@ -976,11 +963,14 @@ def save_epoch_similarity_figures(
     epoch: str,
     similarity_metric: str,
     compute_significance: bool,
+    retain_all_units: bool = False,
 ) -> list[Path]:
     """Write the per-epoch summary figures for one region and epoch."""
     saved_paths: list[Path] = []
+    suffix = _all_units_output_suffix(retain_all_units)
     distribution_path = (
-        fig_dir / f"{region}_{epoch}_{similarity_metric}_similarity_distributions.png"
+        fig_dir
+        / f"{region}_{epoch}_{similarity_metric}_similarity_distributions{suffix}.png"
     )
     plot_epoch_similarity_distributions(
         similarity_table,
@@ -993,7 +983,8 @@ def save_epoch_similarity_figures(
 
     if compute_significance:
         significance_path = (
-            fig_dir / f"{region}_{epoch}_{similarity_metric}_similarity_significance.png"
+            fig_dir
+            / f"{region}_{epoch}_{similarity_metric}_similarity_significance{suffix}.png"
         )
         plot_epoch_similarity_significance(
             similarity_table,
@@ -1015,11 +1006,13 @@ def save_epoch_comparison_table(
     epoch_a: str,
     epoch_b: str,
     similarity_metric: str,
+    retain_all_units: bool = False,
 ) -> Path:
     """Write one cross-epoch similarity comparison table as parquet."""
+    suffix = _all_units_output_suffix(retain_all_units)
     output_path = (
         data_dir
-        / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison.parquet"
+        / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison{suffix}.parquet"
     )
     comparison_table.to_parquet(output_path)
     return output_path
@@ -1033,9 +1026,14 @@ def save_epoch_comparison_figure(
     epoch_a: str,
     epoch_b: str,
     similarity_metric: str,
+    retain_all_units: bool = False,
 ) -> Path:
     """Write one cross-epoch comparison figure."""
-    fig_path = fig_dir / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison.png"
+    suffix = _all_units_output_suffix(retain_all_units)
+    fig_path = (
+        fig_dir
+        / f"{region}_{epoch_a}_{epoch_b}_{similarity_metric}_similarity_comparison{suffix}.png"
+    )
     plot_epoch_comparison(
         comparison_table,
         region=region,
@@ -1045,6 +1043,23 @@ def save_epoch_comparison_figure(
         fig_path=fig_path,
     )
     return fig_path
+
+
+def validate_run_options(
+    *,
+    retain_all_units: bool,
+    compute_significance: bool,
+    n_shuffles: int,
+) -> None:
+    """Validate option combinations before loading session data."""
+    if retain_all_units and compute_significance:
+        raise ValueError(
+            "--retain-all-units cannot be combined with --compute-significance."
+        )
+    if compute_significance and n_shuffles < 1:
+        raise ValueError(
+            "--n-shuffles must be at least 1 when significance is enabled."
+        )
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -1087,7 +1102,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--similarity-metric",
-        choices=("correlation", "absolute_overlap", "shape_overlap"),
+        choices=SIMILARITY_METRICS,
         default="correlation",
         help="Similarity metric used to compare trajectory-pair tuning curves.",
     )
@@ -1118,6 +1133,15 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--retain-all-units",
+        action="store_true",
+        help=(
+            "Retain every selected unit and direct comparison with QC, skip "
+            "legacy firing-rate filtering and pooled rows, and add "
+            f"{ALL_UNITS_OUTPUT_SUFFIX!r} to output filenames."
+        ),
+    )
+    parser.add_argument(
         "--n-shuffles",
         type=int,
         default=DEFAULT_N_SHUFFLES,
@@ -1143,10 +1167,13 @@ def main() -> None:
     args = parse_arguments()
     selected_regions = tuple(args.regions)
     selected_epochs = deduplicate_requested_epochs(args.epochs)
+    validate_run_options(
+        retain_all_units=args.retain_all_units,
+        compute_significance=args.compute_significance,
+        n_shuffles=args.n_shuffles,
+    )
     if args.compute_significance:
         _require_statsmodels()
-        if args.n_shuffles < 1:
-            raise ValueError("--n-shuffles must be at least 1 when significance is enabled.")
 
     session = prepare_task_progression_session(
         animal_name=args.animal_name,
@@ -1200,8 +1227,12 @@ def main() -> None:
                 epoch_firing_rates=epoch_firing_rates,
                 firing_rate_threshold_hz=DEFAULT_REGION_FR_THRESHOLDS[region],
                 similarity_metric=args.similarity_metric,
+                retain_all_units=args.retain_all_units,
             )
-            similarity_table = append_pooled_similarity_rows(similarity_table)
+            similarity_table = finalize_epoch_similarity_table(
+                similarity_table,
+                retain_all_units=args.retain_all_units,
+            )
             if args.compute_significance:
                 similarity_table = annotate_pairwise_similarity_significance(
                     similarity_table,
@@ -1224,6 +1255,7 @@ def main() -> None:
                     region=region,
                     epoch=epoch,
                     similarity_metric=args.similarity_metric,
+                    retain_all_units=args.retain_all_units,
                 )
             )
             saved_figures.extend(
@@ -1234,6 +1266,7 @@ def main() -> None:
                     epoch=epoch,
                     similarity_metric=args.similarity_metric,
                     compute_significance=args.compute_significance,
+                    retain_all_units=args.retain_all_units,
                 )
             )
 
@@ -1258,6 +1291,7 @@ def main() -> None:
                     epoch_a=epoch_a,
                     epoch_b=epoch_b,
                     similarity_metric=args.similarity_metric,
+                    retain_all_units=args.retain_all_units,
                 )
             )
             saved_comparison_figures.append(
@@ -1270,6 +1304,7 @@ def main() -> None:
                     epoch_a=epoch_a,
                     epoch_b=epoch_b,
                     similarity_metric=args.similarity_metric,
+                    retain_all_units=args.retain_all_units,
                 )
             )
         saved_tables.extend(saved_comparison_tables)
@@ -1291,6 +1326,15 @@ def main() -> None:
             "epochs": session["run_epochs"],
             "compare_epochs": list(compare_epochs) if compare_epochs is not None else None,
             "similarity_metric": args.similarity_metric,
+            "retain_all_units": args.retain_all_units,
+            "firing_rate_thresholds_hz": (
+                None
+                if args.retain_all_units
+                else {
+                    region: DEFAULT_REGION_FR_THRESHOLDS[region]
+                    for region in selected_regions
+                }
+            ),
             "position_offset": args.position_offset,
             "speed_threshold_cm_s": args.speed_threshold_cm_s,
             "compute_significance": args.compute_significance,
