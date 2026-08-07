@@ -341,6 +341,60 @@ def _validate_path_progression_decoding_parameter_row(
     return values
 
 
+def _validate_path_specific_place_decoding_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one within-epoch path-specific place decoder row."""
+    expected = set(
+        table_specs.MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "PathSpecificPlaceDecoding parameters must have exactly the "
+            f"declared fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["path_specific_place_decoding_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "path_specific_place_decoding_param_name must be a non-empty "
+            "string of at most 64 characters."
+        )
+    for field_name, minimum in (
+        ("n_folds", 2),
+        ("sliding_window_size_bins", 1),
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise TypeError(f"{field_name} must be one integer scalar.")
+        value = int(value)
+        if value < minimum or value > 65_535:
+            raise ValueError(
+                f"{field_name} must be between {minimum} and 65535."
+            )
+        values[field_name] = value
+    random_seed = values["random_seed"]
+    if isinstance(random_seed, bool) or not isinstance(random_seed, Integral):
+        raise TypeError("random_seed must be one integer scalar.")
+    random_seed = int(random_seed)
+    if random_seed < 0 or random_seed > 2_147_483_647:
+        raise ValueError(
+            "random_seed must fit a non-negative signed 32-bit integer."
+        )
+    values["random_seed"] = random_seed
+    for field_name in ("decoding_bin_size_s", "spatial_bin_size_cm"):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{field_name} must be positive and finite.")
+        values[field_name] = value
+    return values
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1719,6 +1773,195 @@ def _path_progression_decoding_selection_row(
     return {
         "path_progression_decoding_comparison_id": selection_uuid(
             "PathProgressionDecodingComparison",
+            natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _path_specific_place_decoding_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+) -> dict[str, Any]:
+    """Validate and identify one immutable within-epoch place decoder."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    parameters = _validate_path_specific_place_decoding_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "path_specific_place_decoding_param_name": key[
+                    "path_specific_place_decoding_param_name"
+                ]
+            },
+        )
+    )
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "PathSpecificPlaceDecoding regional spikes and movement "
+                f"must share {field_name}."
+            )
+    if str(region_row.get("region_name")) != str(
+        movement_selection.get("region")
+    ):
+        raise ValueError(
+            "PathSpecificPlaceDecoding regional spikes and movement must "
+            "select the same region."
+        )
+    for field_name in (
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "PathSpecificPlaceDecoding regional spikes and movement "
+                f"must share frozen {field_name}."
+            )
+    if str(region_row.get("selected_units_sha256")) != str(
+        movement_result.get("selected_units_sha256")
+    ) or int(region_row.get("n_units", -1)) != int(
+        movement_result.get("n_units", -2)
+    ):
+        raise ValueError(
+            "PathSpecificPlaceDecoding regional spikes and movement must "
+            "contain identical persistent units."
+        )
+    allowed_statuses = (
+        {"no_units"}
+        if int(region_row.get("n_units", -1)) == 0
+        else {"valid", "no_valid_position", "no_movement"}
+    )
+    if str(movement_result.get("analysis_status")) not in allowed_statuses:
+        raise ValueError(
+            "PathSpecificPlaceDecoding movement status is incompatible "
+            "with its regional unit count."
+        )
+
+    epoch_row = _fetch1_dict(epoch_intervals_table, movement_selection)
+    if epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("PathSpecificPlaceDecoding requires one run epoch.")
+    position_row = _fetch1_dict(position_table, movement_selection)
+    if str(position_row.get("spatial_unit")) != "cm":
+        raise ValueError(
+            "PathSpecificPlaceDecoding position must use centimeters."
+        )
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    for field_name, expected_value in (
+        ("nwb_file_name", nwb_file_name),
+        ("epoch", epoch),
+    ):
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                "PathSpecificPlaceDecoding supplied source does not match "
+                f"its movement row: {field_name}."
+            )
+
+    source_fields: dict[str, Any] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                f"PathSpecificPlaceDecoding {trajectory_field} must equal "
+                f"{trajectory_type!r}."
+            )
+        trajectory_row = _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        if int(trajectory_row.get("interval_count", -1)) < int(
+            parameters["n_folds"]
+        ):
+            raise ValueError(
+                "PathSpecificPlaceDecoding requires at least n_folds laps "
+                f"for {trajectory_type!r}."
+            )
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                "PathSpecificPlaceDecoding graph aliases must match their "
+                "trajectory types."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_row.get("coordinate_unit")) != "cm":
+            raise ValueError(
+                "PathSpecificPlaceDecoding graphs must use centimeters."
+            )
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="path_specific_place_decoding_parameters_sha256",
+    )
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE)
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": key["movement_firing_rate_id"],
+        **source_fields,
+        "path_specific_place_decoding_param_name": parameters[
+            "path_specific_place_decoding_param_name"
+        ],
+        **parameter_snapshot,
+        "path_specific_place_decoding_output_rule_sha256": (
+            output_rule_sha256
+        ),
+    }
+    return {
+        "path_specific_place_decoding_id": selection_uuid(
+            "PathSpecificPlaceDecoding",
             natural_key,
         ),
         **natural_key,
@@ -5337,6 +5580,220 @@ def _load_path_progression_decoding_spikes(
     return loaded
 
 
+def _load_path_specific_place_decoding_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate one within-epoch place decoder selection."""
+    validated_selection = _path_specific_place_decoding_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+    )
+    if str(validated_selection["path_specific_place_decoding_id"]) != str(
+        key["path_specific_place_decoding_id"]
+    ):
+        raise ValueError("PathSpecificPlaceDecoding selection UUID is stale.")
+    parameters = _validate_path_specific_place_decoding_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="path_specific_place_decoding_parameters_sha256",
+    )
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    movement_key = {
+        "movement_firing_rate_id": key["movement_firing_rate_id"]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(
+        session_table,
+        movement_selection,
+    )
+    region = str(region_row["region_name"])
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region,
+            "epoch": str(movement_selection["epoch"]),
+        },
+    )
+    epoch_row = _fetch1_dict(epoch_intervals_table, movement_selection)
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError(
+            "EpochIntervals must contain finite start_time < stop_time."
+        )
+    return {
+        "selection": validated_selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_result": movement_result,
+        "movement_selection": movement_selection,
+        "movement_parameters": movement_parameters,
+        "movement": movement,
+        "epoch_row": epoch_row,
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": region,
+        "epoch": str(movement_selection["epoch"]),
+        "epoch_time_support": (epoch_start, epoch_stop),
+    }
+
+
+def _load_path_specific_place_decoding_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load position, four lap sets, and four path graphs from NWB."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    movement_selection = dict(context["movement_selection"])
+    nwb_file_name = str(movement_selection["nwb_file_name"])
+    epoch = str(movement_selection["epoch"])
+    position_row = _fetch1_dict(position_table, movement_selection)
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile,
+            position_row,
+            apply_analysis_offset=True,
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_row": position_row,
+    }
+
+
+def _load_path_specific_place_decoding_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all regional units for one place decoder."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["epoch_time_support"],
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    if unit_digest != str(
+        context["region_row"]["selected_units_sha256"]
+    ) or unit_digest != str(
+        context["movement_result"]["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceDecoding regional units changed after selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "PathSpecificPlaceDecoding regional unit count changed after "
+            "selection."
+        )
+    return loaded
+
+
 def _legacy_dpp_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -5639,6 +6096,113 @@ def _validate_path_progression_decoding_artifact_link(
         raise ValueError(
             "Loaded decoding bundle path disagrees with the result row."
         )
+
+
+def _validate_path_specific_place_decoding_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one place-decoding bundle to match its immutable rows."""
+    from v1ca1.spyglass.path_specific_decoding import (
+        ARTIFACT_DIRNAME,
+        BINNED_ERROR_FILENAME,
+        FOLD_QC_FILENAME,
+        MANIFEST_FILENAME,
+        SELECTED_UNITS_FILENAME,
+        SUMMARY_FILENAME,
+    )
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    metadata = dict(bundle["metadata"])
+    expected_metadata = {
+        "path_specific_place_decoding_id": selection_row[
+            "path_specific_place_decoding_id"
+        ],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "epoch": selection_row["epoch"],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(metadata.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "PathSpecificPlaceDecoding artifact does not match its "
+                f"selection: {field_name}."
+            )
+    parameters = _validate_path_specific_place_decoding_parameter_row(
+        parameters_row
+    )
+    expected_parameter_sha256 = provenance_sha256(parameters)
+    if str(bundle["parameters"]["parameter_sha256"]) != str(
+        selection_row["path_specific_place_decoding_parameters_sha256"]
+    ) or expected_parameter_sha256 != str(
+        selection_row["path_specific_place_decoding_parameters_sha256"]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceDecoding artifact parameter digest is stale."
+        )
+    for field_name in (
+        "n_folds",
+        "decoding_bin_size_s",
+        "sliding_window_size_bins",
+        "spatial_bin_size_cm",
+        "random_seed",
+    ):
+        if str(bundle["parameters"][field_name]) != str(parameters[field_name]):
+            raise ValueError(
+                "PathSpecificPlaceDecoding artifact parameters disagree: "
+                f"{field_name}."
+            )
+    expected_scalars = {
+        "n_units": int(bundle["n_units"]),
+        "n_folds_expected": int(bundle["n_folds_expected"]),
+        "n_folds_valid": int(bundle["n_folds_valid"]),
+        "n_decoded_samples": int(bundle["n_decoded_samples"]),
+        "analysis_status": str(bundle["analysis_status"]),
+        "selected_units_sha256": str(bundle["selected_units_sha256"]),
+        "artifact_origin": str(bundle["artifact_origin"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row[field_name]) != str(expected_value):
+            raise ValueError(
+                "PathSpecificPlaceDecoding result disagrees with its "
+                f"artifact: {field_name}."
+            )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    result_id = str(selection_row["path_specific_place_decoding_id"])
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        str(selection_row["epoch"]),
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "PathSpecificPlaceDecoding manifest path does not match its "
+            "canonical session/epoch/region/UUID layout."
+        )
+    expected_paths = {
+        "selected_units_path": SELECTED_UNITS_FILENAME,
+        "fold_qc_path": FOLD_QC_FILENAME,
+        "decoding_summary_path": SUMMARY_FILENAME,
+        "decoding_error_by_position_path": BINNED_ERROR_FILENAME,
+    }
+    for field_name, filename in expected_paths.items():
+        if Path(result_row[field_name]) != manifest_path.parent / filename:
+            raise ValueError(
+                "PathSpecificPlaceDecoding result paths do not describe one "
+                f"canonical bundle: {field_name}."
+            )
 
 
 def _make_dpp_encoding_comparison_row(
@@ -5974,7 +6538,7 @@ def _make_path_progression_decoding_comparison_row(
         graph_inputs=nwb_inputs["graph_inputs"],
         movement_interval=context["movement_sources"]["target"][
             "movement"
-        ]["intervals"],
+        ]["movement_intervals"],
         decoding_bin_size_s=parameters["decoding_bin_size_s"],
         sliding_window_size_bins=parameters["sliding_window_size_bins"],
         spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
@@ -6028,6 +6592,272 @@ def _make_path_progression_decoding_comparison_row(
         "n_decoded_samples": int(result["n_decoded_samples"]),
         "analysis_status": str(result["analysis_status"]),
         "eligible_units_sha256": str(result["eligible_units_sha256"]),
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _make_path_specific_place_decoding_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one within-epoch physical-place decoder."""
+    from v1ca1.spyglass.path_specific_decoding import (
+        compute_path_specific_place_decoding,
+        get_path_specific_decoding_artifact_paths,
+        write_path_specific_decoding_artifact,
+    )
+
+    context = _load_path_specific_place_decoding_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_path_specific_place_decoding_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_path_specific_place_decoding_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    parameters = context["parameters"]
+    result = compute_path_specific_place_decoding(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        path_specific_place_decoding_id=key[
+            "path_specific_place_decoding_id"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=nwb_inputs["position"],
+        trajectory_intervals=nwb_inputs["trajectory_intervals"],
+        graph_inputs=nwb_inputs["graph_inputs"],
+        movement_interval=context["movement"]["movement_intervals"],
+        parameter_name=parameters[
+            "path_specific_place_decoding_param_name"
+        ],
+        parameter_sha256=key[
+            "path_specific_place_decoding_parameters_sha256"
+        ],
+        output_rule_sha256=key[
+            "path_specific_place_decoding_output_rule_sha256"
+        ],
+        n_folds=parameters["n_folds"],
+        decoding_bin_size_s=parameters["decoding_bin_size_s"],
+        sliding_window_size_bins=parameters[
+            "sliding_window_size_bins"
+        ],
+        spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
+        random_seed=parameters["random_seed"],
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_path_specific_decoding_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        path_specific_place_decoding_id=key[
+            "path_specific_place_decoding_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_path_specific_decoding_artifact(
+        result,
+        artifact_dir,
+        overwrite=False,
+    )
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "fold_qc_path": str(written["fold_qc_path"]),
+        "decoding_summary_path": str(written["decoding_summary_path"]),
+        "decoding_error_by_position_path": str(
+            written["binned_error_path"]
+        ),
+        "n_units": int(result["n_units"]),
+        "n_folds_expected": int(result["n_folds_expected"]),
+        "n_folds_valid": int(result["n_folds_valid"]),
+        "n_decoded_samples": int(result["n_decoded_samples"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": str(result["selected_units_sha256"]),
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_path_specific_place_decoding_row(
+    *,
+    key: Mapping[str, Any],
+    source_true_path: Path,
+    source_decoded_path: Path,
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Validate, normalize, and copy one legacy place decoder bundle."""
+    from v1ca1.spyglass.path_specific_decoding import (
+        get_path_specific_decoding_artifact_paths,
+        register_existing_path_specific_decoding_artifact,
+    )
+    from v1ca1.spyglass.path_specific_place import graph_length_from_inputs
+
+    context = _load_path_specific_place_decoding_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_path_specific_place_decoding_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_path_specific_place_decoding_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    path_lengths = [
+        graph_length_from_inputs(nwb_inputs["graph_inputs"][trajectory_type])
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    ]
+    if not all(
+        math.isclose(
+            path_lengths[0],
+            path_length,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        for path_length in path_lengths[1:]
+    ):
+        raise ValueError(
+            "PathSpecificPlaceDecoding requires four common-length paths."
+        )
+    parameters = context["parameters"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_path_specific_decoding_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=context["epoch"],
+        region=context["region"],
+        path_specific_place_decoding_id=key[
+            "path_specific_place_decoding_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    registered = register_existing_path_specific_decoding_artifact(
+        source_true_path=Path(source_true_path),
+        source_decoded_path=Path(source_decoded_path),
+        destination_path=artifact_dir,
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        epoch=context["epoch"],
+        path_specific_place_decoding_id=key[
+            "path_specific_place_decoding_id"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        trajectory_intervals=nwb_inputs["trajectory_intervals"],
+        movement_interval=context["movement"]["movement_intervals"],
+        path_length_cm=path_lengths[0],
+        parameter_name=parameters[
+            "path_specific_place_decoding_param_name"
+        ],
+        parameter_sha256=key[
+            "path_specific_place_decoding_parameters_sha256"
+        ],
+        output_rule_sha256=key[
+            "path_specific_place_decoding_output_rule_sha256"
+        ],
+        n_folds=parameters["n_folds"],
+        decoding_bin_size_s=parameters["decoding_bin_size_s"],
+        sliding_window_size_bins=parameters[
+            "sliding_window_size_bins"
+        ],
+        spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
+        random_seed=parameters["random_seed"],
+        source_v1ca1_git_commit=source_v1ca1_git_commit,
+    )
+    provenance = dict(registered["legacy_artifact_provenance"])
+    provenance["source_spyglass_git_commit"] = (
+        source_spyglass_git_commit
+    )
+    written = registered["artifact_paths"]
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "fold_qc_path": str(written["fold_qc_path"]),
+        "decoding_summary_path": str(written["decoding_summary_path"]),
+        "decoding_error_by_position_path": str(
+            written["binned_error_path"]
+        ),
+        "n_units": int(registered["n_units"]),
+        "n_folds_expected": int(registered["n_folds_expected"]),
+        "n_folds_valid": int(registered["n_folds_valid"]),
+        "n_decoded_samples": int(registered["n_decoded_samples"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": str(
+            registered["selected_units_sha256"]
+        ),
+        "legacy_artifact_provenance": provenance,
         "_created_artifact_paths": created_artifact_paths,
     }
 
@@ -6147,6 +6977,14 @@ def _construct_tables(
         "path_progression_decoding_comparison_compute",
         _make_path_progression_decoding_comparison_row,
     )
+    path_specific_place_decoding_compute_hook = runtime_hooks.get(
+        "path_specific_place_decoding_compute",
+        _make_path_specific_place_decoding_row,
+    )
+    path_specific_place_decoding_register_hook = runtime_hooks.get(
+        "path_specific_place_decoding_register_existing",
+        _register_existing_path_specific_place_decoding_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -6164,6 +7002,8 @@ def _construct_tables(
             dpp_encoding_comparison_compute_hook,
             dpp_encoding_comparison_register_hook,
             path_progression_decoding_compute_hook,
+            path_specific_place_decoding_compute_hook,
+            path_specific_place_decoding_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -7962,6 +8802,301 @@ def _construct_tables(
         PathProgressionDecodingComparison
     )
 
+    class PathSpecificPlaceDecodingParameters(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.PATH_SPECIFIC_PLACE_DECODING_PARAMETERS_DEFINITION
+        )
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one within-epoch decoder parameter row."""
+            validated = _validate_path_specific_place_decoding_parameter_row(
+                row
+            )
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the canonical place-decoder presets."""
+            return [
+                cls.insert_parameters(
+                    preset,
+                    skip_duplicates=skip_duplicates,
+                )
+                for preset in (
+                    table_specs.PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS
+                )
+            ]
+
+        @classmethod
+        def insert_default(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> dict[str, Any]:
+            """Explicitly insert the manuscript place-decoder preset."""
+            return cls.insert_parameters(
+                table_specs.MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    PathSpecificPlaceDecodingParameters = main_schema(
+        PathSpecificPlaceDecodingParameters
+    )
+    main_context["PathSpecificPlaceDecodingParameters"] = (
+        PathSpecificPlaceDecodingParameters
+    )
+
+    class PathSpecificPlaceDecodingSelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.PATH_SPECIFIC_PLACE_DECODING_SELECTION_DEFINITION
+        )
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one place decoder."""
+            row = _path_specific_place_decoding_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                position_table=Position,
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=PathSpecificPlaceDecodingParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    PathSpecificPlaceDecodingSelection = main_schema(
+        PathSpecificPlaceDecodingSelection
+    )
+    main_context["PathSpecificPlaceDecodingSelection"] = (
+        PathSpecificPlaceDecodingSelection
+    )
+
+    class PathSpecificPlaceDecoding(
+        spyglass_mixin,
+        dj_module.Computed,
+    ):
+        definition = table_specs.PATH_SPECIFIC_PLACE_DECODING_DEFINITION
+        _compute_hook = staticmethod(
+            path_specific_place_decoding_compute_hook
+        )
+        _register_existing_hook = staticmethod(
+            path_specific_place_decoding_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one within-epoch decoder bundle."""
+            selection = _fetch1_dict(
+                PathSpecificPlaceDecodingSelection,
+                key,
+            )
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=PathSpecificPlaceDecodingParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "path_specific_place_decoding_id": selection[
+                            "path_specific_place_decoding_id"
+                        ],
+                        **row,
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_decoding_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical place-decoding bundle."""
+            from v1ca1.spyglass.path_specific_decoding import (
+                load_path_specific_decoding_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                PathSpecificPlaceDecodingSelection,
+                {
+                    "path_specific_place_decoding_id": row[
+                        "path_specific_place_decoding_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                PathSpecificPlaceDecodingParameters,
+                {
+                    "path_specific_place_decoding_param_name": selection[
+                        "path_specific_place_decoding_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_path_specific_decoding_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_path_specific_place_decoding_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_true_path: Path | str,
+            source_decoded_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize two matching legacy Tsd artifacts and insert them."""
+            if overwrite:
+                raise ValueError(
+                    "Registered PathSpecificPlaceDecoding results are "
+                    "immutable; create a new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(
+                PathSpecificPlaceDecodingSelection,
+                key,
+            )
+            result_key = {
+                "path_specific_place_decoding_id": selection[
+                    "path_specific_place_decoding_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "PathSpecificPlaceDecoding already contains this "
+                    "immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_true_path=Path(source_true_path),
+                    source_decoded_path=Path(source_decoded_path),
+                    parameters_table=PathSpecificPlaceDecodingParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "path_specific_place_decoding_id": selection[
+                    "path_specific_place_decoding_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    PathSpecificPlaceDecoding = main_schema(PathSpecificPlaceDecoding)
+    main_context["PathSpecificPlaceDecoding"] = PathSpecificPlaceDecoding
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -8035,6 +9170,13 @@ def _construct_tables(
         "path_progression_decoding_comparison": (
             PathProgressionDecodingComparison
         ),
+        "path_specific_place_decoding_parameters": (
+            PathSpecificPlaceDecodingParameters
+        ),
+        "path_specific_place_decoding_selection": (
+            PathSpecificPlaceDecodingSelection
+        ),
+        "path_specific_place_decoding": PathSpecificPlaceDecoding,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

@@ -31,10 +31,12 @@ from v1ca1.spyglass.tables import (
     _make_dpp_tuning_curve_row,
     _make_movement_firing_rate_row,
     _make_path_progression_decoding_comparison_row,
+    _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
     _movement_firing_rate_selection_row,
     _path_progression_decoding_selection_row,
+    _path_specific_place_decoding_selection_row,
     _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
     _register_existing_dpp_encoding_comparison_row,
@@ -47,6 +49,7 @@ from v1ca1.spyglass.tables import (
     _validate_legacy_tuning_curve_inputs,
     _validate_legacy_stability_schema,
     _validate_path_progression_decoding_artifact_link,
+    _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
 )
 from v1ca1.spyglass.spikes import _sorting_output_sessions
@@ -775,6 +778,59 @@ def _build_path_progression_decoding_selection(
     )
 
 
+def _build_path_specific_place_decoding_selection() -> dict[str, Any]:
+    """Build one within-epoch place-decoder selection from fake rows."""
+    inputs = _path_progression_decoding_selection_inputs()
+    target_id = inputs["key"]["movement_firing_rate_id"]
+    parameters = dict(
+        table_specs.MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS
+    )
+    key = {
+        "nwb_file_name": inputs["key"]["nwb_file_name"],
+        "epoch": inputs["key"]["epoch"],
+        "region_sorted_spikes_group_id": inputs["key"][
+            "region_sorted_spikes_group_id"
+        ],
+        "movement_firing_rate_id": target_id,
+        **{
+            f"{trajectory_type}_trajectory_type": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        **{
+            f"{trajectory_type}_configuration_name": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        "path_specific_place_decoding_param_name": parameters[
+            "path_specific_place_decoding_param_name"
+        ],
+    }
+    return _path_specific_place_decoding_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
+        movement_firing_rate_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            {target_id: inputs["movement_results"][target_id]},
+        ),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            {target_id: inputs["movement_selections"][target_id]},
+        ),
+        position_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            {target_id: inputs["position_rows"][target_id]},
+        ),
+        epoch_intervals_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            {target_id: inputs["epoch_rows"][target_id]},
+        ),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        parameters_table=_FakeRelation(parameters),
+    )
+
+
 def test_import_is_passive_in_fresh_interpreter() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     environment = os.environ.copy()
@@ -827,6 +883,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "path_progression_decoding_parameters",
         "path_progression_decoding_comparison_selection",
         "path_progression_decoding_comparison",
+        "path_specific_place_decoding_parameters",
+        "path_specific_place_decoding_selection",
+        "path_specific_place_decoding",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -848,6 +907,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "DPPEncodingComparisonParameters" in schemas[0].context
     assert "DPPEncodingComparisonSelection" in schemas[0].context
     assert "DPPEncodingComparison" in schemas[0].context
+    assert "PathSpecificPlaceDecodingParameters" in schemas[0].context
+    assert "PathSpecificPlaceDecodingSelection" in schemas[0].context
+    assert "PathSpecificPlaceDecoding" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -1114,6 +1176,35 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "'partial_valid'" in decoding_result
     assert not hasattr(
         bundle["path_progression_decoding_comparison"],
+        "register_existing",
+    )
+
+    place_decoding_parameters = bundle[
+        "path_specific_place_decoding_parameters"
+    ].definition
+    assert "n_folds: smallint unsigned" in place_decoding_parameters
+    assert "decoding_bin_size_s: double" in place_decoding_parameters
+    assert "random_seed: int unsigned" in place_decoding_parameters
+
+    place_decoding_selection = bundle[
+        "path_specific_place_decoding_selection"
+    ].definition
+    assert "path_specific_place_decoding_id: uuid" in (
+        place_decoding_selection
+    )
+    assert "-> RegionSortedSpikesGroup" in place_decoding_selection
+    assert "-> MovementFiringRate" in place_decoding_selection
+    assert "PathSpecificPlaceStability" not in place_decoding_selection
+
+    place_decoding_result = bundle[
+        "path_specific_place_decoding"
+    ].definition
+    assert "-> PathSpecificPlaceDecodingSelection" in place_decoding_result
+    assert "artifact_manifest_path: filepath@analysis" in place_decoding_result
+    assert "fold_qc_path: filepath@analysis" in place_decoding_result
+    assert "'partial_valid'" in place_decoding_result
+    assert hasattr(
+        bundle["path_specific_place_decoding"],
         "register_existing",
     )
 
@@ -3292,6 +3383,24 @@ def test_path_progression_decoding_failed_insert_removes_new_bundle(
 
     assert not artifact_dir.exists()
     assert retained_path.read_bytes() == b"keep"
+
+
+def test_path_specific_place_decoding_selection_is_deterministic() -> None:
+    first = _build_path_specific_place_decoding_selection()
+    second = _build_path_specific_place_decoding_selection()
+
+    assert first == second
+    assert first["path_specific_place_decoding_id"].version == 5
+    assert first[
+        "path_specific_place_decoding_parameters_sha256"
+    ] == provenance_sha256(
+        dict(table_specs.MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS)
+    )
+    assert first[
+        "path_specific_place_decoding_output_rule_sha256"
+    ] == provenance_sha256(
+        dict(table_specs.PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE)
+    )
 
 
 def test_tuning_similarity_result_hooks_receive_fetched_selection(

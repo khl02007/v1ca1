@@ -250,6 +250,12 @@ RegionSortedSpikesGroup
     + PathProgressionDecodingParameters
     -> PathProgressionDecodingComparisonSelection
     -> PathProgressionDecodingComparison
+
+RegionSortedSpikesGroup + MovementFiringRate
+    + four TrajectoryIntervals + four WTrackGraph rows
+    + PathSpecificPlaceDecodingParameters
+    -> PathSpecificPlaceDecodingSelection
+    -> PathSpecificPlaceDecoding
 ```
 
 Its manuscript preset is five lap-wise folds, 50-ms evaluation bins, 4-cm
@@ -263,7 +269,8 @@ smoothing are restarted at every concatenated path or DPP block boundary.
 The computed tables are named `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
-`DPPEncodingComparison`, and `PathProgressionDecodingComparison`, without a
+`DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
+`PathSpecificPlaceDecoding`, without a
 `Computed` suffix. Each explicit
 selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
@@ -293,6 +300,13 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
     decoding_summary.parquet
     cross_path_error_by_position.parquet
     cross_<family>_<source>_to_<target>_{true,decoded}.npz
+<animal>/<date>/path_specific_place_decoding/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    fold_qc.parquet
+    decoding_summary.parquet
+    decoding_error_by_position.parquet
+    {true,decoded}_place.npz
 ```
 
 Any explicit `artifact_root` must remain within the stage configured for the
@@ -352,7 +366,9 @@ stability threshold. Supplying a stability threshold additionally requires at
 least one passing trajectory in each epoch. This auditable shared-population
 policy intentionally differs from the legacy manuscript workflow, which
 selected units from the dark epoch alone. Path-specific-place decoding is not
-bundled because the legacy workflow used a different unit population for it.
+bundled because the legacy workflow used a different unit population for it;
+that all-unit within-epoch decoder is represented by the separate
+`PathSpecificPlaceDecoding` table.
 The selected stability rows remain explicit dependencies when filtering is
 disabled so their values can be retained for audit without affecting the
 cohort. Persistent sorting-output/unit identities—not ephemeral Pynapple
@@ -366,7 +382,8 @@ source-loading stages ultimately derive their data from NWB and the selected
 sorting group. Calling
 `register_existing()` on `RippleModulation`, `PathSpecificPlaceTuningCurve`,
 `PathSpecificPlaceTuningSimilarity`, `DPPTuningCurve`,
-`PathSpecificPlaceStability`, or `DPPEncodingComparison` validates a
+`PathSpecificPlaceStability`, `DPPEncodingComparison`, or
+`PathSpecificPlaceDecoding` validates a
 compatible legacy artifact, copies
 the selected content into the canonical output layout, and inserts the result
 without rerunning the analysis. Legacy tuning-curve

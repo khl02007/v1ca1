@@ -512,6 +512,60 @@ runtime_spyglass_git_commit = NULL: varchar(64)
 """
 
 
+PATH_SPECIFIC_PLACE_DECODING_PARAMETERS_DEFINITION = """
+# Named within-epoch path-specific physical-place decoding parameters.
+path_specific_place_decoding_param_name: varchar(64)
+---
+n_folds: smallint unsigned
+decoding_bin_size_s: double
+sliding_window_size_bins: smallint unsigned
+spatial_bin_size_cm: double
+random_seed: int unsigned
+"""
+
+
+PATH_SPECIFIC_PLACE_DECODING_SELECTION_DEFINITION = """
+# One immutable all-unit within-epoch physical-place decoding selection.
+path_specific_place_decoding_id: uuid
+---
+-> RegionSortedSpikesGroup
+-> MovementFiringRate
+-> TrajectoryIntervals.proj(center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
+-> PathSpecificPlaceDecodingParameters
+path_specific_place_decoding_parameters_sha256: char(64)
+path_specific_place_decoding_output_rule_sha256: char(64)
+"""
+
+
+PATH_SPECIFIC_PLACE_DECODING_DEFINITION = """
+# One within-epoch path-specific physical-place decoding artifact bundle.
+-> PathSpecificPlaceDecodingSelection
+---
+artifact_manifest_path: filepath@analysis
+selected_units_path: filepath@analysis
+fold_qc_path: filepath@analysis
+decoding_summary_path: filepath@analysis
+decoding_error_by_position_path: filepath@analysis
+n_units: int unsigned
+n_folds_expected: smallint unsigned
+n_folds_valid: smallint unsigned
+n_decoded_samples: bigint unsigned
+analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_valid_decodes')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -675,6 +729,48 @@ PATH_PROGRESSION_DECODING_PARAMETER_PRESETS = (
 )
 
 
+PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "coordinate": "concatenated_path_specific_linear_position",
+        "coordinate_unit": "cm",
+        "trajectory_order": (
+            "center_to_left",
+            "left_to_center",
+            "center_to_right",
+            "right_to_center",
+        ),
+        "path_orientation": "from_center",
+        "unit_policy": "all_region_sorted_spikes_group_units",
+        "cross_validation": "lap_wise_kfold_per_trajectory_then_pooled",
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "error_mode": "signed",
+        "error_summary": "median_iqr",
+        "min_bin_count": 5,
+    }
+)
+
+
+MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS = MappingProxyType(
+    {
+        "path_specific_place_decoding_param_name": (
+            "manuscript_5fold_20ms_window4_4cm_all_units"
+        ),
+        "n_folds": 5,
+        "decoding_bin_size_s": 0.02,
+        "sliding_window_size_bins": 4,
+        "spatial_bin_size_cm": 4.0,
+        "random_seed": 47,
+    }
+)
+
+
+PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS = (
+    MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -728,6 +824,15 @@ TABLE_DEFINITIONS = MappingProxyType(
         "path_progression_decoding_comparison": (
             PATH_PROGRESSION_DECODING_DEFINITION
         ),
+        "path_specific_place_decoding_parameters": (
+            PATH_SPECIFIC_PLACE_DECODING_PARAMETERS_DEFINITION
+        ),
+        "path_specific_place_decoding_selection": (
+            PATH_SPECIFIC_PLACE_DECODING_SELECTION_DEFINITION
+        ),
+        "path_specific_place_decoding": (
+            PATH_SPECIFIC_PLACE_DECODING_DEFINITION
+        ),
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -746,6 +851,9 @@ __all__ = [
     "EXPECTED_SPYGLASS_GIT_COMMIT",
     "MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS",
     "MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS",
+    "MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS",
+    "PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE",
+    "PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS",
     "PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE",
     "PATH_PROGRESSION_DECODING_OUTPUT_RULE",
     "PATH_PROGRESSION_DECODING_PARAMETER_PRESETS",

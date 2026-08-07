@@ -24,8 +24,9 @@ register artifacts, or write to NWB.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
 - `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
-  `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`, and
-  `decoding_comparison.py` provide database-free computation and atomic
+  `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
+  `decoding_comparison.py`, and `path_specific_decoding.py` provide
+  database-free computation and atomic
   artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
@@ -247,7 +248,8 @@ not create one DataJoint row per unit.
 The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
-`DPPEncodingComparison`, and `PathProgressionDecodingComparison`—there is no
+`DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
+`PathSpecificPlaceDecoding`—there is no
 `Computed` suffix. Empty but valid
 selections are recorded through explicit terminal statuses rather than being
 silently omitted.
@@ -290,14 +292,36 @@ error summary semantics are frozen by a separate output-rule hash.
 The 16 directed transfers comprise same-turn/cross-arm,
 opposite-turn/same-arm, flipped opposite-turn/same-arm, and
 same-inbound-or-outbound/cross-arm comparisons. All use normalized
-start-to-goal path progression and one shared eligible population. This table
-does not bundle the legacy within-epoch path-specific-place decoder, which
-used a different unit population and belongs in a separate future result.
+start-to-goal path progression and one shared eligible population. The legacy
+within-epoch path-specific-place decoder remains a separate result because it
+uses all units in the selected regional group.
 Cross-epoch and reload joins use persistent sorting-output/unit identities;
 ephemeral Pynapple `TsGroup` keys are stored only as local artifact metadata.
 All NPZ timestamps are seconds on the augmented NWB's ephys timestamp
 reference; true-position and decoded grids may differ and are aligned by
 interpolation when errors are summarized.
+
+Within-epoch path-specific place decoding uses:
+
+```text
+RegionSortedSpikesGroup + MovementFiringRate
+    + four TrajectoryIntervals + four WTrackGraph rows
+    + PathSpecificPlaceDecodingParameters
+    -> PathSpecificPlaceDecodingSelection
+    -> PathSpecificPlaceDecoding
+    -> manifest.parquet + selected_units.parquet + fold_qc.parquet
+       + decoding_summary.parquet + decoding_error_by_position.parquet
+       + Pynapple true/decoded NPZ files
+```
+
+One result covers one run epoch and region. It preserves the manuscript's
+all-unit policy and concatenates the four trajectories into non-overlapping
+physical-position ranges in the fixed legacy order. Each cross-validation
+fold refits its tuning curve from training laps only. Fold failures remain in
+the QC table and yield `partial_valid` or `no_valid_decodes` rather than
+silently removing units. Legacy true/decoded NPZ pairs can be registered only
+against an explicit current selection; their parameter assumptions and
+reconstructed fold coverage are retained as provenance.
 
 ## Artifacts and provenance
 
@@ -334,6 +358,14 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     decoding_summary.parquet
     cross_path_error_by_position.parquet
     cross_<family>_<source>_to_<target>_{true,decoded}.npz
+
+<root>/<animal>/<date>/path_specific_place_decoding/<epoch>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    fold_qc.parquet
+    decoding_summary.parquet
+    decoding_error_by_position.parquet
+    {true,decoded}_place.npz
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -349,7 +381,8 @@ inserts the result row. It never writes results into the source NWB.
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, and
-`DPPEncodingComparison` additionally provide `register_existing()`, which
+`DPPEncodingComparison` and `PathSpecificPlaceDecoding` additionally provide
+`register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
