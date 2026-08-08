@@ -895,6 +895,37 @@ def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _validate_epoch_motor_behavior_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the sole epoch motor-behavior parameter row."""
+    from v1ca1.spyglass.epoch_motor_behavior import (
+        validate_epoch_motor_behavior_parameters,
+    )
+
+    expected = set(table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "EpochMotorBehavior parameters must have exactly the declared "
+            f"fields; missing={missing!r}, extra={extra!r}."
+        )
+    name = row["epoch_motor_behavior_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "epoch_motor_behavior_param_name must be a non-empty string of "
+            "at most 64 characters."
+        )
+    validated = validate_epoch_motor_behavior_parameters(
+        progression_bin_size_cm=row["progression_bin_size_cm"]
+    )
+    return {
+        "epoch_motor_behavior_param_name": name,
+        **validated,
+    }
+
+
 def _validate_legacy_tuning_curve_inputs(
     *,
     position_row: Mapping[str, Any],
@@ -2228,6 +2259,295 @@ def _ripple_decoding_comparison_selection_row(
     return {
         "ripple_decoding_comparison_id": selection_uuid(
             "RippleDecodingComparison", natural_key
+        ),
+        **natural_key,
+    }
+
+
+def _epoch_motor_array_sha256(values: Any) -> str:
+    """Digest one exact numeric array including shape and normalized dtype."""
+    array = np.ascontiguousarray(np.asarray(values, dtype="<f8"))
+    digest = hashlib.sha256()
+    digest.update(str(tuple(array.shape)).encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _epoch_motor_json_value(value: Any) -> Any:
+    """Return one recursive JSON-safe graph-input snapshot."""
+    if isinstance(value, Mapping):
+        return {
+            str(name): _epoch_motor_json_value(item)
+            for name, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, np.ndarray):
+        return _epoch_motor_json_value(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_epoch_motor_json_value(item) for item in value]
+    if isinstance(value, np.generic):
+        return _epoch_motor_json_value(value.item())
+    return value
+
+
+def _epoch_motor_graph_input_sha256(graph: Mapping[str, Any]) -> str:
+    """Digest the exact graph arguments passed to track linearization."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(_epoch_motor_json_value(dict(graph)))
+
+
+def _epoch_motor_position_source_sha256(
+    row: Mapping[str, Any],
+    *,
+    values: np.ndarray,
+    timestamps: np.ndarray,
+) -> str:
+    """Digest one catalog row and its exact already-offset NWB samples."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "catalog_row_sha256": _ripple_decoding_catalog_row_sha256(row),
+            "timestamps_sha256": _epoch_motor_array_sha256(timestamps),
+            "values_sha256": _epoch_motor_array_sha256(values),
+        }
+    )
+
+
+def _epoch_motor_behavior_selection_row(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    position_table: Any,
+    movement_parameters_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    position_inputs: Mapping[str, Any] | None = None,
+    trajectory_interval_sets: Mapping[str, Any] | None = None,
+    graph_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Validate, freeze, and UUID one exact run-epoch motor selection."""
+    from v1ca1.spyglass import epoch_motor_behavior as motor_behavior
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+
+    nwb_file_name = str(key["nwb_file_name"])
+    epoch = str(key["epoch"])
+    epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    if str(epoch_row.get("epoch_type")) != "run":
+        raise ValueError("EpochMotorBehavior requires an explicit run epoch.")
+    parameters = _validate_epoch_motor_behavior_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "epoch_motor_behavior_param_name": key[
+                    "epoch_motor_behavior_param_name"
+                ]
+            },
+        )
+    )
+    movement_row = _validate_movement_parameter_row(
+        _fetch1_dict(
+            movement_parameters_table,
+            {"movement_param_name": key["movement_param_name"]},
+        )
+    )
+    movement_snapshot = motor_behavior.validate_movement_parameter_snapshot(
+        movement_row
+    )
+
+    primary_name = str(key["primary_position_series_name"])
+    reference_name = str(key["orientation_reference_position_series_name"])
+    primary_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": primary_name,
+        },
+    )
+    reference_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": reference_name,
+        },
+    )
+    supplied_positions = dict(position_inputs or {})
+    primary_position = supplied_positions.get("primary_position")
+    reference_position = supplied_positions.get(
+        "orientation_reference_position"
+    )
+    if primary_position is None:
+        primary_position = position_table.load_position(
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "position_series_name": primary_name,
+            },
+            apply_analysis_offset=True,
+        )
+    if reference_position is None:
+        reference_position = position_table.load_position(
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "position_series_name": reference_name,
+            },
+            apply_analysis_offset=True,
+        )
+    validated_position = motor_behavior.validate_position_inputs(
+        epoch=epoch,
+        primary_position=primary_position,
+        orientation_reference_position=reference_position,
+        primary_position_row=primary_row,
+        orientation_reference_position_row=reference_row,
+    )
+
+    trajectory_rows: dict[str, dict[str, Any]] = {}
+    graph_rows: dict[str, dict[str, Any]] = {}
+    source_fields: dict[str, Any] = {}
+    supplied_intervals = dict(trajectory_interval_sets or {})
+    supplied_graphs = dict(graph_inputs or {})
+    selected_intervals: dict[str, Any] = {}
+    selected_graphs: dict[str, Mapping[str, Any]] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type or str(
+            key.get(configuration_field, trajectory_type)
+        ) != trajectory_type:
+            raise ValueError(
+                "EpochMotorBehavior trajectory and graph aliases must match "
+                "the four canonical natural-direction paths."
+            )
+        trajectory_key = {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "trajectory_type": trajectory_type,
+        }
+        graph_key = {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": trajectory_type,
+        }
+        trajectory_rows[trajectory_type] = _fetch1_dict(
+            trajectory_intervals_table, trajectory_key
+        )
+        graph_rows[trajectory_type] = _fetch1_dict(
+            wtrack_graph_table, graph_key
+        )
+        selected_intervals[trajectory_type] = supplied_intervals.get(
+            trajectory_type
+        )
+        if selected_intervals[trajectory_type] is None:
+            selected_intervals[trajectory_type] = (
+                trajectory_intervals_table.load_intervals(trajectory_key)
+            )
+        selected_graphs[trajectory_type] = supplied_graphs.get(
+            trajectory_type
+        )
+        if selected_graphs[trajectory_type] is None:
+            selected_graphs[trajectory_type] = wtrack_graph_table.load_graph(
+                graph_key
+            )
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    motor_behavior._validate_trajectory_inputs(selected_intervals)
+    motor_behavior._validate_graph_inputs(selected_graphs)
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="epoch_motor_behavior_parameters_sha256",
+    )
+    trajectory_hashes = {
+        trajectory_type: _ripple_decoding_interval_sha256(
+            selected_intervals[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    trajectory_row_hashes = {
+        trajectory_type: _ripple_decoding_catalog_row_sha256(
+            trajectory_rows[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_row_hashes = {
+        trajectory_type: _ripple_decoding_catalog_row_sha256(
+            graph_rows[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_input_hashes = {
+        trajectory_type: _epoch_motor_graph_input_sha256(
+            selected_graphs[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    timestamps = np.asarray(validated_position["timestamps"], dtype=float)
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "primary_position_series_name": primary_name,
+        "orientation_reference_position_series_name": reference_name,
+        "movement_param_name": movement_snapshot["movement_param_name"],
+        **source_fields,
+        "epoch_motor_behavior_param_name": parameters[
+            "epoch_motor_behavior_param_name"
+        ],
+        "primary_position_role": validated_position["primary_position_role"],
+        "orientation_reference_position_role": validated_position[
+            "orientation_reference_position_role"
+        ],
+        "position_offset_samples": int(
+            validated_position["position_offset_samples"]
+        ),
+        "epoch_interval_row_sha256": _ripple_decoding_catalog_row_sha256(
+            epoch_row
+        ),
+        "primary_position_row_sha256": _ripple_decoding_catalog_row_sha256(
+            primary_row
+        ),
+        "orientation_reference_position_row_sha256": (
+            _ripple_decoding_catalog_row_sha256(reference_row)
+        ),
+        "aligned_position_timestamps_sha256": _epoch_motor_array_sha256(
+            timestamps
+        ),
+        "primary_position_source_sha256": (
+            _epoch_motor_position_source_sha256(
+                primary_row,
+                values=validated_position["primary_values"],
+                timestamps=timestamps,
+            )
+        ),
+        "orientation_reference_position_source_sha256": (
+            _epoch_motor_position_source_sha256(
+                reference_row,
+                values=validated_position[
+                    "orientation_reference_values"
+                ],
+                timestamps=timestamps,
+            )
+        ),
+        "trajectory_rows_sha256_by_type": trajectory_row_hashes,
+        "trajectory_intervals_sha256_by_type": trajectory_hashes,
+        "graph_rows_sha256_by_trajectory": graph_row_hashes,
+        "graph_inputs_sha256_by_trajectory": graph_input_hashes,
+        "movement_parameters_sha256": movement_snapshot[
+            "movement_parameters_sha256"
+        ],
+        **parameter_snapshot,
+        "epoch_motor_behavior_output_rule_sha256": provenance_sha256(
+            dict(motor_behavior.OUTPUT_RULE)
+        ),
+    }
+    return {
+        "epoch_motor_behavior_id": selection_uuid(
+            "EpochMotorBehavior", natural_key
         ),
         **natural_key,
     }
@@ -7676,6 +7996,458 @@ def _register_existing_ripple_modulation_row(
         "artifact_origin": "registered_existing",
         "_created_artifact_paths": created_artifact_paths,
     }
+
+
+def _load_epoch_motor_behavior_inputs(
+    *,
+    selection: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+) -> dict[str, Any]:
+    """Load the two positions, four lap sets, and four graphs in a selection."""
+    nwb_file_name = str(selection["nwb_file_name"])
+    epoch = str(selection["epoch"])
+    primary_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "position_series_name": selection["primary_position_series_name"],
+    }
+    reference_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "position_series_name": selection[
+            "orientation_reference_position_series_name"
+        ],
+    }
+    return {
+        "position_inputs": {
+            "primary_position": position_table.load_position(
+                primary_key, apply_analysis_offset=True
+            ),
+            "orientation_reference_position": position_table.load_position(
+                reference_key, apply_analysis_offset=True
+            ),
+        },
+        "primary_position_row": _fetch1_dict(position_table, primary_key),
+        "orientation_reference_position_row": _fetch1_dict(
+            position_table, reference_key
+        ),
+        "trajectory_intervals": {
+            trajectory_type: trajectory_intervals_table.load_intervals(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": epoch,
+                    "trajectory_type": trajectory_type,
+                }
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        },
+        "graph_inputs": {
+            trajectory_type: wtrack_graph_table.load_graph(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "configuration_name": trajectory_type,
+                }
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        },
+    }
+
+
+def _load_epoch_motor_behavior_context(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    position_table: Any,
+    movement_parameters_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify every frozen epoch motor-behavior input."""
+    from v1ca1.spyglass import epoch_motor_behavior as motor_behavior
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    loaded = _load_epoch_motor_behavior_inputs(
+        selection=key,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+    )
+    selection = _epoch_motor_behavior_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        position_table=position_table,
+        movement_parameters_table=movement_parameters_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        position_inputs=loaded["position_inputs"],
+        trajectory_interval_sets=loaded["trajectory_intervals"],
+        graph_inputs=loaded["graph_inputs"],
+    )
+    for field_name, expected in selection.items():
+        if field_name not in key or provenance_sha256(
+            _epoch_motor_json_value(key[field_name])
+        ) != provenance_sha256(_epoch_motor_json_value(expected)):
+            raise ValueError(
+                "EpochMotorBehavior selection changed after insertion: "
+                f"{field_name}."
+            )
+    parameters = _validate_epoch_motor_behavior_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, selection)
+    )
+    movement_snapshot = motor_behavior.validate_movement_parameter_snapshot(
+        movement_parameters,
+        movement_parameters_sha256=selection["movement_parameters_sha256"],
+    )
+    animal_name, session_date = _session_identity(session_table, selection)
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "movement_parameters": movement_snapshot,
+        "animal_name": animal_name,
+        "date": session_date,
+        **loaded,
+    }
+
+
+def _epoch_motor_behavior_compute_kwargs(
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the standalone compute arguments for one frozen selection."""
+    selection = context["selection"]
+    parameters = context["parameters"]
+    positions = context["position_inputs"]
+    return {
+        "animal_name": context["animal_name"],
+        "date": context["date"],
+        "epoch": str(selection["epoch"]),
+        "epoch_motor_behavior_id": selection["epoch_motor_behavior_id"],
+        "primary_position": positions["primary_position"],
+        "orientation_reference_position": positions[
+            "orientation_reference_position"
+        ],
+        "primary_position_row": context["primary_position_row"],
+        "orientation_reference_position_row": context[
+            "orientation_reference_position_row"
+        ],
+        "trajectory_intervals_by_type": context["trajectory_intervals"],
+        "graph_inputs_by_configuration": context["graph_inputs"],
+        "epoch_type": "run",
+        "parameter_name": parameters["epoch_motor_behavior_param_name"],
+        "parameter_sha256": selection[
+            "epoch_motor_behavior_parameters_sha256"
+        ],
+        "output_rule_sha256": selection[
+            "epoch_motor_behavior_output_rule_sha256"
+        ],
+        "progression_bin_size_cm": parameters[
+            "progression_bin_size_cm"
+        ],
+        "movement_parameters": context["movement_parameters"],
+        "movement_parameters_sha256": selection[
+            "movement_parameters_sha256"
+        ],
+    }
+
+
+def _epoch_motor_behavior_result_row(
+    result: Mapping[str, Any],
+    paths: Mapping[str, Any],
+    *,
+    created_artifact_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Return one DataJoint payload from a validated standalone result."""
+    from v1ca1.spyglass.epoch_motor_behavior import (
+        BUNDLE_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    )
+
+    return {
+        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
+        "distribution_summary_path": str(paths["distribution_summary_path"]),
+        "progression_summary_path": str(paths["progression_summary_path"]),
+        "trajectory_qc_path": str(paths["trajectory_qc_path"]),
+        "schema_version": SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: result[field_name]
+            for field_name in (
+                "n_position_samples_input",
+                "n_finite_position_samples",
+                "n_dropped_nonfinite_samples",
+                "n_movement_samples",
+                "movement_duration_s",
+                "n_supported_trajectories",
+                "sampling_rate_hz",
+                "median_sample_interval_s",
+                "maximum_sample_gap_s",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": (
+            dict(result["legacy_artifact_provenance"])
+            if result.get("legacy_artifact_provenance")
+            else None
+        ),
+        "_created_artifact_paths": list(created_artifact_paths),
+    }
+
+
+def _make_epoch_motor_behavior_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    position_table: Any,
+    movement_parameters_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one immutable epoch motor-behavior bundle."""
+    from v1ca1.spyglass.epoch_motor_behavior import (
+        compute_selected_epoch_motor_behavior,
+        get_epoch_motor_behavior_artifact_paths,
+        write_epoch_motor_behavior_artifact,
+    )
+
+    context = _load_epoch_motor_behavior_context(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        position_table=position_table,
+        movement_parameters_table=movement_parameters_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        session_table=session_table,
+    )
+    result = compute_selected_epoch_motor_behavior(
+        **_epoch_motor_behavior_compute_kwargs(context),
+        artifact_origin="computed",
+        legacy_artifact_provenance=None,
+    )
+    selection = context["selection"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_epoch_motor_behavior_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        epoch_motor_behavior_id=selection["epoch_motor_behavior_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_epoch_motor_behavior_artifact(result, artifact_dir)
+    return _epoch_motor_behavior_result_row(
+        result,
+        written,
+        created_artifact_paths=created_artifact_paths,
+    )
+
+
+def _validate_epoch_motor_behavior_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    movement_parameters_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one loaded motor bundle to match all DataJoint rows."""
+    from v1ca1.spyglass import epoch_motor_behavior as motor_behavior
+
+    validated = motor_behavior.validate_epoch_motor_behavior_result(bundle)
+    metadata = validated["metadata"]
+    expected_metadata = {
+        "epoch_motor_behavior_id": str(
+            selection_row["epoch_motor_behavior_id"]
+        ),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(selection_row["epoch"]),
+        "epoch_type": "run",
+        "primary_position_source": str(
+            selection_row["primary_position_series_name"]
+        ),
+        "primary_position_role": str(selection_row["primary_position_role"]),
+        "orientation_reference_position_source": str(
+            selection_row["orientation_reference_position_series_name"]
+        ),
+        "orientation_reference_position_role": str(
+            selection_row["orientation_reference_position_role"]
+        ),
+        "position_offset_samples": int(
+            selection_row["position_offset_samples"]
+        ),
+    }
+    if metadata != expected_metadata:
+        raise ValueError(
+            "EpochMotorBehavior artifact metadata differs from its selection."
+        )
+    parameters = _validate_epoch_motor_behavior_parameter_row(parameters_row)
+    expected_parameters = {
+        "parameter_name": parameters["epoch_motor_behavior_param_name"],
+        "parameter_sha256": selection_row[
+            "epoch_motor_behavior_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "epoch_motor_behavior_output_rule_sha256"
+        ],
+        "progression_bin_size_cm": parameters[
+            "progression_bin_size_cm"
+        ],
+    }
+    if validated["parameters"] != expected_parameters:
+        raise ValueError(
+            "EpochMotorBehavior artifact parameters differ from its selection."
+        )
+    expected_movement = motor_behavior.validate_movement_parameter_snapshot(
+        _validate_movement_parameter_row(movement_parameters_row),
+        movement_parameters_sha256=selection_row["movement_parameters_sha256"],
+    )
+    if validated["movement_parameters"] != expected_movement:
+        raise ValueError(
+            "EpochMotorBehavior movement parameters differ from its selection."
+        )
+
+    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
+    try:
+        artifact_root = artifact_dir.parents[4]
+    except IndexError as exc:
+        raise ValueError(
+            "EpochMotorBehavior artifact does not use the canonical layout."
+        ) from exc
+    expected_paths = motor_behavior.get_epoch_motor_behavior_artifact_paths(
+        animal_name=animal_name,
+        date=date,
+        epoch=str(selection_row["epoch"]),
+        epoch_motor_behavior_id=selection_row["epoch_motor_behavior_id"],
+        artifact_root=artifact_root,
+    )
+    for field_name in (
+        "artifact_manifest_path",
+        "distribution_summary_path",
+        "progression_summary_path",
+        "trajectory_qc_path",
+    ):
+        if Path(result_row[field_name]) != Path(expected_paths[field_name]):
+            raise ValueError(
+                "EpochMotorBehavior result path is not canonical: "
+                f"{field_name}."
+            )
+    for field_name in (
+        "n_position_samples_input",
+        "n_finite_position_samples",
+        "n_dropped_nonfinite_samples",
+        "n_movement_samples",
+        "movement_duration_s",
+        "n_supported_trajectories",
+        "sampling_rate_hz",
+        "median_sample_interval_s",
+        "maximum_sample_gap_s",
+        "analysis_status",
+        "artifact_origin",
+    ):
+        left = result_row.get(field_name)
+        right = validated[field_name]
+        if isinstance(right, Real) and not isinstance(right, Integral):
+            matches = (
+                np.isnan(float(left)) and np.isnan(float(right))
+            ) or np.isclose(float(left), float(right), rtol=1e-10, atol=1e-12)
+        else:
+            matches = str(left) == str(right)
+        if not matches:
+            raise ValueError(
+                "EpochMotorBehavior result metadata disagrees with its "
+                f"artifact: {field_name}."
+            )
+    if str(result_row.get("schema_version")) != motor_behavior.SCHEMA_VERSION or str(
+        result_row.get("bundle_schema_version")
+    ) != motor_behavior.BUNDLE_SCHEMA_VERSION:
+        raise ValueError("EpochMotorBehavior schema versions disagree.")
+    if result_row.get("legacy_artifact_provenance") != validated.get(
+        "legacy_artifact_provenance"
+    ):
+        raise ValueError("EpochMotorBehavior legacy provenance disagrees.")
+
+
+def _register_existing_epoch_motor_behavior_row(
+    *,
+    key: Mapping[str, Any],
+    source_distribution_path: Path,
+    source_progression_path: Path,
+    source_run_log_path: Path | None,
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    position_table: Any,
+    movement_parameters_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Recompute, verify, and register one legacy session motor artifact."""
+    from v1ca1.spyglass.epoch_motor_behavior import (
+        get_epoch_motor_behavior_artifact_paths,
+        register_existing_epoch_motor_behavior_artifact,
+    )
+
+    context = _load_epoch_motor_behavior_context(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        position_table=position_table,
+        movement_parameters_table=movement_parameters_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        session_table=session_table,
+    )
+    selection = context["selection"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_epoch_motor_behavior_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        epoch_motor_behavior_id=selection["epoch_motor_behavior_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_epoch_motor_behavior_artifact(
+            source_distribution_path=Path(source_distribution_path),
+            source_progression_path=Path(source_progression_path),
+            source_run_log_path=(
+                None
+                if source_run_log_path is None
+                else Path(source_run_log_path)
+            ),
+            destination_path=artifact_dir,
+            overwrite=False,
+            **_epoch_motor_behavior_compute_kwargs(context),
+        )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    return _epoch_motor_behavior_result_row(
+        registered,
+        paths,
+        created_artifact_paths=created_artifact_paths,
+    )
 
 
 def _make_movement_firing_rate_row(
@@ -15275,6 +16047,14 @@ def _construct_tables(
         "movement_firing_rate_compute",
         _make_movement_firing_rate_row,
     )
+    epoch_motor_behavior_compute_hook = runtime_hooks.get(
+        "epoch_motor_behavior_compute",
+        _make_epoch_motor_behavior_row,
+    )
+    epoch_motor_behavior_register_hook = runtime_hooks.get(
+        "epoch_motor_behavior_register_existing",
+        _register_existing_epoch_motor_behavior_row,
+    )
     tuning_curve_compute_hook = runtime_hooks.get(
         "path_specific_place_tuning_curve_compute",
         _make_path_specific_place_tuning_curve_row,
@@ -15389,6 +16169,8 @@ def _construct_tables(
             ripple_compute_hook,
             ripple_register_hook,
             movement_compute_hook,
+            epoch_motor_behavior_compute_hook,
+            epoch_motor_behavior_register_hook,
             tuning_curve_compute_hook,
             tuning_curve_register_hook,
             tuning_similarity_compute_hook,
@@ -15638,6 +16420,220 @@ def _construct_tables(
 
     MovementParameters = main_schema(MovementParameters)
     main_context["MovementParameters"] = MovementParameters
+
+    class EpochMotorBehaviorParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.EPOCH_MOTOR_BEHAVIOR_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one motor progression-bin definition."""
+            validated = _validate_epoch_motor_behavior_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_default(
+            cls, *, skip_duplicates: bool = True
+        ) -> dict[str, Any]:
+            """Explicitly insert the manuscript four-centimeter preset."""
+            return cls.insert_parameters(
+                table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS,
+                skip_duplicates=skip_duplicates,
+            )
+
+    EpochMotorBehaviorParameters = main_schema(EpochMotorBehaviorParameters)
+    main_context["EpochMotorBehaviorParameters"] = EpochMotorBehaviorParameters
+
+    class EpochMotorBehaviorSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, UUID, and insert one run-epoch selection."""
+            row = _epoch_motor_behavior_selection_row(
+                key=key,
+                epoch_intervals_table=EpochIntervals,
+                position_table=Position,
+                movement_parameters_table=MovementParameters,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=EpochMotorBehaviorParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    EpochMotorBehaviorSelection = main_schema(EpochMotorBehaviorSelection)
+    main_context["EpochMotorBehaviorSelection"] = EpochMotorBehaviorSelection
+
+    class EpochMotorBehavior(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.EPOCH_MOTOR_BEHAVIOR_DEFINITION
+        _compute_hook = staticmethod(epoch_motor_behavior_compute_hook)
+        _register_existing_hook = staticmethod(
+            epoch_motor_behavior_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one epoch motor-behavior bundle."""
+            selection = _fetch1_dict(EpochMotorBehaviorSelection, key)
+            artifact_row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=EpochMotorBehaviorParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    position_table=Position,
+                    movement_parameters_table=MovementParameters,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "epoch_motor_behavior_id": selection[
+                            "epoch_motor_behavior_id"
+                        ],
+                        **artifact_row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_epoch_motor_behavior_bundle(
+            cls, key: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            """Load and verify one canonical epoch motor-behavior bundle."""
+            from v1ca1.spyglass.epoch_motor_behavior import (
+                load_epoch_motor_behavior_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                EpochMotorBehaviorSelection,
+                {
+                    "epoch_motor_behavior_id": row[
+                        "epoch_motor_behavior_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                EpochMotorBehaviorParameters, selection
+            )
+            movement_parameters = _fetch1_dict(
+                MovementParameters, selection
+            )
+            animal_name, session_date = _session_identity(
+                session_table, selection
+            )
+            bundle = load_epoch_motor_behavior_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_epoch_motor_behavior_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                movement_parameters_row=movement_parameters,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_distribution_path: Path | str,
+            source_progression_path: Path | str,
+            source_run_log_path: Path | str | None = None,
+            overwrite: bool = False,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Strictly recompute and register one legacy session artifact."""
+            if overwrite:
+                raise ValueError(
+                    "EpochMotorBehavior results are immutable; create a new "
+                    "selection instead of overwriting."
+                )
+            selection = _fetch1_dict(EpochMotorBehaviorSelection, key)
+            result_key = {
+                "epoch_motor_behavior_id": selection[
+                    "epoch_motor_behavior_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "EpochMotorBehavior already contains this immutable "
+                    "selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_distribution_path=Path(
+                        source_distribution_path
+                    ),
+                    source_progression_path=Path(source_progression_path),
+                    source_run_log_path=(
+                        None
+                        if source_run_log_path is None
+                        else Path(source_run_log_path)
+                    ),
+                    parameters_table=EpochMotorBehaviorParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    position_table=Position,
+                    movement_parameters_table=MovementParameters,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                **result_key,
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    EpochMotorBehavior = main_schema(EpochMotorBehavior)
+    main_context["EpochMotorBehavior"] = EpochMotorBehavior
 
     class MovementFiringRateSelection(spyglass_mixin, dj_module.Manual):
         definition = table_specs.MOVEMENT_FIRING_RATE_SELECTION_DEFINITION
@@ -19308,6 +20304,9 @@ def _construct_tables(
         "spike_sorting_figurl": SpikeSortingFigurl,
         "region_sorted_spikes_group": RegionSortedSpikesGroup,
         "movement_parameters": MovementParameters,
+        "epoch_motor_behavior_parameters": EpochMotorBehaviorParameters,
+        "epoch_motor_behavior_selection": EpochMotorBehaviorSelection,
+        "epoch_motor_behavior": EpochMotorBehavior,
         "movement_firing_rate_selection": MovementFiringRateSelection,
         "movement_firing_rate": MovementFiringRate,
         "ripple_modulation_parameters": RippleModulationParameters,

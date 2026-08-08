@@ -23,7 +23,8 @@ register artifacts, or write to NWB.
   standard sorting group without materializing units or spike times.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
-- `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
+- `movement.py`, `epoch_motor_behavior.py`, `ripple_modulation.py`,
+  `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
   `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
   `dark_light_glm.py`, `swap_glm.py`, and `swap_tuning.py` provide
@@ -184,6 +185,30 @@ bounds and detector provenance, and parameter/output-rule hashes. Units remain
 an all-unit audit in Parquet and NetCDF rather than becoming DataJoint rows.
 Empty movement support, missing eligible units, missing ripples, and other
 expected scientific terminals produce explicit immutable artifacts.
+
+Epoch motor behavior uses:
+
+```text
+EpochIntervals (run) + two aligned Position rows + MovementParameters
+    + four TrajectoryIntervals + four natural-direction WTrackGraph rows
+    + EpochMotorBehaviorParameters
+    -> EpochMotorBehaviorSelection (epoch_motor_behavior_id)
+    -> EpochMotorBehavior
+    -> manifest.parquet + distribution_summary.parquet
+       + progression_summary.parquet + trajectory_qc.parquet
+```
+
+Each row covers one run epoch. The selected primary position supplies
+translation and track linearization; the separately named, aligned reference
+series supplies orientation. Neither role is hard-coded to a current
+`head_position` or `body_position` name. Both series must use centimeters,
+share exact already-offset timestamps and sampling metadata, and retain the
+catalogued leading-sample offset without a second truncation. The selection
+UUID freezes the epoch catalog row, both position rows and their exact loaded
+samples, every trajectory catalog row and interval bound, every graph catalog
+row and exact linearization input, the fixed 4 cm/s and 0.1 s movement row,
+the progression-bin parameter, and the output rule. The only analysis-owned
+parameter is progression bin size (4 cm in the manuscript preset).
 
 Movement firing rate uses:
 
@@ -564,6 +589,12 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     movement_firing_rate.parquet
     movement_intervals.npz
 
+<root>/<animal>/<date>/epoch_motor_behavior/<epoch>/<uuid>/
+    manifest.parquet
+    distribution_summary.parquet
+    progression_summary.parquet
+    trajectory_qc.parquet
+
 <root>/<animal>/<date>/path_specific_place_tuning_curve/<epoch>/<trajectory>/<subset>/<region>/<uuid>/
     tuning_curve.nc
 
@@ -657,7 +688,8 @@ written and validated together. `RippleModulation`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
-`CrossRegionXCorr`, and `RippleDecodingComparison` additionally provide
+`CrossRegionXCorr`, `RippleDecodingComparison`, and `EpochMotorBehavior`
+additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without invoking the computed table's
@@ -681,6 +713,13 @@ redecodes the selected NWB inputs, applies the current graph-derived physical-
 arm labels, and compares every supplied scientific artifact before writing the
 canonical bundle. Stale inbound-arm outputs labeled by turn group are rejected;
 terminal results are computed directly rather than legacy-registered.
+Epoch-motor registration accepts the legacy session-wide distribution and
+progression Parquets, selects exactly one epoch, recomputes that epoch from
+the frozen NWB position/interval/graph sources, and compares all scientific
+rows before writing the canonical bundle. An optional original run log is
+validated and retained as provenance. The trajectory-QC table is always
+generated from the current frozen NWB recomputation rather than trusted from
+legacy files.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

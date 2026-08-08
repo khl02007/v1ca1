@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 import hashlib
 import os
@@ -1487,6 +1488,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         *SOURCE_TABLE_KEYS,
         "region_sorted_spikes_group",
         "movement_parameters",
+        "epoch_motor_behavior_parameters",
+        "epoch_motor_behavior_selection",
+        "epoch_motor_behavior",
         "movement_firing_rate_selection",
         "movement_firing_rate",
         "ripple_modulation_parameters",
@@ -8103,3 +8107,478 @@ def test_snapshot_digest_matches_membership_content() -> None:
 
     assert provenance["sorting_group_members_sha256"] == expected
     assert len(provenance["unit_selection_params_sha256"]) == 64
+
+
+def _epoch_motor_behavior_selection_inputs() -> dict[str, Any]:
+    """Return complete database-free sources for one motor selection."""
+    nwb_file_name = "L1420240102_augmented.nwb"
+    epoch = "02_r1"
+    timestamps = 10.0 + np.arange(20, dtype=float) * 0.1
+    primary_values = np.column_stack(
+        (np.arange(20, dtype=float), np.zeros(20, dtype=float))
+    )
+    reference_values = primary_values - np.asarray([1.0, 0.0])
+    common_position = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "spatial_unit": "cm",
+        "start_index": 100,
+        "stop_index_exclusive": 130,
+        "sample_count": 30,
+        "analysis_start_offset_samples": 10,
+        "start_time": 9.0,
+        "stop_time": 11.9,
+        "first_frame": 500,
+        "last_frame": 529,
+        "video_series_name": "camera",
+        "source_table_path": "processing/behavior/position_index",
+    }
+    position_rows = {
+        "future_head": {
+            **common_position,
+            "position_series_name": "future_head",
+            "position_role": "translation_anchor",
+            "source_object_id": "primary-id",
+        },
+        "future_reference": {
+            **common_position,
+            "position_series_name": "future_reference",
+            "position_role": "orientation_anchor",
+            "source_object_id": "reference-id",
+        },
+    }
+    trajectory_bounds = {
+        "center_to_left": (10.0, 10.4),
+        "center_to_right": (10.5, 10.9),
+        "left_to_center": (11.0, 11.4),
+        "right_to_center": (11.5, 11.9),
+    }
+    trajectory_rows = {
+        trajectory_type: {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "trajectory_type": trajectory_type,
+            "interval_count": 1,
+            "source_table_path": f"intervals/{trajectory_type}",
+            "source_object_id": f"trajectory-{trajectory_type}",
+        }
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    trajectory_intervals = {
+        trajectory_type: _RippleDecodingIntervals([start], [stop])
+        for trajectory_type, (start, stop) in trajectory_bounds.items()
+    }
+    graph_inputs = {
+        trajectory_type: {
+            "configuration_name": trajectory_type,
+            "coordinate_unit": "cm",
+            "use_hmm": False,
+            "track_graph_kwargs": {
+                "node_positions": [[0.0, 0.0], [100.0, 0.0]],
+                "edges": [[0, 1]],
+            },
+            "linearization_kwargs": {
+                "edge_order": [[0, 1]],
+                "edge_spacing": [],
+                "use_HMM": False,
+            },
+        }
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    graph_rows = {
+        trajectory_type: {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": trajectory_type,
+            "coordinate_unit": "cm",
+            "source_object_path": f"processing/behavior/{trajectory_type}",
+            "source_object_id": f"graph-{trajectory_type}",
+        }
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    return {
+        "key": {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "primary_position_series_name": "future_head",
+            "orientation_reference_position_series_name": "future_reference",
+            "movement_param_name": "default",
+            "epoch_motor_behavior_param_name": "manuscript_4cm",
+        },
+        "epoch_row": {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "epoch_type": "run",
+            "start_time": 10.0,
+            "stop_time": 12.0,
+            "condition": "AB",
+            "source_object_id": "epoch-id",
+        },
+        "position_rows": position_rows,
+        "position_inputs": {
+            "primary_position": SimpleNamespace(
+                t=timestamps, d=primary_values
+            ),
+            "orientation_reference_position": SimpleNamespace(
+                t=timestamps, d=reference_values
+            ),
+        },
+        "trajectory_rows": trajectory_rows,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_rows": graph_rows,
+        "graph_inputs": graph_inputs,
+        "movement_parameters": dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS),
+        "parameters": dict(
+            table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS
+        ),
+    }
+
+
+def _build_epoch_motor_behavior_selection(
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one motor selection from injectable fake relations."""
+    return tables_module._epoch_motor_behavior_selection_row(
+        key=inputs["key"],
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        position_table=_FakeKeyedRelation(
+            "position_series_name", inputs["position_rows"]
+        ),
+        movement_parameters_table=_FakeRelation(
+            inputs["movement_parameters"]
+        ),
+        trajectory_intervals_table=_FakeKeyedRelation(
+            "trajectory_type", inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeKeyedRelation(
+            "configuration_name", inputs["graph_rows"]
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        position_inputs=inputs["position_inputs"],
+        trajectory_interval_sets=inputs["trajectory_intervals"],
+        graph_inputs=inputs["graph_inputs"],
+    )
+
+
+def test_epoch_motor_behavior_selection_freezes_every_nwb_source() -> None:
+    """Epoch, position, lap, graph, movement, and output inputs enter UUIDv5."""
+    inputs = _epoch_motor_behavior_selection_inputs()
+    first = _build_epoch_motor_behavior_selection(inputs)
+    assert first == _build_epoch_motor_behavior_selection(inputs)
+    assert first["epoch_motor_behavior_id"].version == 5
+    assert first["primary_position_role"] == "translation_anchor"
+    assert first["orientation_reference_position_role"] == "orientation_anchor"
+    assert first["position_offset_samples"] == 10
+    for field_name in (
+        "epoch_interval_row_sha256",
+        "primary_position_source_sha256",
+        "orientation_reference_position_source_sha256",
+        "movement_parameters_sha256",
+        "epoch_motor_behavior_parameters_sha256",
+        "epoch_motor_behavior_output_rule_sha256",
+    ):
+        assert len(first[field_name]) == 64
+    for field_name in (
+        "trajectory_rows_sha256_by_type",
+        "trajectory_intervals_sha256_by_type",
+        "graph_rows_sha256_by_trajectory",
+        "graph_inputs_sha256_by_trajectory",
+    ):
+        assert set(first[field_name]) == set(_DPP_ENCODING_TRAJECTORIES)
+
+    changed_epoch = copy.deepcopy(inputs)
+    changed_epoch["epoch_row"]["condition"] = "BA"
+    assert _build_epoch_motor_behavior_selection(changed_epoch)[
+        "epoch_motor_behavior_id"
+    ] != first["epoch_motor_behavior_id"]
+
+    changed_position = copy.deepcopy(inputs)
+    changed_position["position_inputs"]["primary_position"].d[0, 0] += 0.5
+    assert _build_epoch_motor_behavior_selection(changed_position)[
+        "epoch_motor_behavior_id"
+    ] != first["epoch_motor_behavior_id"]
+
+    changed_trajectory_row = copy.deepcopy(inputs)
+    changed_trajectory_row["trajectory_rows"]["center_to_left"][
+        "source_object_id"
+    ] = "changed-trajectory"
+    assert _build_epoch_motor_behavior_selection(changed_trajectory_row)[
+        "epoch_motor_behavior_id"
+    ] != first["epoch_motor_behavior_id"]
+
+    changed_interval = copy.deepcopy(inputs)
+    changed_interval["trajectory_intervals"]["center_to_left"].end[0] += 0.01
+    assert _build_epoch_motor_behavior_selection(changed_interval)[
+        "epoch_motor_behavior_id"
+    ] != first["epoch_motor_behavior_id"]
+
+    changed_graph = copy.deepcopy(inputs)
+    for graph in changed_graph["graph_inputs"].values():
+        graph["track_graph_kwargs"]["node_positions"][1][0] = 101.0
+    assert _build_epoch_motor_behavior_selection(changed_graph)[
+        "epoch_motor_behavior_id"
+    ] != first["epoch_motor_behavior_id"]
+
+
+def test_epoch_motor_behavior_selection_requires_fixed_movement_and_run() -> None:
+    """The upstream movement definition and run classification are fixed."""
+    inputs = _epoch_motor_behavior_selection_inputs()
+    inputs["movement_parameters"]["speed_threshold_cm_s"] = 5.0
+    with pytest.raises(ValueError, match="manuscript MovementParameters"):
+        _build_epoch_motor_behavior_selection(inputs)
+
+    inputs = _epoch_motor_behavior_selection_inputs()
+    inputs["epoch_row"]["epoch_type"] = "sleep"
+    with pytest.raises(ValueError, match="explicit run epoch"):
+        _build_epoch_motor_behavior_selection(inputs)
+
+
+def test_epoch_motor_behavior_activation_definitions_and_defaults() -> None:
+    """Activation exposes the three passive tables and inserts nothing."""
+    bundle, _schemas, _unit_selection_params = _fake_bundle()
+    assert {
+        "epoch_motor_behavior_parameters",
+        "epoch_motor_behavior_selection",
+        "epoch_motor_behavior",
+    }.issubset(bundle)
+    selection_definition = bundle["epoch_motor_behavior_selection"].definition
+    assert "epoch_motor_behavior_id: uuid" in selection_definition
+    assert "primary_position_series_name='position_series_name'" in (
+        selection_definition
+    )
+    assert "trajectory_rows_sha256_by_type: longblob" in selection_definition
+    assert "graph_inputs_sha256_by_trajectory: longblob" in (
+        selection_definition
+    )
+    result = bundle["epoch_motor_behavior"]
+    assert "distribution_summary_path: filepath@analysis" in result.definition
+    assert hasattr(result, "register_existing")
+    assert "_insert_calls" not in result.__dict__
+
+    parameters = bundle["epoch_motor_behavior_parameters"]
+    inserted = parameters.insert_default()
+    assert inserted == dict(
+        table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS
+    )
+
+
+def test_epoch_motor_behavior_load_validates_artifact_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result loader delegates checksum and DataJoint-link validation."""
+    from v1ca1.spyglass import epoch_motor_behavior
+
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+    artifact_dir.mkdir()
+    result_row = {
+        "epoch_motor_behavior_id": result_id,
+        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+    }
+    selection = {
+        "epoch_motor_behavior_id": result_id,
+        "movement_param_name": "default",
+        "epoch_motor_behavior_param_name": "manuscript_4cm",
+    }
+    parameters = dict(
+        table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS
+    )
+    movement = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    bundle_payload = {"loaded": True}
+    validated_calls = []
+
+    bundle, _schemas, _unit_selection_params = _fake_bundle()
+    result = bundle["epoch_motor_behavior"]
+    selection_table = bundle["epoch_motor_behavior_selection"]
+    parameters_table = bundle["epoch_motor_behavior_parameters"]
+    movement_table = bundle["movement_parameters"]
+
+    def fetch(table, key):
+        if table is result:
+            return dict(result_row)
+        if table is selection_table:
+            return dict(selection)
+        if table is parameters_table:
+            return dict(parameters)
+        if table is movement_table:
+            return dict(movement)
+        raise AssertionError(f"Unexpected table {table!r}")
+
+    monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
+    monkeypatch.setattr(
+        epoch_motor_behavior,
+        "load_epoch_motor_behavior_artifact",
+        lambda path: bundle_payload,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_validate_epoch_motor_behavior_artifact_link",
+        lambda **kwargs: validated_calls.append(kwargs),
+    )
+
+    loaded = result.load_epoch_motor_behavior_bundle(
+        {"epoch_motor_behavior_id": result_id}
+    )
+    assert loaded is bundle_payload
+    assert validated_calls[0]["bundle"] is bundle_payload
+    assert validated_calls[0]["selection_row"] == selection
+
+
+def test_epoch_motor_behavior_failed_insert_removes_new_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed result insert removes only the hook-reported UUID directory."""
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+    retained = tmp_path / "retained.parquet"
+    retained.write_bytes(b"keep")
+
+    def compute(**_kwargs):
+        artifact_dir.mkdir()
+        paths = {}
+        for field_name, filename in (
+            ("artifact_manifest_path", "manifest.parquet"),
+            ("distribution_summary_path", "distribution.parquet"),
+            ("progression_summary_path", "progression.parquet"),
+            ("trajectory_qc_path", "qc.parquet"),
+        ):
+            path = artifact_dir / filename
+            path.write_bytes(b"new")
+            paths[field_name] = str(path)
+        return {
+            **paths,
+            "schema_version": "1",
+            "bundle_schema_version": "1",
+            "n_position_samples_input": 20,
+            "n_finite_position_samples": 20,
+            "n_dropped_nonfinite_samples": 0,
+            "n_movement_samples": 20,
+            "movement_duration_s": 2.0,
+            "n_supported_trajectories": 4,
+            "sampling_rate_hz": 10.0,
+            "median_sample_interval_s": 0.1,
+            "maximum_sample_gap_s": 0.1,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_dir)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"epoch_motor_behavior_id": result_id},
+    )
+    bundle, _schemas, _unit_selection_params = _fake_bundle(
+        runtime_hooks={"epoch_motor_behavior_compute": compute}
+    )
+    result = bundle["epoch_motor_behavior"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"epoch_motor_behavior_id": result_id})
+    assert not artifact_dir.exists()
+    assert retained.read_bytes() == b"keep"
+
+
+def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table hook calls the standalone NWB-recomputation registrar only."""
+    from v1ca1.spyglass import epoch_motor_behavior
+
+    result_id = uuid.uuid4()
+    selection = {
+        "epoch_motor_behavior_id": result_id,
+        "epoch": "02_r1",
+    }
+    context = {
+        "selection": selection,
+        "parameters": {
+            "epoch_motor_behavior_param_name": "manuscript_4cm",
+            "progression_bin_size_cm": 4.0,
+        },
+        "movement_parameters": {
+            **dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS),
+            "movement_parameters_sha256": "m" * 64,
+        },
+        "animal_name": "L14",
+        "date": "20240102",
+        "position_inputs": {
+            "primary_position": object(),
+            "orientation_reference_position": object(),
+        },
+        "primary_position_row": {"position_series_name": "future_head"},
+        "orientation_reference_position_row": {
+            "position_series_name": "future_reference"
+        },
+        "trajectory_intervals": {"four": "intervals"},
+        "graph_inputs": {"four": "graphs"},
+    }
+    selection.update(
+        {
+            "epoch_motor_behavior_parameters_sha256": "p" * 64,
+            "epoch_motor_behavior_output_rule_sha256": "o" * 64,
+            "movement_parameters_sha256": "m" * 64,
+        }
+    )
+    captured = []
+
+    def register(**kwargs):
+        captured.append(kwargs)
+        return {
+            "n_position_samples_input": 20,
+            "n_finite_position_samples": 20,
+            "n_dropped_nonfinite_samples": 0,
+            "n_movement_samples": 20,
+            "movement_duration_s": 2.0,
+            "n_supported_trajectories": 4,
+            "sampling_rate_hz": 10.0,
+            "median_sample_interval_s": 0.1,
+            "maximum_sample_gap_s": 0.1,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": {"verification": "recomputed"},
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_load_epoch_motor_behavior_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        epoch_motor_behavior,
+        "register_existing_epoch_motor_behavior_artifact",
+        register,
+    )
+    source_distribution = tmp_path / "legacy_distribution.parquet"
+    source_progression = tmp_path / "legacy_progression.parquet"
+    row = tables_module._register_existing_epoch_motor_behavior_row(
+        key=selection,
+        source_distribution_path=source_distribution,
+        source_progression_path=source_progression,
+        source_run_log_path=None,
+        parameters_table=object(),
+        epoch_intervals_table=object(),
+        position_table=object(),
+        movement_parameters_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        session_table=object(),
+        artifact_root=tmp_path,
+    )
+    assert captured[0]["source_distribution_path"] == source_distribution
+    assert captured[0]["source_progression_path"] == source_progression
+    assert captured[0]["primary_position"] is (
+        context["position_inputs"]["primary_position"]
+    )
+    assert captured[0]["parameter_sha256"] == "p" * 64
+    assert row["legacy_artifact_provenance"] == {
+        "verification": "recomputed"
+    }
+    assert row["_created_artifact_paths"] == [
+        str(tmp_path / "L14" / "20240102" / "epoch_motor_behavior" / "02_r1" / str(result_id))
+    ]

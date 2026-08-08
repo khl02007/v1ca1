@@ -162,6 +162,77 @@ speed_smoothing_sigma_s: double
 """
 
 
+EPOCH_MOTOR_BEHAVIOR_PARAMETERS_DEFINITION = """
+# Named progression-bin parameters for epoch-level motor summaries.
+epoch_motor_behavior_param_name: varchar(64)
+---
+progression_bin_size_cm: double
+"""
+
+
+EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION = """
+# One immutable run-epoch motor-behavior source snapshot.
+epoch_motor_behavior_id: uuid
+---
+-> EpochIntervals
+-> Position.proj(primary_position_series_name='position_series_name')
+-> Position.proj(orientation_reference_position_series_name='position_series_name')
+-> MovementParameters
+-> TrajectoryIntervals.proj(center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
+-> EpochMotorBehaviorParameters
+primary_position_role: varchar(64)
+orientation_reference_position_role: varchar(64)
+position_offset_samples: bigint unsigned
+epoch_interval_row_sha256: char(64)
+primary_position_row_sha256: char(64)
+orientation_reference_position_row_sha256: char(64)
+aligned_position_timestamps_sha256: char(64)
+primary_position_source_sha256: char(64)
+orientation_reference_position_source_sha256: char(64)
+trajectory_rows_sha256_by_type: longblob
+trajectory_intervals_sha256_by_type: longblob
+graph_rows_sha256_by_trajectory: longblob
+graph_inputs_sha256_by_trajectory: longblob
+movement_parameters_sha256: char(64)
+epoch_motor_behavior_parameters_sha256: char(64)
+epoch_motor_behavior_output_rule_sha256: char(64)
+"""
+
+
+EPOCH_MOTOR_BEHAVIOR_DEFINITION = """
+# One epoch-level motor-distribution, progression, and trajectory-QC bundle.
+-> EpochMotorBehaviorSelection
+---
+artifact_manifest_path: filepath@analysis
+distribution_summary_path: filepath@analysis
+progression_summary_path: filepath@analysis
+trajectory_qc_path: filepath@analysis
+schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_position_samples_input: bigint unsigned
+n_finite_position_samples: bigint unsigned
+n_dropped_nonfinite_samples: bigint unsigned
+n_movement_samples: bigint unsigned
+movement_duration_s: double
+n_supported_trajectories: tinyint unsigned
+sampling_rate_hz: double
+median_sample_interval_s: double
+maximum_sample_gap_s: double
+analysis_status: enum('valid', 'partial_valid', 'no_valid_position', 'no_movement', 'no_trials')
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 MOVEMENT_FIRING_RATE_SELECTION_DEFINITION = """
 # One immutable position, sorting-group snapshot, region, and movement definition.
 movement_firing_rate_id: uuid
@@ -1145,6 +1216,14 @@ DEFAULT_MOVEMENT_PARAMETERS = MappingProxyType(
 )
 
 
+MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS = MappingProxyType(
+    {
+        "epoch_motor_behavior_param_name": "manuscript_4cm",
+        "progression_bin_size_cm": 4.0,
+    }
+)
+
+
 LEGACY_TUNING_CURVE_PARAMETERS = MappingProxyType(
     {
         "tuning_curve_param_name": "legacy_4cm_unsmoothed",
@@ -1956,6 +2035,13 @@ TABLE_DEFINITIONS = MappingProxyType(
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,
         "region_sorted_spikes_group": REGION_SORTED_SPIKES_GROUP_DEFINITION,
         "movement_parameters": MOVEMENT_PARAMETERS_DEFINITION,
+        "epoch_motor_behavior_parameters": (
+            EPOCH_MOTOR_BEHAVIOR_PARAMETERS_DEFINITION
+        ),
+        "epoch_motor_behavior_selection": (
+            EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION
+        ),
+        "epoch_motor_behavior": EPOCH_MOTOR_BEHAVIOR_DEFINITION,
         "movement_firing_rate_selection": (
             MOVEMENT_FIRING_RATE_SELECTION_DEFINITION
         ),
@@ -2071,11 +2157,15 @@ __all__ = [
     "LEGACY_V4_CA1_DARK_LIGHT_GLM_PARAMETERS",
     "LEGACY_V4_V1_DARK_LIGHT_GLM_PARAMETERS",
     "DEFAULT_MOVEMENT_PARAMETERS",
+    "EPOCH_MOTOR_BEHAVIOR_DEFINITION",
+    "EPOCH_MOTOR_BEHAVIOR_PARAMETERS_DEFINITION",
+    "EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION",
     "DEFAULT_RIPPLE_MODULATION_PARAMETERS",
     "DEFAULT_SCHEMA_NAME",
     "DPP_ENCODING_COMPARISON_PARAMETER_PRESETS",
     "EXPECTED_SPYGLASS_GIT_COMMIT",
     "MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS",
     "MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
     "MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS",
     "MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS",
