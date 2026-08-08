@@ -7,7 +7,7 @@ activated computed tables.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 import hashlib
 import math
@@ -815,6 +815,51 @@ def _validate_cross_region_xcorr_parameter_row(
     return {"cross_region_xcorr_param_name": name, **validated}
 
 
+def _ripple_decoding_comparison_parameter_kwargs(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return fields accepted by the database-free decoding API."""
+    return {
+        field_name: value
+        for field_name, value in parameters.items()
+        if field_name != "ripple_decoding_comparison_param_name"
+    }
+
+
+def _validate_ripple_decoding_comparison_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one fixed categorical ripple-decoding parameter row."""
+    from v1ca1.spyglass.ripple_decoding_comparison import (
+        validate_ripple_decoding_comparison_parameters,
+    )
+
+    expected = set(
+        table_specs.MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "RippleDecodingComparison parameters must have exactly the "
+            f"declared fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["ripple_decoding_comparison_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "ripple_decoding_comparison_param_name must be a non-empty "
+            "string of at most 64 characters."
+        )
+    values["require_speed_gated"] = _database_bool(
+        values["require_speed_gated"], name="require_speed_gated"
+    )
+    validated = validate_ripple_decoding_comparison_parameters(
+        **_ripple_decoding_comparison_parameter_kwargs(values)
+    )
+    return {"ripple_decoding_comparison_param_name": name, **validated}
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1603,6 +1648,586 @@ def _cross_region_xcorr_selection_row(
         "cross_region_xcorr_id": selection_uuid(
             "CrossRegionXCorr",
             natural_key,
+        ),
+        **natural_key,
+    }
+
+
+def _ripple_decoding_interval_sha256(intervals: Any) -> str:
+    """Digest exact ordered seconds bounds for one selected interval set."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    starts = np.asarray(getattr(intervals, "start"), dtype=float).reshape(-1)
+    ends = np.asarray(getattr(intervals, "end"), dtype=float).reshape(-1)
+    if starts.shape != ends.shape or not np.all(np.isfinite(starts)) or not np.all(
+        np.isfinite(ends)
+    ):
+        raise ValueError("Selected interval bounds must be aligned and finite.")
+    if np.any(ends <= starts) or (
+        len(starts) > 1 and np.any(starts[1:] < ends[:-1])
+    ):
+        raise ValueError("Selected intervals must be positive and non-overlapping.")
+    return provenance_sha256(
+        {"start_time_s": starts.tolist(), "end_time_s": ends.tolist()}
+    )
+
+
+def _ripple_decoding_movement_rates_sha256(table: Any) -> str:
+    """Digest stable unit identity and exact epoch movement rates."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    required = (
+        "spikesorting_merge_id",
+        "unit_id",
+        "stable_unit_id",
+        "movement_firing_rate_hz",
+        "firing_rate_status",
+    )
+    missing = [name for name in required if name not in table]
+    if missing:
+        raise ValueError(
+            "MovementFiringRate artifact is missing unit-rate fields "
+            f"{missing!r}."
+        )
+    rates = np.asarray(table["movement_firing_rate_hz"], dtype=float)
+    finite = np.isfinite(rates)
+    if np.any(rates[finite] < 0.0):
+        raise ValueError("Finite movement firing rates must be non-negative.")
+    statuses = set(table["firing_rate_status"].astype(str))
+    if not np.all(finite) and not statuses.issubset(
+        {"no_movement", "no_valid_position"}
+    ):
+        raise ValueError(
+            "Nonfinite movement rates are allowed only for terminal movement artifacts."
+        )
+    return provenance_sha256(
+        [
+            {
+                "spikesorting_merge_id": str(row["spikesorting_merge_id"]),
+                "unit_id": str(row["unit_id"]),
+                "stable_unit_id": str(row["stable_unit_id"]),
+                "movement_firing_rate_hz": (
+                    float(row["movement_firing_rate_hz"])
+                    if np.isfinite(float(row["movement_firing_rate_hz"]))
+                    else None
+                ),
+                "firing_rate_status": str(row["firing_rate_status"]),
+            }
+            for row in table.loc[:, list(required)].to_dict("records")
+        ]
+    )
+
+
+def _ripple_decoding_catalog_row_sha256(row: Mapping[str, Any]) -> str:
+    """Digest one catalog row without transient DataJoint fields."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            str(name): value
+            for name, value in dict(row).items()
+            if not str(name).startswith("_")
+        }
+    )
+
+
+def _ripple_decoding_comparison_upstream_provenance(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact JSON-safe upstream snapshot embedded in artifacts."""
+    fields = (
+        "nwb_file_name",
+        "train_epoch",
+        "decode_epoch",
+        "train_position_series_name",
+        "representation",
+        "source_region",
+        "target_region",
+        "source_ripple_count",
+        "detector_zscore_threshold",
+        "speed_gated",
+        "selected_ripple_intervals_sha256",
+        "ripple_provenance_sha256",
+        "ca1_region_sorted_spikes_group_id",
+        "ca1_sorting_group_members_sha256",
+        "ca1_unit_filter_params_sha256",
+        "ca1_selected_units_sha256",
+        "ca1_n_units",
+        "v1_region_sorted_spikes_group_id",
+        "v1_sorting_group_members_sha256",
+        "v1_unit_filter_params_sha256",
+        "v1_selected_units_sha256",
+        "v1_n_units",
+        "ca1_movement_firing_rate_id",
+        "v1_movement_firing_rate_id",
+        "movement_param_name",
+        "movement_parameters_sha256",
+        "movement_speed_threshold_cm_s",
+        "movement_speed_sigma_s",
+        "ca1_movement_firing_rate_sha256",
+        "ca1_movement_intervals_sha256",
+        "ca1_movement_rates_sha256",
+        "ca1_movement_support_sha256",
+        "ca1_movement_analysis_status",
+        "v1_movement_firing_rate_sha256",
+        "v1_movement_intervals_sha256",
+        "v1_movement_rates_sha256",
+        "v1_movement_support_sha256",
+        "v1_movement_analysis_status",
+        "position_snapshot_sha256",
+        "center_to_left_trajectory_type",
+        "center_to_right_trajectory_type",
+        "left_to_center_trajectory_type",
+        "right_to_center_trajectory_type",
+        "center_to_left_configuration_name",
+        "center_to_right_configuration_name",
+        "left_to_center_configuration_name",
+        "right_to_center_configuration_name",
+        "trajectory_intervals_sha256_by_type",
+        "graph_rows_sha256_by_trajectory",
+        "graph_policy_sha256",
+        "ripple_decoding_comparison_parameters_sha256",
+        "ripple_decoding_comparison_output_rule_sha256",
+    )
+    output = {
+        "ripple_decoding_comparison_id": str(
+            selection["ripple_decoding_comparison_id"]
+        ),
+        **{name: selection[name] for name in fields},
+    }
+    output["speed_gated"] = _database_bool(
+        output["speed_gated"],
+        name="RippleDecodingComparisonSelection.speed_gated",
+    )
+    output["detector_zscore_threshold"] = float(
+        output["detector_zscore_threshold"]
+    )
+    output["movement_speed_threshold_cm_s"] = float(
+        output["movement_speed_threshold_cm_s"]
+    )
+    output["movement_speed_sigma_s"] = float(
+        output["movement_speed_sigma_s"]
+    )
+    for name in (
+        "ca1_region_sorted_spikes_group_id",
+        "v1_region_sorted_spikes_group_id",
+        "ca1_movement_firing_rate_id",
+        "v1_movement_firing_rate_id",
+    ):
+        output[name] = str(output[name])
+    for name in ("source_ripple_count", "ca1_n_units", "v1_n_units"):
+        output[name] = int(output[name])
+    output["trajectory_intervals_sha256_by_type"] = dict(
+        output["trajectory_intervals_sha256_by_type"]
+    )
+    output["graph_rows_sha256_by_trajectory"] = dict(
+        output["graph_rows_sha256_by_trajectory"]
+    )
+    return output
+
+
+def _ripple_decoding_comparison_selection_row(
+    *,
+    key: Mapping[str, Any],
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    session_table: Any,
+    nwbfile_table: Any | None = None,
+    ripple_table: Any | None = None,
+    decode_epoch_interval: Any | None = None,
+    trajectory_interval_sets: Mapping[str, Any] | None = None,
+    graph_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+    movement_artifacts_by_region: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Validate, freeze, and UUID one complete ripple-decoding selection."""
+    from v1ca1.spyglass import ripple_decoding_comparison as decoding
+    from v1ca1.spyglass.selection import selection_uuid
+
+    nwb_file_name = str(key["nwb_file_name"])
+    train_epoch = str(key["train_epoch"])
+    decode_epoch = str(key["decode_epoch"])
+    representation = str(key["representation"])
+    if representation not in decoding.REPRESENTATIONS:
+        raise ValueError(
+            f"representation must be one of {decoding.REPRESENTATIONS!r}."
+        )
+    parameters = _validate_ripple_decoding_comparison_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "ripple_decoding_comparison_param_name": key[
+                    "ripple_decoding_comparison_param_name"
+                ]
+            },
+        )
+    )
+    if dict(decoding.OUTPUT_RULE) != dict(
+        table_specs.RIPPLE_DECODING_COMPARISON_OUTPUT_RULE
+    ):
+        raise RuntimeError(
+            "RippleDecodingComparison table and artifact output rules diverged."
+        )
+    train_epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": train_epoch},
+    )
+    decode_epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": decode_epoch},
+    )
+    if train_epoch_row.get("epoch_type") not in (None, "run"):
+        raise ValueError("RippleDecodingComparison training epoch must be a run.")
+    ripple_row = _fetch1_dict(
+        ripples_table,
+        {"nwb_file_name": nwb_file_name, "epoch": decode_epoch},
+    )
+    _validate_ripple_provenance(ripple_row, parameters)
+    detector_zscore_threshold, speed_gated = _ripple_detector_values(
+        ripple_row
+    )
+    group_rows = {
+        region: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": key[
+                    f"{region}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for region in ("ca1", "v1")
+    }
+    movement_results = {}
+    movement_selections = {}
+    movement_parameters = {}
+    movement_loaded = {}
+    supplied_movement = dict(movement_artifacts_by_region or {})
+    animal_name, session_date = _session_identity(
+        session_table, {"nwb_file_name": nwb_file_name}
+    )
+    for region in ("ca1", "v1"):
+        group_row = group_rows[region]
+        if str(group_row.get("region_name")) != region or str(
+            group_row.get("nwb_file_name")
+        ) != nwb_file_name:
+            raise ValueError(
+                f"RippleDecodingComparison {region} group has wrong region or NWB."
+            )
+        movement_key = {
+            "movement_firing_rate_id": key[f"{region}_movement_firing_rate_id"]
+        }
+        movement_results[region] = _fetch1_dict(
+            movement_firing_rate_table, movement_key
+        )
+        movement_selections[region] = _fetch1_dict(
+            movement_firing_rate_selection_table, movement_key
+        )
+        movement_selection = movement_selections[region]
+        movement_result = movement_results[region]
+        for field_name, expected in (
+            ("nwb_file_name", nwb_file_name),
+            ("epoch", train_epoch),
+            ("region", region),
+        ):
+            if str(movement_selection.get(field_name)) != expected:
+                raise ValueError(
+                    f"RippleDecodingComparison {region} movement must share "
+                    f"the selected {field_name}."
+                )
+        for field_name in (
+            "nwb_file_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+            "sorting_group_members_sha256",
+            "unit_filter_params_sha256",
+        ):
+            if str(group_row.get(field_name)) != str(
+                movement_selection.get(field_name)
+            ):
+                raise ValueError(
+                    f"RippleDecodingComparison {region} regional group and "
+                    f"movement row differ in {field_name}."
+                )
+        if str(group_row.get("selected_units_sha256")) != str(
+            movement_result.get("selected_units_sha256")
+        ) or int(group_row.get("n_units", -1)) != int(
+            movement_result.get("n_units", -2)
+        ):
+            raise ValueError(
+                f"RippleDecodingComparison {region} movement and regional "
+                "group must contain identical units."
+            )
+        movement_parameters[region] = _validate_movement_parameter_row(
+            _fetch1_dict(movement_parameters_table, movement_selection)
+        )
+        _validate_frozen_parameters(
+            movement_selection,
+            movement_parameters[region],
+            field_name="movement_parameters_sha256",
+        )
+        if region in supplied_movement:
+            movement_loaded[region] = dict(supplied_movement[region])
+        else:
+            movement_loaded[region] = _load_movement_result_artifacts(
+                result_row=movement_result,
+                parameters=movement_parameters[region],
+                expected_metadata={
+                    "animal_name": animal_name,
+                    "date": session_date,
+                    "region": region,
+                    "epoch": train_epoch,
+                },
+            )
+    if movement_parameters["ca1"] != movement_parameters["v1"]:
+        raise ValueError(
+            "CA1 and V1 MovementFiringRate rows must share one movement definition."
+        )
+    shared_movement = movement_parameters["ca1"]
+    if not math.isclose(
+        float(shared_movement["speed_threshold_cm_s"]),
+        4.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ) or not math.isclose(
+        float(shared_movement["speed_smoothing_sigma_s"]),
+        0.1,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "RippleDecodingComparison requires upstream movement parameters "
+            "4.0 cm/s and 0.1 s."
+        )
+    position_series_names = {
+        str(row["position_series_name"])
+        for row in movement_selections.values()
+    }
+    if len(position_series_names) != 1:
+        raise ValueError("CA1 and V1 movement rows must share one position series.")
+    position_series_name = position_series_names.pop()
+    supplied_position_name = str(
+        key.get("train_position_series_name", position_series_name)
+    )
+    if supplied_position_name != position_series_name:
+        raise ValueError(
+            "train_position_series_name must equal the movement position series."
+        )
+    position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": train_epoch,
+            "position_series_name": position_series_name,
+        },
+    )
+    if str(position_row.get("spatial_unit")) != "cm":
+        raise ValueError("RippleDecodingComparison position must use centimeters.")
+
+    trajectory_rows = {}
+    graph_rows = {}
+    source_fields: dict[str, Any] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"{trajectory_type}_trajectory_type"
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type or str(
+            key.get(configuration_field, trajectory_type)
+        ) != trajectory_type:
+            raise ValueError(
+                "RippleDecodingComparison trajectory and graph aliases must "
+                "match the four canonical path names."
+            )
+        trajectory_rows[trajectory_type] = _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": train_epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        graph_rows[trajectory_type] = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_rows[trajectory_type].get("coordinate_unit")) != "cm":
+            raise ValueError("RippleDecodingComparison graphs must use centimeters.")
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    if ripple_table is None or decode_epoch_interval is None:
+        if nwbfile_table is None:
+            raise ValueError(
+                "nwbfile_table is required when ripple/epoch intervals are not supplied."
+            )
+        loaded_ripple_table, loaded_decode_epoch = _load_ripple_glm_interval_inputs(
+            nwb_file_name=nwb_file_name,
+            ripple_row=ripple_row,
+            epoch_row=decode_epoch_row,
+            nwbfile_table=nwbfile_table,
+        )
+        if ripple_table is None:
+            ripple_table = loaded_ripple_table
+        if decode_epoch_interval is None:
+            decode_epoch_interval = loaded_decode_epoch
+    event_selection = decoding.prepare_ripple_decoding_comparison_event_selection(
+        decode_epoch=decode_epoch, ripple_table=ripple_table
+    )
+    decoding._require_ripples_inside_epoch(
+        event_selection["selected_ripple_table"], decode_epoch_interval
+    )
+    if int(event_selection["n_ripple_events_input"]) != int(
+        ripple_row["ripple_count"]
+    ):
+        raise ValueError("Ripples.ripple_count disagrees with exact NWB intervals.")
+
+    if trajectory_interval_sets is None:
+        trajectory_interval_sets = {
+            trajectory_type: trajectory_intervals_table.load_intervals(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": train_epoch,
+                    "trajectory_type": trajectory_type,
+                }
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        }
+    if graph_inputs is None:
+        graph_inputs = {
+            trajectory_type: wtrack_graph_table.load_graph(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "configuration_name": trajectory_type,
+                }
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        }
+    geometry = decoding._graph_geometry(graph_inputs)
+    trajectory_hashes = {
+        trajectory_type: _ripple_decoding_interval_sha256(
+            trajectory_interval_sets[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_row_hashes = {
+        trajectory_type: _ripple_decoding_catalog_row_sha256(
+            graph_rows[trajectory_type]
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    movement_snapshots = {}
+    support_hashes = {}
+    for region in ("ca1", "v1"):
+        movement_result = movement_results[region]
+        loaded = movement_loaded[region]
+        movement_status = str(loaded["analysis_status"])
+        if movement_status not in {"valid", "no_movement", "no_valid_position"}:
+            raise ValueError(
+                "RippleDecodingComparison movement artifact has unsupported "
+                f"analysis_status {movement_status!r}."
+            )
+        observed_statuses = set(
+            loaded["table"]["firing_rate_status"].astype(str)
+        )
+        if observed_statuses != {movement_status}:
+            raise ValueError(
+                "RippleDecodingComparison movement table and result status "
+                f"disagree for {region}."
+            )
+        support_hashes[region] = _ripple_decoding_interval_sha256(
+            loaded["movement_intervals"]
+        )
+        movement_snapshots.update(
+            {
+                f"{region}_movement_firing_rate_sha256": _file_sha256(
+                    Path(movement_result["movement_firing_rate_path"])
+                ),
+                f"{region}_movement_intervals_sha256": _file_sha256(
+                    Path(movement_result["movement_intervals_path"])
+                ),
+                f"{region}_movement_rates_sha256": (
+                    _ripple_decoding_movement_rates_sha256(loaded["table"])
+                ),
+                f"{region}_movement_support_sha256": support_hashes[region],
+                f"{region}_movement_analysis_status": movement_status,
+            }
+        )
+    if support_hashes["ca1"] != support_hashes["v1"]:
+        raise ValueError("CA1 and V1 movement support must match exactly.")
+    if (
+        movement_snapshots["ca1_movement_analysis_status"]
+        != movement_snapshots["v1_movement_analysis_status"]
+    ):
+        raise ValueError(
+            "CA1 and V1 movement analysis_status must match exactly."
+        )
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="ripple_decoding_comparison_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "train_epoch": train_epoch,
+        "decode_epoch": decode_epoch,
+        "train_position_series_name": position_series_name,
+        "ca1_region_sorted_spikes_group_id": key[
+            "ca1_region_sorted_spikes_group_id"
+        ],
+        "v1_region_sorted_spikes_group_id": key[
+            "v1_region_sorted_spikes_group_id"
+        ],
+        "ca1_movement_firing_rate_id": key["ca1_movement_firing_rate_id"],
+        "v1_movement_firing_rate_id": key["v1_movement_firing_rate_id"],
+        **source_fields,
+        "ripple_decoding_comparison_param_name": parameters[
+            "ripple_decoding_comparison_param_name"
+        ],
+        "representation": representation,
+        "source_region": "ca1",
+        "target_region": "v1",
+        "source_ripple_count": int(ripple_row["ripple_count"]),
+        "detector_zscore_threshold": detector_zscore_threshold,
+        "speed_gated": speed_gated,
+        "selected_ripple_intervals_sha256": event_selection[
+            "selected_ripple_intervals_sha256"
+        ],
+        "ripple_provenance_sha256": _ripple_glm_provenance_sha256(ripple_row),
+        **_ripple_glm_group_snapshot(group_rows["ca1"], role="ca1"),
+        **_ripple_glm_group_snapshot(group_rows["v1"], role="v1"),
+        "movement_param_name": shared_movement["movement_param_name"],
+        "movement_parameters_sha256": movement_selections["ca1"][
+            "movement_parameters_sha256"
+        ],
+        "movement_speed_threshold_cm_s": float(
+            shared_movement["speed_threshold_cm_s"]
+        ),
+        "movement_speed_sigma_s": float(
+            shared_movement["speed_smoothing_sigma_s"]
+        ),
+        **movement_snapshots,
+        "position_snapshot_sha256": _ripple_decoding_catalog_row_sha256(
+            position_row
+        ),
+        "trajectory_intervals_sha256_by_type": trajectory_hashes,
+        "graph_rows_sha256_by_trajectory": graph_row_hashes,
+        "graph_policy_sha256": geometry["graph_policy_sha256"],
+        **parameter_snapshot,
+        "ripple_decoding_comparison_output_rule_sha256": (
+            decoding.OUTPUT_RULE_SHA256
+        ),
+    }
+    return {
+        "ripple_decoding_comparison_id": selection_uuid(
+            "RippleDecodingComparison", natural_key
         ),
         **natural_key,
     }
@@ -5758,6 +6383,789 @@ def _register_existing_cross_region_xcorr_row(
         ),
         "_created_artifact_paths": created_artifact_paths,
     }
+
+
+def _load_ripple_decoding_comparison_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify every frozen ripple-decoding upstream input."""
+    selection = _ripple_decoding_comparison_selection_row(
+        key=key,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    if str(selection["ripple_decoding_comparison_id"]) != str(
+        key["ripple_decoding_comparison_id"]
+    ):
+        raise ValueError("RippleDecodingComparison selection UUID is stale.")
+    parameters = _validate_ripple_decoding_comparison_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    _validate_frozen_parameters(
+        selection,
+        parameters,
+        field_name="ripple_decoding_comparison_parameters_sha256",
+    )
+    region_rows = {
+        region: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": selection[
+                    f"{region}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for region in ("ca1", "v1")
+    }
+    movement_results = {}
+    movement_selections = {}
+    movement_parameters = {}
+    movement = {}
+    animal_name, session_date = _session_identity(session_table, selection)
+    for region in ("ca1", "v1"):
+        movement_key = {
+            "movement_firing_rate_id": selection[
+                f"{region}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[region] = _fetch1_dict(
+            movement_firing_rate_table, movement_key
+        )
+        movement_selections[region] = _fetch1_dict(
+            movement_firing_rate_selection_table, movement_key
+        )
+        movement_parameters[region] = _validate_movement_parameter_row(
+            _fetch1_dict(
+                movement_parameters_table, movement_selections[region]
+            )
+        )
+        _validate_frozen_parameters(
+            movement_selections[region],
+            movement_parameters[region],
+            field_name="movement_parameters_sha256",
+        )
+        movement[region] = _load_movement_result_artifacts(
+            result_row=movement_results[region],
+            parameters=movement_parameters[region],
+            expected_metadata={
+                "animal_name": animal_name,
+                "date": session_date,
+                "region": region,
+                "epoch": selection["train_epoch"],
+            },
+        )
+        current = {
+            f"{region}_movement_firing_rate_sha256": _file_sha256(
+                Path(movement_results[region]["movement_firing_rate_path"])
+            ),
+            f"{region}_movement_intervals_sha256": _file_sha256(
+                Path(movement_results[region]["movement_intervals_path"])
+            ),
+            f"{region}_movement_rates_sha256": (
+                _ripple_decoding_movement_rates_sha256(
+                    movement[region]["table"]
+                )
+            ),
+            f"{region}_movement_support_sha256": (
+                _ripple_decoding_interval_sha256(
+                    movement[region]["movement_intervals"]
+                )
+            ),
+        }
+        for field_name, value in current.items():
+            if str(selection[field_name]) != str(value):
+                raise ValueError(
+                    "RippleDecodingComparison movement artifact changed "
+                    f"after selection: {field_name}."
+                )
+    train_epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {
+            "nwb_file_name": selection["nwb_file_name"],
+            "epoch": selection["train_epoch"],
+        },
+    )
+    decode_epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {
+            "nwb_file_name": selection["nwb_file_name"],
+            "epoch": selection["decode_epoch"],
+        },
+    )
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "region_rows": region_rows,
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "movement_parameters": movement_parameters,
+        "movement": movement,
+        "train_epoch_row": train_epoch_row,
+        "decode_epoch_row": decode_epoch_row,
+        "animal_name": animal_name,
+        "date": session_date,
+    }
+
+
+def _load_ripple_decoding_comparison_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    ripples_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load selected position, laps, graphs, ripples, and decode epoch once."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    selection = dict(context["selection"])
+    nwb_file_name = str(selection["nwb_file_name"])
+    train_epoch = str(selection["train_epoch"])
+    decode_epoch = str(selection["decode_epoch"])
+    position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": train_epoch,
+            "position_series_name": selection["train_position_series_name"],
+        },
+    )
+    ripple_row = _fetch1_dict(
+        ripples_table,
+        {"nwb_file_name": nwb_file_name, "epoch": decode_epoch},
+    )
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": train_epoch,
+                "trajectory_type": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path), mode="r", load_namespaces=True
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile, position_row, apply_analysis_offset=True
+        )
+        ripple_intervals = load_interval_set(nwbfile, ripple_row)
+        decode_epoch_interval = load_interval_set(
+            nwbfile, context["decode_epoch_row"]
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "ripple_table": _intervals_to_frame(
+            ripple_intervals, epoch=decode_epoch
+        ),
+        "decode_epoch_interval": decode_epoch_interval,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_row": position_row,
+    }
+
+
+def _load_ripple_decoding_comparison_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, dict[str, Any]]:
+    """Load both regional groups and align frozen movement rates by stable id."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    epoch_bounds = (
+        float(context["train_epoch_row"]["start_time"]),
+        float(context["train_epoch_row"]["stop_time"]),
+        float(context["decode_epoch_row"]["start_time"]),
+        float(context["decode_epoch_row"]["stop_time"]),
+    )
+    if not all(math.isfinite(value) for value in epoch_bounds):
+        raise ValueError("RippleDecodingComparison epoch bounds must be finite.")
+    time_support = (min(epoch_bounds[0], epoch_bounds[2]), max(epoch_bounds[1], epoch_bounds[3]))
+    if time_support[1] <= time_support[0]:
+        raise ValueError("RippleDecodingComparison epoch support is empty.")
+    loaded = {}
+    for region in ("ca1", "v1"):
+        group = region_sorted_spikes_group_table.load_spikes(
+            {
+                "region_sorted_spikes_group_id": context["selection"][
+                    f"{region}_region_sorted_spikes_group_id"
+                ]
+            },
+            time_support=time_support,
+        )
+        expected_count = int(context["selection"][f"{region}_n_units"])
+        expected_digest = str(
+            context["selection"][f"{region}_selected_units_sha256"]
+        )
+        if int(group["n_units"]) != expected_count or unit_identity_sha256(
+            group["unit_ids"]
+        ) != expected_digest:
+            raise ValueError(
+                f"RippleDecodingComparison {region} units changed after selection."
+            )
+        rate_table = context["movement"][region]["table"]
+        rate_by_stable = {
+            str(row["stable_unit_id"]): float(row["movement_firing_rate_hz"])
+            for row in rate_table.to_dict("records")
+        }
+        stable_ids = [
+            f"{row['spikesorting_merge_id']}:{row['unit_id']}"
+            for row in group["unit_ids"]
+        ]
+        if set(stable_ids) != set(rate_by_stable) or len(rate_by_stable) != len(
+            stable_ids
+        ):
+            raise ValueError(
+                f"RippleDecodingComparison {region} movement rates and "
+                "regional units differ."
+            )
+        loaded[region] = {
+            **group,
+            "movement_firing_rates_hz": np.asarray(
+                [rate_by_stable[stable_id] for stable_id in stable_ids],
+                dtype=float,
+            ),
+        }
+    return loaded
+
+
+def _validate_ripple_decoding_comparison_upstream_link(
+    upstream: Mapping[str, Any], selection: Mapping[str, Any]
+) -> None:
+    """Require one artifact to embed the exact immutable selection snapshot."""
+    if dict(upstream) != _ripple_decoding_comparison_upstream_provenance(selection):
+        raise ValueError(
+            "RippleDecodingComparison artifact upstream provenance differs "
+            "from its immutable selection."
+        )
+
+
+def _ripple_decoding_comparison_compute_kwargs(
+    *,
+    context: Mapping[str, Any],
+    loaded_spikes: Mapping[str, Mapping[str, Any]],
+    nwb_inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact standalone-compute arguments from frozen inputs."""
+    selection = context["selection"]
+    parameters = context["parameters"]
+    return {
+        "ripple_decoding_comparison_id": selection[
+            "ripple_decoding_comparison_id"
+        ],
+        "animal_name": context["animal_name"],
+        "date": context["date"],
+        "train_epoch": str(selection["train_epoch"]),
+        "decode_epoch": str(selection["decode_epoch"]),
+        "representation": str(selection["representation"]),
+        "ca1_spikes": loaded_spikes["ca1"]["ts_group"],
+        "ca1_stable_unit_ids": loaded_spikes["ca1"]["unit_ids"],
+        "ca1_movement_firing_rates_hz": loaded_spikes["ca1"][
+            "movement_firing_rates_hz"
+        ],
+        "v1_spikes": loaded_spikes["v1"]["ts_group"],
+        "v1_stable_unit_ids": loaded_spikes["v1"]["unit_ids"],
+        "v1_movement_firing_rates_hz": loaded_spikes["v1"][
+            "movement_firing_rates_hz"
+        ],
+        "position": nwb_inputs["position"],
+        "trajectory_intervals": nwb_inputs["trajectory_intervals"],
+        "graph_inputs": nwb_inputs["graph_inputs"],
+        "movement_interval": context["movement"]["ca1"][
+            "movement_intervals"
+        ],
+        "ripple_table": nwb_inputs["ripple_table"],
+        "decode_epoch_interval": nwb_inputs["decode_epoch_interval"],
+        "upstream_provenance": (
+            _ripple_decoding_comparison_upstream_provenance(selection)
+        ),
+        "parameter_name": parameters[
+            "ripple_decoding_comparison_param_name"
+        ],
+        "parameter_sha256": selection[
+            "ripple_decoding_comparison_parameters_sha256"
+        ],
+        "output_rule_sha256": selection[
+            "ripple_decoding_comparison_output_rule_sha256"
+        ],
+        "expected_selected_ripple_intervals_sha256": selection[
+            "selected_ripple_intervals_sha256"
+        ],
+        "expected_graph_policy_sha256": selection["graph_policy_sha256"],
+        **_ripple_decoding_comparison_parameter_kwargs(parameters),
+    }
+
+
+def _ripple_decoding_comparison_result_row(
+    result: Mapping[str, Any],
+    written: Mapping[str, Any],
+    *,
+    created_artifact_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Return the DataJoint result payload for one validated bundle."""
+    from v1ca1.spyglass.ripple_decoding_comparison import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+    )
+
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "ripple_qc_path": str(written["ripple_qc_path"]),
+        "ripple_metrics_path": str(written["ripple_metrics_path"]),
+        "epoch_summary_path": str(written["epoch_summary_path"]),
+        "ripple_decoding_comparison_path": str(written["result_path"]),
+        "ca1_decoded_path": str(written["ca1_decoded_path"]),
+        "v1_decoded_path": str(written["v1_decoded_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: result[field_name]
+            for field_name in (
+                "n_ripple_events_input",
+                "n_ripples",
+                "n_ripple_bins",
+                "n_ca1_units",
+                "n_v1_units",
+                "n_ca1_units_in_decoder",
+                "n_v1_units_in_decoder",
+                "selected_ripple_intervals_sha256",
+                "graph_policy_sha256",
+                "selected_units_sha256",
+                "ripple_qc_sha256",
+                "ripple_metrics_sha256",
+                "epoch_summary_sha256",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": (
+            dict(result["legacy_artifact_provenance"])
+            if result["legacy_artifact_provenance"]
+            else None
+        ),
+        "_created_artifact_paths": list(created_artifact_paths),
+    }
+
+
+def _make_ripple_decoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one immutable RippleDecodingComparison bundle."""
+    from v1ca1.spyglass.ripple_decoding_comparison import (
+        compute_ripple_decoding_comparison,
+        get_ripple_decoding_comparison_artifact_paths,
+        write_ripple_decoding_comparison_artifact,
+    )
+
+    context = _load_ripple_decoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded_spikes = _load_ripple_decoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_ripple_decoding_comparison_nwb_inputs(
+        context=context,
+        ripples_table=ripples_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    result = compute_ripple_decoding_comparison(
+        **_ripple_decoding_comparison_compute_kwargs(
+            context=context,
+            loaded_spikes=loaded_spikes,
+            nwb_inputs=nwb_inputs,
+        )
+    )
+    selection = context["selection"]
+    _validate_ripple_decoding_comparison_upstream_link(
+        result["upstream_provenance"], selection
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_ripple_decoding_comparison_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        train_epoch=str(selection["train_epoch"]),
+        decode_epoch=str(selection["decode_epoch"]),
+        representation=str(selection["representation"]),
+        ripple_decoding_comparison_id=selection[
+            "ripple_decoding_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_ripple_decoding_comparison_artifact(result, artifact_dir)
+    return _ripple_decoding_comparison_result_row(
+        result,
+        written,
+        created_artifact_paths=created_artifact_paths,
+    )
+
+
+def _validate_ripple_decoding_comparison_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one loaded decoding bundle to match its DataJoint rows."""
+    from v1ca1.spyglass.ripple_decoding_comparison import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_ripple_decoding_comparison_artifact_paths,
+        validate_ripple_decoding_comparison_result,
+    )
+
+    validated = validate_ripple_decoding_comparison_result(bundle)
+    expected_metadata = {
+        "ripple_decoding_comparison_id": str(
+            selection_row["ripple_decoding_comparison_id"]
+        ),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "train_epoch": str(selection_row["train_epoch"]),
+        "decode_epoch": str(selection_row["decode_epoch"]),
+        "representation": str(selection_row["representation"]),
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated.get(field_name)) != expected_value:
+            raise ValueError(
+                "RippleDecodingComparison artifact does not match its "
+                f"selection: {field_name}."
+            )
+    parameters = _validate_ripple_decoding_comparison_parameter_row(
+        parameters_row
+    )
+    expected_parameters = {
+        "parameter_name": parameters[
+            "ripple_decoding_comparison_param_name"
+        ],
+        "parameter_sha256": selection_row[
+            "ripple_decoding_comparison_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "ripple_decoding_comparison_output_rule_sha256"
+        ],
+        **_ripple_decoding_comparison_parameter_kwargs(parameters),
+    }
+    if validated["parameters"] != expected_parameters:
+        raise ValueError(
+            "RippleDecodingComparison artifact parameters do not match its "
+            "selection."
+        )
+    _validate_ripple_decoding_comparison_upstream_link(
+        validated["upstream_provenance"], selection_row
+    )
+    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
+    try:
+        artifact_root = artifact_dir.parents[5]
+    except IndexError as exc:
+        raise ValueError(
+            "RippleDecodingComparison artifact does not use the canonical layout."
+        ) from exc
+    expected_paths = get_ripple_decoding_comparison_artifact_paths(
+        animal_name=animal_name,
+        date=date,
+        train_epoch=str(selection_row["train_epoch"]),
+        decode_epoch=str(selection_row["decode_epoch"]),
+        representation=str(selection_row["representation"]),
+        ripple_decoding_comparison_id=selection_row[
+            "ripple_decoding_comparison_id"
+        ],
+        artifact_root=artifact_root,
+    )
+    path_fields = {
+        "artifact_manifest_path": "artifact_manifest_path",
+        "selected_units_path": "selected_units_path",
+        "ripple_qc_path": "ripple_qc_path",
+        "ripple_metrics_path": "ripple_metrics_path",
+        "epoch_summary_path": "epoch_summary_path",
+        "ripple_decoding_comparison_path": "result_path",
+        "ca1_decoded_path": "ca1_decoded_path",
+        "v1_decoded_path": "v1_decoded_path",
+    }
+    for row_field, path_key in path_fields.items():
+        if Path(result_row[row_field]) != Path(expected_paths[path_key]):
+            raise ValueError(
+                "RippleDecodingComparison result paths do not use the "
+                f"canonical layout: {row_field}."
+            )
+    for field_name in (
+        "n_ripple_events_input",
+        "n_ripples",
+        "n_ripple_bins",
+        "n_ca1_units",
+        "n_v1_units",
+        "n_ca1_units_in_decoder",
+        "n_v1_units_in_decoder",
+        "selected_ripple_intervals_sha256",
+        "graph_policy_sha256",
+        "selected_units_sha256",
+        "ripple_qc_sha256",
+        "ripple_metrics_sha256",
+        "epoch_summary_sha256",
+        "analysis_status",
+        "artifact_origin",
+    ):
+        if str(result_row.get(field_name)) != str(validated[field_name]):
+            raise ValueError(
+                "RippleDecodingComparison result metadata disagrees with "
+                f"its artifact: {field_name}."
+            )
+    if str(result_row.get("schema_version")) != RESULT_SCHEMA_VERSION or str(
+        result_row.get("bundle_schema_version")
+    ) != BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            "RippleDecodingComparison result schema versions disagree with "
+            "its artifact."
+        )
+    expected_legacy = validated.get("legacy_artifact_provenance") or None
+    if result_row.get("legacy_artifact_provenance") != expected_legacy:
+        raise ValueError(
+            "RippleDecodingComparison result-row legacy provenance differs "
+            "from its artifact."
+        )
+
+
+def _legacy_ripple_decoding_comparison_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+    *,
+    region: str,
+) -> Callable[[Any], list[dict[str, str]]]:
+    """Build one strict imported-sorting resolver for a legacy unit axis."""
+    identity_by_sorting_id = _legacy_ripple_glm_unit_identity_resolver(
+        loaded_spikes,
+        role=region,
+        analysis_name="RippleDecodingComparison",
+    )
+
+    def resolve(legacy_unit_ids: Any) -> list[dict[str, str]]:
+        resolved = []
+        for legacy_unit_id in legacy_unit_ids:
+            matches = [
+                identity
+                for sorting_unit_id, identity in identity_by_sorting_id.items()
+                if str(sorting_unit_id) == str(legacy_unit_id)
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Legacy RippleDecodingComparison {region} unit "
+                    f"{legacy_unit_id!r} has {len(matches)} imported-sorting "
+                    "identity matches."
+                )
+            resolved.append(dict(matches[0]))
+        return resolved
+
+    return resolve
+
+
+def _register_existing_ripple_decoding_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    source_ca1_decoded_path: Path,
+    source_v1_decoded_path: Path,
+    source_ripple_metrics_path: Path,
+    source_epoch_summary_path: Path,
+    source_result_path: Path,
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Redecode, verify, and register one complete five-file legacy set."""
+    from v1ca1.spyglass.ripple_decoding_comparison import (
+        get_ripple_decoding_comparison_artifact_paths,
+        register_existing_ripple_decoding_comparison_artifact,
+    )
+
+    context = _load_ripple_decoding_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded_spikes = _load_ripple_decoding_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_ripple_decoding_comparison_nwb_inputs(
+        context=context,
+        ripples_table=ripples_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    selection = context["selection"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_ripple_decoding_comparison_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        train_epoch=str(selection["train_epoch"]),
+        decode_epoch=str(selection["decode_epoch"]),
+        representation=str(selection["representation"]),
+        ripple_decoding_comparison_id=selection[
+            "ripple_decoding_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_ripple_decoding_comparison_artifact(
+            source_ca1_decoded_path=Path(source_ca1_decoded_path),
+            source_v1_decoded_path=Path(source_v1_decoded_path),
+            source_ripple_metrics_path=Path(source_ripple_metrics_path),
+            source_epoch_summary_path=Path(source_epoch_summary_path),
+            source_result_path=Path(source_result_path),
+            destination_path=artifact_dir,
+            ca1_legacy_identity_resolver=(
+                _legacy_ripple_decoding_comparison_identity_resolver(
+                    loaded_spikes["ca1"], region="ca1"
+                )
+            ),
+            v1_legacy_identity_resolver=(
+                _legacy_ripple_decoding_comparison_identity_resolver(
+                    loaded_spikes["v1"], region="v1"
+                )
+            ),
+            ca1_sorting_type="ImportedSpikeSorting",
+            v1_sorting_type="ImportedSpikeSorting",
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            source_spyglass_git_commit=source_spyglass_git_commit,
+            overwrite=False,
+            **_ripple_decoding_comparison_compute_kwargs(
+                context=context,
+                loaded_spikes=loaded_spikes,
+                nwb_inputs=nwb_inputs,
+            ),
+        )
+        _validate_ripple_decoding_comparison_upstream_link(
+            registered["upstream_provenance"], selection
+        )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    return _ripple_decoding_comparison_result_row(
+        registered,
+        registered,
+        created_artifact_paths=created_artifact_paths,
+    )
 
 
 def _make_ripple_modulation_row(
@@ -13967,6 +15375,14 @@ def _construct_tables(
         "cross_region_xcorr_register_existing",
         _register_existing_cross_region_xcorr_row,
     )
+    ripple_decoding_comparison_compute_hook = runtime_hooks.get(
+        "ripple_decoding_comparison_compute",
+        _make_ripple_decoding_comparison_row,
+    )
+    ripple_decoding_comparison_register_hook = runtime_hooks.get(
+        "ripple_decoding_comparison_register_existing",
+        _register_existing_ripple_decoding_comparison_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -13998,6 +15414,8 @@ def _construct_tables(
             ripple_glm_register_hook,
             cross_region_xcorr_compute_hook,
             cross_region_xcorr_register_hook,
+            ripple_decoding_comparison_compute_hook,
+            ripple_decoding_comparison_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -17583,6 +19001,277 @@ def _construct_tables(
     CrossRegionXCorr = main_schema(CrossRegionXCorr)
     main_context["CrossRegionXCorr"] = CrossRegionXCorr
 
+    class RippleDecodingComparisonParameters(
+        spyglass_mixin, dj_module.Manual
+    ):
+        definition = (
+            table_specs.RIPPLE_DECODING_COMPARISON_PARAMETERS_DEFINITION
+        )
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one fixed ripple-decoding parameter row."""
+            validated = _validate_ripple_decoding_comparison_parameter_row(
+                row
+            )
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the fixed manuscript decoding preset."""
+            rows = [
+                _validate_ripple_decoding_comparison_parameter_row(parameters)
+                for parameters in (
+                    table_specs.RIPPLE_DECODING_COMPARISON_PARAMETER_PRESETS
+                )
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    RippleDecodingComparisonParameters = main_schema(
+        RippleDecodingComparisonParameters
+    )
+    main_context["RippleDecodingComparisonParameters"] = (
+        RippleDecodingComparisonParameters
+    )
+
+    class RippleDecodingComparisonSelection(
+        spyglass_mixin, dj_module.Manual
+    ):
+        definition = table_specs.RIPPLE_DECODING_COMPARISON_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one decoding selection."""
+            row = _ripple_decoding_comparison_selection_row(
+                key=key,
+                ripples_table=Ripples,
+                epoch_intervals_table=EpochIntervals,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                movement_parameters_table=MovementParameters,
+                position_table=Position,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=RippleDecodingComparisonParameters,
+                session_table=session_table,
+                nwbfile_table=nwbfile_table,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    RippleDecodingComparisonSelection = main_schema(
+        RippleDecodingComparisonSelection
+    )
+    main_context["RippleDecodingComparisonSelection"] = (
+        RippleDecodingComparisonSelection
+    )
+
+    class RippleDecodingComparison(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.RIPPLE_DECODING_COMPARISON_DEFINITION
+        _compute_hook = staticmethod(ripple_decoding_comparison_compute_hook)
+        _register_existing_hook = staticmethod(
+            ripple_decoding_comparison_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one ripple-decoding bundle."""
+            selection = _fetch1_dict(
+                RippleDecodingComparisonSelection, key
+            )
+            artifact_row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=RippleDecodingComparisonParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "ripple_decoding_comparison_id": selection[
+                            "ripple_decoding_comparison_id"
+                        ],
+                        **artifact_row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_ripple_decoding_comparison_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical ripple-decoding bundle."""
+            from v1ca1.spyglass.ripple_decoding_comparison import (
+                load_ripple_decoding_comparison_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                RippleDecodingComparisonSelection,
+                {
+                    "ripple_decoding_comparison_id": row[
+                        "ripple_decoding_comparison_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                RippleDecodingComparisonParameters, selection
+            )
+            animal_name, session_date = _session_identity(
+                session_table, selection
+            )
+            bundle = load_ripple_decoding_comparison_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_ripple_decoding_comparison_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_ca1_decoded_path: Path | str,
+            source_v1_decoded_path: Path | str,
+            source_ripple_metrics_path: Path | str,
+            source_epoch_summary_path: Path | str,
+            source_result_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Verify and insert one exact five-file legacy decoding set."""
+            if overwrite:
+                raise ValueError(
+                    "Registered RippleDecodingComparison results are "
+                    "immutable; create a new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(
+                RippleDecodingComparisonSelection, key
+            )
+            result_key = {
+                "ripple_decoding_comparison_id": selection[
+                    "ripple_decoding_comparison_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "RippleDecodingComparison already contains this "
+                    "immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_ca1_decoded_path=Path(source_ca1_decoded_path),
+                    source_v1_decoded_path=Path(source_v1_decoded_path),
+                    source_ripple_metrics_path=Path(
+                        source_ripple_metrics_path
+                    ),
+                    source_epoch_summary_path=Path(
+                        source_epoch_summary_path
+                    ),
+                    source_result_path=Path(source_result_path),
+                    parameters_table=RippleDecodingComparisonParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "ripple_decoding_comparison_id": selection[
+                    "ripple_decoding_comparison_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    RippleDecodingComparison = main_schema(RippleDecodingComparison)
+    main_context["RippleDecodingComparison"] = RippleDecodingComparison
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -17689,6 +19378,13 @@ def _construct_tables(
         "cross_region_xcorr_parameters": CrossRegionXCorrParameters,
         "cross_region_xcorr_selection": CrossRegionXCorrSelection,
         "cross_region_xcorr": CrossRegionXCorr,
+        "ripple_decoding_comparison_parameters": (
+            RippleDecodingComparisonParameters
+        ),
+        "ripple_decoding_comparison_selection": (
+            RippleDecodingComparisonSelection
+        ),
+        "ripple_decoding_comparison": RippleDecodingComparison,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

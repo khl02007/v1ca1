@@ -31,6 +31,9 @@ register artifacts, or write to NWB.
   artifact writing.
 - `cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
   cross-correlation computation and strict four-artifact legacy registration.
+- `ripple_decoding_comparison.py` independently decodes CA1 and V1 activity
+  during exact ripple intervals, compares categorical decoded states, and
+  strictly verifies complete five-file legacy result sets.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
@@ -152,6 +155,35 @@ belong to the same NWB, and events must be speed-gated threshold-2.0
 detections. The UUID freezes the raw interval digest, actual detector/NWB
 provenance, both unit snapshots, and parameter/output-rule hashes. Unit and
 pair results remain in artifacts, including explicit empty/partial statuses.
+
+Ripple decoding-state comparison uses:
+
+```text
+Ripples at decode_epoch + EpochIntervals
+    + Position at train_epoch + four TrajectoryIntervals
+    + four directional WTrackGraph rows
+    + CA1/V1 RegionSortedSpikesGroup
+    + matching CA1/V1 MovementFiringRate rows
+    + RippleDecodingComparisonParameters + representation
+    -> RippleDecodingComparisonSelection
+    -> RippleDecodingComparison
+    -> manifest.parquet + selected_units.parquet + ripple_qc.parquet
+       + ripple_metrics.parquet + epoch_summary.parquet
+       + ripple_decoding_comparison.nc
+       + ca1_decoded.npz + v1_decoded.npz
+```
+
+Each result is one session, training epoch, decoding epoch, and either
+`path_specific_place` or `dpp` representation. Training uses the exact shared
+movement support saved upstream; decoding uses the exact speed-gated,
+threshold-2.0 ripple bounds. Path-specific place concatenates four directional
+path coordinates. DPP pools the two same-turn paths into fixed left and right
+blocks. The selection freezes both regional unit snapshots and movement-rate
+artifacts, the named position row, all four lap and graph rows, exact ripple
+bounds and detector provenance, and parameter/output-rule hashes. Units remain
+an all-unit audit in Parquet and NetCDF rather than becoming DataJoint rows.
+Empty movement support, missing eligible units, missing ripples, and other
+expected scientific terminals produce explicit immutable artifacts.
 
 Movement firing rate uses:
 
@@ -301,7 +333,7 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
-`CrossRegionXCorr`—there is no
+`CrossRegionXCorr`, and `RippleDecodingComparison`—there is no
 `Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
 rather than being silently omitted.
@@ -598,6 +630,16 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     v1_units.parquet
     summary.parquet
     cross_region_xcorr.nc
+
+<root>/<animal>/<date>/ripple_decoding_comparison/<train>_train_to_<decode>_decode/<representation>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    ripple_qc.parquet
+    ripple_metrics.parquet
+    epoch_summary.parquet
+    ripple_decoding_comparison.nc
+    ca1_decoded.npz
+    v1_decoded.npz
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -615,10 +657,12 @@ written and validated together. `RippleModulation`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
-`CrossRegionXCorr` additionally provide
+`CrossRegionXCorr`, and `RippleDecodingComparison` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
-canonical path, and inserts a result row without rerunning the analysis.
+canonical path, and inserts a result row without invoking the computed table's
+`make()` route. Strict scientific validation may reconstruct the selected NWB
+result, as described below.
 Ripple-GLM registration requires both regional views to resolve uniquely to
 `ImportedSpikeSorting` IDs. It verifies NWB-backed event/window coordinates,
 resolved unit axes, target count matrices, fold layout, metric arithmetic, and
@@ -630,6 +674,13 @@ Cross-region-xcorr registration requires separate CA1 and V1
 V1 unit audit, pair summary, and NetCDF. It recomputes the selected NWB result
 and compares all four scientific artifacts before writing the canonical
 bundle; terminal results are computed directly rather than legacy-registered.
+Ripple-decoding registration requires both regional views to resolve uniquely
+to `ImportedSpikeSorting` unit IDs and requires the complete legacy CA1 and V1
+decoded NPZ, ripple-metrics Parquet, epoch-summary Parquet, and NetCDF set. It
+redecodes the selected NWB inputs, applies the current graph-derived physical-
+arm labels, and compares every supplied scientific artifact before writing the
+canonical bundle. Stale inbound-arm outputs labeled by turn group are rejected;
+terminal results are computed directly rather than legacy-registered.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

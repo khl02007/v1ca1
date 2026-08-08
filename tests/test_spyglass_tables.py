@@ -1529,6 +1529,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "cross_region_xcorr_parameters",
         "cross_region_xcorr_selection",
         "cross_region_xcorr",
+        "ripple_decoding_comparison_parameters",
+        "ripple_decoding_comparison_selection",
+        "ripple_decoding_comparison",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -1571,6 +1574,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "CrossRegionXCorrParameters" in schemas[0].context
     assert "CrossRegionXCorrSelection" in schemas[0].context
     assert "CrossRegionXCorr" in schemas[0].context
+    assert "RippleDecodingComparisonParameters" in schemas[0].context
+    assert "RippleDecodingComparisonSelection" in schemas[0].context
+    assert "RippleDecodingComparison" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -2033,6 +2039,27 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "n_valid_pairs: int unsigned" in xcorr_result
     assert hasattr(bundle["cross_region_xcorr"], "register_existing")
 
+    decoding_parameters = bundle[
+        "ripple_decoding_comparison_parameters"
+    ].definition
+    assert "decode_bin_size_s: double" in decoding_parameters
+    assert "v1_min_movement_rate_hz: double" in decoding_parameters
+    assert "movement_speed_threshold_cm_s" not in decoding_parameters
+    decoding_selection = bundle[
+        "ripple_decoding_comparison_selection"
+    ].definition
+    assert "ripple_decoding_comparison_id: uuid" in decoding_selection
+    assert "decode_epoch='epoch'" in decoding_selection
+    assert "train_epoch='epoch'" in decoding_selection
+    assert "ca1_movement_analysis_status:" in decoding_selection
+    assert "v1_movement_analysis_status:" in decoding_selection
+    decoding_result = bundle["ripple_decoding_comparison"].definition
+    assert "-> RippleDecodingComparisonSelection" in decoding_result
+    assert "ripple_qc_path: filepath@analysis" in decoding_result
+    assert "ca1_decoded_path: filepath@analysis" in decoding_result
+    assert "v1_decoded_path: filepath@analysis" in decoding_result
+    assert hasattr(bundle["ripple_decoding_comparison"], "register_existing")
+
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
     monkeypatch,
@@ -2126,6 +2153,9 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     ]
     ripple_glm_parameters = bundle["ripple_glm_parameters"]
     xcorr_parameters = bundle["cross_region_xcorr_parameters"]
+    ripple_decoding_parameters = bundle[
+        "ripple_decoding_comparison_parameters"
+    ]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
@@ -2137,6 +2167,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     swap_tuning_rows = swap_tuning_parameters.insert_defaults()
     ripple_glm_rows = ripple_glm_parameters.insert_defaults()
     xcorr_rows = xcorr_parameters.insert_defaults()
+    ripple_decoding_rows = ripple_decoding_parameters.insert_defaults()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -2305,6 +2336,12 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert _validate_cross_region_xcorr_parameter_row(
         fetched_xcorr_row
     ) == xcorr_rows[0]
+    assert ripple_decoding_rows == [
+        dict(table_specs.MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS)
+    ]
+    assert ripple_decoding_parameters._insert_many_calls == [
+        (ripple_decoding_rows, {"skip_duplicates": True})
+    ]
 
     with pytest.raises(TypeError, match="numeric scalar"):
         ripple_parameters.insert_parameters({**ripple_row, "bin_size_s": [0.02]})
@@ -5002,6 +5039,510 @@ def test_cross_region_xcorr_selection_rejects_region_or_nwb_mismatch() -> None:
         _build_cross_region_xcorr_selection(inputs)
 
 
+class _RippleDecodingIntervals:
+    """Minimal Pynapple-like interval bounds for table-layer tests."""
+
+    def __init__(self, start, end):
+        self.start = np.asarray(start, dtype=float)
+        self.end = np.asarray(end, dtype=float)
+
+
+def _ripple_decoding_graph_inputs() -> dict[str, dict[str, Any]]:
+    """Return four simple directional centimeter graph inputs."""
+    graph_inputs = {}
+    for trajectory_type in _DPP_ENCODING_TRAJECTORIES:
+        outbound = not trajectory_type.endswith("_to_center")
+        graph_inputs[trajectory_type] = {
+            "configuration_name": trajectory_type,
+            "coordinate_unit": "cm",
+            "track_graph_kwargs": {
+                "node_positions": [[0, 0], [10, 0], [20, 0], [30, 0]],
+                "edges": [[0, 1], [1, 2], [2, 3]],
+            },
+            "linearization_kwargs": {
+                "edge_order": (
+                    [[0, 1], [1, 2], [2, 3]]
+                    if outbound
+                    else [[3, 2], [2, 1], [1, 0]]
+                ),
+                "edge_spacing": [0, 0],
+                "use_HMM": False,
+            },
+        }
+    return graph_inputs
+
+
+def _ripple_decoding_selection_inputs(
+    tmp_path: Path,
+    *,
+    terminal_movement: bool = False,
+) -> dict[str, Any]:
+    """Return complete injectable sources for one decoding selection."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    nwb_file_name = "L1420240102_.nwb"
+    train_epoch = "02_r1"
+    decode_epoch = "03_s2"
+    ca1_group_id = uuid.UUID("a1111111-1111-5111-8111-111111111111")
+    v1_group_id = uuid.UUID("a2222222-2222-5222-8222-222222222222")
+    ca1_movement_id = uuid.UUID("a3333333-3333-5333-8333-333333333333")
+    v1_movement_id = uuid.UUID("a4444444-4444-5444-8444-444444444444")
+    parameters = dict(
+        table_specs.MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS
+    )
+    movement_parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    movement_parameters_sha256 = provenance_sha256(movement_parameters)
+    group_rows = {
+        ca1_group_id: {
+            "region_sorted_spikes_group_id": ca1_group_id,
+            "nwb_file_name": nwb_file_name,
+            "region_name": "ca1",
+            "unit_filter_params_name": "all_units",
+            "sorted_spikes_group_name": "ca1_group",
+            "sorting_group_members_sha256": "a" * 64,
+            "unit_filter_params_sha256": "b" * 64,
+            "selected_units_sha256": "c" * 64,
+            "n_units": 1,
+        },
+        v1_group_id: {
+            "region_sorted_spikes_group_id": v1_group_id,
+            "nwb_file_name": nwb_file_name,
+            "region_name": "v1",
+            "unit_filter_params_name": "all_units",
+            "sorted_spikes_group_name": "v1_group",
+            "sorting_group_members_sha256": "d" * 64,
+            "unit_filter_params_sha256": "e" * 64,
+            "selected_units_sha256": "f" * 64,
+            "n_units": 1,
+        },
+    }
+    status = "no_movement" if terminal_movement else "valid"
+    movement_tables = {
+        "ca1": pd.DataFrame(
+            {
+                "spikesorting_merge_id": ["ca1-merge"],
+                "unit_id": ["1"],
+                "stable_unit_id": ["ca1-merge:1"],
+                "movement_firing_rate_hz": [
+                    np.nan if terminal_movement else 0.0
+                ],
+                "firing_rate_status": [status],
+            }
+        ),
+        "v1": pd.DataFrame(
+            {
+                "spikesorting_merge_id": ["v1-merge"],
+                "unit_id": ["2"],
+                "stable_unit_id": ["v1-merge:2"],
+                "movement_firing_rate_hz": [
+                    np.nan if terminal_movement else 0.6
+                ],
+                "firing_rate_status": [status],
+            }
+        ),
+    }
+    movement_support = (
+        _RippleDecodingIntervals([], [])
+        if terminal_movement
+        else _RippleDecodingIntervals([0.0], [8.0])
+    )
+    movement_results = {}
+    movement_selections = {}
+    movement_artifacts = {}
+    for region, movement_id, group_id in (
+        ("ca1", ca1_movement_id, ca1_group_id),
+        ("v1", v1_movement_id, v1_group_id),
+    ):
+        rate_path = tmp_path / f"{region}_movement.parquet"
+        interval_path = tmp_path / f"{region}_movement.npz"
+        rate_path.write_bytes(f"{region}-rates-{status}".encode())
+        interval_path.write_bytes(f"{region}-intervals-{status}".encode())
+        group_row = group_rows[group_id]
+        movement_results[movement_id] = {
+            "movement_firing_rate_id": movement_id,
+            "movement_firing_rate_path": str(rate_path),
+            "movement_intervals_path": str(interval_path),
+            "selected_units_sha256": group_row["selected_units_sha256"],
+            "n_units": 1,
+            "analysis_status": status,
+        }
+        movement_selections[movement_id] = {
+            "movement_firing_rate_id": movement_id,
+            "nwb_file_name": nwb_file_name,
+            "epoch": train_epoch,
+            "region": region,
+            "position_series_name": "head_position",
+            "movement_param_name": "default",
+            "movement_parameters_sha256": movement_parameters_sha256,
+            "unit_filter_params_name": group_row[
+                "unit_filter_params_name"
+            ],
+            "sorted_spikes_group_name": group_row[
+                "sorted_spikes_group_name"
+            ],
+            "sorting_group_members_sha256": group_row[
+                "sorting_group_members_sha256"
+            ],
+            "unit_filter_params_sha256": group_row[
+                "unit_filter_params_sha256"
+            ],
+        }
+        movement_artifacts[region] = {
+            "table": movement_tables[region],
+            "movement_intervals": movement_support,
+            "analysis_status": status,
+        }
+    ripple_row = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": decode_epoch,
+        "ripple_count": 2,
+        "detector_zscore_threshold": 2.0,
+        "speed_gated": True,
+        "detection_parameters": {"speed_threshold": 4.0},
+        "provenance_path": "scratch/ripple_detection_provenance",
+        "provenance_object_id": "prov-id",
+        "source_table_path": "intervals/ripples",
+        "source_table_object_id": "table-id",
+        "source_object_path": "intervals/ripples",
+        "source_object_id": "object-id",
+    }
+    ripple_table = pd.DataFrame(
+        {
+            "epoch": [decode_epoch, decode_epoch],
+            "start_time": [10.1, 10.3],
+            "end_time": [10.2, 10.4],
+        }
+    )
+    trajectory_rows = {
+        trajectory_type: {
+            "nwb_file_name": nwb_file_name,
+            "epoch": train_epoch,
+            "trajectory_type": trajectory_type,
+            "source_table_path": f"intervals/{trajectory_type}",
+            "source_object_id": f"trajectory-{trajectory_type}",
+        }
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    graph_rows = {
+        trajectory_type: {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": trajectory_type,
+            "coordinate_unit": "cm",
+            "source_object_path": f"processing/behavior/{trajectory_type}",
+            "source_object_id": f"graph-{trajectory_type}",
+        }
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "train_epoch": train_epoch,
+        "decode_epoch": decode_epoch,
+        "ca1_region_sorted_spikes_group_id": ca1_group_id,
+        "v1_region_sorted_spikes_group_id": v1_group_id,
+        "ca1_movement_firing_rate_id": ca1_movement_id,
+        "v1_movement_firing_rate_id": v1_movement_id,
+        "ripple_decoding_comparison_param_name": parameters[
+            "ripple_decoding_comparison_param_name"
+        ],
+        "representation": "path_specific_place",
+    }
+    return {
+        "key": key,
+        "parameters": parameters,
+        "movement_parameters": movement_parameters,
+        "group_rows": group_rows,
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "movement_artifacts": movement_artifacts,
+        "ripple_row": ripple_row,
+        "ripple_table": ripple_table,
+        "trajectory_rows": trajectory_rows,
+        "trajectory_intervals": {
+            name: _RippleDecodingIntervals([0.0], [8.0])
+            for name in _DPP_ENCODING_TRAJECTORIES
+        },
+        "graph_rows": graph_rows,
+        "graph_inputs": _ripple_decoding_graph_inputs(),
+        "position_row": {
+            "nwb_file_name": nwb_file_name,
+            "epoch": train_epoch,
+            "position_series_name": "head_position",
+            "position_role": "head",
+            "spatial_unit": "cm",
+            "source_object_id": "head-position-id",
+        },
+        "epoch_rows": {
+            train_epoch: {
+                "nwb_file_name": nwb_file_name,
+                "epoch": train_epoch,
+                "epoch_type": "run",
+                "start_time": 0.0,
+                "stop_time": 8.0,
+            },
+            decode_epoch: {
+                "nwb_file_name": nwb_file_name,
+                "epoch": decode_epoch,
+                "epoch_type": "sleep",
+                "start_time": 10.0,
+                "stop_time": 11.0,
+            },
+        },
+        "decode_epoch_interval": _RippleDecodingIntervals([10.0], [11.0]),
+        "session": _FakeRelation(
+            {
+                "subject_id": "L14",
+                "session_start_time": datetime(2024, 1, 2, 12, 30),
+            }
+        ),
+    }
+
+
+def _build_ripple_decoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one decoding selection from database-free fake sources."""
+    return tables_module._ripple_decoding_comparison_selection_row(
+        key=inputs["key"],
+        ripples_table=_FakeRelation(inputs["ripple_row"]),
+        epoch_intervals_table=_FakeKeyedRelation(
+            "epoch", inputs["epoch_rows"]
+        ),
+        region_sorted_spikes_group_table=_FakeKeyedRelation(
+            "region_sorted_spikes_group_id", inputs["group_rows"]
+        ),
+        movement_firing_rate_table=_FakeKeyedRelation(
+            "movement_firing_rate_id", inputs["movement_results"]
+        ),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id", inputs["movement_selections"]
+        ),
+        movement_parameters_table=_FakeRelation(inputs["movement_parameters"]),
+        position_table=_FakeRelation(inputs["position_row"]),
+        trajectory_intervals_table=_FakeKeyedRelation(
+            "trajectory_type", inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeKeyedRelation(
+            "configuration_name", inputs["graph_rows"]
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        session_table=inputs["session"],
+        ripple_table=inputs["ripple_table"],
+        decode_epoch_interval=inputs["decode_epoch_interval"],
+        trajectory_interval_sets=inputs["trajectory_intervals"],
+        graph_inputs=inputs["graph_inputs"],
+        movement_artifacts_by_region=inputs["movement_artifacts"],
+    )
+
+
+def test_ripple_decoding_parameter_normalization_and_output_rule_parity() -> None:
+    from v1ca1.spyglass import ripple_decoding_comparison
+
+    raw = {
+        **dict(
+            table_specs.MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS
+        ),
+        "n_shuffles": np.int64(100),
+        "shuffle_seed": np.int64(45),
+        "require_speed_gated": np.bool_(True),
+    }
+    validated = tables_module._validate_ripple_decoding_comparison_parameter_row(
+        raw
+    )
+    assert validated == dict(
+        table_specs.MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS
+    )
+    assert isinstance(validated["n_shuffles"], int)
+    assert isinstance(validated["require_speed_gated"], bool)
+    assert "movement_speed_threshold_cm_s" not in validated
+    assert dict(table_specs.RIPPLE_DECODING_COMPARISON_OUTPUT_RULE) == dict(
+        ripple_decoding_comparison.OUTPUT_RULE
+    )
+
+
+def test_ripple_decoding_selection_freezes_exact_sources_and_terminal_rates(
+    tmp_path: Path,
+) -> None:
+    inputs = _ripple_decoding_selection_inputs(
+        tmp_path, terminal_movement=True
+    )
+    first = _build_ripple_decoding_selection(inputs)
+    second = _build_ripple_decoding_selection(inputs)
+    assert first == second
+    assert first["ripple_decoding_comparison_id"].version == 5
+    assert first["ca1_movement_analysis_status"] == "no_movement"
+    assert first["v1_movement_analysis_status"] == "no_movement"
+    assert len(first["ca1_movement_rates_sha256"]) == 64
+    assert len(first["selected_ripple_intervals_sha256"]) == 64
+    assert set(first["graph_rows_sha256_by_trajectory"]) == set(
+        _DPP_ENCODING_TRAJECTORIES
+    )
+    upstream = tables_module._ripple_decoding_comparison_upstream_provenance(
+        first
+    )
+    assert upstream["ripple_decoding_comparison_id"] == str(
+        first["ripple_decoding_comparison_id"]
+    )
+    assert upstream["ca1_movement_analysis_status"] == "no_movement"
+
+    inputs["ripple_table"].loc[0, "end_time"] += 0.01
+    assert _build_ripple_decoding_selection(inputs)[
+        "ripple_decoding_comparison_id"
+    ] != first["ripple_decoding_comparison_id"]
+
+
+def test_ripple_decoding_selection_rejects_cross_session_group(
+    tmp_path: Path,
+) -> None:
+    inputs = _ripple_decoding_selection_inputs(tmp_path)
+    inputs["group_rows"][
+        inputs["key"]["v1_region_sorted_spikes_group_id"]
+    ]["nwb_file_name"] = "other.nwb"
+    with pytest.raises(ValueError, match="wrong region or NWB"):
+        _build_ripple_decoding_selection(inputs)
+
+
+def test_ripple_decoding_selection_rejects_movement_status_mismatch(
+    tmp_path: Path,
+) -> None:
+    inputs = _ripple_decoding_selection_inputs(
+        tmp_path, terminal_movement=True
+    )
+    inputs["movement_artifacts"]["v1"][
+        "analysis_status"
+    ] = "no_valid_position"
+    inputs["movement_artifacts"]["v1"]["table"].loc[
+        :, "firing_rate_status"
+    ] = "no_valid_position"
+    with pytest.raises(ValueError, match="analysis_status must match"):
+        _build_ripple_decoding_selection(inputs)
+
+
+def test_ripple_decoding_result_row_and_artifact_link(
+    tmp_path: Path,
+) -> None:
+    from v1ca1.spyglass import ripple_decoding_comparison
+
+    inputs = _ripple_decoding_selection_inputs(
+        tmp_path / "sources", terminal_movement=True
+    )
+    selection = _build_ripple_decoding_selection(inputs)
+    result = ripple_decoding_comparison.compute_ripple_decoding_comparison(
+        ripple_decoding_comparison_id=selection[
+            "ripple_decoding_comparison_id"
+        ],
+        animal_name="L14",
+        date="20240102",
+        train_epoch=selection["train_epoch"],
+        decode_epoch=selection["decode_epoch"],
+        representation=selection["representation"],
+        ca1_spikes={0: object()},
+        ca1_stable_unit_ids=[
+            {"spikesorting_merge_id": "ca1-merge", "unit_id": "1"}
+        ],
+        ca1_movement_firing_rates_hz=[np.nan],
+        v1_spikes={0: object()},
+        v1_stable_unit_ids=[
+            {"spikesorting_merge_id": "v1-merge", "unit_id": "2"}
+        ],
+        v1_movement_firing_rates_hz=[np.nan],
+        position=object(),
+        trajectory_intervals=inputs["trajectory_intervals"],
+        graph_inputs=inputs["graph_inputs"],
+        movement_interval=inputs["movement_artifacts"]["ca1"][
+            "movement_intervals"
+        ],
+        ripple_table=inputs["ripple_table"],
+        decode_epoch_interval=inputs["decode_epoch_interval"],
+        upstream_provenance=(
+            tables_module._ripple_decoding_comparison_upstream_provenance(
+                selection
+            )
+        ),
+        parameter_name=selection[
+            "ripple_decoding_comparison_param_name"
+        ],
+        parameter_sha256=selection[
+            "ripple_decoding_comparison_parameters_sha256"
+        ],
+        output_rule_sha256=selection[
+            "ripple_decoding_comparison_output_rule_sha256"
+        ],
+        expected_selected_ripple_intervals_sha256=selection[
+            "selected_ripple_intervals_sha256"
+        ],
+        expected_graph_policy_sha256=selection["graph_policy_sha256"],
+        **tables_module._ripple_decoding_comparison_parameter_kwargs(
+            inputs["parameters"]
+        ),
+    )
+    paths = ripple_decoding_comparison.get_ripple_decoding_comparison_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        train_epoch=selection["train_epoch"],
+        decode_epoch=selection["decode_epoch"],
+        representation=selection["representation"],
+        ripple_decoding_comparison_id=selection[
+            "ripple_decoding_comparison_id"
+        ],
+        artifact_root=tmp_path / "analysis",
+    )
+    written = ripple_decoding_comparison.write_ripple_decoding_comparison_artifact(
+        result, paths["artifact_dir"]
+    )
+    row = tables_module._ripple_decoding_comparison_result_row(
+        result, written, created_artifact_paths=[str(paths["artifact_dir"])]
+    )
+    row.pop("_created_artifact_paths")
+    row["artifact_origin"] = "computed"
+    bundle = ripple_decoding_comparison.load_ripple_decoding_comparison_artifact(
+        paths["artifact_dir"]
+    )
+    tables_module._validate_ripple_decoding_comparison_artifact_link(
+        bundle=bundle,
+        result_row=row,
+        selection_row=selection,
+        parameters_row=inputs["parameters"],
+        animal_name="L14",
+        date="20240102",
+    )
+    assert row["analysis_status"] == "no_train_movement"
+    assert Path(row["ca1_decoded_path"]) == paths["ca1_decoded_path"]
+    tampered = {**row, "n_ripple_events_input": 99}
+    with pytest.raises(ValueError, match="n_ripple_events_input"):
+        tables_module._validate_ripple_decoding_comparison_artifact_link(
+            bundle=bundle,
+            result_row=tampered,
+            selection_row=selection,
+            parameters_row=inputs["parameters"],
+            animal_name="L14",
+            date="20240102",
+        )
+
+
+def test_ripple_decoding_legacy_resolver_requires_imported_sorting() -> None:
+    loaded = {
+        "ts_group": {0: object()},
+        "unit_ids": [
+            {"spikesorting_merge_id": "ca1-merge", "unit_id": "1"}
+        ],
+        "unit_metadata": [
+            {
+                "spikesorting_merge_id": "ca1-merge",
+                "unit_id": "1",
+                "sorting_unit_id": 101,
+            }
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "ca1-merge",
+                "merge_parent": "CurationV1",
+                "n_selected_units": 1,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="ImportedSpikeSorting"):
+        tables_module._legacy_ripple_decoding_comparison_identity_resolver(
+            loaded, region="ca1"
+        )
+
+
 def _cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
     """Return minimal separate imported CA1 and V1 sorting groups."""
     return {
@@ -6986,6 +7527,18 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             },
         ),
         (
+            "ripple_decoding_comparison",
+            "ripple_decoding_comparison_id",
+            "ripple_decoding_comparison_register_existing",
+            {
+                "source_ca1_decoded_path": "old-ca1.npz",
+                "source_v1_decoded_path": "old-v1.npz",
+                "source_ripple_metrics_path": "old-metrics.parquet",
+                "source_epoch_summary_path": "old-summary.parquet",
+                "source_result_path": "old-decoding.nc",
+            },
+        ),
+        (
             "swap_tuning_curve_comparison",
             "swap_tuning_curve_comparison_id",
             "swap_tuning_curve_comparison_register_existing",
@@ -7078,6 +7631,18 @@ def test_register_existing_rejects_overwrite_before_hook(
             {
                 "source_nested_cv_path": "old-nested.nc",
                 "source_full_refit_path": "old-full-refit.nc",
+            },
+        ),
+        (
+            "ripple_decoding_comparison",
+            "ripple_decoding_comparison_id",
+            "ripple_decoding_comparison_register_existing",
+            {
+                "source_ca1_decoded_path": "old-ca1.npz",
+                "source_v1_decoded_path": "old-v1.npz",
+                "source_ripple_metrics_path": "old-metrics.parquet",
+                "source_epoch_summary_path": "old-summary.parquet",
+                "source_result_path": "old-decoding.nc",
             },
         ),
         (
@@ -7203,6 +7768,24 @@ def test_register_existing_preflights_duplicate_before_hook(
                 ("selected_units_path", "selected_units.parquet"),
                 ("nested_cv_path", "nested_cv.nc"),
                 ("full_refit_path", "full_refit.nc"),
+            ),
+        ),
+        (
+            "ripple_decoding_comparison",
+            "ripple_decoding_comparison_id",
+            "ripple_decoding_comparison_compute",
+            (
+                ("artifact_manifest_path", "manifest.parquet"),
+                ("selected_units_path", "selected_units.parquet"),
+                ("ripple_qc_path", "ripple_qc.parquet"),
+                ("ripple_metrics_path", "ripple_metrics.parquet"),
+                ("epoch_summary_path", "epoch_summary.parquet"),
+                (
+                    "ripple_decoding_comparison_path",
+                    "ripple_decoding_comparison.nc",
+                ),
+                ("ca1_decoded_path", "ca1_decoded.npz"),
+                ("v1_decoded_path", "v1_decoded.npz"),
             ),
         ),
         (
