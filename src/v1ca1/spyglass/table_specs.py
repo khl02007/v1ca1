@@ -923,6 +923,79 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+CROSS_REGION_XCORR_PARAMETERS_DEFINITION = """
+# Named fixed parameters for ripple-restricted CA1-to-V1 cross-correlation.
+cross_region_xcorr_param_name: varchar(64)
+---
+bin_size_s: double
+max_lag_s: double
+min_ripple_spikes: int unsigned
+extremum_half_width_bins: smallint unsigned
+norm: bool
+expected_detector_zscore_threshold: double
+require_speed_gated: bool
+"""
+
+
+CROSS_REGION_XCORR_SELECTION_DEFINITION = """
+# One immutable epoch-level exact-ripple CA1-to-V1 xcorr selection.
+cross_region_xcorr_id: uuid
+---
+-> Ripples
+-> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
+-> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
+-> CrossRegionXCorrParameters
+source_region: enum('ca1')
+target_region: enum('v1')
+source_ripple_count: int unsigned
+detector_zscore_threshold: double
+speed_gated: bool
+selected_ripple_intervals_sha256: char(64)
+ripple_provenance_sha256: char(64)
+source_sorting_group_members_sha256: char(64)
+source_unit_filter_params_sha256: char(64)
+source_selected_units_sha256: char(64)
+source_n_units: int unsigned
+target_sorting_group_members_sha256: char(64)
+target_unit_filter_params_sha256: char(64)
+target_selected_units_sha256: char(64)
+target_n_units: int unsigned
+cross_region_xcorr_parameters_sha256: char(64)
+cross_region_xcorr_output_rule_sha256: char(64)
+"""
+
+
+CROSS_REGION_XCORR_DEFINITION = """
+# One exact-ripple CA1-to-V1 xcorr audit, pair summary, and NetCDF bundle.
+-> CrossRegionXCorrSelection
+---
+artifact_manifest_path: filepath@analysis
+ca1_units_path: filepath@analysis
+v1_units_path: filepath@analysis
+summary_path: filepath@analysis
+cross_region_xcorr_path: filepath@analysis
+schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_ripples: int unsigned
+ripple_duration_s: double
+n_ca1_units: int unsigned
+n_v1_units: int unsigned
+n_ca1_units_in_xcorr: int unsigned
+n_v1_units_in_xcorr: int unsigned
+n_pairs: int unsigned
+n_valid_pairs: int unsigned
+selected_ripple_intervals_sha256: char(64)
+ca1_units_sha256: char(64)
+v1_units_sha256: char(64)
+summary_sha256: char(64)
+analysis_status: enum('valid', 'partial_valid', 'no_valid_pairs', 'no_ripples', 'no_ca1_units', 'no_v1_units', 'no_eligible_ca1_units', 'no_eligible_v1_units')
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -1608,6 +1681,60 @@ RIPPLE_GLM_PARAMETER_PRESETS = (
 )
 
 
+CROSS_REGION_XCORR_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "direction": "ca1_reference_to_v1_target",
+        "interval_scope": (
+            "exact_selected_detected_ripple_intervals_for_one_epoch"
+        ),
+        "epoch_pooling": False,
+        "fixed_ripple_windows": False,
+        "state_intervals": False,
+        "normalization": "pynapple_target_rate_norm_true",
+        "bin_size_s": 0.005,
+        "max_lag_s": 0.5,
+        "minimum_ripple_spikes_per_unit": 30,
+        "extremum_half_width_bins": 1,
+        "detector_event_policy": "zscore_threshold_2_and_speed_gated",
+        "unit_audit_policy": "retain_all_ca1_and_v1_input_units",
+        "unit_identity_policy": (
+            "stable_sorting_identity_with_runtime_group_key_audit"
+        ),
+        "terminal_artifact_policy": "explicit_empty_and_partial_statuses",
+        "legacy_registration_policy": (
+            "imported_spike_sorting_identity_resolution_and_exact_nwb_recomputation"
+        ),
+        "legacy_comparison_policy": (
+            "all_four_scientific_artifacts_tight_equal"
+        ),
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+    }
+)
+
+
+MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS = MappingProxyType(
+    {
+        "cross_region_xcorr_param_name": (
+            "manuscript_ripple_5ms_lag500ms_min30"
+        ),
+        "bin_size_s": 0.005,
+        "max_lag_s": 0.5,
+        "min_ripple_spikes": 30,
+        "extremum_half_width_bins": 1,
+        "norm": True,
+        "expected_detector_zscore_threshold": 2.0,
+        "require_speed_gated": True,
+    }
+)
+
+
+CROSS_REGION_XCORR_PARAMETER_PRESETS = (
+    MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -1695,6 +1822,13 @@ TABLE_DEFINITIONS = MappingProxyType(
         "ripple_glm_parameters": RIPPLE_GLM_PARAMETERS_DEFINITION,
         "ripple_glm_selection": RIPPLE_GLM_SELECTION_DEFINITION,
         "ripple_glm": RIPPLE_GLM_DEFINITION,
+        "cross_region_xcorr_parameters": (
+            CROSS_REGION_XCORR_PARAMETERS_DEFINITION
+        ),
+        "cross_region_xcorr_selection": (
+            CROSS_REGION_XCORR_SELECTION_DEFINITION
+        ),
+        "cross_region_xcorr": CROSS_REGION_XCORR_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -1750,6 +1884,12 @@ __all__ = [
     "RIPPLE_GLM_PARAMETERS_DEFINITION",
     "RIPPLE_GLM_PARAMETER_PRESETS",
     "RIPPLE_GLM_SELECTION_DEFINITION",
+    "CROSS_REGION_XCORR_DEFINITION",
+    "CROSS_REGION_XCORR_OUTPUT_RULE",
+    "CROSS_REGION_XCORR_PARAMETERS_DEFINITION",
+    "CROSS_REGION_XCORR_PARAMETER_PRESETS",
+    "CROSS_REGION_XCORR_SELECTION_DEFINITION",
+    "MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS",
     "SWAP_TUNING_CURVE_COMPARISON_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS",

@@ -217,6 +217,11 @@ Ripples + EpochIntervals + CA1/V1 RegionSortedSpikesGroup rows
     -> RippleGLMSelection
     -> RippleGLM
 
+Ripples + EpochIntervals + CA1/V1 RegionSortedSpikesGroup rows
+    + CrossRegionXCorrParameters
+    -> CrossRegionXCorrSelection
+    -> CrossRegionXCorr
+
 Position + MovementParameters
     + SortedSpikesGroup / UnitSelectionParams
     -> MovementFiringRateSelection
@@ -322,6 +327,15 @@ snapshots, and the parameter/output hashes. The two manuscript presets use a
 separate `unit_vector` and `mean_activity` CA1 predictors; both require
 speed-gated detector-threshold-2.0 events.
 
+`CrossRegionXCorr` computes one ripple-restricted CA1-reference/V1-target
+correlation result per epoch. It uses only the exact selected ripple
+start/end intervals—never pooled epochs, generic intervals, or fixed event
+windows—and freezes their digest, actual detector/NWB provenance, both
+regional unit snapshots, and all parameter/output hashes. The fixed preset is
+5-ms bins, lags through 0.5 s, normalized correlation, and at least 30 ripple
+spikes per included unit. Unit audits and pair results remain in artifacts,
+not one DataJoint row per unit or pair.
+
 `DPPEncodingComparison`'s manuscript preset is five lap-wise folds, 50-ms
 evaluation bins, 4-cm spatial bins, one-bin Gaussian smoothing, random seed 47,
 movement firing rate
@@ -336,7 +350,8 @@ The computed tables are named `RippleModulation`, `MovementFiringRate`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, `SwapTuningCurveComparison`, and `RippleGLM`, without a `Computed`
+`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
+`CrossRegionXCorr`, without a `Computed`
 suffix. Each
 explicit selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
@@ -398,6 +413,12 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
     selected_units.parquet
     summary.parquet
     ripple_glm.nc
+<animal>/<date>/cross_region_xcorr/<epoch>/<uuid>/
+    manifest.parquet
+    ca1_units.parquet
+    v1_units.parquet
+    summary.parquet
+    cross_region_xcorr.nc
 ```
 
 Any explicit `artifact_root` must remain within the stage configured for the
@@ -475,7 +496,8 @@ sorting group. Calling
 `PathSpecificPlaceTuningSimilarity`, `DPPTuningCurve`,
 `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, or
-`SwapGLM`, `SwapTuningCurveComparison`, or `RippleGLM` validates a
+`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, or
+`CrossRegionXCorr` validates a
 compatible legacy artifact, copies
 the selected content into the canonical output layout, and inserts the result
 without rerunning the analysis. Legacy tuning-curve
@@ -513,6 +535,11 @@ verifies the NWB-derived event/window coordinates, resolved unit axes, target
 count matrices, fold layout, metric arithmetic, and coefficient axes, shape,
 and finiteness before writing the canonical UUID bundle. It does not refit the
 model or compare coefficient values against an independent refit.
+`CrossRegionXCorr.register_existing()` requires separate CA1 and V1
+`ImportedSpikeSorting` identity resolution plus the exact legacy CA1 unit
+audit, V1 unit audit, pair summary, and NetCDF. It recomputes the selected NWB
+result and compares all four scientific artifacts before writing the
+canonical bundle; terminal selections are represented by direct computation.
 `MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle
 atomically. `PathProgressionDecodingComparison` is also compute-only: legacy
 decoding NPZs omit selected-unit identities, sorting and graph snapshots,

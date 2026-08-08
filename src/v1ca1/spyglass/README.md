@@ -29,6 +29,8 @@ register artifacts, or write to NWB.
   `dark_light_glm.py`, `swap_glm.py`, and `swap_tuning.py` provide
   database-free computation and atomic
   artifact writing.
+- `cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
+  cross-correlation computation and strict four-artifact legacy registration.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
@@ -128,6 +130,28 @@ ridge 0.1, seed 45, `maxiter=6000`, and `tol=1e-7`; they differ only between
 CA1 `unit_vector` and `mean_activity` predictors. Both require the speed-gated
 events detected at z-score threshold 2.0. Units remain inside the audit and
 NetCDF artifacts rather than becoming one DataJoint row per unit.
+
+Ripple-restricted cross-region correlation uses:
+
+```text
+Ripples + EpochIntervals
+    + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
+    + CrossRegionXCorrParameters
+    -> CrossRegionXCorrSelection (cross_region_xcorr_id)
+    -> CrossRegionXCorr
+    -> manifest.parquet + ca1_units.parquet + v1_units.parquet
+       + summary.parquet + cross_region_xcorr.nc
+```
+
+Each result covers one epoch and only the exact start/end intervals in its
+selected `Ripples` row; it does not pool epochs, substitute generic intervals,
+or construct fixed event windows. The fixed manuscript rule uses CA1 as the
+reference and V1 as the target, 5-ms bins, lags through 0.5 s, normalized
+correlation, and at least 30 ripple spikes per included unit. Both groups must
+belong to the same NWB, and events must be speed-gated threshold-2.0
+detections. The UUID freezes the raw interval digest, actual detector/NWB
+provenance, both unit snapshots, and parameter/output-rule hashes. Unit and
+pair results remain in artifacts, including explicit empty/partial statuses.
 
 Movement firing rate uses:
 
@@ -276,7 +300,8 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, `SwapTuningCurveComparison`, and `RippleGLM`—there is no
+`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
+`CrossRegionXCorr`—there is no
 `Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
 rather than being silently omitted.
@@ -566,6 +591,13 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     selected_units.parquet
     summary.parquet
     ripple_glm.nc
+
+<root>/<animal>/<date>/cross_region_xcorr/<epoch>/<uuid>/
+    manifest.parquet
+    ca1_units.parquet
+    v1_units.parquet
+    summary.parquet
+    cross_region_xcorr.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -582,7 +614,8 @@ written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, `SwapTuningCurveComparison`, and `RippleGLM` additionally provide
+`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
+`CrossRegionXCorr` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
@@ -592,6 +625,11 @@ resolved unit axes, target count matrices, fold layout, metric arithmetic, and
 coefficient axes, shape, and finiteness before accepting and normalizing the
 legacy NetCDF. It does not refit the model or compare coefficient values
 against an independent refit.
+Cross-region-xcorr registration requires separate CA1 and V1
+`ImportedSpikeSorting` identity resolvers and the exact legacy CA1 unit audit,
+V1 unit audit, pair summary, and NetCDF. It recomputes the selected NWB result
+and compares all four scientific artifacts before writing the canonical
+bundle; terminal results are computed directly rather than legacy-registered.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

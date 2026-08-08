@@ -23,6 +23,7 @@ from v1ca1.spyglass.tables import (
     _analysis_region,
     _attach_registered_unit_identity,
     _construct_tables,
+    _cross_region_xcorr_selection_row,
     _dark_light_glm_selection_row,
     _dpp_encoding_comparison_selection_row,
     _dpp_tuning_curve_selection_row,
@@ -31,6 +32,7 @@ from v1ca1.spyglass.tables import (
     _legacy_dpp_unit_identity_resolver,
     _legacy_dark_light_unit_identity_resolver,
     _legacy_ripple_glm_unit_identity_resolver,
+    _legacy_cross_region_xcorr_identity_resolver,
     _legacy_swap_glm_unit_identity_resolver,
     _legacy_swap_tuning_curve_comparison_unit_identity_resolver,
     _load_tuning_similarity_inputs,
@@ -42,6 +44,7 @@ from v1ca1.spyglass.tables import (
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
     _make_ripple_glm_row,
+    _make_cross_region_xcorr_row,
     _make_swap_glm_row,
     _make_swap_tuning_curve_comparison_row,
     _motor_encoding_comparison_selection_row,
@@ -52,6 +55,7 @@ from v1ca1.spyglass.tables import (
     _ripple_modulation_selection_row,
     _ripple_glm_selection_row,
     _register_existing_ripple_glm_row,
+    _register_existing_cross_region_xcorr_row,
     _register_existing_dpp_encoding_comparison_row,
     _register_existing_dark_light_glm_row,
     _register_existing_swap_glm_row,
@@ -71,6 +75,7 @@ from v1ca1.spyglass.tables import (
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
     _validate_ripple_glm_parameter_row,
+    _validate_cross_region_xcorr_parameter_row,
     _validate_swap_glm_artifact_link,
     _validate_swap_glm_parameter_row,
     _validate_swap_tuning_curve_comparison_artifact_link,
@@ -1521,6 +1526,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "ripple_glm_parameters",
         "ripple_glm_selection",
         "ripple_glm",
+        "cross_region_xcorr_parameters",
+        "cross_region_xcorr_selection",
+        "cross_region_xcorr",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -1560,6 +1568,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "RippleGLMParameters" in schemas[0].context
     assert "RippleGLMSelection" in schemas[0].context
     assert "RippleGLM" in schemas[0].context
+    assert "CrossRegionXCorrParameters" in schemas[0].context
+    assert "CrossRegionXCorrSelection" in schemas[0].context
+    assert "CrossRegionXCorr" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -2005,6 +2016,23 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "n_valid_target_units: int unsigned" in ripple_glm_result
     assert hasattr(bundle["ripple_glm"], "register_existing")
 
+    xcorr_parameters = bundle["cross_region_xcorr_parameters"].definition
+    assert "bin_size_s: double" in xcorr_parameters
+    assert "min_ripple_spikes: int unsigned" in xcorr_parameters
+    xcorr_selection = bundle["cross_region_xcorr_selection"].definition
+    assert "cross_region_xcorr_id: uuid" in xcorr_selection
+    assert "-> Ripples" in xcorr_selection
+    assert "source_region_sorted_spikes_group_id=" in xcorr_selection
+    assert "target_region_sorted_spikes_group_id=" in xcorr_selection
+    assert "selected_ripple_intervals_sha256: char(64)" in xcorr_selection
+    xcorr_result = bundle["cross_region_xcorr"].definition
+    assert "-> CrossRegionXCorrSelection" in xcorr_result
+    assert "ca1_units_path: filepath@analysis" in xcorr_result
+    assert "v1_units_path: filepath@analysis" in xcorr_result
+    assert "cross_region_xcorr_path: filepath@analysis" in xcorr_result
+    assert "n_valid_pairs: int unsigned" in xcorr_result
+    assert hasattr(bundle["cross_region_xcorr"], "register_existing")
+
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
     monkeypatch,
@@ -2097,6 +2125,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         "swap_tuning_curve_comparison_parameters"
     ]
     ripple_glm_parameters = bundle["ripple_glm_parameters"]
+    xcorr_parameters = bundle["cross_region_xcorr_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
@@ -2107,6 +2136,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     motor_rows = motor_parameters.insert_presets()
     swap_tuning_rows = swap_tuning_parameters.insert_defaults()
     ripple_glm_rows = ripple_glm_parameters.insert_defaults()
+    xcorr_rows = xcorr_parameters.insert_defaults()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -2261,6 +2291,20 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert _validate_ripple_glm_parameter_row(
         fetched_ripple_glm_row
     ) == ripple_glm_rows[0]
+    assert xcorr_rows == [
+        dict(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+    ]
+    assert xcorr_parameters._insert_many_calls == [
+        (xcorr_rows, {"skip_duplicates": True})
+    ]
+    fetched_xcorr_row = {
+        **xcorr_rows[0],
+        "norm": np.int64(1),
+        "require_speed_gated": np.bool_(True),
+    }
+    assert _validate_cross_region_xcorr_parameter_row(
+        fetched_xcorr_row
+    ) == xcorr_rows[0]
 
     with pytest.raises(TypeError, match="numeric scalar"):
         ripple_parameters.insert_parameters({**ripple_row, "bin_size_s": [0.02]})
@@ -2363,6 +2407,18 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     with pytest.raises(TypeError, match="database integer 0/1"):
         _validate_ripple_glm_parameter_row(
             {**ripple_glm_rows[0], "require_speed_gated": 2}
+        )
+    with pytest.raises(ValueError, match="fixed value 0.005"):
+        xcorr_parameters.insert_parameters(
+            {**xcorr_rows[0], "bin_size_s": 0.01}
+        )
+    with pytest.raises(ValueError, match="speed-gated"):
+        xcorr_parameters.insert_parameters(
+            {**xcorr_rows[0], "require_speed_gated": False}
+        )
+    with pytest.raises(TypeError, match="database integer 0/1"):
+        _validate_cross_region_xcorr_parameter_row(
+            {**xcorr_rows[0], "norm": 2}
         )
 
     assert _analysis_region("ca1") == "ca1"
@@ -4855,6 +4911,229 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
         "stable_unit_id"
     ] == "v1-merge:20"
     assert row["legacy_artifact_provenance"] == {"source": "legacy"}
+
+
+def _cross_region_xcorr_selection_inputs() -> dict[str, Any]:
+    """Return one complete exact-ripple xcorr selection input set."""
+    inputs = _ripple_glm_selection_inputs()
+    parameters = dict(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+    key = {
+        name: value
+        for name, value in inputs["key"].items()
+        if name != "ripple_glm_param_name"
+    }
+    key["cross_region_xcorr_param_name"] = parameters[
+        "cross_region_xcorr_param_name"
+    ]
+    inputs.update({"key": key, "parameters": parameters})
+    return inputs
+
+
+def _build_cross_region_xcorr_selection(
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one xcorr selection from mutable database-free inputs."""
+    return _cross_region_xcorr_selection_row(
+        key=inputs["key"],
+        ripples_table=_FakeRelation(inputs["ripple_row"]),
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        region_sorted_spikes_group_table=_FakeKeyedRelation(
+            "region_sorted_spikes_group_id",
+            inputs["group_rows"],
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        ripple_table=inputs["ripple_table"],
+    )
+
+
+def test_cross_region_xcorr_selection_freezes_exact_inputs() -> None:
+    inputs = _cross_region_xcorr_selection_inputs()
+    first = _build_cross_region_xcorr_selection(inputs)
+    second = _build_cross_region_xcorr_selection(
+        _cross_region_xcorr_selection_inputs()
+    )
+
+    assert first == second
+    assert first["cross_region_xcorr_id"].version == 5
+    assert first["source_region"] == "ca1"
+    assert first["target_region"] == "v1"
+    assert first["source_ripple_count"] == 5
+    assert first["detector_zscore_threshold"] == pytest.approx(2.0)
+    assert first["speed_gated"] is True
+    assert len(first["selected_ripple_intervals_sha256"]) == 64
+    assert first["cross_region_xcorr_parameters_sha256"] == (
+        provenance_sha256(inputs["parameters"])
+    )
+    from v1ca1.spyglass.cross_region_xcorr import OUTPUT_RULE_SHA256
+
+    assert first["cross_region_xcorr_output_rule_sha256"] == (
+        OUTPUT_RULE_SHA256
+    )
+    upstream = tables_module._cross_region_xcorr_upstream_provenance(first)
+    assert upstream["detector_zscore_threshold"] == pytest.approx(2.0)
+    assert upstream["speed_gated"] is True
+
+    changed_end = _cross_region_xcorr_selection_inputs()
+    changed_end["ripple_table"].loc[0, "end_time"] = 1.075
+    assert _build_cross_region_xcorr_selection(changed_end)[
+        "cross_region_xcorr_id"
+    ] != first["cross_region_xcorr_id"]
+
+    changed_provenance = _cross_region_xcorr_selection_inputs()
+    changed_provenance["ripple_row"]["detection_parameters"] = {
+        "speed_threshold": 3.0
+    }
+    assert _build_cross_region_xcorr_selection(changed_provenance)[
+        "cross_region_xcorr_id"
+    ] != first["cross_region_xcorr_id"]
+
+
+def test_cross_region_xcorr_selection_rejects_region_or_nwb_mismatch() -> None:
+    inputs = _cross_region_xcorr_selection_inputs()
+    source_id = inputs["key"]["source_region_sorted_spikes_group_id"]
+    inputs["group_rows"][source_id]["region_name"] = "v1"
+    with pytest.raises(ValueError, match="source group.*ca1"):
+        _build_cross_region_xcorr_selection(inputs)
+
+    inputs = _cross_region_xcorr_selection_inputs()
+    target_id = inputs["key"]["target_region_sorted_spikes_group_id"]
+    inputs["group_rows"][target_id]["nwb_file_name"] = "other.nwb"
+    with pytest.raises(ValueError, match="same NWB"):
+        _build_cross_region_xcorr_selection(inputs)
+
+
+def _cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
+    """Return minimal separate imported CA1 and V1 sorting groups."""
+    return {
+        role: {
+            "ts_group": {0: object()},
+            "unit_ids": [
+                {"spikesorting_merge_id": merge_id, "unit_id": unit_id}
+            ],
+            "unit_metadata": [
+                {
+                    "spikesorting_merge_id": merge_id,
+                    "unit_id": unit_id,
+                    "sorting_unit_id": sorting_unit_id,
+                }
+            ],
+            "member_provenance": [
+                {
+                    "spikesorting_merge_id": merge_id,
+                    "merge_parent": "ImportedSpikeSorting",
+                    "n_selected_units": 1,
+                }
+            ],
+        }
+        for role, merge_id, unit_id, sorting_unit_id in (
+            ("source", "ca1-merge", 10, 101),
+            ("target", "v1-merge", 20, 201),
+        )
+    }
+
+
+def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = _cross_region_xcorr_selection_inputs()
+    selection = _build_cross_region_xcorr_selection(inputs)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "ripple_table": inputs["ripple_table"],
+        "animal_name": "L14",
+        "date": "20240102",
+    }
+    loaded = _cross_region_xcorr_loaded_spikes()
+    monkeypatch.setattr(
+        tables_module,
+        "_load_cross_region_xcorr_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_ripple_glm_spikes",
+        lambda **kwargs: loaded,
+    )
+    from v1ca1.spyglass import cross_region_xcorr
+
+    calls = []
+
+    def register_existing(**kwargs):
+        calls.append(kwargs)
+        artifact_dir = Path(kwargs["destination_path"])
+        return {
+            "upstream_provenance": (
+                tables_module._cross_region_xcorr_upstream_provenance(
+                    selection
+                )
+            ),
+            "selected_ripple_intervals_sha256": selection[
+                "selected_ripple_intervals_sha256"
+            ],
+            "n_ripples": 5,
+            "ripple_duration_s": 0.25,
+            "n_ca1_units": 1,
+            "n_v1_units": 1,
+            "n_ca1_units_in_xcorr": 1,
+            "n_v1_units_in_xcorr": 1,
+            "n_pairs": 1,
+            "n_valid_pairs": 1,
+            "ca1_units_sha256": "a" * 64,
+            "v1_units_sha256": "b" * 64,
+            "summary_sha256": "c" * 64,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": {"source": "legacy"},
+            "artifact_manifest_path": artifact_dir / "manifest.parquet",
+            "ca1_units_path": artifact_dir / "ca1_units.parquet",
+            "v1_units_path": artifact_dir / "v1_units.parquet",
+            "summary_path": artifact_dir / "summary.parquet",
+            "result_path": artifact_dir / "cross_region_xcorr.nc",
+        }
+
+    monkeypatch.setattr(
+        cross_region_xcorr,
+        "register_existing_cross_region_xcorr_artifact",
+        register_existing,
+    )
+    row = _register_existing_cross_region_xcorr_row(
+        key=selection,
+        source_ca1_unit_filter_path=tmp_path / "ca1.parquet",
+        source_v1_unit_filter_path=tmp_path / "v1.parquet",
+        source_summary_path=tmp_path / "summary.parquet",
+        source_result_path=tmp_path / "xcorr.nc",
+        parameters_table=object(),
+        ripples_table=object(),
+        epoch_intervals_table=object(),
+        region_sorted_spikes_group_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        source_v1ca1_git_commit="v1",
+        source_spyglass_git_commit="sg",
+        artifact_root=tmp_path,
+    )
+
+    call = calls[0]
+    assert call["expected_selected_ripple_intervals_sha256"] == selection[
+        "selected_ripple_intervals_sha256"
+    ]
+    assert call["ca1_sorting_type"] == "ImportedSpikeSorting"
+    assert call["v1_sorting_type"] == "ImportedSpikeSorting"
+    assert call["ca1_legacy_identity_resolver"]([101])[0][
+        "stable_unit_id"
+    ] == "ca1-merge:10"
+    assert call["v1_legacy_identity_resolver"]([201])[0][
+        "stable_unit_id"
+    ] == "v1-merge:20"
+    assert row["legacy_artifact_provenance"] == {"source": "legacy"}
+
+
+def test_cross_region_xcorr_resolver_rejects_nonimported_groups() -> None:
+    loaded = _cross_region_xcorr_loaded_spikes()["source"]
+    loaded["member_provenance"][0]["merge_parent"] = "CurationV1"
+    with pytest.raises(ValueError, match="CrossRegionXCorr.*Imported"):
+        _legacy_cross_region_xcorr_identity_resolver(loaded, role="source")
 
 
 def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:

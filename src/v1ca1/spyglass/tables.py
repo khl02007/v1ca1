@@ -770,6 +770,51 @@ def _validate_ripple_glm_parameter_row(
     return {"ripple_glm_param_name": name, **validated}
 
 
+def _cross_region_xcorr_parameter_kwargs(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return model fields accepted by the database-free xcorr API."""
+    return {
+        field_name: value
+        for field_name, value in parameters.items()
+        if field_name != "cross_region_xcorr_param_name"
+    }
+
+
+def _validate_cross_region_xcorr_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one exact ripple-restricted cross-region parameter row."""
+    from v1ca1.spyglass.cross_region_xcorr import (
+        validate_cross_region_xcorr_parameters,
+    )
+
+    expected = set(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "CrossRegionXCorr parameters must have exactly the declared "
+            f"fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["cross_region_xcorr_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "cross_region_xcorr_param_name must be a non-empty string of at "
+            "most 64 characters."
+        )
+    values["norm"] = _database_bool(values["norm"], name="norm")
+    values["require_speed_gated"] = _database_bool(
+        values["require_speed_gated"],
+        name="require_speed_gated",
+    )
+    validated = validate_cross_region_xcorr_parameters(
+        **_cross_region_xcorr_parameter_kwargs(values)
+    )
+    return {"cross_region_xcorr_param_name": name, **validated}
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1425,6 +1470,140 @@ def _ripple_glm_selection_row(
     }
     return {
         "ripple_glm_id": selection_uuid("RippleGLM", natural_key),
+        **natural_key,
+    }
+
+
+def _cross_region_xcorr_selection_row(
+    *,
+    key: Mapping[str, Any],
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    parameters_table: Any,
+    nwbfile_table: Any | None = None,
+    ripple_table: Any | None = None,
+) -> dict[str, Any]:
+    """Validate, freeze, and identify one exact-ripple xcorr selection."""
+    from v1ca1.spyglass import cross_region_xcorr
+    from v1ca1.spyglass.selection import selection_uuid
+
+    nwb_file_name = str(key["nwb_file_name"])
+    epoch = str(key["epoch"])
+    ripple_row = _fetch1_dict(
+        ripples_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    parameters = _validate_cross_region_xcorr_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "cross_region_xcorr_param_name": key[
+                    "cross_region_xcorr_param_name"
+                ]
+            },
+        )
+    )
+    _validate_ripple_provenance(ripple_row, parameters)
+    detector_zscore_threshold, speed_gated = _ripple_detector_values(
+        ripple_row
+    )
+    group_rows = {
+        role: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": key[
+                    f"{role}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for role in ("source", "target")
+    }
+    for role, expected_region in (("source", "ca1"), ("target", "v1")):
+        row = group_rows[role]
+        if str(row.get("region_name")) != expected_region:
+            raise ValueError(
+                f"CrossRegionXCorr {role} group must select region "
+                f"{expected_region!r}."
+            )
+        if str(row.get("nwb_file_name")) != nwb_file_name:
+            raise ValueError(
+                "CrossRegionXCorr ripple and regional sorting inputs must "
+                "belong to the same NWB file."
+            )
+    if ripple_table is None:
+        if nwbfile_table is None:
+            raise ValueError(
+                "nwbfile_table is required when ripple intervals are not "
+                "supplied."
+            )
+        ripple_table, _ = _load_ripple_glm_interval_inputs(
+            nwb_file_name=nwb_file_name,
+            ripple_row=ripple_row,
+            epoch_row=epoch_row,
+            nwbfile_table=nwbfile_table,
+        )
+    event_selection = (
+        cross_region_xcorr.prepare_cross_region_xcorr_event_selection(
+            epoch=epoch,
+            ripple_table=ripple_table,
+        )
+    )
+    normalized_ripples = event_selection["selected_ripple_table"]
+    if int(event_selection["n_ripples"]) != int(ripple_row["ripple_count"]):
+        raise ValueError(
+            "Ripples.ripple_count disagrees with its NWB interval data."
+        )
+    if dict(cross_region_xcorr.OUTPUT_RULE) != dict(
+        table_specs.CROSS_REGION_XCORR_OUTPUT_RULE
+    ):
+        raise RuntimeError(
+            "CrossRegionXCorr table and database-free output rules have "
+            "diverged."
+        )
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="cross_region_xcorr_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "source_region_sorted_spikes_group_id": key[
+            "source_region_sorted_spikes_group_id"
+        ],
+        "target_region_sorted_spikes_group_id": key[
+            "target_region_sorted_spikes_group_id"
+        ],
+        "cross_region_xcorr_param_name": parameters[
+            "cross_region_xcorr_param_name"
+        ],
+        "source_region": "ca1",
+        "target_region": "v1",
+        "source_ripple_count": int(ripple_row["ripple_count"]),
+        "detector_zscore_threshold": detector_zscore_threshold,
+        "speed_gated": speed_gated,
+        "selected_ripple_intervals_sha256": (
+            event_selection["selected_ripple_intervals_sha256"]
+        ),
+        "ripple_provenance_sha256": _ripple_glm_provenance_sha256(
+            ripple_row
+        ),
+        **_ripple_glm_group_snapshot(group_rows["source"], role="source"),
+        **_ripple_glm_group_snapshot(group_rows["target"], role="target"),
+        **parameter_snapshot,
+        "cross_region_xcorr_output_rule_sha256": (
+            cross_region_xcorr.OUTPUT_RULE_SHA256
+        ),
+    }
+    return {
+        "cross_region_xcorr_id": selection_uuid(
+            "CrossRegionXCorr",
+            natural_key,
+        ),
         **natural_key,
     }
 
@@ -4468,8 +4647,9 @@ def _load_ripple_glm_spikes(
     *,
     context: Mapping[str, Any],
     region_sorted_spikes_group_table: Any,
+    analysis_name: str = "RippleGLM",
 ) -> dict[str, dict[str, Any]]:
-    """Load the selected CA1 and V1 regional groups over the epoch support."""
+    """Load selected CA1 and V1 groups over one analysis epoch support."""
     epoch_row = context["epoch_row"]
     time_support = (
         float(epoch_row["start_time"]),
@@ -4480,7 +4660,8 @@ def _load_ripple_glm_spikes(
         or time_support[1] <= time_support[0]
     ):
         raise ValueError(
-            "RippleGLM EpochIntervals must contain finite start_time < stop_time."
+            f"{analysis_name} EpochIntervals must contain finite "
+            "start_time < stop_time."
         )
     loaded = {
         role: region_sorted_spikes_group_table.load_spikes(
@@ -4500,13 +4681,15 @@ def _load_ripple_glm_spikes(
         )
         if int(group["n_units"]) != expected_count:
             raise ValueError(
-                f"RippleGLM {role} unit count changed after selection insertion."
+                f"{analysis_name} {role} unit count changed after selection "
+                "insertion."
             )
         from v1ca1.spyglass.selection import unit_identity_sha256
 
         if unit_identity_sha256(group["unit_ids"]) != expected_sha256:
             raise ValueError(
-                f"RippleGLM {role} unit identities changed after selection "
+                f"{analysis_name} {role} unit identities changed after "
+                "selection "
                 "insertion."
             )
     return loaded
@@ -4795,6 +4978,7 @@ def _legacy_ripple_glm_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
     *,
     role: str,
+    analysis_name: str = "RippleGLM",
 ) -> dict[str, dict[str, str]]:
     """Map legacy imported-sorting IDs to persistent regional identities."""
     non_imported = [
@@ -4805,14 +4989,15 @@ def _legacy_ripple_glm_unit_identity_resolver(
     ]
     if non_imported:
         raise ValueError(
-            f"Legacy RippleGLM {role} registration requires matching "
+            f"Legacy {analysis_name} {role} registration requires matching "
             "ImportedSpikeSorting units; found non-imported outputs "
             f"{non_imported!r}."
         )
     metadata_rows = list(loaded_spikes["unit_metadata"])
     if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
         raise ValueError(
-            f"RippleGLM {role} metadata must contain one row per selected unit."
+            f"{analysis_name} {role} metadata must contain one row per "
+            "selected unit."
         )
     resolver: dict[str, dict[str, str]] = {}
     for group_unit_id, metadata in zip(
@@ -4824,7 +5009,7 @@ def _legacy_ripple_glm_unit_identity_resolver(
         resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
         if not resolver_key or resolver_key in resolver:
             raise ValueError(
-                f"Every RippleGLM {role} unit requires a unique "
+                f"Every {analysis_name} {role} unit requires a unique "
                 "sorting_unit_id for legacy registration."
             )
         resolver[resolver_key] = {
@@ -4956,6 +5141,615 @@ def _register_existing_ripple_glm_row(
                 "n_ripples",
                 "selected_ripple_events_sha256",
                 "selected_units_sha256",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": dict(
+            registered["legacy_artifact_provenance"]
+        ),
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _cross_region_xcorr_upstream_provenance(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact CrossRegionXCorr selection snapshot for artifacts."""
+    fields = (
+        "nwb_file_name",
+        "epoch",
+        "source_region",
+        "target_region",
+        "source_ripple_count",
+        "detector_zscore_threshold",
+        "speed_gated",
+        "selected_ripple_intervals_sha256",
+        "ripple_provenance_sha256",
+        "source_sorting_group_members_sha256",
+        "source_unit_filter_params_sha256",
+        "source_selected_units_sha256",
+        "source_n_units",
+        "target_sorting_group_members_sha256",
+        "target_unit_filter_params_sha256",
+        "target_selected_units_sha256",
+        "target_n_units",
+        "cross_region_xcorr_parameters_sha256",
+        "cross_region_xcorr_output_rule_sha256",
+    )
+    provenance = {
+        "cross_region_xcorr_id": str(selection["cross_region_xcorr_id"]),
+        "source_region_sorted_spikes_group_id": str(
+            selection["source_region_sorted_spikes_group_id"]
+        ),
+        "target_region_sorted_spikes_group_id": str(
+            selection["target_region_sorted_spikes_group_id"]
+        ),
+        **{field_name: selection[field_name] for field_name in fields},
+    }
+    provenance["source_ripple_count"] = int(
+        provenance["source_ripple_count"]
+    )
+    provenance["source_n_units"] = int(provenance["source_n_units"])
+    provenance["target_n_units"] = int(provenance["target_n_units"])
+    provenance["detector_zscore_threshold"] = float(
+        provenance["detector_zscore_threshold"]
+    )
+    provenance["speed_gated"] = _database_bool(
+        provenance["speed_gated"],
+        name="CrossRegionXCorrSelection.speed_gated",
+    )
+    return provenance
+
+
+def _validate_cross_region_xcorr_upstream_link(
+    upstream: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> None:
+    """Require a CrossRegionXCorr bundle to embed its exact selection."""
+    if dict(upstream) != _cross_region_xcorr_upstream_provenance(selection):
+        raise ValueError(
+            "CrossRegionXCorr upstream provenance does not match its "
+            "immutable selection."
+        )
+
+
+def _load_cross_region_xcorr_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all lightweight CrossRegionXCorr inputs."""
+    from v1ca1.spyglass import cross_region_xcorr
+
+    selection = dict(key)
+    parameters = _validate_cross_region_xcorr_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    _validate_frozen_parameters(
+        selection,
+        parameters,
+        field_name="cross_region_xcorr_parameters_sha256",
+    )
+    if str(selection.get("cross_region_xcorr_output_rule_sha256")) != (
+        cross_region_xcorr.OUTPUT_RULE_SHA256
+    ):
+        raise ValueError(
+            "CrossRegionXCorr fixed output rule changed after selection "
+            "insertion. Create a new selection."
+        )
+    ripple_row = _fetch1_dict(ripples_table, selection)
+    epoch_row = _fetch1_dict(epoch_intervals_table, selection)
+    _validate_ripple_provenance(ripple_row, parameters)
+    detector_zscore_threshold, speed_gated = _ripple_detector_values(
+        ripple_row
+    )
+    selected_detector_threshold = float(
+        selection["detector_zscore_threshold"]
+    )
+    selected_speed_gated = _database_bool(
+        selection.get("speed_gated"),
+        name="CrossRegionXCorrSelection.speed_gated",
+    )
+    if not math.isclose(
+        selected_detector_threshold,
+        detector_zscore_threshold,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ) or selected_speed_gated != speed_gated:
+        raise ValueError(
+            "CrossRegionXCorr detector values changed after selection "
+            "insertion."
+        )
+    selection["detector_zscore_threshold"] = selected_detector_threshold
+    selection["speed_gated"] = selected_speed_gated
+    if int(ripple_row["ripple_count"]) != int(
+        selection["source_ripple_count"]
+    ):
+        raise ValueError(
+            "CrossRegionXCorr selected Ripples row changed after selection "
+            "insertion."
+        )
+    region_rows = {
+        role: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": selection[
+                    f"{role}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for role in ("source", "target")
+    }
+    for role, expected_region in (("source", "ca1"), ("target", "v1")):
+        row = region_rows[role]
+        if str(row.get("nwb_file_name")) != str(selection["nwb_file_name"]):
+            raise ValueError(
+                "CrossRegionXCorr regional groups must remain in the "
+                "selected NWB file."
+            )
+        if str(row.get("region_name")) != expected_region:
+            raise ValueError(
+                f"CrossRegionXCorr {role} region must remain "
+                f"{expected_region!r}."
+            )
+        _validate_ripple_glm_group_snapshot(selection, row, role=role)
+    ripple_table, _ = _load_ripple_glm_interval_inputs(
+        nwb_file_name=str(selection["nwb_file_name"]),
+        ripple_row=ripple_row,
+        epoch_row=epoch_row,
+        nwbfile_table=nwbfile_table,
+    )
+    event_selection = (
+        cross_region_xcorr.prepare_cross_region_xcorr_event_selection(
+            epoch=str(selection["epoch"]),
+            ripple_table=ripple_table,
+        )
+    )
+    normalized_ripples = event_selection["selected_ripple_table"]
+    if int(event_selection["n_ripples"]) != int(
+        selection["source_ripple_count"]
+    ):
+        raise ValueError(
+            "CrossRegionXCorr exact ripple count changed after selection."
+        )
+    if str(event_selection["selected_ripple_intervals_sha256"]) != str(
+        selection["selected_ripple_intervals_sha256"]
+    ):
+        raise ValueError(
+            "CrossRegionXCorr exact ripple boundaries changed after selection."
+        )
+    if _ripple_glm_provenance_sha256(ripple_row) != str(
+        selection["ripple_provenance_sha256"]
+    ):
+        raise ValueError(
+            "CrossRegionXCorr ripple detector provenance changed after "
+            "selection."
+        )
+    animal_name, session_date = _session_identity(session_table, selection)
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "ripple_row": ripple_row,
+        "epoch_row": epoch_row,
+        "region_rows": region_rows,
+        "ripple_table": normalized_ripples.assign(
+            epoch=str(selection["epoch"])
+        ),
+        "animal_name": animal_name,
+        "date": session_date,
+    }
+
+
+def _make_cross_region_xcorr_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one immutable CrossRegionXCorr bundle."""
+    from v1ca1.spyglass.cross_region_xcorr import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        compute_cross_region_xcorr,
+        get_cross_region_xcorr_artifact_paths,
+        write_cross_region_xcorr_artifact,
+    )
+
+    context = _load_cross_region_xcorr_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded = _load_ripple_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        analysis_name="CrossRegionXCorr",
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    result = compute_cross_region_xcorr(
+        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        ripple_table=context["ripple_table"],
+        ca1_spikes=loaded["source"]["ts_group"],
+        ca1_stable_unit_ids=loaded["source"]["unit_ids"],
+        v1_spikes=loaded["target"]["ts_group"],
+        v1_stable_unit_ids=loaded["target"]["unit_ids"],
+        upstream_provenance=_cross_region_xcorr_upstream_provenance(
+            selection
+        ),
+        expected_selected_ripple_intervals_sha256=selection[
+            "selected_ripple_intervals_sha256"
+        ],
+        parameter_name=parameters["cross_region_xcorr_param_name"],
+        parameter_sha256=selection[
+            "cross_region_xcorr_parameters_sha256"
+        ],
+        output_rule_sha256=selection[
+            "cross_region_xcorr_output_rule_sha256"
+        ],
+        **_cross_region_xcorr_parameter_kwargs(parameters),
+    )
+    _validate_cross_region_xcorr_upstream_link(
+        result["upstream_provenance"], selection
+    )
+    if str(result["selected_ripple_intervals_sha256"]) != str(
+        selection["selected_ripple_intervals_sha256"]
+    ):
+        raise ValueError(
+            "CrossRegionXCorr computation changed its exact ripple intervals."
+        )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_cross_region_xcorr_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_cross_region_xcorr_artifact(result, artifact_dir)
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "ca1_units_path": str(written["ca1_units_path"]),
+        "v1_units_path": str(written["v1_units_path"]),
+        "summary_path": str(written["summary_path"]),
+        "cross_region_xcorr_path": str(written["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: result[field_name]
+            for field_name in (
+                "n_ripples",
+                "ripple_duration_s",
+                "n_ca1_units",
+                "n_v1_units",
+                "n_ca1_units_in_xcorr",
+                "n_v1_units_in_xcorr",
+                "n_pairs",
+                "n_valid_pairs",
+                "selected_ripple_intervals_sha256",
+                "ca1_units_sha256",
+                "v1_units_sha256",
+                "summary_sha256",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _validate_cross_region_xcorr_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one loaded xcorr bundle to match its DataJoint rows."""
+    from v1ca1.spyglass.cross_region_xcorr import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_cross_region_xcorr_artifact_paths,
+        validate_cross_region_xcorr_result,
+    )
+
+    validated = validate_cross_region_xcorr_result(bundle)
+    expected_metadata = {
+        "cross_region_xcorr_id": str(
+            selection_row["cross_region_xcorr_id"]
+        ),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(selection_row["epoch"]),
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated.get(field_name)) != expected_value:
+            raise ValueError(
+                "CrossRegionXCorr artifact does not match its selection: "
+                f"{field_name}."
+            )
+    parameters = _validate_cross_region_xcorr_parameter_row(parameters_row)
+    expected_parameters = {
+        "parameter_name": parameters["cross_region_xcorr_param_name"],
+        "parameter_sha256": selection_row[
+            "cross_region_xcorr_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "cross_region_xcorr_output_rule_sha256"
+        ],
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "cross_region_xcorr_param_name"
+        },
+    }
+    if validated["parameters"] != expected_parameters:
+        raise ValueError(
+            "CrossRegionXCorr artifact parameters do not match its selection."
+        )
+    _validate_cross_region_xcorr_upstream_link(
+        validated["upstream_provenance"], selection_row
+    )
+    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
+    try:
+        artifact_root = artifact_dir.parents[4]
+    except IndexError as exc:
+        raise ValueError(
+            "CrossRegionXCorr artifact does not use the canonical layout."
+        ) from exc
+    expected_paths = get_cross_region_xcorr_artifact_paths(
+        animal_name=animal_name,
+        date=date,
+        epoch=str(selection_row["epoch"]),
+        cross_region_xcorr_id=selection_row["cross_region_xcorr_id"],
+        artifact_root=artifact_root,
+    )
+    path_fields = {
+        "artifact_manifest_path": "artifact_manifest_path",
+        "ca1_units_path": "ca1_units_path",
+        "v1_units_path": "v1_units_path",
+        "summary_path": "summary_path",
+        "cross_region_xcorr_path": "result_path",
+    }
+    for row_field, path_key in path_fields.items():
+        if Path(result_row[row_field]) != Path(expected_paths[path_key]):
+            raise ValueError(
+                "CrossRegionXCorr result paths do not use the canonical "
+                f"layout: {row_field}."
+            )
+    for field_name in (
+        "n_ripples",
+        "n_ca1_units",
+        "n_v1_units",
+        "n_ca1_units_in_xcorr",
+        "n_v1_units_in_xcorr",
+        "n_pairs",
+        "n_valid_pairs",
+        "selected_ripple_intervals_sha256",
+        "ca1_units_sha256",
+        "v1_units_sha256",
+        "summary_sha256",
+        "analysis_status",
+        "artifact_origin",
+    ):
+        if str(result_row.get(field_name)) != str(validated[field_name]):
+            raise ValueError(
+                "CrossRegionXCorr result metadata disagrees with its "
+                f"artifact: {field_name}."
+            )
+    if not math.isclose(
+        float(result_row["ripple_duration_s"]),
+        float(validated["ripple_duration_s"]),
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "CrossRegionXCorr result duration disagrees with its artifact."
+        )
+    if str(result_row.get("schema_version")) != RESULT_SCHEMA_VERSION or str(
+        result_row.get("bundle_schema_version")
+    ) != BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            "CrossRegionXCorr result schema versions disagree with its artifact."
+        )
+    if result_row.get("legacy_artifact_provenance") != validated.get(
+        "legacy_artifact_provenance"
+    ):
+        raise ValueError(
+            "CrossRegionXCorr result-row legacy provenance differs from its "
+            "artifact."
+        )
+
+
+def _legacy_cross_region_xcorr_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+    *,
+    role: str,
+) -> Callable[[Any], list[dict[str, str]]]:
+    """Build one sequence resolver for legacy imported-sorting unit IDs."""
+    identity_by_sorting_id = _legacy_ripple_glm_unit_identity_resolver(
+        loaded_spikes,
+        role=role,
+        analysis_name="CrossRegionXCorr",
+    )
+
+    def resolve(legacy_unit_ids: Any) -> list[dict[str, str]]:
+        resolved = []
+        for legacy_unit_id in legacy_unit_ids:
+            matches = [
+                identity
+                for sorting_unit_id, identity in identity_by_sorting_id.items()
+                if str(sorting_unit_id) == str(legacy_unit_id)
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Legacy CrossRegionXCorr {role} unit "
+                    f"{legacy_unit_id!r} has {len(matches)} imported-sorting "
+                    "identity matches."
+                )
+            resolved.append(dict(matches[0]))
+        return resolved
+
+    return resolve
+
+
+def _register_existing_cross_region_xcorr_row(
+    *,
+    key: Mapping[str, Any],
+    source_ca1_unit_filter_path: Path,
+    source_v1_unit_filter_path: Path,
+    source_summary_path: Path,
+    source_result_path: Path,
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Recompute and register one exact legacy four-artifact xcorr set."""
+    from v1ca1.spyglass.cross_region_xcorr import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_cross_region_xcorr_artifact_paths,
+        register_existing_cross_region_xcorr_artifact,
+    )
+
+    context = _load_cross_region_xcorr_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded = _load_ripple_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        analysis_name="CrossRegionXCorr",
+    )
+    resolvers = {
+        role: _legacy_cross_region_xcorr_identity_resolver(
+            loaded[role],
+            role=role,
+        )
+        for role in ("source", "target")
+    }
+    selection = context["selection"]
+    parameters = context["parameters"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_cross_region_xcorr_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_cross_region_xcorr_artifact(
+            source_ca1_unit_filter_path=Path(source_ca1_unit_filter_path),
+            source_v1_unit_filter_path=Path(source_v1_unit_filter_path),
+            source_summary_path=Path(source_summary_path),
+            source_result_path=Path(source_result_path),
+            destination_path=artifact_dir,
+            cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+            animal_name=context["animal_name"],
+            date=context["date"],
+            epoch=str(selection["epoch"]),
+            ripple_table=context["ripple_table"],
+            ca1_spikes=loaded["source"]["ts_group"],
+            ca1_stable_unit_ids=loaded["source"]["unit_ids"],
+            v1_spikes=loaded["target"]["ts_group"],
+            v1_stable_unit_ids=loaded["target"]["unit_ids"],
+            upstream_provenance=_cross_region_xcorr_upstream_provenance(
+                selection
+            ),
+            expected_selected_ripple_intervals_sha256=selection[
+                "selected_ripple_intervals_sha256"
+            ],
+            ca1_legacy_identity_resolver=resolvers["source"],
+            v1_legacy_identity_resolver=resolvers["target"],
+            ca1_sorting_type="ImportedSpikeSorting",
+            v1_sorting_type="ImportedSpikeSorting",
+            parameter_name=parameters["cross_region_xcorr_param_name"],
+            parameter_sha256=selection[
+                "cross_region_xcorr_parameters_sha256"
+            ],
+            output_rule_sha256=selection[
+                "cross_region_xcorr_output_rule_sha256"
+            ],
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            source_spyglass_git_commit=source_spyglass_git_commit,
+            overwrite=False,
+            **_cross_region_xcorr_parameter_kwargs(parameters),
+        )
+        _validate_cross_region_xcorr_upstream_link(
+            registered["upstream_provenance"], selection
+        )
+        if str(registered["selected_ripple_intervals_sha256"]) != str(
+            selection["selected_ripple_intervals_sha256"]
+        ):
+            raise ValueError(
+                "Registered CrossRegionXCorr ripple boundaries disagree "
+                "with its selection."
+            )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    return {
+        "artifact_manifest_path": str(registered["artifact_manifest_path"]),
+        "ca1_units_path": str(registered["ca1_units_path"]),
+        "v1_units_path": str(registered["v1_units_path"]),
+        "summary_path": str(registered["summary_path"]),
+        "cross_region_xcorr_path": str(registered["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: registered[field_name]
+            for field_name in (
+                "n_ripples",
+                "ripple_duration_s",
+                "n_ca1_units",
+                "n_v1_units",
+                "n_ca1_units_in_xcorr",
+                "n_v1_units_in_xcorr",
+                "n_pairs",
+                "n_valid_pairs",
+                "selected_ripple_intervals_sha256",
+                "ca1_units_sha256",
+                "v1_units_sha256",
+                "summary_sha256",
                 "analysis_status",
             )
         },
@@ -13165,6 +13959,14 @@ def _construct_tables(
         "ripple_glm_register_existing",
         _register_existing_ripple_glm_row,
     )
+    cross_region_xcorr_compute_hook = runtime_hooks.get(
+        "cross_region_xcorr_compute",
+        _make_cross_region_xcorr_row,
+    )
+    cross_region_xcorr_register_hook = runtime_hooks.get(
+        "cross_region_xcorr_register_existing",
+        _register_existing_cross_region_xcorr_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -13194,6 +13996,8 @@ def _construct_tables(
             swap_tuning_curve_comparison_register_hook,
             ripple_glm_compute_hook,
             ripple_glm_register_hook,
+            cross_region_xcorr_compute_hook,
+            cross_region_xcorr_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -16560,6 +17364,225 @@ def _construct_tables(
     RippleGLM = main_schema(RippleGLM)
     main_context["RippleGLM"] = RippleGLM
 
+    class CrossRegionXCorrParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.CROSS_REGION_XCORR_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one fixed ripple-xcorr parameter row."""
+            validated = _validate_cross_region_xcorr_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the fixed manuscript xcorr preset."""
+            rows = [
+                _validate_cross_region_xcorr_parameter_row(parameters)
+                for parameters in (
+                    table_specs.CROSS_REGION_XCORR_PARAMETER_PRESETS
+                )
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    CrossRegionXCorrParameters = main_schema(CrossRegionXCorrParameters)
+    main_context["CrossRegionXCorrParameters"] = CrossRegionXCorrParameters
+
+    class CrossRegionXCorrSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.CROSS_REGION_XCORR_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one exact-ripple xcorr."""
+            row = _cross_region_xcorr_selection_row(
+                key=key,
+                ripples_table=Ripples,
+                epoch_intervals_table=EpochIntervals,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                parameters_table=CrossRegionXCorrParameters,
+                nwbfile_table=nwbfile_table,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    CrossRegionXCorrSelection = main_schema(CrossRegionXCorrSelection)
+    main_context["CrossRegionXCorrSelection"] = CrossRegionXCorrSelection
+
+    class CrossRegionXCorr(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.CROSS_REGION_XCORR_DEFINITION
+        _compute_hook = staticmethod(cross_region_xcorr_compute_hook)
+        _register_existing_hook = staticmethod(
+            cross_region_xcorr_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one CrossRegionXCorr bundle."""
+            selection = _fetch1_dict(CrossRegionXCorrSelection, key)
+            artifact_row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=CrossRegionXCorrParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "cross_region_xcorr_id": selection[
+                            "cross_region_xcorr_id"
+                        ],
+                        **artifact_row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_cross_region_xcorr_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical CrossRegionXCorr bundle."""
+            from v1ca1.spyglass.cross_region_xcorr import (
+                load_cross_region_xcorr_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                CrossRegionXCorrSelection,
+                {"cross_region_xcorr_id": row["cross_region_xcorr_id"]},
+            )
+            parameters = _fetch1_dict(
+                CrossRegionXCorrParameters,
+                selection,
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_cross_region_xcorr_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_cross_region_xcorr_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_ca1_unit_filter_path: Path | str,
+            source_v1_unit_filter_path: Path | str,
+            source_summary_path: Path | str,
+            source_result_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Verify and insert one exact legacy four-artifact xcorr set."""
+            if overwrite:
+                raise ValueError(
+                    "Registered CrossRegionXCorr results are immutable; "
+                    "create a new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(CrossRegionXCorrSelection, key)
+            result_key = {
+                "cross_region_xcorr_id": selection["cross_region_xcorr_id"]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "CrossRegionXCorr already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_ca1_unit_filter_path=Path(
+                        source_ca1_unit_filter_path
+                    ),
+                    source_v1_unit_filter_path=Path(
+                        source_v1_unit_filter_path
+                    ),
+                    source_summary_path=Path(source_summary_path),
+                    source_result_path=Path(source_result_path),
+                    parameters_table=CrossRegionXCorrParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "cross_region_xcorr_id": selection[
+                    "cross_region_xcorr_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    CrossRegionXCorr = main_schema(CrossRegionXCorr)
+    main_context["CrossRegionXCorr"] = CrossRegionXCorr
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -16663,6 +17686,9 @@ def _construct_tables(
         "ripple_glm_parameters": RippleGLMParameters,
         "ripple_glm_selection": RippleGLMSelection,
         "ripple_glm": RippleGLM,
+        "cross_region_xcorr_parameters": CrossRegionXCorrParameters,
+        "cross_region_xcorr_selection": CrossRegionXCorrSelection,
+        "cross_region_xcorr": CrossRegionXCorr,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 
