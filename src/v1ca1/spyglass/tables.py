@@ -926,6 +926,39 @@ def _validate_epoch_motor_behavior_parameter_row(
     }
 
 
+def _validate_cv_pca_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one named cvPCA parameter row without deriving its region."""
+    from v1ca1.spyglass.cv_pca import validate_cv_pca_parameters
+
+    expected = set(table_specs.MANUSCRIPT_V1_CV_PCA_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "CVPCA parameters must have exactly the declared fields; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    name = row["cv_pca_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "cv_pca_param_name must be a non-empty string of at most 64 "
+            "characters."
+        )
+    # An explicit threshold makes validation independent of the selected
+    # regional group.  Region is never a parameter-table attribute.
+    validated = validate_cv_pca_parameters(
+        region="parameter_validation",
+        **{
+            field_name: row[field_name]
+            for field_name in expected
+            if field_name != "cv_pca_param_name"
+        },
+    )
+    return {"cv_pca_param_name": name, **validated}
+
+
 def _validate_legacy_tuning_curve_inputs(
     *,
     position_row: Mapping[str, Any],
@@ -2549,6 +2582,494 @@ def _epoch_motor_behavior_selection_row(
         "epoch_motor_behavior_id": selection_uuid(
             "EpochMotorBehavior", natural_key
         ),
+        **natural_key,
+    }
+
+
+def _cv_pca_epoch_bounds_sha256(row: Mapping[str, Any]) -> str:
+    """Digest exact epoch bounds and condition fields used by cvPCA."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    start = float(row["start_time"])
+    stop = float(row["stop_time"])
+    if not math.isfinite(start) or not math.isfinite(stop) or stop <= start:
+        raise ValueError("CVPCA epoch bounds must be finite and positive.")
+    return provenance_sha256(
+        {
+            "start_time_s": start,
+            "stop_time_s": stop,
+            "nwb_epoch_start_time_s": float(row["nwb_epoch_start_time"]),
+            "nwb_epoch_stop_time_s": float(row["nwb_epoch_stop_time"]),
+            "epoch_type": row.get("epoch_type"),
+            "condition": row.get("condition"),
+            "is_light": (
+                None
+                if row.get("is_light") is None
+                else _database_bool(row["is_light"], name="is_light")
+            ),
+        }
+    )
+
+
+def _cv_pca_position_snapshot(
+    *,
+    condition: str,
+    row: Mapping[str, Any],
+    position: Any,
+) -> dict[str, Any]:
+    """Validate and digest one untrimmed Position source."""
+    from v1ca1.spyglass import cv_pca
+
+    if str(row.get("spatial_unit")) != "cm":
+        raise ValueError("CVPCA Position rows must use centimeters.")
+    offset = int(row.get("analysis_start_offset_samples", -1))
+    if offset != cv_pca.DEFAULT_POSITION_OFFSET_SAMPLES:
+        raise ValueError("CVPCA Position rows must declare a 10-sample offset.")
+    values, timestamps = cv_pca._position_arrays(
+        position, name=f"{condition}_position"
+    )
+    if len(values) != int(row.get("sample_count", -1)):
+        raise ValueError(
+            "CVPCA requires an untrimmed Position load matching sample_count."
+        )
+    if offset > len(values):
+        raise ValueError("CVPCA position offset exceeds its untrimmed series.")
+    return {
+        "values": values,
+        "timestamps": timestamps,
+        "row_sha256": _ripple_decoding_catalog_row_sha256(row),
+        "values_sha256": _epoch_motor_array_sha256(values),
+        "timestamps_sha256": _epoch_motor_array_sha256(timestamps),
+        "position_role": str(row.get("position_role", "")),
+        "position_offset_samples": offset,
+    }
+
+
+def _cv_pca_selection_row(
+    *,
+    key: Mapping[str, Any],
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    session_table: Any,
+    position_inputs_by_condition: Mapping[str, Any] | None = None,
+    movement_artifacts_by_condition: Mapping[str, Mapping[str, Any]] | None = None,
+    trajectory_interval_sets_by_condition: Mapping[str, Mapping[str, Any]]
+    | None = None,
+    graph_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Validate, freeze, and UUID one exact light/dark cvPCA selection."""
+    from v1ca1.spyglass import cv_pca
+    from v1ca1.spyglass.selection import (
+        provenance_sha256,
+        selection_uuid,
+        unit_identity_sha256,
+    )
+
+    nwb_file_name = str(key["nwb_file_name"])
+    epochs = {
+        condition: str(key[f"{condition}_epoch"])
+        for condition in ("light", "dark")
+    }
+    if epochs["light"] == epochs["dark"]:
+        raise ValueError("CVPCA light and dark epochs must differ.")
+    epoch_rows = {
+        condition: _fetch1_dict(
+            epoch_intervals_table,
+            {"nwb_file_name": nwb_file_name, "epoch": epoch},
+        )
+        for condition, epoch in epochs.items()
+    }
+    if str(epoch_rows["light"].get("epoch_type")) != "run" or not _database_bool(
+        epoch_rows["light"].get("is_light"), name="light is_light"
+    ):
+        raise ValueError("CVPCA light_epoch must be an explicit light run epoch.")
+    if str(epoch_rows["dark"].get("epoch_type")) != "run" or str(
+        epoch_rows["dark"].get("condition")
+    ) != "dark":
+        raise ValueError("CVPCA dark_epoch must be an explicit dark run epoch.")
+    if epoch_rows["dark"].get("is_light") is not None and _database_bool(
+        epoch_rows["dark"]["is_light"], name="dark is_light"
+    ):
+        raise ValueError("CVPCA dark_epoch cannot be marked as light.")
+
+    group_key = {
+        "region_sorted_spikes_group_id": key["region_sorted_spikes_group_id"]
+    }
+    group_row = _fetch1_dict(region_sorted_spikes_group_table, group_key)
+    if str(group_row.get("nwb_file_name")) != nwb_file_name:
+        raise ValueError("CVPCA regional sorting group must share the selected NWB.")
+    region = _analysis_region(group_row.get("region_name"))
+    parameters = _validate_cv_pca_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {"cv_pca_param_name": key["cv_pca_param_name"]},
+        )
+    )
+    effective_parameters = cv_pca.validate_cv_pca_parameters(
+        region=region,
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "cv_pca_param_name"
+        },
+    )
+    output_rule_sha256 = provenance_sha256(dict(table_specs.CV_PCA_OUTPUT_RULE))
+    if output_rule_sha256 != cv_pca.OUTPUT_RULE_SHA256:
+        raise RuntimeError("Passive and standalone CVPCA output rules differ.")
+
+    animal_name, session_date = _session_identity(
+        session_table, {"nwb_file_name": nwb_file_name}
+    )
+    supplied_positions = dict(position_inputs_by_condition or {})
+    supplied_movement = dict(movement_artifacts_by_condition or {})
+    movement_results: dict[str, dict[str, Any]] = {}
+    movement_selections: dict[str, dict[str, Any]] = {}
+    movement_parameters: dict[str, dict[str, Any]] = {}
+    movement_loaded: dict[str, dict[str, Any]] = {}
+    position_rows: dict[str, dict[str, Any]] = {}
+    positions: dict[str, Any] = {}
+    position_snapshots: dict[str, dict[str, Any]] = {}
+    for condition in ("light", "dark"):
+        movement_key = {
+            "movement_firing_rate_id": key[
+                f"{condition}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[condition] = _fetch1_dict(
+            movement_firing_rate_table, movement_key
+        )
+        movement_selections[condition] = _fetch1_dict(
+            movement_firing_rate_selection_table, movement_key
+        )
+        movement_selection = movement_selections[condition]
+        movement_result = movement_results[condition]
+        for field_name, expected in (
+            ("nwb_file_name", nwb_file_name),
+            ("epoch", epochs[condition]),
+            ("region", region),
+        ):
+            if str(movement_selection.get(field_name)) != expected:
+                raise ValueError(
+                    f"CVPCA {condition} MovementFiringRate has wrong {field_name}."
+                )
+        for field_name in (
+            "nwb_file_name",
+            "unit_filter_params_name",
+            "sorted_spikes_group_name",
+            "sorting_group_members_sha256",
+            "unit_filter_params_sha256",
+        ):
+            if str(group_row.get(field_name)) != str(
+                movement_selection.get(field_name)
+            ):
+                raise ValueError(
+                    "CVPCA regional group and MovementFiringRate differ in "
+                    f"{field_name}."
+                )
+        if str(group_row.get("selected_units_sha256")) != str(
+            movement_result.get("selected_units_sha256")
+        ) or int(group_row.get("n_units", -1)) != int(
+            movement_result.get("n_units", -2)
+        ):
+            raise ValueError(
+                "CVPCA regional group and MovementFiringRate units differ."
+            )
+        movement_parameters[condition] = _validate_movement_parameter_row(
+            _fetch1_dict(movement_parameters_table, movement_selection)
+        )
+        _validate_frozen_parameters(
+            movement_selection,
+            movement_parameters[condition],
+            field_name="movement_parameters_sha256",
+        )
+        if condition in supplied_movement:
+            movement_loaded[condition] = dict(supplied_movement[condition])
+        else:
+            movement_loaded[condition] = _load_movement_result_artifacts(
+                result_row=movement_result,
+                parameters=movement_parameters[condition],
+                expected_metadata={
+                    "animal_name": animal_name,
+                    "date": session_date,
+                    "region": region,
+                    "epoch": epochs[condition],
+                },
+            )
+        if str(movement_loaded[condition]["analysis_status"]) != str(
+            movement_result.get("analysis_status")
+        ):
+            raise ValueError("CVPCA MovementFiringRate status is inconsistent.")
+
+        position_key = {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epochs[condition],
+            "position_series_name": movement_selection[
+                "position_series_name"
+            ],
+        }
+        position_rows[condition] = _fetch1_dict(position_table, position_key)
+        positions[condition] = supplied_positions.get(condition)
+        if positions[condition] is None:
+            positions[condition] = position_table.load_position(
+                position_key, apply_analysis_offset=False
+            )
+        position_snapshots[condition] = _cv_pca_position_snapshot(
+            condition=condition,
+            row=position_rows[condition],
+            position=positions[condition],
+        )
+
+    if movement_parameters["light"] != movement_parameters["dark"]:
+        raise ValueError("CVPCA MovementFiringRate rows must share one definition.")
+    if position_snapshots["light"]["position_role"] != position_snapshots[
+        "dark"
+    ]["position_role"] or not position_snapshots["light"]["position_role"]:
+        raise ValueError("CVPCA Position rows must share one non-empty role.")
+
+    identity_columns = ("spikesorting_merge_id", "unit_id")
+    identity_rows: dict[str, list[dict[str, str]]] = {}
+    for condition in ("light", "dark"):
+        table = movement_loaded[condition]["table"]
+        identity_rows[condition] = [
+            {name: str(row[name]) for name in identity_columns}
+            for row in table.loc[:, list(identity_columns)].to_dict("records")
+        ]
+        if unit_identity_sha256(identity_rows[condition]) != str(
+            group_row["selected_units_sha256"]
+        ):
+            raise ValueError(
+                "CVPCA MovementFiringRate artifact units differ from its group."
+            )
+    if identity_rows["light"] != identity_rows["dark"]:
+        raise ValueError("CVPCA light and dark unit order must match exactly.")
+
+    trajectory_rows: dict[str, dict[str, dict[str, Any]]] = {
+        "light": {},
+        "dark": {},
+    }
+    selected_intervals: dict[str, dict[str, Any]] = {"light": {}, "dark": {}}
+    source_fields: dict[str, Any] = {}
+    supplied_intervals = dict(trajectory_interval_sets_by_condition or {})
+    for condition in ("light", "dark"):
+        condition_inputs = dict(supplied_intervals.get(condition, {}))
+        for trajectory_type in _DPP_TRAJECTORY_TYPES:
+            field_name = f"{condition}_{trajectory_type}_trajectory_type"
+            if str(key.get(field_name, trajectory_type)) != trajectory_type:
+                raise ValueError("CVPCA trajectory aliases must be canonical.")
+            trajectory_key = {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs[condition],
+                "trajectory_type": trajectory_type,
+            }
+            trajectory_rows[condition][trajectory_type] = _fetch1_dict(
+                trajectory_intervals_table, trajectory_key
+            )
+            selected_intervals[condition][trajectory_type] = condition_inputs.get(
+                trajectory_type
+            )
+            if selected_intervals[condition][trajectory_type] is None:
+                selected_intervals[condition][trajectory_type] = (
+                    trajectory_intervals_table.load_intervals(trajectory_key)
+                )
+            source_fields[field_name] = trajectory_type
+        cv_pca._validate_trajectory_mapping(
+            selected_intervals[condition],
+            name=f"{condition}_trajectory_intervals",
+        )
+
+    selected_graphs: dict[str, Mapping[str, Any]] = {}
+    graph_rows: dict[str, dict[str, Any]] = {}
+    supplied_graphs = dict(graph_inputs or {})
+    for trajectory_type in ("center_to_left", "center_to_right"):
+        field_name = f"{trajectory_type}_configuration_name"
+        if str(key.get(field_name, trajectory_type)) != trajectory_type:
+            raise ValueError("CVPCA graph aliases must be canonical.")
+        graph_key = {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": trajectory_type,
+        }
+        graph_rows[trajectory_type] = _fetch1_dict(
+            wtrack_graph_table, graph_key
+        )
+        selected_graphs[trajectory_type] = supplied_graphs.get(trajectory_type)
+        if selected_graphs[trajectory_type] is None:
+            selected_graphs[trajectory_type] = wtrack_graph_table.load_graph(
+                graph_key
+            )
+        source_fields[field_name] = trajectory_type
+    cv_pca._normalize_graph_inputs(selected_graphs)
+
+    trajectory_row_hashes = {
+        condition: {
+            trajectory: _ripple_decoding_catalog_row_sha256(
+                trajectory_rows[condition][trajectory]
+            )
+            for trajectory in _DPP_TRAJECTORY_TYPES
+        }
+        for condition in ("light", "dark")
+    }
+    trajectory_interval_hashes = {
+        condition: {
+            trajectory: _ripple_decoding_interval_sha256(
+                selected_intervals[condition][trajectory]
+            )
+            for trajectory in _DPP_TRAJECTORY_TYPES
+        }
+        for condition in ("light", "dark")
+    }
+    graph_row_hashes = {
+        trajectory: _ripple_decoding_catalog_row_sha256(graph_rows[trajectory])
+        for trajectory in selected_graphs
+    }
+    graph_input_hashes = {
+        trajectory: _epoch_motor_graph_input_sha256(selected_graphs[trajectory])
+        for trajectory in selected_graphs
+    }
+    movement_parameter_hash = str(
+        movement_selections["light"]["movement_parameters_sha256"]
+    )
+    if movement_parameter_hash != str(
+        movement_selections["dark"]["movement_parameters_sha256"]
+    ):
+        raise ValueError("CVPCA movement parameter snapshots must match.")
+
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "light_epoch": epochs["light"],
+        "dark_epoch": epochs["dark"],
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        "light_movement_firing_rate_id": key[
+            "light_movement_firing_rate_id"
+        ],
+        "dark_movement_firing_rate_id": key[
+            "dark_movement_firing_rate_id"
+        ],
+        **source_fields,
+        "cv_pca_param_name": parameters["cv_pca_param_name"],
+        "light_position_series_name": str(
+            movement_selections["light"]["position_series_name"]
+        ),
+        "dark_position_series_name": str(
+            movement_selections["dark"]["position_series_name"]
+        ),
+        "position_role": position_snapshots["light"]["position_role"],
+        "position_offset_samples": cv_pca.DEFAULT_POSITION_OFFSET_SAMPLES,
+        **{
+            f"{condition}_epoch_row_sha256": (
+                _ripple_decoding_catalog_row_sha256(epoch_rows[condition])
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_epoch_bounds_sha256": _cv_pca_epoch_bounds_sha256(
+                epoch_rows[condition]
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_position_row_sha256": position_snapshots[condition][
+                "row_sha256"
+            ]
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_position_values_sha256": position_snapshots[
+                condition
+            ]["values_sha256"]
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_position_timestamps_sha256": position_snapshots[
+                condition
+            ]["timestamps_sha256"]
+            for condition in ("light", "dark")
+        },
+        "region_group_row_sha256": _ripple_decoding_catalog_row_sha256(
+            group_row
+        ),
+        "sorting_group_members_sha256": str(
+            group_row["sorting_group_members_sha256"]
+        ),
+        "unit_filter_params_sha256": str(group_row["unit_filter_params_sha256"]),
+        "selected_units_sha256": str(group_row["selected_units_sha256"]),
+        "n_input_units": int(group_row["n_units"]),
+        "movement_param_name": str(
+            movement_parameters["light"]["movement_param_name"]
+        ),
+        "movement_parameters_sha256": movement_parameter_hash,
+        **{
+            f"{condition}_movement_selection_row_sha256": (
+                _ripple_decoding_catalog_row_sha256(
+                    movement_selections[condition]
+                )
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_result_row_sha256": (
+                _ripple_decoding_catalog_row_sha256(
+                    movement_results[condition]
+                )
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_firing_rate_file_sha256": _file_sha256(
+                Path(movement_results[condition]["movement_firing_rate_path"])
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_intervals_file_sha256": _file_sha256(
+                Path(movement_results[condition]["movement_intervals_path"])
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_rates_sha256": (
+                _ripple_decoding_movement_rates_sha256(
+                    movement_loaded[condition]["table"]
+                )
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_support_sha256": (
+                _ripple_decoding_interval_sha256(
+                    movement_loaded[condition]["movement_intervals"]
+                )
+            )
+            for condition in ("light", "dark")
+        },
+        **{
+            f"{condition}_movement_analysis_status": str(
+                movement_loaded[condition]["analysis_status"]
+            )
+            for condition in ("light", "dark")
+        },
+        "trajectory_rows_sha256_by_epoch_and_type": trajectory_row_hashes,
+        "trajectory_intervals_sha256_by_epoch_and_type": (
+            trajectory_interval_hashes
+        ),
+        "graph_rows_sha256_by_trajectory": graph_row_hashes,
+        "graph_inputs_sha256_by_trajectory": graph_input_hashes,
+        "cv_pca_parameters_sha256": provenance_sha256(parameters),
+        "cv_pca_effective_parameters_sha256": provenance_sha256(
+            effective_parameters
+        ),
+        "cv_pca_output_rule_sha256": output_rule_sha256,
+    }
+    return {
+        "cv_pca_id": selection_uuid("CVPCA", natural_key),
         **natural_key,
     }
 
@@ -8657,6 +9178,557 @@ def _load_movement_result_artifacts(
         "movement_intervals": movement_intervals,
         "analysis_status": status,
     }
+
+
+def _load_cv_pca_inputs(
+    *,
+    selection: Mapping[str, Any],
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load exact untrimmed positions, movement artifacts, laps, and graphs."""
+    nwb_file_name = str(selection["nwb_file_name"])
+    animal_name, session_date = _session_identity(session_table, selection)
+    movement_results = {}
+    movement_selections = {}
+    movement_parameters = {}
+    movement_artifacts = {}
+    positions = {}
+    for condition in ("light", "dark"):
+        movement_key = {
+            "movement_firing_rate_id": selection[
+                f"{condition}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[condition] = _fetch1_dict(
+            movement_firing_rate_table, movement_key
+        )
+        movement_selections[condition] = _fetch1_dict(
+            movement_firing_rate_selection_table, movement_key
+        )
+        movement_parameters[condition] = _validate_movement_parameter_row(
+            _fetch1_dict(
+                movement_parameters_table, movement_selections[condition]
+            )
+        )
+        movement_artifacts[condition] = _load_movement_result_artifacts(
+            result_row=movement_results[condition],
+            parameters=movement_parameters[condition],
+            expected_metadata={
+                "animal_name": animal_name,
+                "date": session_date,
+                "region": selection.get("_resolved_region", "") or str(
+                    movement_selections[condition]["region"]
+                ),
+                "epoch": selection[f"{condition}_epoch"],
+            },
+        )
+        positions[condition] = position_table.load_position(
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": selection[f"{condition}_epoch"],
+                "position_series_name": selection[
+                    f"{condition}_position_series_name"
+                ],
+            },
+            apply_analysis_offset=False,
+        )
+    trajectory_intervals = {
+        condition: {
+            trajectory_type: trajectory_intervals_table.load_intervals(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": selection[f"{condition}_epoch"],
+                    "trajectory_type": trajectory_type,
+                }
+            )
+            for trajectory_type in _DPP_TRAJECTORY_TYPES
+        }
+        for condition in ("light", "dark")
+    }
+    graphs = {
+        trajectory_type: wtrack_graph_table.load_graph(
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            }
+        )
+        for trajectory_type in ("center_to_left", "center_to_right")
+    }
+    return {
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "movement_parameters": movement_parameters,
+        "movement_artifacts": movement_artifacts,
+        "positions": positions,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graphs,
+    }
+
+
+def _cv_pca_upstream_provenance(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the immutable selection digests stored inside a cvPCA bundle."""
+    scalar_fields = (
+        "nwb_file_name",
+        "light_epoch",
+        "dark_epoch",
+        "region_sorted_spikes_group_id",
+        "light_movement_firing_rate_id",
+        "dark_movement_firing_rate_id",
+        "light_epoch_row_sha256",
+        "dark_epoch_row_sha256",
+        "light_epoch_bounds_sha256",
+        "dark_epoch_bounds_sha256",
+        "light_position_row_sha256",
+        "dark_position_row_sha256",
+        "light_position_values_sha256",
+        "dark_position_values_sha256",
+        "light_position_timestamps_sha256",
+        "dark_position_timestamps_sha256",
+        "region_group_row_sha256",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+        "selected_units_sha256",
+        "movement_parameters_sha256",
+        "light_movement_selection_row_sha256",
+        "dark_movement_selection_row_sha256",
+        "light_movement_result_row_sha256",
+        "dark_movement_result_row_sha256",
+        "light_movement_firing_rate_file_sha256",
+        "dark_movement_firing_rate_file_sha256",
+        "light_movement_intervals_file_sha256",
+        "dark_movement_intervals_file_sha256",
+        "light_movement_rates_sha256",
+        "dark_movement_rates_sha256",
+        "light_movement_support_sha256",
+        "dark_movement_support_sha256",
+        "cv_pca_parameters_sha256",
+        "cv_pca_effective_parameters_sha256",
+        "cv_pca_output_rule_sha256",
+    )
+    nested_fields = (
+        "trajectory_rows_sha256_by_epoch_and_type",
+        "trajectory_intervals_sha256_by_epoch_and_type",
+        "graph_rows_sha256_by_trajectory",
+        "graph_inputs_sha256_by_trajectory",
+    )
+    return {
+        **{field: str(selection[field]) for field in scalar_fields},
+        **{
+            field: _epoch_motor_json_value(selection[field])
+            for field in nested_fields
+        },
+        "position_offset_samples": int(selection["position_offset_samples"]),
+        "n_input_units": int(selection["n_input_units"]),
+        "light_movement_analysis_status": str(
+            selection["light_movement_analysis_status"]
+        ),
+        "dark_movement_analysis_status": str(
+            selection["dark_movement_analysis_status"]
+        ),
+    }
+
+
+def _load_cv_pca_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify every frozen cvPCA source before computation."""
+    from v1ca1.spyglass.selection import provenance_sha256, unit_identity_sha256
+
+    group_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {"region_sorted_spikes_group_id": key["region_sorted_spikes_group_id"]},
+    )
+    region = _analysis_region(group_row["region_name"])
+    load_key = {**dict(key), "_resolved_region": region}
+    loaded = _load_cv_pca_inputs(
+        selection=load_key,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=movement_firing_rate_selection_table,
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    selection = _cv_pca_selection_row(
+        key=key,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=movement_firing_rate_selection_table,
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        session_table=session_table,
+        position_inputs_by_condition=loaded["positions"],
+        movement_artifacts_by_condition=loaded["movement_artifacts"],
+        trajectory_interval_sets_by_condition=loaded["trajectory_intervals"],
+        graph_inputs=loaded["graph_inputs"],
+    )
+    for field_name, expected in selection.items():
+        if field_name not in key or provenance_sha256(
+            _epoch_motor_json_value(key[field_name])
+        ) != provenance_sha256(_epoch_motor_json_value(expected)):
+            raise ValueError(
+                f"CVPCA selection changed after insertion: {field_name}."
+            )
+    parameters = _validate_cv_pca_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    _validate_frozen_parameters(
+        selection,
+        parameters,
+        field_name="cv_pca_parameters_sha256",
+    )
+    epoch_start = min(
+        float(
+            _fetch1_dict(
+                epoch_intervals_table,
+                {
+                    "nwb_file_name": selection["nwb_file_name"],
+                    "epoch": selection[f"{condition}_epoch"],
+                },
+            )["start_time"]
+        )
+        for condition in ("light", "dark")
+    )
+    epoch_stop = max(
+        float(
+            _fetch1_dict(
+                epoch_intervals_table,
+                {
+                    "nwb_file_name": selection["nwb_file_name"],
+                    "epoch": selection[f"{condition}_epoch"],
+                },
+            )["stop_time"]
+        )
+        for condition in ("light", "dark")
+    )
+    loaded_spikes = region_sorted_spikes_group_table.load_spikes(
+        {"region_sorted_spikes_group_id": selection["region_sorted_spikes_group_id"]},
+        time_support=(epoch_start, epoch_stop),
+    )
+    if unit_identity_sha256(loaded_spikes["unit_ids"]) != str(
+        selection["selected_units_sha256"]
+    ):
+        raise ValueError("CVPCA regional group units changed after selection.")
+    spike_identity = [
+        (str(row["spikesorting_merge_id"]), str(row["unit_id"]))
+        for row in loaded_spikes["unit_ids"]
+    ]
+    for condition in ("light", "dark"):
+        movement_identity = [
+            (str(row["spikesorting_merge_id"]), str(row["unit_id"]))
+            for row in loaded["movement_artifacts"][condition]["table"].to_dict(
+                "records"
+            )
+        ]
+        if movement_identity != spike_identity:
+            raise ValueError(
+                "CVPCA spike and MovementFiringRate unit order must match."
+            )
+    animal_name, session_date = _session_identity(session_table, selection)
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "group_row": group_row,
+        "region": region,
+        "loaded_spikes": loaded_spikes,
+        "animal_name": animal_name,
+        "date": session_date,
+        **loaded,
+    }
+
+
+def _cv_pca_compute_inputs(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Return standalone cvPCA arguments from one verified table context."""
+    selection = context["selection"]
+    parameters = context["parameters"]
+    return {
+        "cv_pca_id": selection["cv_pca_id"],
+        "animal_name": context["animal_name"],
+        "date": context["date"],
+        "region": context["region"],
+        "light_epoch": selection["light_epoch"],
+        "dark_epoch": selection["dark_epoch"],
+        "spikes": context["loaded_spikes"]["ts_group"],
+        "stable_unit_ids": context["loaded_spikes"]["unit_ids"],
+        "light_position": context["positions"]["light"],
+        "dark_position": context["positions"]["dark"],
+        "light_movement_intervals": context["movement_artifacts"]["light"][
+            "movement_intervals"
+        ],
+        "dark_movement_intervals": context["movement_artifacts"]["dark"][
+            "movement_intervals"
+        ],
+        "light_movement_firing_rate_hz": context["movement_artifacts"]["light"][
+            "table"
+        ]["movement_firing_rate_hz"].to_numpy(dtype=float),
+        "dark_movement_firing_rate_hz": context["movement_artifacts"]["dark"][
+            "table"
+        ]["movement_firing_rate_hz"].to_numpy(dtype=float),
+        "light_trajectory_intervals": context["trajectory_intervals"]["light"],
+        "dark_trajectory_intervals": context["trajectory_intervals"]["dark"],
+        "graph_inputs": context["graph_inputs"],
+        "upstream_provenance": _cv_pca_upstream_provenance(selection),
+        "parameter_name": parameters["cv_pca_param_name"],
+        "parameter_sha256": selection["cv_pca_effective_parameters_sha256"],
+        "position_offset_samples": int(selection["position_offset_samples"]),
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "cv_pca_param_name"
+        },
+    }
+
+
+def _cv_pca_result_row(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one DataJoint payload from a validated standalone cvPCA bundle."""
+    from v1ca1.spyglass import cv_pca
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    paths = result["artifact_paths"]
+    selected_units = result["selected_units"]
+    identities = selected_units.loc[
+        :, ["spikesorting_merge_id", "unit_id"]
+    ].to_dict("records")
+    return {
+        "artifact_manifest_path": str(paths["manifest_path"]),
+        "result_path": str(paths["result_path"]),
+        "summary_path": str(paths["summary_path"]),
+        "spectrum_path": str(paths["spectrum_path"]),
+        "selected_units_path": str(paths["selected_units_path"]),
+        "lap_assignments_path": str(paths["lap_assignments_path"]),
+        "trajectory_qc_path": str(paths["trajectory_qc_path"]),
+        "result_schema_version": cv_pca.RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": cv_pca.BUNDLE_SCHEMA_VERSION,
+        "n_input_units": int(result["n_input_units"]),
+        "n_selected_units": int(result["n_selected_units"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": unit_identity_sha256(identities),
+        "legacy_artifact_provenance": (
+            dict(result["legacy_artifact_provenance"])
+            if result.get("legacy_artifact_provenance")
+            else None
+        ),
+        "_created_artifact_paths": list(
+            result.get("_created_artifact_paths", ())
+        ),
+    }
+
+
+def _make_cv_pca_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one immutable cvPCA bundle."""
+    from v1ca1.spyglass import cv_pca
+
+    context = _load_cv_pca_context(
+        key=key,
+        parameters_table=parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=movement_firing_rate_selection_table,
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    result = cv_pca.compute_cv_pca(**_cv_pca_compute_inputs(context))
+    write_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        write_kwargs["artifact_root"] = artifact_root
+    written = cv_pca.write_cv_pca_artifact(result, **write_kwargs)
+    return _cv_pca_result_row(written)
+
+
+def _validate_cv_pca_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one loaded cvPCA bundle to match its DataJoint rows."""
+    from v1ca1.spyglass import cv_pca
+    from v1ca1.spyglass.selection import provenance_sha256, unit_identity_sha256
+
+    validated = cv_pca.validate_cv_pca_result(bundle)
+    parameters = _validate_cv_pca_parameter_row(parameters_row)
+    expected_parameters = cv_pca.validate_cv_pca_parameters(
+        region=str(region_row["region_name"]),
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "cv_pca_param_name"
+        },
+    )
+    expected_metadata = {
+        "cv_pca_id": str(selection_row["cv_pca_id"]),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "region": str(region_row["region_name"]),
+        "light_epoch": str(selection_row["light_epoch"]),
+        "dark_epoch": str(selection_row["dark_epoch"]),
+        "parameter_name": parameters["cv_pca_param_name"],
+        "parameter_sha256": selection_row[
+            "cv_pca_effective_parameters_sha256"
+        ],
+    }
+    for field_name, expected in expected_metadata.items():
+        if str(validated[field_name]) != str(expected):
+            raise ValueError(
+                f"CVPCA artifact metadata differs from selection: {field_name}."
+            )
+    if validated["parameters"] != expected_parameters or validated[
+        "upstream_provenance"
+    ] != _cv_pca_upstream_provenance(selection_row):
+        raise ValueError("CVPCA artifact parameters or provenance differ.")
+    if int(validated["position_offset_samples"]) != int(
+        selection_row["position_offset_samples"]
+    ):
+        raise ValueError("CVPCA artifact position offset differs from selection.")
+
+    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
+    try:
+        artifact_root = artifact_dir.parents[5]
+    except IndexError as exc:
+        raise ValueError("CVPCA artifact does not use the canonical layout.") from exc
+    expected_paths = cv_pca.get_cv_pca_artifact_paths(
+        animal_name=animal_name,
+        date=date,
+        light_epoch=selection_row["light_epoch"],
+        dark_epoch=selection_row["dark_epoch"],
+        region=region_row["region_name"],
+        cv_pca_id=selection_row["cv_pca_id"],
+        artifact_root=artifact_root,
+    )
+    for field_name, path_key in (
+        ("artifact_manifest_path", "manifest_path"),
+        ("result_path", "result_path"),
+        ("summary_path", "summary_path"),
+        ("spectrum_path", "spectrum_path"),
+        ("selected_units_path", "selected_units_path"),
+        ("lap_assignments_path", "lap_assignments_path"),
+        ("trajectory_qc_path", "trajectory_qc_path"),
+    ):
+        if Path(result_row[field_name]) != Path(expected_paths[path_key]):
+            raise ValueError(f"CVPCA result path is not canonical: {field_name}.")
+    for field_name in (
+        "n_input_units",
+        "n_selected_units",
+        "analysis_status",
+        "artifact_origin",
+    ):
+        if str(result_row.get(field_name)) != str(validated[field_name]):
+            raise ValueError(
+                f"CVPCA result metadata disagrees with artifact: {field_name}."
+            )
+    identities = validated["selected_units"].loc[
+        :, ["spikesorting_merge_id", "unit_id"]
+    ].to_dict("records")
+    selected_digest = unit_identity_sha256(identities)
+    if selected_digest != str(result_row["selected_units_sha256"]) or (
+        selected_digest != str(region_row["selected_units_sha256"])
+    ):
+        raise ValueError("CVPCA selected-unit digest disagrees with its group.")
+    if str(result_row["result_schema_version"]) != cv_pca.RESULT_SCHEMA_VERSION or str(
+        result_row["bundle_schema_version"]
+    ) != cv_pca.BUNDLE_SCHEMA_VERSION:
+        raise ValueError("CVPCA schema versions disagree.")
+    artifact_legacy = validated.get("legacy_artifact_provenance") or None
+    if result_row.get("legacy_artifact_provenance") != artifact_legacy:
+        raise ValueError("CVPCA legacy provenance disagrees.")
+    if provenance_sha256(parameters) != str(
+        selection_row["cv_pca_parameters_sha256"]
+    ):
+        raise ValueError("CVPCA parameter snapshot is stale.")
+
+
+def _register_existing_cv_pca_row(
+    *,
+    key: Mapping[str, Any],
+    legacy_result_path: Path,
+    legacy_summary_path: Path,
+    parameters_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Strictly recompute, compare, and register one legacy cvPCA pair."""
+    from v1ca1.spyglass import cv_pca
+
+    context = _load_cv_pca_context(
+        key=key,
+        parameters_table=parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=movement_firing_rate_selection_table,
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    register_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        register_kwargs["artifact_root"] = artifact_root
+    registered = cv_pca.register_existing_cv_pca_artifact(
+        legacy_result_path=Path(legacy_result_path),
+        legacy_summary_path=Path(legacy_summary_path),
+        compute_inputs=_cv_pca_compute_inputs(context),
+        overwrite=False,
+        **register_kwargs,
+    )
+    return _cv_pca_result_row(registered)
 
 
 def _make_path_specific_place_tuning_curve_row(
@@ -16055,6 +17127,14 @@ def _construct_tables(
         "epoch_motor_behavior_register_existing",
         _register_existing_epoch_motor_behavior_row,
     )
+    cv_pca_compute_hook = runtime_hooks.get(
+        "cv_pca_compute",
+        _make_cv_pca_row,
+    )
+    cv_pca_register_hook = runtime_hooks.get(
+        "cv_pca_register_existing",
+        _register_existing_cv_pca_row,
+    )
     tuning_curve_compute_hook = runtime_hooks.get(
         "path_specific_place_tuning_curve_compute",
         _make_path_specific_place_tuning_curve_row,
@@ -16171,6 +17251,8 @@ def _construct_tables(
             movement_compute_hook,
             epoch_motor_behavior_compute_hook,
             epoch_motor_behavior_register_hook,
+            cv_pca_compute_hook,
+            cv_pca_register_hook,
             tuning_curve_compute_hook,
             tuning_curve_register_hook,
             tuning_similarity_compute_hook,
@@ -16722,6 +17804,216 @@ def _construct_tables(
 
     MovementFiringRate = main_schema(MovementFiringRate)
     main_context["MovementFiringRate"] = MovementFiringRate
+
+    class CVPCAParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.CV_PCA_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one named cvPCA parameter row."""
+            validated = _validate_cv_pca_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_presets(
+            cls, *, skip_duplicates: bool = True
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the V1 and CA1 manuscript seed-47 rows."""
+            return [
+                cls.insert_parameters(
+                    parameters,
+                    skip_duplicates=skip_duplicates,
+                )
+                for parameters in table_specs.CV_PCA_PARAMETER_PRESETS
+            ]
+
+    CVPCAParameters = main_schema(CVPCAParameters)
+    main_context["CVPCAParameters"] = CVPCAParameters
+
+    class CVPCASelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.CV_PCA_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, UUID, and insert one cvPCA selection."""
+            row = _cv_pca_selection_row(
+                key=key,
+                epoch_intervals_table=EpochIntervals,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=MovementFiringRateSelection,
+                movement_parameters_table=MovementParameters,
+                position_table=Position,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=CVPCAParameters,
+                session_table=session_table,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    CVPCASelection = main_schema(CVPCASelection)
+    main_context["CVPCASelection"] = CVPCASelection
+
+    class CVPCA(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.CV_PCA_DEFINITION
+        _compute_hook = staticmethod(cv_pca_compute_hook)
+        _register_existing_hook = staticmethod(cv_pca_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one immutable cvPCA bundle."""
+            selection = _fetch1_dict(CVPCASelection, key)
+            artifact_row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=CVPCAParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "cv_pca_id": selection["cv_pca_id"],
+                        **artifact_row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_cv_pca_bundle(
+            cls, key: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            """Load and verify one canonical cvPCA artifact bundle."""
+            from v1ca1.spyglass.cv_pca import load_cv_pca_artifact
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                CVPCASelection, {"cv_pca_id": row["cv_pca_id"]}
+            )
+            parameters = _fetch1_dict(CVPCAParameters, selection)
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table, selection
+            )
+            bundle = load_cv_pca_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_cv_pca_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            legacy_result_path: Path | str,
+            legacy_summary_path: Path | str,
+            overwrite: bool = False,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Strictly recompute, compare, and register one legacy pair."""
+            if overwrite:
+                raise ValueError(
+                    "CVPCA results are immutable; create a new selection "
+                    "instead of overwriting."
+                )
+            selection = _fetch1_dict(CVPCASelection, key)
+            result_key = {"cv_pca_id": selection["cv_pca_id"]}
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "CVPCA already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    legacy_result_path=Path(legacy_result_path),
+                    legacy_summary_path=Path(legacy_summary_path),
+                    parameters_table=CVPCAParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                **result_key,
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    CVPCA = main_schema(CVPCA)
+    main_context["CVPCA"] = CVPCA
 
     class RippleModulationParameters(spyglass_mixin, dj_module.Manual):
         definition = table_specs.RIPPLE_MODULATION_PARAMETERS_DEFINITION
@@ -20309,6 +21601,9 @@ def _construct_tables(
         "epoch_motor_behavior": EpochMotorBehavior,
         "movement_firing_rate_selection": MovementFiringRateSelection,
         "movement_firing_rate": MovementFiringRate,
+        "cv_pca_parameters": CVPCAParameters,
+        "cv_pca_selection": CVPCASelection,
+        "cv_pca": CVPCA,
         "ripple_modulation_parameters": RippleModulationParameters,
         "ripple_modulation_selection": RippleModulationSelection,
         "ripple_modulation": RippleModulation,

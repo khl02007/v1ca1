@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 
 from v1ca1.spyglass import table_specs
-from v1ca1.spyglass.selection import provenance_sha256
+from v1ca1.spyglass.selection import provenance_sha256, unit_identity_sha256
 from v1ca1.spyglass.spikes import resolve_sorted_spikes_group_provenance
 import v1ca1.spyglass.tables as tables_module
 from v1ca1.spyglass.tables import (
@@ -25,6 +25,7 @@ from v1ca1.spyglass.tables import (
     _attach_registered_unit_identity,
     _construct_tables,
     _cross_region_xcorr_selection_row,
+    _cv_pca_selection_row,
     _dark_light_glm_selection_row,
     _dpp_encoding_comparison_selection_row,
     _dpp_tuning_curve_selection_row,
@@ -46,6 +47,7 @@ from v1ca1.spyglass.tables import (
     _make_ripple_modulation_row,
     _make_ripple_glm_row,
     _make_cross_region_xcorr_row,
+    _make_cv_pca_row,
     _make_swap_glm_row,
     _make_swap_tuning_curve_comparison_row,
     _motor_encoding_comparison_selection_row,
@@ -57,6 +59,7 @@ from v1ca1.spyglass.tables import (
     _ripple_glm_selection_row,
     _register_existing_ripple_glm_row,
     _register_existing_cross_region_xcorr_row,
+    _register_existing_cv_pca_row,
     _register_existing_dpp_encoding_comparison_row,
     _register_existing_dark_light_glm_row,
     _register_existing_swap_glm_row,
@@ -77,6 +80,8 @@ from v1ca1.spyglass.tables import (
     _validate_ripple_provenance,
     _validate_ripple_glm_parameter_row,
     _validate_cross_region_xcorr_parameter_row,
+    _validate_cv_pca_artifact_link,
+    _validate_cv_pca_parameter_row,
     _validate_swap_glm_artifact_link,
     _validate_swap_glm_parameter_row,
     _validate_swap_tuning_curve_comparison_artifact_link,
@@ -1493,6 +1498,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "epoch_motor_behavior",
         "movement_firing_rate_selection",
         "movement_firing_rate",
+        "cv_pca_parameters",
+        "cv_pca_selection",
+        "cv_pca",
         "ripple_modulation_parameters",
         "ripple_modulation_selection",
         "ripple_modulation",
@@ -1554,6 +1562,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "PathSpecificPlaceStabilitySelection" in schemas[0].context
     assert "PathSpecificPlaceStability" in schemas[0].context
     assert "RegionSortedSpikesGroup" in schemas[0].context
+    assert "CVPCAParameters" in schemas[0].context
+    assert "CVPCASelection" in schemas[0].context
+    assert "CVPCA" in schemas[0].context
     assert "DPPEncodingComparisonParameters" in schemas[0].context
     assert "DPPEncodingComparisonSelection" in schemas[0].context
     assert "DPPEncodingComparison" in schemas[0].context
@@ -1646,6 +1657,40 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "'no_movement'" in movement_result
     assert "artifact_origin" not in movement_result
     assert not hasattr(bundle["movement_firing_rate"], "register_existing")
+
+    cv_pca_parameters = bundle["cv_pca_parameters"].definition
+    assert "cv_pca_param_name: varchar(64)" in cv_pca_parameters
+    assert "random_seed: int unsigned" in cv_pca_parameters
+    assert "min_firing_rate_hz: double" in cv_pca_parameters
+    assert "\nregion:" not in cv_pca_parameters
+
+    cv_pca_selection = bundle["cv_pca_selection"].definition
+    assert "cv_pca_id: uuid" in cv_pca_selection
+    assert "light_epoch='epoch'" in cv_pca_selection
+    assert "dark_epoch='epoch'" in cv_pca_selection
+    assert "-> RegionSortedSpikesGroup" in cv_pca_selection
+    assert "light_movement_firing_rate_id='movement_firing_rate_id'" in (
+        cv_pca_selection
+    )
+    assert "dark_movement_firing_rate_id='movement_firing_rate_id'" in (
+        cv_pca_selection
+    )
+    assert "position_offset_samples: bigint unsigned" in cv_pca_selection
+    assert "trajectory_intervals_sha256_by_epoch_and_type: longblob" in (
+        cv_pca_selection
+    )
+    assert "graph_inputs_sha256_by_trajectory: longblob" in cv_pca_selection
+    assert "cv_pca_output_rule_sha256: char(64)" in cv_pca_selection
+
+    cv_pca_result = bundle["cv_pca"].definition
+    assert "-> CVPCASelection" in cv_pca_result
+    assert "result_path: filepath@analysis" in cv_pca_result
+    assert "spectrum_path: filepath@analysis" in cv_pca_result
+    assert "lap_assignments_path: filepath@analysis" in cv_pca_result
+    assert "trajectory_qc_path: filepath@analysis" in cv_pca_result
+    assert "'no_movement'" in cv_pca_result
+    assert "'insufficient_laps'" in cv_pca_result
+    assert hasattr(bundle["cv_pca"], "register_existing")
 
     tuning_selection = bundle[
         "path_specific_place_tuning_curve_selection"
@@ -2160,6 +2205,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     ripple_decoding_parameters = bundle[
         "ripple_decoding_comparison_parameters"
     ]
+    cv_pca_parameters = bundle["cv_pca_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
@@ -2172,6 +2218,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     ripple_glm_rows = ripple_glm_parameters.insert_defaults()
     xcorr_rows = xcorr_parameters.insert_defaults()
     ripple_decoding_rows = ripple_decoding_parameters.insert_defaults()
+    cv_pca_rows = cv_pca_parameters.insert_presets()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -2182,6 +2229,27 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert movement_parameters._insert_calls == [
         (movement_row, {"skip_duplicates": True})
     ]
+    assert cv_pca_rows == [
+        dict(row) for row in table_specs.CV_PCA_PARAMETER_PRESETS
+    ]
+    assert cv_pca_parameters._insert_calls == [
+        (row, {"skip_duplicates": True}) for row in cv_pca_rows
+    ]
+    assert _validate_cv_pca_parameter_row(
+        {
+            **cv_pca_rows[0],
+            "n_groups": np.int64(4),
+            "random_seed": np.int64(47),
+        }
+    ) == cv_pca_rows[0]
+    with pytest.raises(ValueError, match="exactly the declared fields"):
+        cv_pca_parameters.insert_parameters(
+            {**cv_pca_rows[0], "region": "v1"}
+        )
+    with pytest.raises(ValueError, match="at least 3"):
+        cv_pca_parameters.insert_parameters(
+            {**cv_pca_rows[0], "n_groups": 2}
+        )
 
     assert ripple_row == dict(table_specs.DEFAULT_RIPPLE_MODULATION_PARAMETERS)
     assert "minimum_ripple_mean_zscore" not in ripple_row
@@ -7522,6 +7590,15 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             {"encoding_comparison_path": "old-encoding.parquet"},
         ),
         (
+            "cv_pca",
+            "cv_pca_id",
+            "cv_pca_register_existing",
+            {
+                "legacy_result_path": "old-cv-pca.nc",
+                "legacy_summary_path": "old-cv-pca-summary.parquet",
+            },
+        ),
+        (
             "motor_encoding_comparison",
             "motor_encoding_comparison_id",
             "motor_encoding_comparison_register_existing",
@@ -7627,6 +7704,15 @@ def test_register_existing_rejects_overwrite_before_hook(
             "dpp_encoding_comparison_id",
             "dpp_encoding_comparison_register_existing",
             {"encoding_comparison_path": "old-encoding.parquet"},
+        ),
+        (
+            "cv_pca",
+            "cv_pca_id",
+            "cv_pca_register_existing",
+            {
+                "legacy_result_path": "old-cv-pca.nc",
+                "legacy_summary_path": "old-cv-pca-summary.parquet",
+            },
         ),
         (
             "motor_encoding_comparison",
@@ -8582,3 +8668,653 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
     assert row["_created_artifact_paths"] == [
         str(tmp_path / "L14" / "20240102" / "epoch_motor_behavior" / "02_r1" / str(result_id))
     ]
+
+
+def _cv_pca_selection_inputs(tmp_path: Path) -> dict[str, Any]:
+    """Return complete database-free sources for one cvPCA selection."""
+    nwb_file_name = "L1420240102_augmented.nwb"
+    epochs = {"light": "02_r1", "dark": "08_r4"}
+    group_id = uuid.uuid4()
+    movement_ids = {condition: uuid.uuid4() for condition in epochs}
+    unit_ids = [
+        {"spikesorting_merge_id": "merge-a", "unit_id": "1"},
+        {"spikesorting_merge_id": "merge-a", "unit_id": "2"},
+    ]
+    selected_units_sha256 = unit_identity_sha256(unit_ids)
+    group_row = {
+        "region_sorted_spikes_group_id": group_id,
+        "nwb_file_name": nwb_file_name,
+        "unit_filter_params_name": "all_units",
+        "sorted_spikes_group_name": "all shanks",
+        "region_name": "v1",
+        "sorting_group_members": ["merge-a"],
+        "sorting_group_members_sha256": "a" * 64,
+        "unit_filter_include_labels": [],
+        "unit_filter_exclude_labels": [],
+        "unit_filter_params_sha256": "b" * 64,
+        "n_units": 2,
+        "selected_units_sha256": selected_units_sha256,
+    }
+    epoch_rows = {
+        "light": {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epochs["light"],
+            "start_time": 10.0,
+            "stop_time": 20.0,
+            "nwb_epoch_start_time": 10.0,
+            "nwb_epoch_stop_time": 20.0,
+            "epoch_type": "run",
+            "condition": "AB",
+            "is_light": True,
+            "source_object_id": "light-epoch",
+        },
+        "dark": {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epochs["dark"],
+            "start_time": 30.0,
+            "stop_time": 40.0,
+            "nwb_epoch_start_time": 30.0,
+            "nwb_epoch_stop_time": 40.0,
+            "epoch_type": "run",
+            "condition": "dark",
+            "is_light": False,
+            "source_object_id": "dark-epoch",
+        },
+    }
+    movement_parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    movement_parameters_sha256 = provenance_sha256(movement_parameters)
+    movement_selections = {}
+    movement_results = {}
+    movement_artifacts = {}
+    position_rows = {}
+    position_inputs = {}
+    for condition, epoch in epochs.items():
+        position_name = f"head_{epoch}"
+        movement_selections[condition] = {
+            "movement_firing_rate_id": movement_ids[condition],
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": position_name,
+            "movement_param_name": "default",
+            "unit_filter_params_name": "all_units",
+            "sorted_spikes_group_name": "all shanks",
+            "region": "v1",
+            "sorting_group_members": ["merge-a"],
+            "sorting_group_members_sha256": "a" * 64,
+            "unit_filter_include_labels": [],
+            "unit_filter_exclude_labels": [],
+            "unit_filter_params_sha256": "b" * 64,
+            "movement_parameters_sha256": movement_parameters_sha256,
+        }
+        firing_rate_path = tmp_path / f"{condition}_movement.parquet"
+        intervals_path = tmp_path / f"{condition}_movement.npz"
+        firing_rate_path.write_bytes(f"{condition}-rates".encode())
+        intervals_path.write_bytes(f"{condition}-intervals".encode())
+        movement_results[condition] = {
+            "movement_firing_rate_id": movement_ids[condition],
+            "movement_firing_rate_path": str(firing_rate_path),
+            "movement_intervals_path": str(intervals_path),
+            "n_units": 2,
+            "n_valid_units": 2,
+            "n_units_with_spikes": 2,
+            "movement_interval_count": 1,
+            "movement_duration_s": 8.0,
+            "analysis_status": "valid",
+            "selected_units_sha256": selected_units_sha256,
+        }
+        table = pd.DataFrame(
+            {
+                "spikesorting_merge_id": ["merge-a", "merge-a"],
+                "unit_id": ["1", "2"],
+                "stable_unit_id": ["merge-a:1", "merge-a:2"],
+                "movement_firing_rate_hz": [1.0, 1.5],
+                "firing_rate_status": ["valid", "valid"],
+            }
+        )
+        start = 10.0 if condition == "light" else 30.0
+        movement_artifacts[condition] = {
+            "table": table,
+            "movement_intervals": _RippleDecodingIntervals(
+                [start + 1.0], [start + 9.0]
+            ),
+            "analysis_status": "valid",
+        }
+        timestamps = start + np.arange(100, dtype=float) * 0.1
+        values = np.column_stack(
+            (np.arange(100, dtype=float) * 0.2, np.zeros(100))
+        )
+        position_rows[condition] = {
+            "nwb_file_name": nwb_file_name,
+            "epoch": epoch,
+            "position_series_name": position_name,
+            "position_role": "head",
+            "start_index": 0,
+            "stop_index_exclusive": 100,
+            "sample_count": 100,
+            "analysis_start_offset_samples": 10,
+            "start_time": float(timestamps[0]),
+            "stop_time": float(timestamps[-1]),
+            "spatial_unit": "cm",
+            "source_object_id": f"{condition}-position",
+        }
+        position_inputs[condition] = SimpleNamespace(t=timestamps, d=values)
+
+    trajectory_rows = []
+    trajectory_intervals = {"light": {}, "dark": {}}
+    for condition, epoch in epochs.items():
+        base = 10.5 if condition == "light" else 30.5
+        for trajectory_index, trajectory in enumerate(
+            _DPP_ENCODING_TRAJECTORIES
+        ):
+            trajectory_rows.append(
+                {
+                    "nwb_file_name": nwb_file_name,
+                    "epoch": epoch,
+                    "trajectory_type": trajectory,
+                    "interval_count": 4,
+                    "source_object_id": f"{condition}-{trajectory}",
+                }
+            )
+            starts = base + trajectory_index * 0.1 + np.arange(4) * 2.0
+            trajectory_intervals[condition][trajectory] = (
+                _RippleDecodingIntervals(starts, starts + 0.5)
+            )
+    graph_inputs = {
+        trajectory: {
+            "configuration_name": trajectory,
+            "coordinate_unit": "cm",
+            "track_graph_kwargs": {
+                "node_positions": [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]],
+                "edges": [[0, 1], [1, 2]],
+            },
+            "linearization_kwargs": {
+                "edge_order": [[0, 1], [1, 2]],
+                "edge_spacing": [0.0],
+                "use_HMM": False,
+            },
+        }
+        for trajectory in ("center_to_left", "center_to_right")
+    }
+    graph_rows = {
+        trajectory: {
+            "nwb_file_name": nwb_file_name,
+            "configuration_name": trajectory,
+            "coordinate_unit": "cm",
+            "use_hmm": False,
+            "source_object_id": f"graph-{trajectory}",
+        }
+        for trajectory in graph_inputs
+    }
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "light_epoch": epochs["light"],
+        "dark_epoch": epochs["dark"],
+        "region_sorted_spikes_group_id": group_id,
+        "light_movement_firing_rate_id": movement_ids["light"],
+        "dark_movement_firing_rate_id": movement_ids["dark"],
+        "cv_pca_param_name": "manuscript_v1_seed47",
+    }
+    return {
+        "key": key,
+        "epoch_rows": epoch_rows,
+        "group_row": group_row,
+        "movement_parameters": movement_parameters,
+        "movement_selections": movement_selections,
+        "movement_results": movement_results,
+        "movement_artifacts": movement_artifacts,
+        "position_rows": position_rows,
+        "position_inputs": position_inputs,
+        "trajectory_rows": trajectory_rows,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_rows": graph_rows,
+        "graph_inputs": graph_inputs,
+        "parameters": dict(table_specs.MANUSCRIPT_V1_CV_PCA_PARAMETERS),
+    }
+
+
+def _build_cv_pca_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one cvPCA selection from injectable fake relations."""
+    return _cv_pca_selection_row(
+        key=inputs["key"],
+        epoch_intervals_table=_FakeRowsRelation(
+            list(inputs["epoch_rows"].values())
+        ),
+        region_sorted_spikes_group_table=_FakeRelation(inputs["group_row"]),
+        movement_firing_rate_table=_FakeRowsRelation(
+            list(inputs["movement_results"].values())
+        ),
+        movement_firing_rate_selection_table=_FakeRowsRelation(
+            list(inputs["movement_selections"].values())
+        ),
+        movement_parameters_table=_FakeRelation(inputs["movement_parameters"]),
+        position_table=_FakeRowsRelation(list(inputs["position_rows"].values())),
+        trajectory_intervals_table=_FakeRowsRelation(inputs["trajectory_rows"]),
+        wtrack_graph_table=_FakeKeyedRelation(
+            "configuration_name", inputs["graph_rows"]
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        session_table=_FakeRelation(
+            {
+                "subject_id": "L14",
+                "session_start_time": datetime(2024, 1, 2),
+            }
+        ),
+        position_inputs_by_condition=inputs["position_inputs"],
+        movement_artifacts_by_condition=inputs["movement_artifacts"],
+        trajectory_interval_sets_by_condition=inputs["trajectory_intervals"],
+        graph_inputs=inputs["graph_inputs"],
+    )
+
+
+def test_cv_pca_selection_freezes_every_source_and_uuid_mutation(
+    tmp_path: Path,
+) -> None:
+    """Every scientific source and random seed participates in UUIDv5."""
+    from v1ca1.spyglass import cv_pca
+
+    inputs = _cv_pca_selection_inputs(tmp_path)
+    first = _build_cv_pca_selection(inputs)
+    assert first == _build_cv_pca_selection(inputs)
+    assert first["cv_pca_id"].version == 5
+    assert first["position_offset_samples"] == 10
+    assert first["cv_pca_output_rule_sha256"] == cv_pca.OUTPUT_RULE_SHA256
+    assert set(first["graph_inputs_sha256_by_trajectory"]) == {
+        "center_to_left",
+        "center_to_right",
+    }
+
+    mutations = []
+    changed = copy.deepcopy(inputs)
+    changed["epoch_rows"]["light"]["condition"] = "BA"
+    mutations.append(changed)
+    changed = copy.deepcopy(inputs)
+    changed["position_inputs"]["light"].d[0, 0] += 0.5
+    mutations.append(changed)
+    changed = copy.deepcopy(inputs)
+    changed["movement_artifacts"]["dark"]["table"].loc[
+        0, "movement_firing_rate_hz"
+    ] += 0.25
+    mutations.append(changed)
+    changed = copy.deepcopy(inputs)
+    changed["trajectory_intervals"]["light"]["center_to_left"].end[0] += 0.01
+    mutations.append(changed)
+    changed = copy.deepcopy(inputs)
+    changed["graph_inputs"]["center_to_left"]["track_graph_kwargs"][
+        "node_positions"
+    ][1][0] += 0.25
+    changed["graph_inputs"]["center_to_right"]["track_graph_kwargs"][
+        "node_positions"
+    ][1][0] += 0.25
+    mutations.append(changed)
+    changed = copy.deepcopy(inputs)
+    changed["parameters"]["random_seed"] = 48
+    mutations.append(changed)
+    assert all(
+        _build_cv_pca_selection(changed)["cv_pca_id"] != first["cv_pca_id"]
+        for changed in mutations
+    )
+
+
+def test_cv_pca_selection_loads_untrimmed_position_once(
+    tmp_path: Path,
+) -> None:
+    """The table adapter never applies Position's analysis offset itself."""
+    inputs = _cv_pca_selection_inputs(tmp_path)
+
+    class PositionTable(_FakeRowsRelation):
+        def __init__(self, rows, positions):
+            super().__init__(rows)
+            self.positions = positions
+            self.calls = []
+
+        def load_position(self, key, *, apply_analysis_offset=True):
+            self.calls.append((dict(key), apply_analysis_offset))
+            condition = "light" if key["epoch"] == "02_r1" else "dark"
+            return self.positions[condition]
+
+    position_table = PositionTable(
+        list(inputs["position_rows"].values()), inputs["position_inputs"]
+    )
+    _cv_pca_selection_row(
+        key=inputs["key"],
+        epoch_intervals_table=_FakeRowsRelation(
+            list(inputs["epoch_rows"].values())
+        ),
+        region_sorted_spikes_group_table=_FakeRelation(inputs["group_row"]),
+        movement_firing_rate_table=_FakeRowsRelation(
+            list(inputs["movement_results"].values())
+        ),
+        movement_firing_rate_selection_table=_FakeRowsRelation(
+            list(inputs["movement_selections"].values())
+        ),
+        movement_parameters_table=_FakeRelation(inputs["movement_parameters"]),
+        position_table=position_table,
+        trajectory_intervals_table=_FakeRowsRelation(inputs["trajectory_rows"]),
+        wtrack_graph_table=_FakeKeyedRelation(
+            "configuration_name", inputs["graph_rows"]
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        session_table=_FakeRelation(
+            {
+                "subject_id": "L14",
+                "session_start_time": datetime(2024, 1, 2),
+            }
+        ),
+        movement_artifacts_by_condition=inputs["movement_artifacts"],
+        trajectory_interval_sets_by_condition=inputs["trajectory_intervals"],
+        graph_inputs=inputs["graph_inputs"],
+    )
+    assert len(position_table.calls) == 2
+    assert all(apply_offset is False for _key, apply_offset in position_table.calls)
+
+
+def test_cv_pca_passive_and_standalone_rules_are_identical() -> None:
+    """The passive schema and standalone computation share one exact rule."""
+    from v1ca1.spyglass import cv_pca
+
+    assert dict(table_specs.CV_PCA_OUTPUT_RULE) == cv_pca.OUTPUT_RULE
+    assert provenance_sha256(dict(table_specs.CV_PCA_OUTPUT_RULE)) == (
+        cv_pca.OUTPUT_RULE_SHA256
+    )
+    assert "cv_pca_parameters" in table_specs.TABLE_DEFINITIONS
+    assert "cv_pca_selection" in table_specs.TABLE_DEFINITIONS
+    assert "cv_pca" in table_specs.TABLE_DEFINITIONS
+
+
+def test_cv_pca_terminal_status_is_inserted_as_a_result_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expected empty-input outcomes remain successful computed rows."""
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+
+    def compute(**_kwargs):
+        return {
+            "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+            "result_path": str(artifact_dir / "cv_pca.nc"),
+            "summary_path": str(artifact_dir / "summary.parquet"),
+            "spectrum_path": str(artifact_dir / "within_spectrum.parquet"),
+            "selected_units_path": str(
+                artifact_dir / "selected_units.parquet"
+            ),
+            "lap_assignments_path": str(
+                artifact_dir / "lap_assignments.parquet"
+            ),
+            "trajectory_qc_path": str(
+                artifact_dir / "trajectory_qc.parquet"
+            ),
+            "result_schema_version": "1",
+            "bundle_schema_version": "1",
+            "n_input_units": 2,
+            "n_selected_units": 0,
+            "analysis_status": "no_movement",
+            "selected_units_sha256": "c" * 64,
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"cv_pca_id": result_id},
+    )
+    bundle, _schemas, _unit_selection_params = _fake_bundle(
+        runtime_hooks={"cv_pca_compute": compute}
+    )
+    result = bundle["cv_pca"]
+    result().make({"cv_pca_id": result_id})
+
+    inserted, kwargs = result._insert_calls[0]
+    assert kwargs == {}
+    assert inserted["cv_pca_id"] == result_id
+    assert inserted["analysis_status"] == "no_movement"
+    assert inserted["n_selected_units"] == 0
+    assert inserted["artifact_origin"] == "computed"
+
+
+def test_cv_pca_load_validates_artifact_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result loader delegates checksum and DataJoint-link validation."""
+    from v1ca1.spyglass import cv_pca
+
+    result_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+    result_row = {
+        "cv_pca_id": result_id,
+        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+    }
+    selection = {
+        "cv_pca_id": result_id,
+        "cv_pca_param_name": "manuscript_v1_seed47",
+        "region_sorted_spikes_group_id": group_id,
+        "light_epoch": "02_r1",
+        "dark_epoch": "08_r4",
+    }
+    parameters = dict(table_specs.MANUSCRIPT_V1_CV_PCA_PARAMETERS)
+    region_row = {
+        "region_sorted_spikes_group_id": group_id,
+        "region_name": "v1",
+    }
+    bundle_payload = {"loaded": True}
+    validation_calls = []
+
+    bundle, _schemas, _unit_selection_params = _fake_bundle()
+    result = bundle["cv_pca"]
+    selection_table = bundle["cv_pca_selection"]
+    parameters_table = bundle["cv_pca_parameters"]
+    group_table = bundle["region_sorted_spikes_group"]
+
+    def fetch(table, key):
+        if table is result:
+            return dict(result_row)
+        if table is selection_table:
+            return dict(selection)
+        if table is parameters_table:
+            return dict(parameters)
+        if table is group_table:
+            return dict(region_row)
+        raise AssertionError(f"Unexpected table {table!r}")
+
+    monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
+    load_calls = []
+    monkeypatch.setattr(
+        cv_pca,
+        "load_cv_pca_artifact",
+        lambda path: load_calls.append(Path(path)) or bundle_payload,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_validate_cv_pca_artifact_link",
+        lambda **kwargs: validation_calls.append(kwargs),
+    )
+
+    loaded = result.load_cv_pca_bundle({"cv_pca_id": result_id})
+    assert loaded is bundle_payload
+    assert load_calls == [artifact_dir]
+    assert validation_calls[0]["bundle"] is bundle_payload
+    assert validation_calls[0]["result_row"] == result_row
+    assert validation_calls[0]["selection_row"] == selection
+    assert validation_calls[0]["parameters_row"] == parameters
+    assert validation_calls[0]["region_row"] == region_row
+
+
+def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy registration receives the exact frozen NWB-derived context."""
+    from v1ca1.spyglass import cv_pca
+
+    inputs = _cv_pca_selection_inputs(tmp_path)
+    selection = _build_cv_pca_selection(inputs)
+    loaded_spikes = {
+        "ts_group": object(),
+        "unit_ids": [
+            {"spikesorting_merge_id": "merge-a", "unit_id": "1"},
+            {"spikesorting_merge_id": "merge-a", "unit_id": "2"},
+        ],
+    }
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "group_row": inputs["group_row"],
+        "region": "v1",
+        "loaded_spikes": loaded_spikes,
+        "animal_name": "L14",
+        "date": "20240102",
+        "movement_results": inputs["movement_results"],
+        "movement_selections": inputs["movement_selections"],
+        "movement_parameters": {
+            condition: inputs["movement_parameters"]
+            for condition in ("light", "dark")
+        },
+        "movement_artifacts": inputs["movement_artifacts"],
+        "positions": inputs["position_inputs"],
+        "trajectory_intervals": inputs["trajectory_intervals"],
+        "graph_inputs": inputs["graph_inputs"],
+    }
+    monkeypatch.setitem(
+        _register_existing_cv_pca_row.__globals__,
+        "_load_cv_pca_context",
+        lambda **kwargs: context,
+    )
+    captured = []
+    artifact_paths = cv_pca.get_cv_pca_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        light_epoch="02_r1",
+        dark_epoch="08_r4",
+        region="v1",
+        cv_pca_id=selection["cv_pca_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    selected_units = pd.DataFrame(
+        {
+            "spikesorting_merge_id": ["merge-a", "merge-a"],
+            "unit_id": ["1", "2"],
+        }
+    )
+
+    def register(**kwargs):
+        captured.append(kwargs)
+        return {
+            "artifact_paths": artifact_paths,
+            "selected_units": selected_units,
+            "n_input_units": 2,
+            "n_selected_units": 2,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": {
+                "verification": "exact_nwb_recomputation"
+            },
+            "_created_artifact_paths": [
+                str(artifact_paths["artifact_dir"])
+            ],
+        }
+
+    monkeypatch.setattr(
+        cv_pca, "register_existing_cv_pca_artifact", register
+    )
+    legacy_result = tmp_path / "legacy.nc"
+    legacy_summary = tmp_path / "legacy_summary.parquet"
+    row = _register_existing_cv_pca_row(
+        key=selection,
+        legacy_result_path=legacy_result,
+        legacy_summary_path=legacy_summary,
+        parameters_table=object(),
+        epoch_intervals_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        position_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        session_table=object(),
+        artifact_root=tmp_path / "analysis",
+    )
+
+    call = captured[0]
+    assert call["legacy_result_path"] == legacy_result
+    assert call["legacy_summary_path"] == legacy_summary
+    assert call["overwrite"] is False
+    assert call["artifact_root"] == tmp_path / "analysis"
+    compute_inputs = call["compute_inputs"]
+    assert compute_inputs["spikes"] is loaded_spikes["ts_group"]
+    assert compute_inputs["light_position"] is inputs["position_inputs"]["light"]
+    assert compute_inputs["dark_position"] is inputs["position_inputs"]["dark"]
+    assert compute_inputs["position_offset_samples"] == 10
+    assert compute_inputs["random_seed"] == 47
+    assert compute_inputs["upstream_provenance"] == (
+        tables_module._cv_pca_upstream_provenance(selection)
+    )
+    assert row["analysis_status"] == "valid"
+    assert row["selected_units_sha256"] == selection[
+        "selected_units_sha256"
+    ]
+    assert row["legacy_artifact_provenance"] == {
+        "verification": "exact_nwb_recomputation"
+    }
+    assert row["_created_artifact_paths"] == [
+        str(artifact_paths["artifact_dir"])
+    ]
+
+
+def test_cv_pca_failed_insert_removes_only_new_uuid_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed database insert removes the hook-reported bundle only."""
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / "cv_pca" / str(result_id)
+    retained = tmp_path / "retained.parquet"
+    retained.write_bytes(b"keep")
+
+    def compute(**_kwargs):
+        artifact_dir.mkdir(parents=True)
+        paths = {}
+        for field_name, filename in (
+            ("artifact_manifest_path", "manifest.parquet"),
+            ("result_path", "cv_pca.nc"),
+            ("summary_path", "summary.parquet"),
+            ("spectrum_path", "within_spectrum.parquet"),
+            ("selected_units_path", "selected_units.parquet"),
+            ("lap_assignments_path", "lap_assignments.parquet"),
+            ("trajectory_qc_path", "trajectory_qc.parquet"),
+        ):
+            path = artifact_dir / filename
+            path.write_bytes(b"new")
+            paths[field_name] = str(path)
+        return {
+            **paths,
+            "result_schema_version": "1",
+            "bundle_schema_version": "1",
+            "n_input_units": 2,
+            "n_selected_units": 2,
+            "analysis_status": "valid",
+            "selected_units_sha256": "c" * 64,
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_dir)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"cv_pca_id": result_id},
+    )
+    bundle, _schemas, _unit_selection_params = _fake_bundle(
+        runtime_hooks={"cv_pca_compute": compute}
+    )
+    result = bundle["cv_pca"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"cv_pca_id": result_id})
+    assert not artifact_dir.exists()
+    assert retained.read_bytes() == b"keep"

@@ -24,7 +24,7 @@ register artifacts, or write to NWB.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
 - `movement.py`, `epoch_motor_behavior.py`, `ripple_modulation.py`,
-  `path_specific_place.py`, `dpp.py`,
+  `cv_pca.py`, `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
   `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
   `dark_light_glm.py`, `swap_glm.py`, and `swap_tuning.py` provide
@@ -247,6 +247,41 @@ one of:
   movement support exceeds the threshold; selected units are retained with
   undefined rates and the IntervalSet is empty.
 
+Light/dark cross-validated PCA uses:
+
+```text
+light/dark EpochIntervals + RegionSortedSpikesGroup
+    + matching light/dark MovementFiringRate rows and Position series
+    + eight epoch-specific TrajectoryIntervals
+    + center_to_left/center_to_right WTrackGraph rows + CVPCAParameters
+    -> CVPCASelection (cv_pca_id)
+    -> CVPCA
+    -> manifest.parquet + cv_pca.nc + summary.parquet
+       + within_spectrum.parquet + selected_units.parquet
+       + lap_assignments.parquet + trajectory_qc.parquet
+```
+
+Each result is one session, explicitly labeled light run, dark run, regional
+sorting group, and named random-seed parameter row. The region comes only from
+`RegionSortedSpikesGroup`; it is not duplicated in the parameter table. Both
+movement rows must have the same sorting snapshot, exact unit order, movement
+definition, and NWB file as the regional group. The selection UUID freezes
+both epoch records, untrimmed position samples and timestamps, movement-rate
+files and exact movement support, all eight lap sources, both graph inputs,
+the complete parameter row, and the fixed output rule.
+
+The standalone computation receives each untrimmed position series and
+applies the NWB-recorded 10-sample analysis offset exactly once. It
+concatenates the four path-specific physical-place representations in the
+fixed trajectory order, treats inbound paths in the from-center direction,
+randomly partitions all laps into disjoint groups with the named seed, and
+retains only position bins shared across every light and dark group. V1 and
+CA1 manuscript presets use the same seed-47 analysis and differ only in their
+explicit minimum movement firing-rate thresholds (0.5 and 0.0 Hz). Expected
+empty-input outcomes such as no movement, insufficient laps, or no eligible
+units are written as complete terminal artifacts rather than leaving the
+selection unpopulated.
+
 Path-specific place tuning and stability use:
 
 ```text
@@ -355,7 +390,7 @@ not create one DataJoint row per unit.
 The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
-`DPPEncodingComparison`, `PathProgressionDecodingComparison`,
+`DPPEncodingComparison`, `CVPCA`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
 `CrossRegionXCorr`, and `RippleDecodingComparison`—there is no
@@ -595,6 +630,15 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     progression_summary.parquet
     trajectory_qc.parquet
 
+<root>/<animal>/<date>/cv_pca/<light>_vs_<dark>/<region>/<uuid>/
+    manifest.parquet
+    cv_pca.nc
+    summary.parquet
+    within_spectrum.parquet
+    selected_units.parquet
+    lap_assignments.parquet
+    trajectory_qc.parquet
+
 <root>/<animal>/<date>/path_specific_place_tuning_curve/<epoch>/<trajectory>/<subset>/<region>/<uuid>/
     tuning_curve.nc
 
@@ -686,7 +730,8 @@ inserts the result row. It never writes results into the source NWB.
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
+`CVPCA`, `PathSpecificPlaceDecoding`, `MotorEncodingComparison`,
+`DarkLightGLM`, and
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
 `CrossRegionXCorr`, `RippleDecodingComparison`, and `EpochMotorBehavior`
 additionally provide
@@ -720,6 +765,14 @@ rows before writing the canonical bundle. An optional original run log is
 validated and retained as provenance. The trajectory-QC table is always
 generated from the current frozen NWB recomputation rather than trusted from
 legacy files.
+cvPCA registration requires the complete legacy seed-specific NetCDF and
+summary pair. It recomputes the exact selected NWB inputs, compares all
+retained scientific coordinates and variables, and then writes a compact
+canonical bundle. The legacy full residual matrix and the scientifically
+invalid residual-fraction-by-unit-class array are deliberately excluded; the
+selected-unit audit, lap assignments, and QC come from the frozen
+recomputation. Terminal selections are computed directly rather than
+legacy-registered.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

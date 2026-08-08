@@ -233,6 +233,111 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+CV_PCA_PARAMETERS_DEFINITION = """
+# Named light/dark cross-validated PCA parameters; region is selected upstream.
+cv_pca_param_name: varchar(64)
+---
+bin_size_cm: double
+n_groups: smallint unsigned
+min_occupancy_s: double
+unit_filter_mode: enum('shared-active', 'dark-active', 'union-active')
+min_firing_rate_hz: double
+min_condition_sd_hz: double
+normalization: enum('zscore', 'center')
+min_scale: double
+random_seed: int unsigned
+"""
+
+
+CV_PCA_SELECTION_DEFINITION = """
+# One immutable session, light epoch, dark epoch, regional group, and seed.
+cv_pca_id: uuid
+---
+-> EpochIntervals.proj(light_epoch='epoch')
+-> EpochIntervals.proj(dark_epoch='epoch')
+-> RegionSortedSpikesGroup
+-> MovementFiringRate.proj(light_movement_firing_rate_id='movement_firing_rate_id')
+-> MovementFiringRate.proj(dark_movement_firing_rate_id='movement_firing_rate_id')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_epoch='epoch', light_right_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(dark_epoch='epoch', dark_right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> CVPCAParameters
+light_position_series_name: varchar(255)
+dark_position_series_name: varchar(255)
+position_role: varchar(64)
+position_offset_samples: bigint unsigned
+light_epoch_row_sha256: char(64)
+dark_epoch_row_sha256: char(64)
+light_epoch_bounds_sha256: char(64)
+dark_epoch_bounds_sha256: char(64)
+light_position_row_sha256: char(64)
+dark_position_row_sha256: char(64)
+light_position_values_sha256: char(64)
+dark_position_values_sha256: char(64)
+light_position_timestamps_sha256: char(64)
+dark_position_timestamps_sha256: char(64)
+region_group_row_sha256: char(64)
+sorting_group_members_sha256: char(64)
+unit_filter_params_sha256: char(64)
+selected_units_sha256: char(64)
+n_input_units: int unsigned
+movement_param_name: varchar(64)
+movement_parameters_sha256: char(64)
+light_movement_selection_row_sha256: char(64)
+dark_movement_selection_row_sha256: char(64)
+light_movement_result_row_sha256: char(64)
+dark_movement_result_row_sha256: char(64)
+light_movement_firing_rate_file_sha256: char(64)
+dark_movement_firing_rate_file_sha256: char(64)
+light_movement_intervals_file_sha256: char(64)
+dark_movement_intervals_file_sha256: char(64)
+light_movement_rates_sha256: char(64)
+dark_movement_rates_sha256: char(64)
+light_movement_support_sha256: char(64)
+dark_movement_support_sha256: char(64)
+light_movement_analysis_status: varchar(32)
+dark_movement_analysis_status: varchar(32)
+trajectory_rows_sha256_by_epoch_and_type: longblob
+trajectory_intervals_sha256_by_epoch_and_type: longblob
+graph_rows_sha256_by_trajectory: longblob
+graph_inputs_sha256_by_trajectory: longblob
+cv_pca_parameters_sha256: char(64)
+cv_pca_effective_parameters_sha256: char(64)
+cv_pca_output_rule_sha256: char(64)
+"""
+
+
+CV_PCA_DEFINITION = """
+# One immutable multi-file light/dark cvPCA artifact bundle.
+-> CVPCASelection
+---
+artifact_manifest_path: filepath@analysis
+result_path: filepath@analysis
+summary_path: filepath@analysis
+spectrum_path: filepath@analysis
+selected_units_path: filepath@analysis
+lap_assignments_path: filepath@analysis
+trajectory_qc_path: filepath@analysis
+result_schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_input_units: int unsigned
+n_selected_units: int unsigned
+analysis_status: enum('valid', 'no_units', 'no_valid_position', 'no_movement', 'no_trials', 'insufficient_laps', 'no_shared_position_bins', 'no_eligible_units')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 MOVEMENT_FIRING_RATE_SELECTION_DEFINITION = """
 # One immutable position, sorting-group snapshot, region, and movement definition.
 movement_firing_rate_id: uuid
@@ -1224,6 +1329,74 @@ MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS = MappingProxyType(
 )
 
 
+CV_PCA_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "row_scope": "one_session_light_epoch_dark_epoch_region_random_seed",
+        "representation": (
+            "four_concatenated_path_specific_physical_place_trajectories"
+        ),
+        "linearization_direction": (
+            "from_center_for_both_inbound_and_outbound_laps"
+        ),
+        "trajectory_order": (
+            "center_to_left",
+            "center_to_right",
+            "left_to_center",
+            "right_to_center",
+        ),
+        "lap_policy": "all_laps_randomly_partitioned_into_disjoint_groups",
+        "condition_bin_policy": (
+            "intersection_across_all_dark_and_light_lap_groups"
+        ),
+        "unit_policy": "same_sorted_units_and_stable_identity_in_both_epochs",
+        "position_input_policy": (
+            "untrimmed_position_series_then_discard_position_offset_samples_once"
+        ),
+        "default_unit_filter": "shared_active_in_both_epochs",
+        "full_residual_matrix_storage": False,
+        "residual_fraction_by_unit_class_storage": False,
+        "terminal_artifact_policy": "explicit_expected_empty_input_statuses",
+        "legacy_registration_policy": (
+            "readable_complete_netcdf_and_summary_then_exact_nwb_recomputation"
+        ),
+        "time_unit": "s",
+        "position_unit": "cm",
+    }
+)
+
+
+MANUSCRIPT_V1_CV_PCA_PARAMETERS = MappingProxyType(
+    {
+        "cv_pca_param_name": "manuscript_v1_seed47",
+        "bin_size_cm": 4.0,
+        "n_groups": 4,
+        "min_occupancy_s": 0.01,
+        "unit_filter_mode": "shared-active",
+        "min_firing_rate_hz": 0.5,
+        "min_condition_sd_hz": 1e-6,
+        "normalization": "zscore",
+        "min_scale": 1e-6,
+        "random_seed": 47,
+    }
+)
+
+
+MANUSCRIPT_CA1_CV_PCA_PARAMETERS = MappingProxyType(
+    {
+        **MANUSCRIPT_V1_CV_PCA_PARAMETERS,
+        "cv_pca_param_name": "manuscript_ca1_seed47",
+        "min_firing_rate_hz": 0.0,
+    }
+)
+
+
+CV_PCA_PARAMETER_PRESETS = (
+    MANUSCRIPT_V1_CV_PCA_PARAMETERS,
+    MANUSCRIPT_CA1_CV_PCA_PARAMETERS,
+)
+
+
 LEGACY_TUNING_CURVE_PARAMETERS = MappingProxyType(
     {
         "tuning_curve_param_name": "legacy_4cm_unsmoothed",
@@ -2042,6 +2215,9 @@ TABLE_DEFINITIONS = MappingProxyType(
             EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION
         ),
         "epoch_motor_behavior": EPOCH_MOTOR_BEHAVIOR_DEFINITION,
+        "cv_pca_parameters": CV_PCA_PARAMETERS_DEFINITION,
+        "cv_pca_selection": CV_PCA_SELECTION_DEFINITION,
+        "cv_pca": CV_PCA_DEFINITION,
         "movement_firing_rate_selection": (
             MOVEMENT_FIRING_RATE_SELECTION_DEFINITION
         ),
@@ -2143,6 +2319,11 @@ TABLE_DEFINITIONS = MappingProxyType(
 __all__ = [
     "ABSOLUTE_OVERLAP_TUNING_SIMILARITY_PARAMETERS",
     "CORRELATION_TUNING_SIMILARITY_PARAMETERS",
+    "CV_PCA_DEFINITION",
+    "CV_PCA_OUTPUT_RULE",
+    "CV_PCA_PARAMETERS_DEFINITION",
+    "CV_PCA_PARAMETER_PRESETS",
+    "CV_PCA_SELECTION_DEFINITION",
     "CURRENT_V5_CA1_DARK_LIGHT_GLM_PARAMETERS",
     "CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS",
     "DARK_LIGHT_GLM_DEFINITION",
@@ -2165,11 +2346,13 @@ __all__ = [
     "DPP_ENCODING_COMPARISON_PARAMETER_PRESETS",
     "EXPECTED_SPYGLASS_GIT_COMMIT",
     "MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_CA1_CV_PCA_PARAMETERS",
     "MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS",
     "MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
     "MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS",
     "MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS",
     "MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_V1_CV_PCA_PARAMETERS",
     "MOTOR_ENCODING_COMPARISON_MODEL_SPEC",
     "MOTOR_ENCODING_COMPARISON_OUTPUT_RULE",
     "MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS",
