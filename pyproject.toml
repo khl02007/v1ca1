@@ -20,7 +20,7 @@ analysis = [
     "cupy-cuda12x",
     "matplotlib>=3.7",
     "mountainsort4>=1.0",
-    "nemos>=0.2.7",
+    "nemos==0.2.5",
     "pandas>=2.0",
     "pyarrow>=14.0",
     "scikit-learn>=1.3",
