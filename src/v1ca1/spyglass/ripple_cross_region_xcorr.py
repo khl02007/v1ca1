@@ -17,12 +17,12 @@ import pandas as pd
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
-ARTIFACT_DIRNAME = "cross_region_xcorr"
+ARTIFACT_DIRNAME = "ripple_cross_region_xcorr"
 MANIFEST_FILENAME = "manifest.parquet"
 CA1_UNITS_FILENAME = "ca1_units.parquet"
 V1_UNITS_FILENAME = "v1_units.parquet"
 SUMMARY_FILENAME = "summary.parquet"
-RESULT_FILENAME = "cross_region_xcorr.nc"
+RESULT_FILENAME = "ripple_cross_region_xcorr.nc"
 BUNDLE_SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "1"
 
@@ -86,7 +86,7 @@ PAIR_STATUS_VALID = "valid"
 PAIR_STATUS_NO_FINITE_BINS = "no_finite_bins"
 PAIR_STATUSES = (PAIR_STATUS_VALID, PAIR_STATUS_NO_FINITE_BINS)
 PAIR_SUMMARY_COLUMNS = (
-    "cross_region_xcorr_id",
+    "ripple_cross_region_xcorr_id",
     "animal_name",
     "date",
     "epoch",
@@ -121,7 +121,7 @@ MANIFEST_COLUMNS = (
     "artifact_kind",
     "file_size_bytes",
     "sha256",
-    "cross_region_xcorr_id",
+    "ripple_cross_region_xcorr_id",
     "animal_name",
     "date",
     "epoch",
@@ -226,19 +226,19 @@ def _canonical_json_mapping(
     return normalized, encoded
 
 
-def get_cross_region_xcorr_artifact_paths(
+def get_ripple_cross_region_xcorr_artifact_paths(
     *,
     animal_name: str,
     date: str,
     epoch: str,
-    cross_region_xcorr_id: Any,
+    ripple_cross_region_xcorr_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> dict[str, Path]:
     """Return one UUID-keyed, session-first cross-region xcorr bundle."""
     animal_name = _path_component(animal_name, name="animal_name")
     date = _path_component(date, name="date")
     epoch = _path_component(epoch, name="epoch")
-    result_id = _uuid_string(cross_region_xcorr_id, name="cross_region_xcorr_id")
+    result_id = _uuid_string(ripple_cross_region_xcorr_id, name="ripple_cross_region_xcorr_id")
     artifact_dir = (
         Path(artifact_root)
         / animal_name
@@ -257,7 +257,7 @@ def get_cross_region_xcorr_artifact_paths(
     }
 
 
-def get_legacy_cross_region_xcorr_paths(
+def get_legacy_ripple_cross_region_xcorr_paths(
     analysis_path: Path, *, epoch: str
 ) -> dict[str, Path]:
     """Return the four canonical legacy exact-ripple xcorr artifact paths."""
@@ -274,7 +274,7 @@ def get_legacy_cross_region_xcorr_paths(
     }
 
 
-def validate_cross_region_xcorr_parameters(
+def validate_ripple_cross_region_xcorr_parameters(
     *,
     bin_size_s: float = DEFAULT_BIN_SIZE_S,
     max_lag_s: float = DEFAULT_MAX_LAG_S,
@@ -318,9 +318,9 @@ def validate_cross_region_xcorr_parameters(
         if int(raw) != expected:
             raise ValueError(f"{name} must equal the fixed value {expected!r}.")
     if not _database_bool(norm, name="norm"):
-        raise ValueError("CrossRegionXCorr requires pynapple norm=True.")
+        raise ValueError("RippleCrossRegionXCorr requires pynapple norm=True.")
     if not _database_bool(require_speed_gated, name="require_speed_gated"):
-        raise ValueError("CrossRegionXCorr requires speed-gated ripple events.")
+        raise ValueError("RippleCrossRegionXCorr requires speed-gated ripple events.")
     return {
         "bin_size_s": bin_size,
         "max_lag_s": max_lag,
@@ -340,10 +340,10 @@ def _effective_parameters(
     **values: Any,
 ) -> dict[str, Any]:
     """Validate parameters and immutable parameter/output-rule hashes."""
-    parameters = validate_cross_region_xcorr_parameters(**values)
+    parameters = validate_ripple_cross_region_xcorr_parameters(**values)
     name = _path_component(parameter_name, name="parameter_name")
     expected_parameter_hash = _provenance_sha256(
-        {"cross_region_xcorr_param_name": name, **parameters}
+        {"ripple_cross_region_xcorr_param_name": name, **parameters}
     )
     if parameter_sha256 is None:
         parameter_sha256 = expected_parameter_hash
@@ -362,12 +362,12 @@ def _effective_parameters(
 
 
 def _metadata(
-    *, cross_region_xcorr_id: Any, animal_name: str, date: str, epoch: str
+    *, ripple_cross_region_xcorr_id: Any, animal_name: str, date: str, epoch: str
 ) -> dict[str, str]:
     """Return validated immutable selection metadata."""
     return {
-        "cross_region_xcorr_id": _uuid_string(
-            cross_region_xcorr_id, name="cross_region_xcorr_id"
+        "ripple_cross_region_xcorr_id": _uuid_string(
+            ripple_cross_region_xcorr_id, name="ripple_cross_region_xcorr_id"
         ),
         "animal_name": _path_component(animal_name, name="animal_name"),
         "date": _path_component(date, name="date"),
@@ -380,7 +380,7 @@ def _validate_upstream_provenance(
     *,
     parameters: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    """Require the selected Ripples row to carry fixed detector provenance."""
+    """Require the selected RippleInterval row to carry fixed detector provenance."""
     if not isinstance(upstream_provenance, Mapping):
         raise TypeError("upstream_provenance must be a mapping.")
     raw = dict(upstream_provenance)
@@ -392,7 +392,7 @@ def _validate_upstream_provenance(
     if missing:
         raise ValueError(
             "upstream_provenance must contain detector_zscore_threshold and "
-            "speed_gated from the selected Ripples row."
+            "speed_gated from the selected RippleInterval row."
         )
     detector_value = raw["detector_zscore_threshold"]
     if isinstance(detector_value, bool) or not isinstance(detector_value, Real):
@@ -417,9 +417,9 @@ def _validate_upstream_provenance(
         rtol=0.0,
         atol=1e-12,
     ):
-        raise ValueError("Selected Ripples detector threshold does not equal 2.0.")
+        raise ValueError("Selected RippleInterval detector threshold does not equal 2.0.")
     if not speed_gated:
-        raise ValueError("Selected Ripples provenance must have speed_gated=True.")
+        raise ValueError("Selected RippleInterval provenance must have speed_gated=True.")
     return normalized, encoded
 
 
@@ -476,7 +476,7 @@ def _ripple_intervals_sha256(table: pd.DataFrame) -> str:
     )
 
 
-def prepare_cross_region_xcorr_event_selection(
+def prepare_ripple_cross_region_xcorr_event_selection(
     *, epoch: str, ripple_table: Any
 ) -> dict[str, Any]:
     """Return canonical exact ripple intervals and their immutable selection hash."""
@@ -707,7 +707,7 @@ def _dataset_attrs(
         if name not in {"parameter_name", "parameter_sha256", "output_rule_sha256"}
     }
     return {
-        "cross_region_xcorr_result_schema_version": RESULT_SCHEMA_VERSION,
+        "ripple_cross_region_xcorr_result_schema_version": RESULT_SCHEMA_VERSION,
         **metadata,
         "source_region": SOURCE_REGION,
         "target_region": TARGET_REGION,
@@ -812,9 +812,9 @@ def _make_dataset(
     )
 
 
-def compute_cross_region_xcorr(
+def compute_ripple_cross_region_xcorr(
     *,
-    cross_region_xcorr_id: Any,
+    ripple_cross_region_xcorr_id: Any,
     animal_name: str,
     date: str,
     epoch: str,
@@ -840,7 +840,7 @@ def compute_cross_region_xcorr(
 ) -> dict[str, Any]:
     """Compute CA1-reference/V1-target xcorr inside exact detected ripples."""
     metadata = _metadata(
-        cross_region_xcorr_id=cross_region_xcorr_id,
+        ripple_cross_region_xcorr_id=ripple_cross_region_xcorr_id,
         animal_name=animal_name,
         date=date,
         epoch=epoch,
@@ -860,7 +860,7 @@ def compute_cross_region_xcorr(
     provenance, provenance_json = _validate_upstream_provenance(
         upstream_provenance, parameters=parameters
     )
-    event_selection = prepare_cross_region_xcorr_event_selection(
+    event_selection = prepare_ripple_cross_region_xcorr_event_selection(
         epoch=metadata["epoch"], ripple_table=ripple_table
     )
     ripples = event_selection["selected_ripple_table"]
@@ -974,7 +974,7 @@ def compute_cross_region_xcorr(
         xcorr=xcorr,
         analysis_status=analysis_status,
     )
-    return validate_cross_region_xcorr_result(
+    return validate_ripple_cross_region_xcorr_result(
         {
             **metadata,
             "parameters": parameters,
@@ -1109,9 +1109,9 @@ def _validate_dataset(
 ) -> pd.DataFrame:
     """Validate NetCDF identity, interval, tensor, and pair-summary arithmetic."""
     if dataset is None or not hasattr(dataset, "attrs") or not hasattr(dataset, "sizes"):
-        raise TypeError("CrossRegionXCorr dataset must be xarray Dataset-like.")
+        raise TypeError("RippleCrossRegionXCorr dataset must be xarray Dataset-like.")
     expected_attrs = {
-        "cross_region_xcorr_result_schema_version": RESULT_SCHEMA_VERSION,
+        "ripple_cross_region_xcorr_result_schema_version": RESULT_SCHEMA_VERSION,
         **metadata,
         "source_region": SOURCE_REGION,
         "target_region": TARGET_REGION,
@@ -1129,7 +1129,7 @@ def _validate_dataset(
     }
     for name, expected in expected_attrs.items():
         if str(dataset.attrs.get(name, "")) != str(expected):
-            raise ValueError(f"CrossRegionXCorr dataset has mismatched {name}.")
+            raise ValueError(f"RippleCrossRegionXCorr dataset has mismatched {name}.")
     effective = {
         name: value
         for name, value in parameters.items()
@@ -1143,17 +1143,17 @@ def _validate_dataset(
             str(dataset.attrs.get("legacy_artifact_provenance_json", "{}"))
         )
     except json.JSONDecodeError as exc:
-        raise ValueError("CrossRegionXCorr dataset has malformed JSON attrs.") from exc
+        raise ValueError("RippleCrossRegionXCorr dataset has malformed JSON attrs.") from exc
     if dataset_parameters != effective:
-        raise ValueError("CrossRegionXCorr dataset parameters differ from the row.")
+        raise ValueError("RippleCrossRegionXCorr dataset parameters differ from the row.")
     if dataset_legacy != dict(legacy_artifact_provenance):
-        raise ValueError("CrossRegionXCorr dataset legacy provenance differs from the row.")
+        raise ValueError("RippleCrossRegionXCorr dataset legacy provenance differs from the row.")
     required_dimensions = ("ripple", "ca1_unit", "v1_unit", "lag_s")
     if any(name not in dataset.dims for name in required_dimensions):
-        raise ValueError("CrossRegionXCorr dataset lacks canonical dimensions.")
+        raise ValueError("RippleCrossRegionXCorr dataset lacks canonical dimensions.")
     for name in ("ripple_start_time_s", "ripple_end_time_s"):
         if name not in dataset or dataset[name].dims != ("ripple",):
-            raise ValueError(f"CrossRegionXCorr dataset lacks canonical {name}.")
+            raise ValueError(f"RippleCrossRegionXCorr dataset lacks canonical {name}.")
     starts = np.asarray(dataset["ripple_start_time_s"].values, dtype=float)
     ends = np.asarray(dataset["ripple_end_time_s"].values, dtype=float)
     if not np.all(np.isfinite(starts)) or not np.all(np.isfinite(ends)):
@@ -1170,7 +1170,7 @@ def _validate_dataset(
         rtol=0.0,
         atol=1e-12,
     ):
-        raise ValueError("CrossRegionXCorr lag coordinates differ from parameters.")
+        raise ValueError("RippleCrossRegionXCorr lag coordinates differ from parameters.")
     selected_by_region = {
         SOURCE_REGION: ca1_units.loc[ca1_units["included_in_xcorr"]].reset_index(
             drop=True
@@ -1201,14 +1201,14 @@ def _validate_dataset(
                 selected[column].to_numpy(dtype=str),
             ):
                 raise ValueError(
-                    f"CrossRegionXCorr {region} coordinate {coordinate} is misaligned."
+                    f"RippleCrossRegionXCorr {region} coordinate {coordinate} is misaligned."
                 )
     if "xcorr" not in dataset or dataset["xcorr"].dims != (
         "ca1_unit",
         "v1_unit",
         "lag_s",
     ):
-        raise ValueError("CrossRegionXCorr dataset lacks its canonical tensor.")
+        raise ValueError("RippleCrossRegionXCorr dataset lacks its canonical tensor.")
     values = np.asarray(dataset["xcorr"].values, dtype=float)
     expected_shape = (
         len(selected_by_region[SOURCE_REGION]),
@@ -1216,10 +1216,10 @@ def _validate_dataset(
         len(lag_times),
     )
     if values.shape != expected_shape:
-        raise ValueError("CrossRegionXCorr tensor shape differs from unit coordinates.")
+        raise ValueError("RippleCrossRegionXCorr tensor shape differs from unit coordinates.")
     if analysis_status not in NONTERMINAL_STATUSES:
         if values.shape[:2] != (0, 0):
-            raise ValueError("Terminal CrossRegionXCorr tensors must have empty unit axes.")
+            raise ValueError("Terminal RippleCrossRegionXCorr tensors must have empty unit axes.")
         return pd.DataFrame(columns=PAIR_SUMMARY_COLUMNS)
     screen = _screen_module()
     ca1_selected = selected_by_region[SOURCE_REGION]
@@ -1241,12 +1241,12 @@ def _validate_dataset(
     )
 
 
-def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, Any]:
+def validate_ripple_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and return one canonical ripple-only cross-region xcorr result."""
     if not isinstance(result, Mapping):
         raise TypeError("result must be a mapping.")
     metadata = _metadata(
-        cross_region_xcorr_id=result.get("cross_region_xcorr_id"),
+        ripple_cross_region_xcorr_id=result.get("ripple_cross_region_xcorr_id"),
         animal_name=result.get("animal_name"),
         date=result.get("date"),
         epoch=result.get("epoch"),
@@ -1265,7 +1265,7 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
     )
     missing = [name for name in parameter_keys if name not in raw_parameters]
     if missing:
-        raise ValueError(f"CrossRegionXCorr parameters are missing {missing!r}.")
+        raise ValueError(f"RippleCrossRegionXCorr parameters are missing {missing!r}.")
     parameters = _effective_parameters(
         parameter_name=raw_parameters.get("parameter_name"),
         parameter_sha256=raw_parameters.get("parameter_sha256"),
@@ -1280,18 +1280,18 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
         raise ValueError("selected_ripple_intervals_sha256 must be a SHA-256 digest.")
     analysis_status = str(result.get("analysis_status", ""))
     if analysis_status not in ANALYSIS_STATUSES:
-        raise ValueError("CrossRegionXCorr has an unsupported analysis_status.")
+        raise ValueError("RippleCrossRegionXCorr has an unsupported analysis_status.")
     artifact_origin = str(result.get("artifact_origin", ""))
     if artifact_origin not in {"computed", "registered_existing"}:
-        raise ValueError("CrossRegionXCorr has an unsupported artifact_origin.")
+        raise ValueError("RippleCrossRegionXCorr has an unsupported artifact_origin.")
     legacy = result.get("legacy_artifact_provenance", {})
     if not isinstance(legacy, Mapping):
         raise TypeError("legacy_artifact_provenance must be a mapping.")
     legacy = dict(legacy)
     if artifact_origin == "computed" and legacy:
-        raise ValueError("Computed CrossRegionXCorr results cannot claim legacy provenance.")
+        raise ValueError("Computed RippleCrossRegionXCorr results cannot claim legacy provenance.")
     if artifact_origin == "registered_existing" and not legacy:
-        raise ValueError("Registered CrossRegionXCorr results require legacy provenance.")
+        raise ValueError("Registered RippleCrossRegionXCorr results require legacy provenance.")
     ca1_units = _validate_unit_audit(
         result.get("ca1_units"), region=SOURCE_REGION, parameters=parameters
     )
@@ -1313,14 +1313,14 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
     )
     summary = result.get("summary")
     if not isinstance(summary, pd.DataFrame) or tuple(summary.columns) != PAIR_SUMMARY_COLUMNS:
-        raise ValueError("CrossRegionXCorr summary does not match its canonical schema.")
-    _assert_frame_equal(summary, expected_summary, name="CrossRegionXCorr summary")
+        raise ValueError("RippleCrossRegionXCorr summary does not match its canonical schema.")
+    _assert_frame_equal(summary, expected_summary, name="RippleCrossRegionXCorr summary")
     n_ripples = int(dataset.sizes["ripple"])
     terminal = _terminal_status(ca1_units, v1_units, n_ripples=n_ripples)
     if analysis_status in NONTERMINAL_STATUSES:
         if terminal is not None:
             raise ValueError(
-                "Nonterminal CrossRegionXCorr result has terminal inputs: " + terminal
+                "Nonterminal RippleCrossRegionXCorr result has terminal inputs: " + terminal
             )
         valid_pairs = summary["status"].eq(PAIR_STATUS_VALID)
         expected_status = (
@@ -1329,7 +1329,7 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
             else "partial_valid" if valid_pairs.any() else "no_valid_pairs"
         )
         if analysis_status != expected_status:
-            raise ValueError("CrossRegionXCorr status differs from pair QC.")
+            raise ValueError("RippleCrossRegionXCorr status differs from pair QC.")
         expected_ca1 = _annotate_unit_qc(
             ca1_units.assign(
                 included_in_xcorr=ca1_units["passes_ripple_spike_threshold"],
@@ -1361,7 +1361,7 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
         _assert_frame_equal(ca1_units, expected_ca1, name="CA1 unit QC")
         _assert_frame_equal(v1_units, expected_v1, name="V1 unit QC")
     elif terminal != analysis_status:
-        raise ValueError("CrossRegionXCorr terminal status differs from its inputs.")
+        raise ValueError("RippleCrossRegionXCorr terminal status differs from its inputs.")
     n_valid_pairs = int(summary["status"].eq(PAIR_STATUS_VALID).sum())
     return {
         **metadata,
@@ -1397,7 +1397,7 @@ def validate_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict[str, A
 def _manifest_common(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return immutable manifest values repeated for every bundle artifact."""
     return {
-        "cross_region_xcorr_id": result["cross_region_xcorr_id"],
+        "ripple_cross_region_xcorr_id": result["ripple_cross_region_xcorr_id"],
         "animal_name": result["animal_name"],
         "date": result["date"],
         "epoch": result["epoch"],
@@ -1440,20 +1440,20 @@ def _load_dataset(path: Path) -> Any:
         return dataset.load()
 
 
-def write_cross_region_xcorr_artifact(
+def write_ripple_cross_region_xcorr_artifact(
     result: Mapping[str, Any],
     path: Path,
     *,
     overwrite: bool = False,
 ) -> dict[str, Path]:
     """Atomically write, checksum, and reload one complete xcorr bundle."""
-    validated = validate_cross_region_xcorr_result(result)
+    validated = validate_ripple_cross_region_xcorr_result(result)
     destination = Path(path)
-    if destination.name != validated["cross_region_xcorr_id"]:
-        raise ValueError("Artifact directory name must equal cross_region_xcorr_id.")
+    if destination.name != validated["ripple_cross_region_xcorr_id"]:
+        raise ValueError("Artifact directory name must equal ripple_cross_region_xcorr_id.")
     if destination.exists() and not overwrite:
         raise FileExistsError(
-            f"Refusing to overwrite CrossRegionXCorr artifact: {destination}"
+            f"Refusing to overwrite RippleCrossRegionXCorr artifact: {destination}"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -1471,7 +1471,7 @@ def write_cross_region_xcorr_artifact(
             ("ca1_units", CA1_UNITS_FILENAME, "parquet"),
             ("v1_units", V1_UNITS_FILENAME, "parquet"),
             ("summary", SUMMARY_FILENAME, "parquet"),
-            ("cross_region_xcorr", RESULT_FILENAME, "netcdf"),
+            ("ripple_cross_region_xcorr", RESULT_FILENAME, "netcdf"),
         ):
             artifact_path = temporary / filename
             rows.append(
@@ -1487,7 +1487,7 @@ def write_cross_region_xcorr_artifact(
         pd.DataFrame.from_records(rows, columns=MANIFEST_COLUMNS).to_parquet(
             temporary / MANIFEST_FILENAME, index=False
         )
-        load_cross_region_xcorr_artifact(temporary, _allow_temporary_name=True)
+        load_ripple_cross_region_xcorr_artifact(temporary, _allow_temporary_name=True)
         if destination.exists():
             shutil.rmtree(destination)
         os.replace(temporary, destination)
@@ -1505,55 +1505,55 @@ def write_cross_region_xcorr_artifact(
     }
 
 
-def load_cross_region_xcorr_artifact(
+def load_ripple_cross_region_xcorr_artifact(
     path: Path,
     *,
     _allow_temporary_name: bool = False,
 ) -> dict[str, Any]:
-    """Load, checksum, and validate one complete CrossRegionXCorr bundle."""
+    """Load, checksum, and validate one complete RippleCrossRegionXCorr bundle."""
     directory = Path(path)
     manifest_path = directory / MANIFEST_FILENAME
     if not manifest_path.is_file():
-        raise FileNotFoundError(f"CrossRegionXCorr manifest not found: {manifest_path}")
+        raise FileNotFoundError(f"RippleCrossRegionXCorr manifest not found: {manifest_path}")
     manifest = pd.read_parquet(manifest_path)
     if tuple(manifest.columns) != MANIFEST_COLUMNS or len(manifest) != 4:
-        raise ValueError("CrossRegionXCorr manifest does not have the canonical schema.")
+        raise ValueError("RippleCrossRegionXCorr manifest does not have the canonical schema.")
     expected = {
         "ca1_units": (CA1_UNITS_FILENAME, "parquet"),
         "v1_units": (V1_UNITS_FILENAME, "parquet"),
         "summary": (SUMMARY_FILENAME, "parquet"),
-        "cross_region_xcorr": (RESULT_FILENAME, "netcdf"),
+        "ripple_cross_region_xcorr": (RESULT_FILENAME, "netcdf"),
     }
     if set(manifest["artifact_key"].astype(str)) != set(expected):
-        raise ValueError("CrossRegionXCorr manifest lacks canonical artifacts.")
+        raise ValueError("RippleCrossRegionXCorr manifest lacks canonical artifacts.")
     for _, row in manifest.iterrows():
         filename, kind = expected[str(row["artifact_key"])]
         if str(row["relative_path"]) != filename or str(row["artifact_kind"]) != kind:
-            raise ValueError("CrossRegionXCorr manifest names or kinds are stale.")
+            raise ValueError("RippleCrossRegionXCorr manifest names or kinds are stale.")
         artifact_path = directory / filename
         if not artifact_path.is_file():
-            raise FileNotFoundError(f"CrossRegionXCorr artifact not found: {artifact_path}")
+            raise FileNotFoundError(f"RippleCrossRegionXCorr artifact not found: {artifact_path}")
         if artifact_path.stat().st_size != int(row["file_size_bytes"]) or _file_sha256(
             artifact_path
         ) != str(row["sha256"]):
-            raise ValueError(f"CrossRegionXCorr checksum mismatch: {artifact_path}")
+            raise ValueError(f"RippleCrossRegionXCorr checksum mismatch: {artifact_path}")
     first = manifest.iloc[0]
     for name in MANIFEST_COLUMNS[5:]:
         if not np.all(manifest[name].astype(str) == str(first[name])):
-            raise ValueError(f"CrossRegionXCorr manifest has inconsistent {name!r}.")
-    result_id = str(first["cross_region_xcorr_id"])
+            raise ValueError(f"RippleCrossRegionXCorr manifest has inconsistent {name!r}.")
+    result_id = str(first["ripple_cross_region_xcorr_id"])
     if not _allow_temporary_name and directory.name != result_id:
-        raise ValueError("Artifact directory name does not match cross_region_xcorr_id.")
+        raise ValueError("Artifact directory name does not match ripple_cross_region_xcorr_id.")
     dataset = _load_dataset(directory / RESULT_FILENAME)
     try:
         effective = json.loads(str(dataset.attrs["effective_parameters_json"]))
         upstream = json.loads(str(first["upstream_provenance_json"]))
         legacy = json.loads(str(first["legacy_artifact_provenance_json"]))
     except (KeyError, json.JSONDecodeError) as exc:
-        raise ValueError("CrossRegionXCorr artifact contains malformed provenance.") from exc
-    validated = validate_cross_region_xcorr_result(
+        raise ValueError("RippleCrossRegionXCorr artifact contains malformed provenance.") from exc
+    validated = validate_ripple_cross_region_xcorr_result(
         {
-            "cross_region_xcorr_id": result_id,
+            "ripple_cross_region_xcorr_id": result_id,
             "animal_name": str(first["animal_name"]),
             "date": str(first["date"]),
             "epoch": str(first["epoch"]),
@@ -1586,17 +1586,17 @@ def load_cross_region_xcorr_artifact(
         "n_valid_pairs",
     )
     if any(validated[name] != int(first[name]) for name in integer_fields):
-        raise ValueError("CrossRegionXCorr manifest counts differ from its artifacts.")
+        raise ValueError("RippleCrossRegionXCorr manifest counts differ from its artifacts.")
     if not np.isclose(
         validated["ripple_duration_s"],
         float(first["ripple_duration_s"]),
         rtol=1e-12,
         atol=1e-12,
     ):
-        raise ValueError("CrossRegionXCorr manifest duration differs from its dataset.")
+        raise ValueError("RippleCrossRegionXCorr manifest duration differs from its dataset.")
     for name in ("ca1_units_sha256", "v1_units_sha256", "summary_sha256"):
         if validated[name] != str(first[name]):
-            raise ValueError(f"CrossRegionXCorr manifest {name} is mismatched.")
+            raise ValueError(f"RippleCrossRegionXCorr manifest {name} is mismatched.")
     return {**validated, "manifest": manifest}
 
 
@@ -1911,14 +1911,14 @@ def _compare_legacy_dataset(
         raise ValueError("Legacy xcorr tensor differs from exact NWB recomputation.")
 
 
-def register_existing_cross_region_xcorr_artifact(
+def register_existing_ripple_cross_region_xcorr_artifact(
     *,
     source_ca1_unit_filter_path: Path,
     source_v1_unit_filter_path: Path,
     source_summary_path: Path,
     source_result_path: Path,
     destination_path: Path,
-    cross_region_xcorr_id: Any,
+    ripple_cross_region_xcorr_id: Any,
     animal_name: str,
     date: str,
     epoch: str,
@@ -1958,7 +1958,7 @@ def register_existing_cross_region_xcorr_artifact(
         v1_sorting_type
     ) != "ImportedSpikeSorting":
         raise ValueError(
-            "Legacy CrossRegionXCorr registration requires "
+            "Legacy RippleCrossRegionXCorr registration requires "
             "ImportedSpikeSorting for both CA1 and V1 groups."
         )
     source_paths = {
@@ -1970,8 +1970,8 @@ def register_existing_cross_region_xcorr_artifact(
     for name, path in source_paths.items():
         if not path.is_file():
             raise FileNotFoundError(f"Legacy {name} artifact not found: {path}")
-    recomputed = compute_cross_region_xcorr(
-        cross_region_xcorr_id=cross_region_xcorr_id,
+    recomputed = compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=ripple_cross_region_xcorr_id,
         animal_name=animal_name,
         date=date,
         epoch=epoch,
@@ -2037,7 +2037,7 @@ def register_existing_cross_region_xcorr_artifact(
     )
     metadata = {
         name: recomputed[name]
-        for name in ("cross_region_xcorr_id", "animal_name", "date", "epoch")
+        for name in ("ripple_cross_region_xcorr_id", "animal_name", "date", "epoch")
     }
     _compare_legacy_dataset(
         source_paths["result"],
@@ -2091,7 +2091,7 @@ def register_existing_cross_region_xcorr_artifact(
         artifact_origin="registered_existing",
         legacy_artifact_provenance=legacy_provenance,
     )
-    registered = validate_cross_region_xcorr_result(
+    registered = validate_ripple_cross_region_xcorr_result(
         {
             **metadata,
             "parameters": recomputed["parameters"],
@@ -2108,7 +2108,7 @@ def register_existing_cross_region_xcorr_artifact(
             "legacy_artifact_provenance": legacy_provenance,
         }
     )
-    paths = write_cross_region_xcorr_artifact(
+    paths = write_ripple_cross_region_xcorr_artifact(
         registered, destination_path, overwrite=overwrite
     )
     return {**registered, **paths}
@@ -2127,13 +2127,13 @@ __all__ = [
     "PAIR_SUMMARY_COLUMNS",
     "RESULT_SCHEMA_VERSION",
     "UNIT_AUDIT_COLUMNS",
-    "compute_cross_region_xcorr",
-    "get_cross_region_xcorr_artifact_paths",
-    "get_legacy_cross_region_xcorr_paths",
-    "load_cross_region_xcorr_artifact",
-    "prepare_cross_region_xcorr_event_selection",
-    "register_existing_cross_region_xcorr_artifact",
-    "validate_cross_region_xcorr_parameters",
-    "validate_cross_region_xcorr_result",
-    "write_cross_region_xcorr_artifact",
+    "compute_ripple_cross_region_xcorr",
+    "get_ripple_cross_region_xcorr_artifact_paths",
+    "get_legacy_ripple_cross_region_xcorr_paths",
+    "load_ripple_cross_region_xcorr_artifact",
+    "prepare_ripple_cross_region_xcorr_event_selection",
+    "register_existing_ripple_cross_region_xcorr_artifact",
+    "validate_ripple_cross_region_xcorr_parameters",
+    "validate_ripple_cross_region_xcorr_result",
+    "write_ripple_cross_region_xcorr_artifact",
 ]

@@ -11,7 +11,7 @@ import pytest
 import xarray as xr
 
 from v1ca1.helper.session import TRAJECTORY_TYPES
-from v1ca1.spyglass import encoding_comparison as encoding
+from v1ca1.spyglass import dpp_encoding as encoding
 from v1ca1.spyglass import movement
 
 
@@ -186,7 +186,7 @@ def _canonical_row() -> dict[str, object]:
         "unit_id": "11",
         "stable_unit_id": "merge-a:11",
         "group_unit_id": "10",
-        "dpp_encoding_comparison_id": str(COMPARISON_ID),
+        "dpp_encoding_id": str(COMPARISON_ID),
         "animal_name": "L14",
         "date": "20240611",
         "region": "v1",
@@ -252,12 +252,12 @@ def _resolver() -> dict[int, dict[str, object]]:
 
 
 def test_artifact_path_and_empty_summary_are_uuid_keyed(tmp_path: Path) -> None:
-    path = encoding.get_encoding_comparison_artifact_path(
+    path = encoding.get_dpp_encoding_artifact_path(
         animal_name="L14",
         date="20240611",
         epoch="08_r4",
         region="v1",
-        dpp_encoding_comparison_id=COMPARISON_ID,
+        dpp_encoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
 
@@ -265,15 +265,15 @@ def test_artifact_path_and_empty_summary_are_uuid_keyed(tmp_path: Path) -> None:
         tmp_path
         / "L14"
         / "20240611"
-        / "dpp_encoding_comparison"
+        / "dpp_encoding"
         / "08_r4"
         / "v1"
         / str(COMPARISON_ID)
-        / "encoding_comparison.parquet"
+        / "dpp_encoding.parquet"
     )
-    empty = encoding.empty_encoding_comparison_table()
+    empty = encoding.empty_dpp_encoding_table()
     assert list(empty.columns) == list(encoding.TABLE_COLUMNS)
-    summary = encoding.summarize_encoding_comparison_table(empty)
+    summary = encoding.summarize_dpp_encoding_table(empty)
     assert summary["analysis_status"] == "no_eligible_units"
     assert summary["n_units_eligible"] == 0
     assert summary["n_units_valid"] == 0
@@ -702,7 +702,7 @@ def test_compute_filters_before_fitting_and_writes_self_describing_rows(
         return {key: _valid_store() for key in spikes.keys()}
 
     monkeypatch.setattr(encoding, "_evaluate_encoding_models", _fake_evaluate)
-    result = encoding.compute_selected_dpp_encoding_comparison(
+    result = encoding.compute_selected_dpp_encoding(
         animal_name="L14",
         date="20240611",
         region="v1",
@@ -717,7 +717,7 @@ def test_compute_filters_before_fitting_and_writes_self_describing_rows(
         stability_tables_by_trajectory=_stability_tables(),
         minimum_movement_firing_rate_hz=0.5,
         minimum_stability_correlation=0.5,
-        dpp_encoding_comparison_id=COMPARISON_ID,
+        dpp_encoding_id=COMPARISON_ID,
         n_folds=5,
         evaluation_bin_size_s=0.05,
         spatial_bin_size_cm=4.0,
@@ -732,7 +732,7 @@ def test_compute_filters_before_fitting_and_writes_self_describing_rows(
         "n_folds": 5,
     }
     assert table["stable_unit_id"].tolist() == ["merge-a:11", "merge-c:33"]
-    assert table["dpp_encoding_comparison_id"].unique().tolist() == [
+    assert table["dpp_encoding_id"].unique().tolist() == [
         str(COMPARISON_ID)
     ]
     assert table["spatial_bin_size_cm"].unique().tolist() == [4.0]
@@ -747,17 +747,17 @@ def test_validator_checks_equations_qc_and_exact_schema() -> None:
         :, list(encoding.TABLE_COLUMNS)
     ]
 
-    assert encoding.validate_encoding_comparison_table(table) is table
+    assert encoding.validate_dpp_encoding_table(table) is table
     bad = table.copy()
     bad.loc[0, "dpp_vs_absolute_place_bits_per_spike"] += 0.1
     with pytest.raises(ValueError, match="inconsistent"):
-        encoding.validate_encoding_comparison_table(bad)
+        encoding.validate_dpp_encoding_table(bad)
     with pytest.raises(ValueError, match="exact canonical schema"):
-        encoding.validate_encoding_comparison_table(table.assign(extra=1))
+        encoding.validate_dpp_encoding_table(table.assign(extra=1))
 
 
 def test_legacy_normalization_uses_exact_eligible_set_and_total_nats() -> None:
-    table = encoding.normalize_legacy_encoding_comparison_table(
+    table = encoding.normalize_legacy_dpp_encoding_table(
         _legacy_table(),
         animal_name="L14",
         date="20240611",
@@ -770,7 +770,7 @@ def test_legacy_normalization_uses_exact_eligible_set_and_total_nats() -> None:
         minimum_movement_firing_rate_hz=0.5,
         minimum_stability_correlation=0.5,
         unit_identity_resolver=_resolver(),
-        dpp_encoding_comparison_id=COMPARISON_ID,
+        dpp_encoding_id=COMPARISON_ID,
     )
 
     assert table["stable_unit_id"].tolist() == ["merge-a:11", "merge-c:33"]
@@ -781,7 +781,7 @@ def test_legacy_normalization_uses_exact_eligible_set_and_total_nats() -> None:
     )
 
     with pytest.raises(ValueError, match="exactly match"):
-        encoding.normalize_legacy_encoding_comparison_table(
+        encoding.normalize_legacy_dpp_encoding_table(
             _legacy_table(units=(101,)),
             animal_name="L14",
             date="20240611",
@@ -794,7 +794,7 @@ def test_legacy_normalization_uses_exact_eligible_set_and_total_nats() -> None:
             minimum_movement_firing_rate_hz=0.5,
             minimum_stability_correlation=0.5,
             unit_identity_resolver=_resolver(),
-            dpp_encoding_comparison_id=COMPARISON_ID,
+            dpp_encoding_id=COMPARISON_ID,
         )
 
 
@@ -804,11 +804,11 @@ def test_artifact_round_trip_and_no_implicit_overwrite(tmp_path: Path) -> None:
     ]
     path = tmp_path / "encoding.parquet"
 
-    assert encoding.write_encoding_comparison_artifact(table, path) == path
-    loaded = encoding.load_encoding_comparison_artifact(path)
+    assert encoding.write_dpp_encoding_artifact(table, path) == path
+    loaded = encoding.load_dpp_encoding_artifact(path)
     pd.testing.assert_frame_equal(loaded, table, check_dtype=False)
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
-        encoding.write_encoding_comparison_artifact(table, path)
+        encoding.write_dpp_encoding_artifact(table, path)
 
 
 def test_legacy_registration_records_digest_and_refuses_overwrite(
@@ -818,7 +818,7 @@ def test_legacy_registration_records_digest_and_refuses_overwrite(
     destination = tmp_path / "canonical.parquet"
     _legacy_table().to_parquet(source)
 
-    result = encoding.register_existing_encoding_comparison_artifact(
+    result = encoding.register_existing_dpp_encoding_artifact(
         source,
         destination,
         animal_name="L14",
@@ -832,7 +832,7 @@ def test_legacy_registration_records_digest_and_refuses_overwrite(
         minimum_movement_firing_rate_hz=0.5,
         minimum_stability_correlation=0.5,
         unit_identity_resolver=_resolver(),
-        dpp_encoding_comparison_id=COMPARISON_ID,
+        dpp_encoding_id=COMPARISON_ID,
         source_v1ca1_git_commit="abc123",
     )
 
@@ -843,7 +843,7 @@ def test_legacy_registration_records_digest_and_refuses_overwrite(
     assert len(result["legacy_artifact_provenance"]["source_sha256"]) == 64
     assert result["_created_artifact_paths"] == [str(destination)]
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
-        encoding.register_existing_encoding_comparison_artifact(
+        encoding.register_existing_dpp_encoding_artifact(
             source,
             destination,
             animal_name="L14",
@@ -857,5 +857,5 @@ def test_legacy_registration_records_digest_and_refuses_overwrite(
             minimum_movement_firing_rate_hz=0.5,
             minimum_stability_correlation=0.5,
             unit_identity_resolver=_resolver(),
-            dpp_encoding_comparison_id=COMPARISON_ID,
+            dpp_encoding_id=COMPARISON_ID,
         )

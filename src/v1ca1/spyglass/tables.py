@@ -24,7 +24,7 @@ from v1ca1.spyglass import table_specs
 SOURCE_TABLE_KEYS = (
     "epoch_intervals",
     "trajectory_intervals",
-    "ripples",
+    "ripple_interval",
     "position",
     "wtrack_graph",
     "spike_sorting_figurl",
@@ -217,23 +217,23 @@ def _validate_tuning_similarity_parameter_row(
     return values
 
 
-def _validate_dpp_encoding_comparison_parameter_row(
+def _validate_dpp_encoding_parameter_row(
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate one four-model DPP encoding-comparison parameter row."""
-    expected = set(table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS)
+    expected = set(table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS)
     missing = sorted(expected.difference(row))
     extra = sorted(set(row).difference(expected))
     if missing or extra:
         raise ValueError(
-            "DPPEncodingComparison parameters must have exactly the declared "
+            "DPPEncoding parameters must have exactly the declared "
             f"fields; missing={missing!r}, extra={extra!r}."
         )
     values = dict(row)
-    name = values["dpp_encoding_comparison_param_name"]
+    name = values["dpp_encoding_param_name"]
     if not isinstance(name, str) or not name.strip() or len(name) > 64:
         raise ValueError(
-            "dpp_encoding_comparison_param_name must be a non-empty string "
+            "dpp_encoding_param_name must be a non-empty string "
             "of at most 64 characters."
         )
 
@@ -405,25 +405,25 @@ def _validate_path_specific_place_decoding_parameter_row(
     return values
 
 
-def _validate_motor_encoding_comparison_parameter_row(
+def _validate_motor_encoding_parameter_row(
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate one nine-model nested-CV motor-encoding parameter row."""
     expected = set(
-        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS
     )
     missing = sorted(expected.difference(row))
     extra = sorted(set(row).difference(expected))
     if missing or extra:
         raise ValueError(
-            "MotorEncodingComparison parameters must have exactly the "
+            "MotorEncoding parameters must have exactly the "
             f"declared fields; missing={missing!r}, extra={extra!r}."
         )
     values = dict(row)
-    name = values["motor_encoding_comparison_param_name"]
+    name = values["motor_encoding_param_name"]
     if not isinstance(name, str) or not name.strip() or len(name) > 64:
         raise ValueError(
-            "motor_encoding_comparison_param_name must be a non-empty "
+            "motor_encoding_param_name must be a non-empty "
             "string of at most 64 characters."
         )
 
@@ -456,6 +456,7 @@ def _validate_motor_encoding_comparison_parameter_row(
     for field_name in (
         "evaluation_bin_size_s",
         "minimum_movement_firing_rate_hz",
+        "minimum_stability_correlation",
         "motor_zscore_eps",
         "speed_smoothing_sigma_s",
         "generalized_place_branch_gap_cm",
@@ -480,6 +481,10 @@ def _validate_motor_encoding_comparison_parameter_row(
     ):
         if values[field_name] < 0.0:
             raise ValueError(f"{field_name} must be non-negative.")
+    if not -1.0 <= values["minimum_stability_correlation"] <= 1.0:
+        raise ValueError(
+            "minimum_stability_correlation must be between -1 and 1."
+        )
 
     for field_name, allow_zero in (
         ("ridge_values", True),
@@ -770,38 +775,38 @@ def _validate_ripple_glm_parameter_row(
     return {"ripple_glm_param_name": name, **validated}
 
 
-def _cross_region_xcorr_parameter_kwargs(
+def _ripple_cross_region_xcorr_parameter_kwargs(
     parameters: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return model fields accepted by the database-free xcorr API."""
     return {
         field_name: value
         for field_name, value in parameters.items()
-        if field_name != "cross_region_xcorr_param_name"
+        if field_name != "ripple_cross_region_xcorr_param_name"
     }
 
 
-def _validate_cross_region_xcorr_parameter_row(
+def _validate_ripple_cross_region_xcorr_parameter_row(
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate one exact ripple-restricted cross-region parameter row."""
-    from v1ca1.spyglass.cross_region_xcorr import (
-        validate_cross_region_xcorr_parameters,
+    from v1ca1.spyglass.ripple_cross_region_xcorr import (
+        validate_ripple_cross_region_xcorr_parameters,
     )
 
-    expected = set(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+    expected = set(table_specs.MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS)
     missing = sorted(expected.difference(row))
     extra = sorted(set(row).difference(expected))
     if missing or extra:
         raise ValueError(
-            "CrossRegionXCorr parameters must have exactly the declared "
+            "RippleCrossRegionXCorr parameters must have exactly the declared "
             f"fields; missing={missing!r}, extra={extra!r}."
         )
     values = dict(row)
-    name = values["cross_region_xcorr_param_name"]
+    name = values["ripple_cross_region_xcorr_param_name"]
     if not isinstance(name, str) or not name.strip() or len(name) > 64:
         raise ValueError(
-            "cross_region_xcorr_param_name must be a non-empty string of at "
+            "ripple_cross_region_xcorr_param_name must be a non-empty string of at "
             "most 64 characters."
         )
     values["norm"] = _database_bool(values["norm"], name="norm")
@@ -809,10 +814,10 @@ def _validate_cross_region_xcorr_parameter_row(
         values["require_speed_gated"],
         name="require_speed_gated",
     )
-    validated = validate_cross_region_xcorr_parameters(
-        **_cross_region_xcorr_parameter_kwargs(values)
+    validated = validate_ripple_cross_region_xcorr_parameters(
+        **_ripple_cross_region_xcorr_parameter_kwargs(values)
     )
-    return {"cross_region_xcorr_param_name": name, **validated}
+    return {"ripple_cross_region_xcorr_param_name": name, **validated}
 
 
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1123,14 +1128,14 @@ def _ripple_detector_values(
         actual_threshold, Real
     ):
         raise TypeError(
-            "Ripples.detector_zscore_threshold must be one numeric scalar."
+            "RippleInterval.detector_zscore_threshold must be one numeric scalar."
         )
     threshold = float(actual_threshold)
     if not math.isfinite(threshold):
-        raise ValueError("Ripples.detector_zscore_threshold must be finite.")
+        raise ValueError("RippleInterval.detector_zscore_threshold must be finite.")
     speed_gated = _database_bool(
         ripple_row.get("speed_gated"),
-        name="Ripples.speed_gated",
+        name="RippleInterval.speed_gated",
     )
     return threshold, speed_gated
 
@@ -1148,11 +1153,11 @@ def _validate_ripple_provenance(
         abs_tol=1e-12,
     ):
         raise ValueError(
-            "Ripples.detector_zscore_threshold does not match "
+            "RippleInterval.detector_zscore_threshold does not match "
             "expected_detector_zscore_threshold."
         )
     if parameters["require_speed_gated"] and not speed_gated:
-        raise ValueError("Selected Ripples row must be explicitly speed-gated.")
+        raise ValueError("Selected RippleInterval row must be explicitly speed-gated.")
 
 
 def _parameter_kwargs(parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -1178,55 +1183,6 @@ def _analysis_region(value: Any) -> str:
     if region not in {"v1", "ca1"}:
         raise ValueError("region must be the canonical lowercase 'v1' or 'ca1'.")
     return region
-
-
-def _sorting_snapshot_fields(provenance: Mapping[str, Any]) -> dict[str, Any]:
-    """Return selection columns for one resolved sorting-group snapshot."""
-    parameters = dict(provenance["unit_selection_params"])
-    return {
-        "sorting_group_members": list(provenance["sorting_group_members"]),
-        "sorting_group_members_sha256": str(
-            provenance["sorting_group_members_sha256"]
-        ),
-        "unit_filter_include_labels": list(parameters["include_labels"]),
-        "unit_filter_exclude_labels": list(parameters["exclude_labels"]),
-        "unit_filter_params_sha256": str(
-            provenance["unit_selection_params_sha256"]
-        ),
-    }
-
-
-def _resolve_sorting_snapshot(
-    *,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    key: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Resolve one standard group and its immutable label-filter snapshot."""
-    from v1ca1.spyglass.spikes import resolve_sorted_spikes_group_provenance
-
-    return resolve_sorted_spikes_group_provenance(
-        sorted_spikes_group,
-        unit_selection_params,
-        key,
-    )
-
-
-def _validate_frozen_sorting_snapshot(
-    selection: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-) -> None:
-    """Require current group membership/filter values to match a selection."""
-    expected = _sorting_snapshot_fields(provenance)
-    for field_name, current_value in expected.items():
-        selected_value = selection.get(field_name)
-        if field_name.endswith("labels") or field_name == "sorting_group_members":
-            selected_value = list(selected_value or ())
-        if selected_value != current_value:
-            raise ValueError(
-                "SortedSpikesGroup membership or UnitSelectionParams changed "
-                f"after selection insertion: {field_name}. Create a new selection."
-            )
 
 
 def _parameter_snapshot_field(
@@ -1261,8 +1217,7 @@ def _ripple_modulation_selection_row(
     ripples_table: Any,
     epoch_intervals_table: Any,
     parameters_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
 ) -> dict[str, Any]:
     """Validate and identify one immutable RippleModulation selection."""
     from v1ca1.spyglass.selection import selection_uuid
@@ -1273,34 +1228,40 @@ def _ripple_modulation_selection_row(
             "nwb_file_name",
             "epoch",
             "ripple_modulation_param_name",
-            "unit_filter_params_name",
-            "sorted_spikes_group_name",
+            "region_sorted_spikes_group_id",
         )
     }
-    natural_key["region"] = _analysis_region(key["region"])
     _fetch1_dict(ripples_table, natural_key)
     _fetch1_dict(epoch_intervals_table, natural_key)
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": natural_key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    if str(region_row.get("nwb_file_name")) != str(
+        natural_key["nwb_file_name"]
+    ):
+        raise ValueError(
+            "RippleModulation and RegionSortedSpikesGroup must belong to "
+            "the same NWB file."
+        )
     parameters = _validate_parameter_row(
         _fetch1_dict(parameters_table, natural_key)
     )
-    provenance = _resolve_sorting_snapshot(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        key=natural_key,
-    )
-    snapshot = _sorting_snapshot_fields(provenance)
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
         field_name="ripple_modulation_parameters_sha256",
     )
-    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    identity_payload = {**natural_key, **parameter_snapshot}
     return {
         "ripple_modulation_id": selection_uuid(
             "RippleModulation",
             identity_payload,
         ),
         **natural_key,
-        **snapshot,
         **parameter_snapshot,
     }
 
@@ -1486,7 +1447,7 @@ def _ripple_glm_selection_row(
         ripple_row["ripple_count"]
     ):
         raise ValueError(
-            "Ripples.ripple_count disagrees with its NWB interval data."
+            "RippleInterval.ripple_count disagrees with its NWB interval data."
         )
     if dict(OUTPUT_RULE) != dict(table_specs.RIPPLE_GLM_OUTPUT_RULE):
         raise RuntimeError(
@@ -1538,7 +1499,7 @@ def _ripple_glm_selection_row(
     }
 
 
-def _cross_region_xcorr_selection_row(
+def _ripple_cross_region_xcorr_selection_row(
     *,
     key: Mapping[str, Any],
     ripples_table: Any,
@@ -1549,7 +1510,7 @@ def _cross_region_xcorr_selection_row(
     ripple_table: Any | None = None,
 ) -> dict[str, Any]:
     """Validate, freeze, and identify one exact-ripple xcorr selection."""
-    from v1ca1.spyglass import cross_region_xcorr
+    from v1ca1.spyglass import ripple_cross_region_xcorr
     from v1ca1.spyglass.selection import selection_uuid
 
     nwb_file_name = str(key["nwb_file_name"])
@@ -1562,12 +1523,12 @@ def _cross_region_xcorr_selection_row(
         epoch_intervals_table,
         {"nwb_file_name": nwb_file_name, "epoch": epoch},
     )
-    parameters = _validate_cross_region_xcorr_parameter_row(
+    parameters = _validate_ripple_cross_region_xcorr_parameter_row(
         _fetch1_dict(
             parameters_table,
             {
-                "cross_region_xcorr_param_name": key[
-                    "cross_region_xcorr_param_name"
+                "ripple_cross_region_xcorr_param_name": key[
+                    "ripple_cross_region_xcorr_param_name"
                 ]
             },
         )
@@ -1591,12 +1552,12 @@ def _cross_region_xcorr_selection_row(
         row = group_rows[role]
         if str(row.get("region_name")) != expected_region:
             raise ValueError(
-                f"CrossRegionXCorr {role} group must select region "
+                f"RippleCrossRegionXCorr {role} group must select region "
                 f"{expected_region!r}."
             )
         if str(row.get("nwb_file_name")) != nwb_file_name:
             raise ValueError(
-                "CrossRegionXCorr ripple and regional sorting inputs must "
+                "RippleCrossRegionXCorr ripple and regional sorting inputs must "
                 "belong to the same NWB file."
             )
     if ripple_table is None:
@@ -1612,7 +1573,7 @@ def _cross_region_xcorr_selection_row(
             nwbfile_table=nwbfile_table,
         )
     event_selection = (
-        cross_region_xcorr.prepare_cross_region_xcorr_event_selection(
+        ripple_cross_region_xcorr.prepare_ripple_cross_region_xcorr_event_selection(
             epoch=epoch,
             ripple_table=ripple_table,
         )
@@ -1620,18 +1581,18 @@ def _cross_region_xcorr_selection_row(
     normalized_ripples = event_selection["selected_ripple_table"]
     if int(event_selection["n_ripples"]) != int(ripple_row["ripple_count"]):
         raise ValueError(
-            "Ripples.ripple_count disagrees with its NWB interval data."
+            "RippleInterval.ripple_count disagrees with its NWB interval data."
         )
-    if dict(cross_region_xcorr.OUTPUT_RULE) != dict(
-        table_specs.CROSS_REGION_XCORR_OUTPUT_RULE
+    if dict(ripple_cross_region_xcorr.OUTPUT_RULE) != dict(
+        table_specs.RIPPLE_CROSS_REGION_XCORR_OUTPUT_RULE
     ):
         raise RuntimeError(
-            "CrossRegionXCorr table and database-free output rules have "
+            "RippleCrossRegionXCorr table and database-free output rules have "
             "diverged."
         )
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
-        field_name="cross_region_xcorr_parameters_sha256",
+        field_name="ripple_cross_region_xcorr_parameters_sha256",
     )
     natural_key = {
         "nwb_file_name": nwb_file_name,
@@ -1642,8 +1603,8 @@ def _cross_region_xcorr_selection_row(
         "target_region_sorted_spikes_group_id": key[
             "target_region_sorted_spikes_group_id"
         ],
-        "cross_region_xcorr_param_name": parameters[
-            "cross_region_xcorr_param_name"
+        "ripple_cross_region_xcorr_param_name": parameters[
+            "ripple_cross_region_xcorr_param_name"
         ],
         "source_region": "ca1",
         "target_region": "v1",
@@ -1659,13 +1620,13 @@ def _cross_region_xcorr_selection_row(
         **_ripple_glm_group_snapshot(group_rows["source"], role="source"),
         **_ripple_glm_group_snapshot(group_rows["target"], role="target"),
         **parameter_snapshot,
-        "cross_region_xcorr_output_rule_sha256": (
-            cross_region_xcorr.OUTPUT_RULE_SHA256
+        "ripple_cross_region_xcorr_output_rule_sha256": (
+            ripple_cross_region_xcorr.OUTPUT_RULE_SHA256
         ),
     }
     return {
-        "cross_region_xcorr_id": selection_uuid(
-            "CrossRegionXCorr",
+        "ripple_cross_region_xcorr_id": selection_uuid(
+            "RippleCrossRegionXCorr",
             natural_key,
         ),
         **natural_key,
@@ -1750,117 +1711,6 @@ def _catalog_row_sha256(row: Mapping[str, Any]) -> str:
     )
 
 
-def _ripple_band_lfp_parameter_kwargs(
-    parameters: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Return the eight scientific parameters accepted by the standalone API."""
-    return {
-        field_name: parameters[field_name]
-        for field_name in (
-            "lowcut_hz",
-            "highcut_hz",
-            "filter_order",
-            "target_sampling_frequency_hz",
-            "enable_notch_filter",
-            "notch_base_freq_hz",
-            "notch_harmonics",
-            "notch_quality",
-        )
-    }
-
-
-def _validate_ripple_band_lfp_parameter_row(
-    row: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Validate one source-independent RippleBandLFP parameter row."""
-    expected = set(table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS)
-    missing = sorted(expected.difference(row))
-    extra = sorted(set(row).difference(expected))
-    if missing or extra:
-        raise ValueError(
-            "RippleBandLFP parameters must have exactly the declared fields; "
-            f"missing={missing!r}, extra={extra!r}."
-        )
-    values = dict(row)
-    name = values["ripple_band_lfp_param_name"]
-    if not isinstance(name, str) or not name.strip() or len(name) > 64:
-        raise ValueError(
-            "ripple_band_lfp_param_name must be a non-empty string of at "
-            "most 64 characters."
-        )
-    values["ripple_band_lfp_param_name"] = name
-    for field_name in (
-        "lowcut_hz",
-        "highcut_hz",
-        "target_sampling_frequency_hz",
-        "notch_base_freq_hz",
-        "notch_quality",
-    ):
-        value = values[field_name]
-        if isinstance(value, bool) or not isinstance(value, Real):
-            raise TypeError(f"{field_name} must be one numeric scalar.")
-        value = float(value)
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{field_name} must be positive and finite.")
-        values[field_name] = value
-    if values["highcut_hz"] <= values["lowcut_hz"]:
-        raise ValueError("highcut_hz must exceed lowcut_hz.")
-    for field_name in ("filter_order", "notch_harmonics"):
-        value = values[field_name]
-        if isinstance(value, bool) or not isinstance(value, Integral):
-            raise TypeError(f"{field_name} must be one integer scalar.")
-        value = int(value)
-        if value < 1:
-            raise ValueError(f"{field_name} must be positive.")
-        if value > 65535:
-            raise ValueError(
-                f"{field_name} must fit the smallint unsigned schema field."
-            )
-        values[field_name] = value
-    values["enable_notch_filter"] = _database_bool(
-        values["enable_notch_filter"], name="enable_notch_filter"
-    )
-    return values
-
-
-def _ordered_ripple_band_lfp_electrode_ids(
-    ripple_row: Mapping[str, Any],
-) -> list[int]:
-    """Read ordered unique NWB electrode-table IDs only from ripple metadata."""
-    parameters = ripple_row.get("detection_parameters")
-    if not isinstance(parameters, Mapping):
-        raise ValueError(
-            "Ripples.detection_parameters must contain ripple_channels."
-        )
-    values = parameters.get("ripple_channels")
-    if isinstance(values, (str, bytes, Mapping)) or values is None:
-        raise TypeError(
-            "Ripples ripple_channels must be an ordered integer sequence."
-        )
-    try:
-        sequence = list(values)
-    except TypeError as exc:
-        raise TypeError(
-            "Ripples ripple_channels must be an ordered integer sequence."
-        ) from exc
-    if not sequence:
-        raise ValueError("Ripples ripple_channels must not be empty.")
-    electrode_ids: list[int] = []
-    for value in sequence:
-        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
-            raise TypeError(
-                "Ripples ripple_channels must contain only integer NWB "
-                "electrode-table IDs."
-            )
-        electrode_id = int(value)
-        if electrode_id < 0:
-            raise ValueError("Ripple electrode-table IDs must be non-negative.")
-        electrode_ids.append(electrode_id)
-    if len(electrode_ids) != len(set(electrode_ids)):
-        raise ValueError("Ripple electrode-table IDs must be unique.")
-    return electrode_ids
-
-
 def _registered_nwb_source_identity(
     *,
     nwbfile_table: Any,
@@ -1869,12 +1719,18 @@ def _registered_nwb_source_identity(
     """Return authoritative DataJoint filepath identity and current byte size."""
     nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
     custom_loader = getattr(
-        nwbfile_table, "get_registered_source_identity", None
+        nwbfile_table,
+        "get_registered_source_identity",
+        None,
     )
     if callable(custom_loader):
         registered = dict(custom_loader(nwb_file_name))
     else:
-        table = nwbfile_table() if isinstance(nwbfile_table, type) else nwbfile_table
+        table = (
+            nwbfile_table()
+            if isinstance(nwbfile_table, type)
+            else nwbfile_table
+        )
         try:
             attribute = table.heading.attributes["nwb_file_abs_path"]
             external = table.connection.schemas[attribute.database].external[
@@ -1909,7 +1765,8 @@ def _registered_nwb_source_identity(
         ) from exc
     registered_size = registered.get("size")
     if isinstance(registered_size, bool) or not isinstance(
-        registered_size, Integral
+        registered_size,
+        Integral,
     ):
         raise TypeError("Nwbfile filepath@raw size must be an integer.")
     registered_size = int(registered_size)
@@ -1930,742 +1787,6 @@ def _registered_nwb_source_identity(
         "registered_source_contents_hash": contents_hash_text,
         "registered_source_size_bytes": registered_size,
     }
-
-
-def _inspect_ripple_band_lfp_source(
-    *,
-    key: Mapping[str, Any],
-    ripple_row: Mapping[str, Any],
-    nwbfile_table: Any,
-) -> dict[str, Any]:
-    """Inspect only immutable HDF5 metadata for one selected NWB epoch."""
-    from v1ca1.spyglass.ripple_band_lfp import (
-        inspect_selected_ripple_band_lfp_nwb_inputs,
-    )
-
-    nwb_path = Path(
-        nwbfile_table.get_abs_path(str(key["nwb_file_name"]))
-    )
-    return inspect_selected_ripple_band_lfp_nwb_inputs(
-        nwb_path=nwb_path,
-        epoch=str(key["epoch"]),
-        electrode_ids=_ordered_ripple_band_lfp_electrode_ids(ripple_row),
-    )
-
-
-def _ripple_band_lfp_source_snapshot_fields(
-    source_snapshot: Mapping[str, Any],
-    *,
-    epoch: str,
-    electrode_ids: Sequence[int],
-) -> dict[str, Any]:
-    """Normalize the full public metadata-only NWB inspection snapshot."""
-    from v1ca1.spyglass.selection import provenance_sha256
-
-    expected_fields = {
-        "source_nwb_file_name",
-        "source_electrical_series_path",
-        "electrode_ids",
-        "gain_to_uv",
-        "offset_to_uv",
-        "source_sampling_frequency_hz",
-        "sampling_frequency_provenance",
-        "source_slice_provenance",
-    }
-    if not isinstance(source_snapshot, Mapping) or set(source_snapshot) != (
-        expected_fields
-    ):
-        raise ValueError(
-            "RippleBandLFP NWB inspection returned a non-canonical snapshot."
-        )
-    snapshot = _epoch_motor_json_value(dict(source_snapshot))
-    if snapshot["electrode_ids"] != list(electrode_ids):
-        raise ValueError(
-            "Inspected NWB electrode IDs do not preserve ripple-channel order."
-        )
-    if len(snapshot["gain_to_uv"]) != len(electrode_ids) or len(
-        snapshot["offset_to_uv"]
-    ) != len(electrode_ids):
-        raise ValueError("Inspected NWB scaling does not align to electrodes.")
-    source_slice = snapshot["source_slice_provenance"]
-    if not isinstance(source_slice, Mapping) or str(
-        source_slice.get("epoch")
-    ) != epoch:
-        raise ValueError("Inspected NWB source slice has the wrong epoch.")
-    start_index = int(source_slice["source_start_index"])
-    stop_index = int(source_slice["source_stop_index_exclusive"])
-    if start_index < 0 or stop_index < start_index:
-        raise ValueError("Inspected NWB source slice indices are invalid.")
-    source_fs = float(snapshot["source_sampling_frequency_hz"])
-    if not math.isfinite(source_fs) or source_fs <= 0.0:
-        raise ValueError("Inspected NWB sampling frequency must be positive.")
-    trace_scaling = {
-        "electrode_ids": list(electrode_ids),
-        "gain_to_uV": [float(value) for value in snapshot["gain_to_uv"]],
-        "offset_to_uV": [float(value) for value in snapshot["offset_to_uv"]],
-        "scaling_operation_dtype": "float32",
-        "filter_input_dtype": "float64",
-    }
-    return {
-        "source_nwb_file_name": str(snapshot["source_nwb_file_name"]),
-        "source_electrical_series_path": str(
-            snapshot["source_electrical_series_path"]
-        ),
-        "ordered_electrode_ids": list(electrode_ids),
-        "ordered_electrode_ids_sha256": provenance_sha256(
-            list(electrode_ids)
-        ),
-        "ordered_gain_to_uv": trace_scaling["gain_to_uV"],
-        "ordered_offset_to_uv": trace_scaling["offset_to_uV"],
-        "trace_scaling_sha256": provenance_sha256(trace_scaling),
-        "sampling_frequency_provenance": snapshot[
-            "sampling_frequency_provenance"
-        ],
-        "sampling_frequency_provenance_sha256": provenance_sha256(
-            snapshot["sampling_frequency_provenance"]
-        ),
-        "source_slice_provenance": source_slice,
-        "source_slice_provenance_sha256": provenance_sha256(source_slice),
-        "source_sampling_frequency_hz": source_fs,
-        "input_sample_count": stop_index - start_index,
-    }
-
-
-def _ripple_band_lfp_expected_source_snapshot(
-    selection: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Reconstruct the standalone loader snapshot frozen in a selection."""
-    return {
-        "source_nwb_file_name": str(selection["source_nwb_file_name"]),
-        "source_electrical_series_path": str(
-            selection["source_electrical_series_path"]
-        ),
-        "electrode_ids": [
-            int(value) for value in selection["ordered_electrode_ids"]
-        ],
-        "gain_to_uv": [
-            float(value) for value in selection["ordered_gain_to_uv"]
-        ],
-        "offset_to_uv": [
-            float(value) for value in selection["ordered_offset_to_uv"]
-        ],
-        "source_sampling_frequency_hz": float(
-            selection["source_sampling_frequency_hz"]
-        ),
-        "sampling_frequency_provenance": dict(
-            selection["sampling_frequency_provenance"]
-        ),
-        "source_slice_provenance": dict(
-            selection["source_slice_provenance"]
-        ),
-    }
-
-
-def _ripple_band_lfp_selection_row(
-    *,
-    key: Mapping[str, Any],
-    ripples_table: Any,
-    epoch_intervals_table: Any,
-    parameters_table: Any,
-    nwbfile_table: Any,
-    source_snapshot: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Inspect, freeze, UUID, and return one raw-NWB RippleBandLFP selection."""
-    from v1ca1.spyglass import ripple_band_lfp
-    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
-
-    nwb_file_name = str(key["nwb_file_name"])
-    epoch = str(key["epoch"])
-    ripple_row = _fetch1_dict(
-        ripples_table,
-        {"nwb_file_name": nwb_file_name, "epoch": epoch},
-    )
-    epoch_row = _fetch1_dict(
-        epoch_intervals_table,
-        {"nwb_file_name": nwb_file_name, "epoch": epoch},
-    )
-    parameter_name = str(key["ripple_band_lfp_param_name"])
-    parameters = _validate_ripple_band_lfp_parameter_row(
-        _fetch1_dict(
-            parameters_table,
-            {"ripple_band_lfp_param_name": parameter_name},
-        )
-    )
-    electrode_ids = _ordered_ripple_band_lfp_electrode_ids(ripple_row)
-    registered_identity = _registered_nwb_source_identity(
-        nwbfile_table=nwbfile_table,
-        nwb_file_name=nwb_file_name,
-    )
-    if source_snapshot is None:
-        source_snapshot = _inspect_ripple_band_lfp_source(
-            key={"nwb_file_name": nwb_file_name, "epoch": epoch},
-            ripple_row=ripple_row,
-            nwbfile_table=nwbfile_table,
-        )
-    source_fields = _ripple_band_lfp_source_snapshot_fields(
-        source_snapshot,
-        epoch=epoch,
-        electrode_ids=electrode_ids,
-    )
-    resolved_name = Path(registered_identity["nwb_path"]).name
-    if source_fields["source_nwb_file_name"] != resolved_name:
-        raise ValueError(
-            "Inspected RippleBandLFP source filename differs from Nwbfile."
-        )
-    effective = ripple_band_lfp.validate_ripple_band_lfp_parameters(
-        source_sampling_frequency_hz=source_fields[
-            "source_sampling_frequency_hz"
-        ],
-        **_ripple_band_lfp_parameter_kwargs(parameters),
-    )
-    if dict(table_specs.RIPPLE_BAND_LFP_OUTPUT_RULE) != dict(
-        ripple_band_lfp.OUTPUT_RULE
-    ):
-        raise RuntimeError(
-            "Passive and standalone RippleBandLFP output rules differ."
-        )
-    parameter_sha256 = provenance_sha256(parameters)
-    natural_key = {
-        "nwb_file_name": nwb_file_name,
-        "epoch": epoch,
-        "ripple_band_lfp_param_name": parameter_name,
-        "registered_source_contents_hash": registered_identity[
-            "registered_source_contents_hash"
-        ],
-        "registered_source_size_bytes": registered_identity[
-            "registered_source_size_bytes"
-        ],
-        **source_fields,
-        "ripple_catalog_row_sha256": (
-            _catalog_row_sha256(ripple_row)
-        ),
-        "epoch_intervals_catalog_row_sha256": (
-            _catalog_row_sha256(epoch_row)
-        ),
-        "decimation_factor": int(effective["decimation_factor"]),
-        "actual_sampling_frequency_hz": float(
-            effective["actual_sampling_frequency_hz"]
-        ),
-        "ripple_band_lfp_parameters_sha256": parameter_sha256,
-        "ripple_band_lfp_output_rule_sha256": (
-            ripple_band_lfp.OUTPUT_RULE_SHA256
-        ),
-    }
-    return {
-        "ripple_band_lfp_id": selection_uuid(
-            "RippleBandLFP", natural_key
-        ),
-        **natural_key,
-    }
-
-
-def _ripple_band_lfp_upstream_provenance(
-    selection: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Return the exact selection snapshot embedded in an LFP bundle."""
-    fields = (
-        "nwb_file_name",
-        "epoch",
-        "ripple_catalog_row_sha256",
-        "epoch_intervals_catalog_row_sha256",
-        "source_nwb_file_name",
-        "registered_source_contents_hash",
-        "registered_source_size_bytes",
-        "source_electrical_series_path",
-        "ordered_electrode_ids",
-        "ordered_electrode_ids_sha256",
-        "ordered_gain_to_uv",
-        "ordered_offset_to_uv",
-        "trace_scaling_sha256",
-        "sampling_frequency_provenance",
-        "sampling_frequency_provenance_sha256",
-        "source_slice_provenance",
-        "source_slice_provenance_sha256",
-        "source_sampling_frequency_hz",
-        "input_sample_count",
-        "decimation_factor",
-        "actual_sampling_frequency_hz",
-        "ripple_band_lfp_param_name",
-        "ripple_band_lfp_parameters_sha256",
-        "ripple_band_lfp_output_rule_sha256",
-    )
-    return {field_name: selection[field_name] for field_name in fields}
-
-
-def _load_ripple_band_lfp_context(
-    *,
-    key: Mapping[str, Any],
-    ripples_table: Any,
-    epoch_intervals_table: Any,
-    parameters_table: Any,
-    session_table: Any,
-    nwbfile_table: Any,
-) -> dict[str, Any]:
-    """Reinspect metadata, reject drift, then load only the selected slice."""
-    from v1ca1.spyglass.ripple_band_lfp import (
-        load_selected_ripple_band_lfp_nwb_inputs,
-    )
-    from v1ca1.spyglass.selection import provenance_sha256
-
-    stored_selection = dict(key)
-    current_identity = _registered_nwb_source_identity(
-        nwbfile_table=nwbfile_table,
-        nwb_file_name=str(stored_selection["nwb_file_name"]),
-    )
-    for field_name in (
-        "registered_source_contents_hash",
-        "registered_source_size_bytes",
-    ):
-        if str(stored_selection.get(field_name)) != str(
-            current_identity[field_name]
-        ):
-            raise ValueError(
-                "RippleBandLFP registered raw NWB identity changed after "
-                f"selection: {field_name}."
-            )
-    ripple_row = _fetch1_dict(ripples_table, stored_selection)
-    current_snapshot = _inspect_ripple_band_lfp_source(
-        key=stored_selection,
-        ripple_row=ripple_row,
-        nwbfile_table=nwbfile_table,
-    )
-    current_selection = _ripple_band_lfp_selection_row(
-        key=stored_selection,
-        ripples_table=ripples_table,
-        epoch_intervals_table=epoch_intervals_table,
-        parameters_table=parameters_table,
-        nwbfile_table=nwbfile_table,
-        source_snapshot=current_snapshot,
-    )
-    for field_name, expected in current_selection.items():
-        if field_name not in stored_selection or provenance_sha256(
-            stored_selection[field_name]
-        ) != provenance_sha256(expected):
-            raise ValueError(
-                "RippleBandLFP selection changed after insertion: "
-                f"{field_name}."
-            )
-    expected_snapshot = _ripple_band_lfp_expected_source_snapshot(
-        current_selection
-    )
-    nwb_path = Path(
-        nwbfile_table.get_abs_path(str(current_selection["nwb_file_name"]))
-    )
-    loaded = load_selected_ripple_band_lfp_nwb_inputs(
-        nwb_path=nwb_path,
-        epoch=str(current_selection["epoch"]),
-        electrode_ids=current_selection["ordered_electrode_ids"],
-        source_electrical_series_path=current_selection[
-            "source_electrical_series_path"
-        ],
-        expected_snapshot=expected_snapshot,
-    )
-    animal_name, session_date = _session_identity(
-        session_table, current_selection
-    )
-    parameters = _validate_ripple_band_lfp_parameter_row(
-        _fetch1_dict(parameters_table, current_selection)
-    )
-    return {
-        "selection": current_selection,
-        "parameters": parameters,
-        "animal_name": animal_name,
-        "date": session_date,
-        "nwb_inputs": loaded,
-        "ripple_row": ripple_row,
-    }
-
-
-def _ripple_band_lfp_compute_kwargs(
-    context: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Return exact standalone arguments for one frozen LFP selection."""
-    selection = context["selection"]
-    parameters = context["parameters"]
-    nwb_inputs = context["nwb_inputs"]
-    return {
-        "animal_name": context["animal_name"],
-        "date": context["date"],
-        "epoch": str(selection["epoch"]),
-        "ripple_band_lfp_id": selection["ripple_band_lfp_id"],
-        **{
-            field_name: nwb_inputs[field_name]
-            for field_name in (
-                "source_nwb_file_name",
-                "source_electrical_series_path",
-                "raw_timestamps",
-                "raw_traces",
-                "electrode_ids",
-                "gain_to_uv",
-                "offset_to_uv",
-                "source_sampling_frequency_hz",
-                "sampling_frequency_provenance",
-                "source_slice_provenance",
-            )
-        },
-        "parameter_name": parameters["ripple_band_lfp_param_name"],
-        "parameter_sha256": selection[
-            "ripple_band_lfp_parameters_sha256"
-        ],
-        "output_rule_sha256": selection[
-            "ripple_band_lfp_output_rule_sha256"
-        ],
-        **_ripple_band_lfp_parameter_kwargs(parameters),
-        "upstream_provenance": _ripple_band_lfp_upstream_provenance(
-            selection
-        ),
-    }
-
-
-def _ripple_band_lfp_result_row(
-    result: Mapping[str, Any],
-    paths: Mapping[str, Any],
-    *,
-    created_artifact_paths: Sequence[str],
-) -> dict[str, Any]:
-    """Return one DataJoint payload from a validated standalone LFP bundle."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    validated = ripple_band_lfp.validate_ripple_band_lfp_result(result)
-    return {
-        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
-        "channel_qc_path": str(paths["channel_qc_path"]),
-        "ripple_band_lfp_path": str(paths["result_path"]),
-        "bundle_schema_version": ripple_band_lfp.BUNDLE_SCHEMA_VERSION,
-        "n_channels": len(validated["ordered_electrode_ids"]),
-        "input_sample_count": int(validated["input_sample_count"]),
-        "output_sample_count": int(validated["output_sample_count"]),
-        "source_sampling_frequency_hz": float(
-            validated["source_sampling_frequency_hz"]
-        ),
-        "actual_sampling_frequency_hz": float(
-            validated["actual_sampling_frequency_hz"]
-        ),
-        "decimation_factor": int(validated["decimation_factor"]),
-        "raw_timestamps_sha256": str(validated["raw_timestamps_sha256"]),
-        "raw_traces_sha256": str(validated["raw_traces_sha256"]),
-        "analysis_status": str(validated["analysis_status"]),
-        "legacy_artifact_provenance": (
-            dict(validated["legacy_artifact_provenance"])
-            if validated["legacy_artifact_provenance"]
-            else None
-        ),
-        "_created_artifact_paths": list(created_artifact_paths),
-    }
-
-
-def _make_ripple_band_lfp_row(
-    *,
-    key: Mapping[str, Any],
-    parameters_table: Any,
-    ripples_table: Any,
-    epoch_intervals_table: Any,
-    session_table: Any,
-    nwbfile_table: Any,
-    artifact_root: Path | None,
-) -> dict[str, Any]:
-    """Compute and write one immutable raw-NWB ripple-band LFP bundle."""
-    from v1ca1.spyglass.ripple_band_lfp import (
-        compute_selected_ripple_band_lfp,
-        get_ripple_band_lfp_artifact_paths,
-        write_ripple_band_lfp_artifact,
-    )
-
-    context = _load_ripple_band_lfp_context(
-        key=key,
-        ripples_table=ripples_table,
-        epoch_intervals_table=epoch_intervals_table,
-        parameters_table=parameters_table,
-        session_table=session_table,
-        nwbfile_table=nwbfile_table,
-    )
-    result = compute_selected_ripple_band_lfp(
-        **_ripple_band_lfp_compute_kwargs(context),
-        artifact_origin="computed",
-        legacy_artifact_provenance=None,
-    )
-    selection = context["selection"]
-    path_kwargs: dict[str, Any] = {}
-    if artifact_root is not None:
-        path_kwargs["artifact_root"] = artifact_root
-    paths = get_ripple_band_lfp_artifact_paths(
-        animal_name=context["animal_name"],
-        date=context["date"],
-        epoch=str(selection["epoch"]),
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        **path_kwargs,
-    )
-    artifact_dir = Path(paths["artifact_dir"])
-    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
-    try:
-        written = write_ripple_band_lfp_artifact(result, artifact_dir)
-        return _ripple_band_lfp_result_row(
-            result,
-            written,
-            created_artifact_paths=created_artifact_paths,
-        )
-    except Exception:
-        _remove_created_artifacts(created_artifact_paths)
-        raise
-
-
-def _validate_ripple_band_lfp_artifact_link(
-    *,
-    bundle: Mapping[str, Any],
-    result_row: Mapping[str, Any],
-    selection_row: Mapping[str, Any],
-    parameters_row: Mapping[str, Any],
-    animal_name: str,
-    date: str,
-) -> None:
-    """Require one loaded LFP bundle to match its complete DataJoint source."""
-    from v1ca1.spyglass import ripple_band_lfp
-    from v1ca1.spyglass.selection import provenance_sha256
-
-    validated = ripple_band_lfp.validate_ripple_band_lfp_result(bundle)
-    expected_metadata = {
-        "ripple_band_lfp_id": str(selection_row["ripple_band_lfp_id"]),
-        "animal_name": str(animal_name),
-        "date": str(date),
-        "epoch": str(selection_row["epoch"]),
-        "source_nwb_file_name": str(
-            selection_row["source_nwb_file_name"]
-        ),
-        "source_electrical_series_path": str(
-            selection_row["source_electrical_series_path"]
-        ),
-    }
-    if validated["metadata"] != expected_metadata:
-        raise ValueError("RippleBandLFP artifact metadata differs from selection.")
-    parameters = _validate_ripple_band_lfp_parameter_row(parameters_row)
-    effective = ripple_band_lfp.validate_ripple_band_lfp_parameters(
-        source_sampling_frequency_hz=selection_row[
-            "source_sampling_frequency_hz"
-        ],
-        **_ripple_band_lfp_parameter_kwargs(parameters),
-    )
-    expected_parameters = {
-        "parameter_name": parameters["ripple_band_lfp_param_name"],
-        "parameter_sha256": selection_row[
-            "ripple_band_lfp_parameters_sha256"
-        ],
-        "output_rule_sha256": selection_row[
-            "ripple_band_lfp_output_rule_sha256"
-        ],
-        **_ripple_band_lfp_parameter_kwargs(parameters),
-        "source_sampling_frequency_hz": effective[
-            "source_sampling_frequency_hz"
-        ],
-        "decimation_factor": effective["decimation_factor"],
-        "actual_sampling_frequency_hz": effective[
-            "actual_sampling_frequency_hz"
-        ],
-    }
-    if validated["parameters"] != expected_parameters:
-        raise ValueError("RippleBandLFP parameters differ from selection.")
-    actual_source_snapshot = {
-        "source_nwb_file_name": validated["metadata"][
-            "source_nwb_file_name"
-        ],
-        "source_electrical_series_path": validated["metadata"][
-            "source_electrical_series_path"
-        ],
-        "electrode_ids": validated["ordered_electrode_ids"],
-        "gain_to_uv": validated["ordered_gain_to_uv"],
-        "offset_to_uv": validated["ordered_offset_to_uv"],
-        "source_sampling_frequency_hz": validated[
-            "source_sampling_frequency_hz"
-        ],
-        "sampling_frequency_provenance": validated[
-            "sampling_frequency_provenance"
-        ],
-        "source_slice_provenance": validated[
-            "source_slice_provenance"
-        ],
-    }
-    if provenance_sha256(actual_source_snapshot) != provenance_sha256(
-        _ripple_band_lfp_expected_source_snapshot(selection_row)
-    ):
-        raise ValueError("RippleBandLFP NWB source snapshot differs from selection.")
-    if provenance_sha256(validated["upstream_provenance"]) != provenance_sha256(
-        _ripple_band_lfp_upstream_provenance(selection_row)
-    ):
-        raise ValueError("RippleBandLFP upstream provenance differs from selection.")
-    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
-    try:
-        artifact_root = artifact_dir.parents[4]
-    except IndexError as exc:
-        raise ValueError(
-            "RippleBandLFP artifact does not use the canonical layout."
-        ) from exc
-    expected_paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name=animal_name,
-        date=date,
-        epoch=str(selection_row["epoch"]),
-        ripple_band_lfp_id=selection_row["ripple_band_lfp_id"],
-        artifact_root=artifact_root,
-    )
-    path_fields = {
-        "artifact_manifest_path": "artifact_manifest_path",
-        "channel_qc_path": "channel_qc_path",
-        "ripple_band_lfp_path": "result_path",
-    }
-    for field_name, path_name in path_fields.items():
-        if Path(result_row[field_name]) != Path(expected_paths[path_name]):
-            raise ValueError(
-                f"RippleBandLFP result path is not canonical: {field_name}."
-            )
-    expected_scalars = {
-        "n_channels": len(validated["ordered_electrode_ids"]),
-        "input_sample_count": validated["input_sample_count"],
-        "output_sample_count": validated["output_sample_count"],
-        "source_sampling_frequency_hz": validated[
-            "source_sampling_frequency_hz"
-        ],
-        "actual_sampling_frequency_hz": validated[
-            "actual_sampling_frequency_hz"
-        ],
-        "decimation_factor": validated["decimation_factor"],
-        "raw_timestamps_sha256": validated["raw_timestamps_sha256"],
-        "raw_traces_sha256": validated["raw_traces_sha256"],
-        "analysis_status": validated["analysis_status"],
-        "artifact_origin": validated["artifact_origin"],
-    }
-    for field_name, expected in expected_scalars.items():
-        actual = result_row.get(field_name)
-        if isinstance(expected, Real) and not isinstance(expected, Integral):
-            matches = np.isclose(
-                float(actual), float(expected), rtol=1e-10, atol=1e-12
-            )
-        else:
-            matches = str(actual) == str(expected)
-        if not matches:
-            raise ValueError(
-                "RippleBandLFP result metadata disagrees with artifact: "
-                f"{field_name}."
-            )
-    if str(result_row.get("bundle_schema_version")) != (
-        ripple_band_lfp.BUNDLE_SCHEMA_VERSION
-    ):
-        raise ValueError("RippleBandLFP schema versions disagree.")
-    stored_legacy = result_row.get("legacy_artifact_provenance") or {}
-    if provenance_sha256(stored_legacy) != provenance_sha256(
-        validated["legacy_artifact_provenance"]
-    ):
-        raise ValueError("RippleBandLFP legacy provenance disagrees.")
-
-
-def _validate_legacy_ripple_band_lfp_parameters(
-    *,
-    parameters: Mapping[str, Any],
-    ripple_row: Mapping[str, Any],
-) -> None:
-    """Require the filter settings recorded by the legacy detector run."""
-    detection = ripple_row.get("detection_parameters")
-    if not isinstance(detection, Mapping):
-        raise ValueError("Legacy RippleBandLFP requires detector provenance.")
-    manuscript = table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS
-    for field_name in (
-        "lowcut_hz",
-        "highcut_hz",
-        "filter_order",
-        "target_sampling_frequency_hz",
-    ):
-        if parameters[field_name] != manuscript[field_name]:
-            raise ValueError(
-                "Legacy RippleBandLFP requires the detector's fixed bandpass "
-                f"and stride settings; {field_name} differs."
-            )
-    detector_fields = {
-        "enable_notch_filter": "notch_filter_enabled",
-        "notch_base_freq_hz": "notch_base_freq_hz",
-        "notch_harmonics": "notch_harmonics",
-        "notch_quality": "notch_quality",
-    }
-    for parameter_field, detector_field in detector_fields.items():
-        if detector_field not in detection:
-            raise ValueError(
-                "Legacy RippleBandLFP detector provenance is missing "
-                f"{detector_field}."
-            )
-        if parameter_field == "enable_notch_filter":
-            matches = _database_bool(
-                detection[detector_field], name=detector_field
-            ) == bool(parameters[parameter_field])
-        else:
-            matches = float(detection[detector_field]) == float(
-                parameters[parameter_field]
-            )
-        if not matches:
-            raise ValueError(
-                "Legacy RippleBandLFP parameters differ from detector "
-                f"provenance: {parameter_field}."
-            )
-
-
-def _register_existing_ripple_band_lfp_row(
-    *,
-    key: Mapping[str, Any],
-    legacy_result_path: Path,
-    legacy_run_log_path: Path | None,
-    parameters_table: Any,
-    ripples_table: Any,
-    epoch_intervals_table: Any,
-    session_table: Any,
-    nwbfile_table: Any,
-    artifact_root: Path | None,
-) -> dict[str, Any]:
-    """Recompute exact NWB input and register one matching legacy NetCDF."""
-    from v1ca1.spyglass.ripple_band_lfp import (
-        get_ripple_band_lfp_artifact_paths,
-        register_existing_ripple_band_lfp_artifact,
-    )
-
-    context = _load_ripple_band_lfp_context(
-        key=key,
-        ripples_table=ripples_table,
-        epoch_intervals_table=epoch_intervals_table,
-        parameters_table=parameters_table,
-        session_table=session_table,
-        nwbfile_table=nwbfile_table,
-    )
-    _validate_legacy_ripple_band_lfp_parameters(
-        parameters=context["parameters"],
-        ripple_row=context["ripple_row"],
-    )
-    selection = context["selection"]
-    path_kwargs: dict[str, Any] = {}
-    if artifact_root is not None:
-        path_kwargs["artifact_root"] = artifact_root
-    paths = get_ripple_band_lfp_artifact_paths(
-        animal_name=context["animal_name"],
-        date=context["date"],
-        epoch=str(selection["epoch"]),
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        **path_kwargs,
-    )
-    artifact_dir = Path(paths["artifact_dir"])
-    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
-    try:
-        registered = register_existing_ripple_band_lfp_artifact(
-            source_result_path=Path(legacy_result_path),
-            source_run_log_path=(
-                None
-                if legacy_run_log_path is None
-                else Path(legacy_run_log_path)
-            ),
-            destination_path=artifact_dir,
-            overwrite=False,
-            **_ripple_band_lfp_compute_kwargs(context),
-        )
-        return _ripple_band_lfp_result_row(
-            registered,
-            paths,
-            created_artifact_paths=created_artifact_paths,
-        )
-    except Exception:
-        _remove_created_artifacts(created_artifact_paths)
-        raise
 
 
 def _epoch_motor_array_sha256(values: Any) -> str:
@@ -3124,34 +2245,17 @@ def _cv_pca_selection_row(
         for field_name, expected in (
             ("nwb_file_name", nwb_file_name),
             ("epoch", epochs[condition]),
-            ("region", region),
         ):
             if str(movement_selection.get(field_name)) != expected:
                 raise ValueError(
                     f"CVPCA {condition} MovementFiringRate has wrong {field_name}."
                 )
-        for field_name in (
-            "nwb_file_name",
-            "unit_filter_params_name",
-            "sorted_spikes_group_name",
-            "sorting_group_members_sha256",
-            "unit_filter_params_sha256",
-        ):
-            if str(group_row.get(field_name)) != str(
-                movement_selection.get(field_name)
-            ):
-                raise ValueError(
-                    "CVPCA regional group and MovementFiringRate differ in "
-                    f"{field_name}."
-                )
-        if str(group_row.get("selected_units_sha256")) != str(
-            movement_result.get("selected_units_sha256")
-        ) or int(group_row.get("n_units", -1)) != int(
-            movement_result.get("n_units", -2)
-        ):
-            raise ValueError(
-                "CVPCA regional group and MovementFiringRate units differ."
-            )
+        _validate_region_movement_identity(
+            analysis_name="CVPCA",
+            region_row=group_row,
+            movement_selection=movement_selection,
+            movement_result=movement_result,
+        )
         movement_parameters[condition] = _validate_movement_parameter_row(
             _fetch1_dict(movement_parameters_table, movement_selection)
         )
@@ -3450,8 +2554,7 @@ def _movement_firing_rate_selection_row(
     key: Mapping[str, Any],
     position_table: Any,
     parameters_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
 ) -> dict[str, Any]:
     """Validate and identify one immutable movement firing-rate selection."""
     from v1ca1.spyglass.selection import selection_uuid
@@ -3463,37 +2566,82 @@ def _movement_firing_rate_selection_row(
             "epoch",
             "position_series_name",
             "movement_param_name",
-            "unit_filter_params_name",
-            "sorted_spikes_group_name",
+            "region_sorted_spikes_group_id",
         )
     }
-    natural_key["region"] = _analysis_region(key["region"])
     position_row = _fetch1_dict(position_table, natural_key)
     if position_row.get("spatial_unit") != "cm":
         raise ValueError("MovementFiringRate position must use centimeters.")
     parameters = _validate_movement_parameter_row(
         _fetch1_dict(parameters_table, natural_key)
     )
-    provenance = _resolve_sorting_snapshot(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        key=natural_key,
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": natural_key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
     )
-    snapshot = _sorting_snapshot_fields(provenance)
+    if str(region_row.get("nwb_file_name")) != str(
+        natural_key["nwb_file_name"]
+    ):
+        raise ValueError(
+            "MovementFiringRate and RegionSortedSpikesGroup must belong to "
+            "the same NWB file."
+        )
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
         field_name="movement_parameters_sha256",
     )
-    identity_payload = {**natural_key, **snapshot, **parameter_snapshot}
+    identity_payload = {**natural_key, **parameter_snapshot}
     return {
         "movement_firing_rate_id": selection_uuid(
             "MovementFiringRate",
             identity_payload,
         ),
         **natural_key,
-        **snapshot,
         **parameter_snapshot,
     }
+
+
+def _validate_region_movement_identity(
+    *,
+    analysis_name: str,
+    region_row: Mapping[str, Any],
+    movement_selection: Mapping[str, Any],
+    movement_result: Mapping[str, Any],
+) -> None:
+    """Require movement artifacts to use one exact registered region group."""
+    region_group_id = str(region_row["region_sorted_spikes_group_id"])
+    if str(movement_selection.get("region_sorted_spikes_group_id")) != (
+        region_group_id
+    ):
+        raise ValueError(
+            f"{analysis_name} regional spikes and MovementFiringRate must "
+            "use the same RegionSortedSpikesGroup row."
+        )
+    if str(region_row.get("nwb_file_name")) != str(
+        movement_selection.get("nwb_file_name")
+    ):
+        raise ValueError(
+            f"{analysis_name} regional spikes and MovementFiringRate must "
+            "use the same nwb_file_name."
+        )
+    if str(region_row.get("selected_units_sha256")) != str(
+        movement_result.get("selected_units_sha256")
+    ):
+        raise ValueError(
+            f"{analysis_name} regional spikes and MovementFiringRate must "
+            "contain the same persistent units."
+        )
+    if int(region_row.get("n_units", -1)) != int(
+        movement_result.get("n_units", -2)
+    ):
+        raise ValueError(
+            f"{analysis_name} regional spikes and MovementFiringRate unit "
+            "counts disagree."
+        )
 
 
 def _path_specific_place_tuning_curve_selection_row(
@@ -3853,7 +3001,7 @@ def _tuning_similarity_selection_row(
     }
 
 
-def _dpp_encoding_comparison_selection_row(
+def _dpp_encoding_selection_row(
     *,
     key: Mapping[str, Any],
     region_sorted_spikes_group_table: Any,
@@ -3886,51 +3034,14 @@ def _dpp_encoding_comparison_selection_row(
     )
     if str(movement_result.get("analysis_status")) != "valid":
         raise ValueError(
-            "DPPEncodingComparison requires a valid MovementFiringRate row."
+            "DPPEncoding requires a valid MovementFiringRate row."
         )
-    for field_name in (
-        "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "RegionSortedSpikesGroup and MovementFiringRate must share "
-                f"the same {field_name}."
-            )
-    if str(region_row.get("region_name")) != str(
-        movement_selection.get("region")
-    ):
-        raise ValueError(
-            "RegionSortedSpikesGroup and MovementFiringRate must select the "
-            "same region."
-        )
-    for field_name in (
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "RegionSortedSpikesGroup and MovementFiringRate must share "
-                f"the same frozen {field_name}."
-            )
-    if str(region_row.get("selected_units_sha256")) != str(
-        movement_result.get("selected_units_sha256")
-    ):
-        raise ValueError(
-            "RegionSortedSpikesGroup and MovementFiringRate must contain the "
-            "same persistent units."
-        )
-    if int(region_row.get("n_units", -1)) != int(
-        movement_result.get("n_units", -2)
-    ):
-        raise ValueError(
-            "RegionSortedSpikesGroup and MovementFiringRate unit counts disagree."
-        )
+    _validate_region_movement_identity(
+        analysis_name="DPPEncoding",
+        region_row=region_row,
+        movement_selection=movement_selection,
+        movement_result=movement_result,
+    )
 
     nwb_file_name = str(movement_selection["nwb_file_name"])
     epoch = str(movement_selection["epoch"])
@@ -3940,7 +3051,7 @@ def _dpp_encoding_comparison_selection_row(
     ):
         if field_name in key and str(key[field_name]) != expected_value:
             raise ValueError(
-                "DPPEncodingComparison supplied source does not match its "
+                "DPPEncoding supplied source does not match its "
                 f"MovementFiringRate: {field_name}."
             )
     epoch_row = _fetch1_dict(
@@ -3948,14 +3059,14 @@ def _dpp_encoding_comparison_selection_row(
         {"nwb_file_name": nwb_file_name, "epoch": epoch},
     )
     if epoch_row.get("epoch_type") not in (None, "run"):
-        raise ValueError("DPPEncodingComparison requires a run epoch.")
+        raise ValueError("DPPEncoding requires a run epoch.")
 
-    parameters = _validate_dpp_encoding_comparison_parameter_row(
+    parameters = _validate_dpp_encoding_parameter_row(
         _fetch1_dict(
             parameters_table,
             {
-                "dpp_encoding_comparison_param_name": key[
-                    "dpp_encoding_comparison_param_name"
+                "dpp_encoding_param_name": key[
+                    "dpp_encoding_param_name"
                 ]
             },
         )
@@ -3967,7 +3078,7 @@ def _dpp_encoding_comparison_selection_row(
         supplied_trajectory = str(key.get(trajectory_field, trajectory_type))
         if supplied_trajectory != trajectory_type:
             raise ValueError(
-                f"DPPEncodingComparison {trajectory_field} must equal "
+                f"DPPEncoding {trajectory_field} must equal "
                 f"{trajectory_type!r}."
             )
         trajectory_row = _fetch1_dict(
@@ -3976,7 +3087,7 @@ def _dpp_encoding_comparison_selection_row(
         )
         if int(trajectory_row.get("interval_count", -1)) < parameters["n_folds"]:
             raise ValueError(
-                f"DPPEncodingComparison requires at least {parameters['n_folds']} "
+                f"DPPEncoding requires at least {parameters['n_folds']} "
                 f"laps for {trajectory_type!r}."
             )
         configuration_field = f"{trajectory_type}_configuration_name"
@@ -3985,7 +3096,7 @@ def _dpp_encoding_comparison_selection_row(
         )
         if supplied_configuration != trajectory_type:
             raise ValueError(
-                f"DPPEncodingComparison {configuration_field} must equal "
+                f"DPPEncoding {configuration_field} must equal "
                 f"{trajectory_type!r}."
             )
         graph_row = _fetch1_dict(
@@ -3996,7 +3107,7 @@ def _dpp_encoding_comparison_selection_row(
             },
         )
         if graph_row.get("coordinate_unit") != "cm":
-            raise ValueError("DPPEncodingComparison graphs must use centimeters.")
+            raise ValueError("DPPEncoding graphs must use centimeters.")
         source_fields[trajectory_field] = trajectory_type
         source_fields[configuration_field] = trajectory_type
 
@@ -4008,7 +3119,7 @@ def _dpp_encoding_comparison_selection_row(
     )
     if full_w_name != _DPP_FULL_GRAPH_CONFIGURATION_NAME:
         raise ValueError(
-            "DPPEncodingComparison full_w_configuration_name must equal "
+            "DPPEncoding full_w_configuration_name must equal "
             f"{_DPP_FULL_GRAPH_CONFIGURATION_NAME!r}."
         )
     full_w_row = _fetch1_dict(
@@ -4019,7 +3130,7 @@ def _dpp_encoding_comparison_selection_row(
         },
     )
     if full_w_row.get("coordinate_unit") != "cm":
-        raise ValueError("DPPEncodingComparison graphs must use centimeters.")
+        raise ValueError("DPPEncoding graphs must use centimeters.")
     source_fields["full_w_configuration_name"] = full_w_name
 
     stability_fields: dict[str, Any] = {}
@@ -4041,14 +3152,14 @@ def _dpp_encoding_comparison_selection_row(
             movement_result.get("selected_units_sha256")
         ):
             raise ValueError(
-                "DPPEncodingComparison stability and movement rows must "
+                "DPPEncoding stability and movement rows must "
                 "contain the same persistent units."
             )
         if int(stability_result.get("n_units", -1)) != int(
             movement_result.get("n_units", -2)
         ):
             raise ValueError(
-                "DPPEncodingComparison stability and movement rows must "
+                "DPPEncoding stability and movement rows must "
                 "contain the same unit count."
             )
         if str(stability_result.get("analysis_status")) not in {
@@ -4056,7 +3167,7 @@ def _dpp_encoding_comparison_selection_row(
             "no_valid_units",
         }:
             raise ValueError(
-                "DPPEncodingComparison stability inputs must be valid or "
+                "DPPEncoding stability inputs must be valid or "
                 "no_valid_units when their MovementFiringRate is valid."
             )
         for subset in ("odd", "even"):
@@ -4088,14 +3199,14 @@ def _dpp_encoding_comparison_selection_row(
                     expected_value
                 ):
                     raise ValueError(
-                        "DPPEncodingComparison stability input does not match "
+                        "DPPEncoding stability input does not match "
                         f"its {trajectory_type!r} slot: {expected_field}."
                     )
         stability_fields[field_name] = stability_id
 
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
-        field_name="dpp_encoding_comparison_parameters_sha256",
+        field_name="dpp_encoding_parameters_sha256",
     )
     natural_key = {
         "nwb_file_name": nwb_file_name,
@@ -4106,14 +3217,14 @@ def _dpp_encoding_comparison_selection_row(
         "movement_firing_rate_id": key["movement_firing_rate_id"],
         **source_fields,
         **stability_fields,
-        "dpp_encoding_comparison_param_name": parameters[
-            "dpp_encoding_comparison_param_name"
+        "dpp_encoding_param_name": parameters[
+            "dpp_encoding_param_name"
         ],
         **parameter_snapshot,
     }
     return {
-        "dpp_encoding_comparison_id": selection_uuid(
-            "DPPEncodingComparison",
+        "dpp_encoding_id": selection_uuid(
+            "DPPEncoding",
             natural_key,
         ),
         **natural_key,
@@ -4136,7 +3247,7 @@ def _path_progression_decoding_selection_row(
     parameters_table: Any,
 ) -> dict[str, Any]:
     """Validate and identify one immutable shared-cohort decoder selection."""
-    from v1ca1.spyglass.decoding_comparison import TRANSFER_SPEC_SHA256
+    from v1ca1.spyglass.path_progression_decoding import TRANSFER_SPEC_SHA256
     from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
 
     region_key = {
@@ -4173,51 +3284,24 @@ def _path_progression_decoding_selection_row(
         )
         if movement_status != expected_movement_status:
             raise ValueError(
-                "PathProgressionDecodingComparison requires target and cohort "
+                "PathProgressionDecoding requires target and cohort "
                 "MovementFiringRate rows matching the regional unit count."
             )
-        for field_name in (
-            "nwb_file_name",
-            "unit_filter_params_name",
-            "sorted_spikes_group_name",
-        ):
-            if str(region_row.get(field_name)) != str(selection.get(field_name)):
-                raise ValueError(
-                    "RegionSortedSpikesGroup and decoding movement sources "
-                    f"must share {field_name}."
-                )
-        if str(region_row.get("region_name")) != str(selection.get("region")):
-            raise ValueError(
-                "RegionSortedSpikesGroup and decoding movement sources must "
-                "select the same region."
-            )
-        for field_name in (
-            "sorting_group_members_sha256",
-            "unit_filter_params_sha256",
-        ):
-            if str(region_row.get(field_name)) != str(selection.get(field_name)):
-                raise ValueError(
-                    "RegionSortedSpikesGroup and decoding movement sources "
-                    f"must share the frozen {field_name}."
-                )
-        if str(region_row.get("selected_units_sha256")) != str(
-            result.get("selected_units_sha256")
-        ) or int(region_row.get("n_units", -1)) != int(
-            result.get("n_units", -2)
-        ):
-            raise ValueError(
-                "RegionSortedSpikesGroup and decoding movement sources must "
-                "contain the same persistent units."
-            )
+        _validate_region_movement_identity(
+            analysis_name="PathProgressionDecoding",
+            region_row=region_row,
+            movement_selection=selection,
+            movement_result=result,
+        )
         epoch_row = _fetch1_dict(epoch_intervals_table, selection)
         if epoch_row.get("epoch_type") not in (None, "run"):
             raise ValueError(
-                "PathProgressionDecodingComparison requires run epochs."
+                "PathProgressionDecoding requires run epochs."
             )
         position_row = _fetch1_dict(position_table, selection)
         if str(position_row.get("spatial_unit")) != "cm":
             raise ValueError(
-                "PathProgressionDecodingComparison position must use centimeters."
+                "PathProgressionDecoding position must use centimeters."
             )
         movement_sources[source_name] = {
             "id_field": id_field,
@@ -4268,7 +3352,7 @@ def _path_progression_decoding_selection_row(
     ):
         if field_name in key and str(key[field_name]) != expected_value:
             raise ValueError(
-                "PathProgressionDecodingComparison supplied source does not "
+                "PathProgressionDecoding supplied source does not "
                 f"match its movement rows: {field_name}."
             )
 
@@ -4278,7 +3362,7 @@ def _path_progression_decoding_selection_row(
         trajectory_field = f"{trajectory_type}_trajectory_type"
         if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
             raise ValueError(
-                f"PathProgressionDecodingComparison {trajectory_field} must "
+                f"PathProgressionDecoding {trajectory_field} must "
                 f"equal {trajectory_type!r}."
             )
         trajectory_row = _fetch1_dict(
@@ -4287,13 +3371,13 @@ def _path_progression_decoding_selection_row(
         )
         if int(trajectory_row.get("interval_count", -1)) < 1:
             raise ValueError(
-                "PathProgressionDecodingComparison requires at least one "
+                "PathProgressionDecoding requires at least one "
                 f"lap for {trajectory_type!r}."
             )
         configuration_field = f"{trajectory_type}_configuration_name"
         if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
             raise ValueError(
-                "PathProgressionDecodingComparison graph aliases must match "
+                "PathProgressionDecoding graph aliases must match "
                 "their trajectory types."
             )
         graph_row = _fetch1_dict(
@@ -4305,7 +3389,7 @@ def _path_progression_decoding_selection_row(
         )
         if str(graph_row.get("coordinate_unit")) != "cm":
             raise ValueError(
-                "PathProgressionDecodingComparison graphs must use centimeters."
+                "PathProgressionDecoding graphs must use centimeters."
             )
         source_fields[trajectory_field] = trajectory_type
         source_fields[configuration_field] = trajectory_type
@@ -4334,7 +3418,7 @@ def _path_progression_decoding_selection_row(
                 movement_source["result"].get("n_units", -2)
             ):
                 raise ValueError(
-                    "PathProgressionDecodingComparison stability and movement "
+                    "PathProgressionDecoding stability and movement "
                     "sources must contain identical persistent units."
                 )
             allowed_stability_statuses = (
@@ -4346,7 +3430,7 @@ def _path_progression_decoding_selection_row(
                 allowed_stability_statuses
             ):
                 raise ValueError(
-                    "PathProgressionDecodingComparison stability sources must "
+                    "PathProgressionDecoding stability sources must "
                     "be valid or no_valid_units."
                 )
             for subset in ("odd", "even"):
@@ -4376,7 +3460,7 @@ def _path_progression_decoding_selection_row(
                         expected_value
                     ):
                         raise ValueError(
-                            "PathProgressionDecodingComparison stability input "
+                            "PathProgressionDecoding stability input "
                             f"does not match {source_name} {trajectory_type!r}: "
                             f"{expected_field}."
                         )
@@ -4414,8 +3498,8 @@ def _path_progression_decoding_selection_row(
         "decoding_output_rule_sha256": decoding_output_rule_sha256,
     }
     return {
-        "path_progression_decoding_comparison_id": selection_uuid(
-            "PathProgressionDecodingComparison",
+        "path_progression_decoding_id": selection_uuid(
+            "PathProgressionDecoding",
             natural_key,
         ),
         **natural_key,
@@ -4466,45 +3550,12 @@ def _path_specific_place_decoding_selection_row(
         movement_firing_rate_selection_table,
         movement_key,
     )
-    for field_name in (
-        "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "PathSpecificPlaceDecoding regional spikes and movement "
-                f"must share {field_name}."
-            )
-    if str(region_row.get("region_name")) != str(
-        movement_selection.get("region")
-    ):
-        raise ValueError(
-            "PathSpecificPlaceDecoding regional spikes and movement must "
-            "select the same region."
-        )
-    for field_name in (
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "PathSpecificPlaceDecoding regional spikes and movement "
-                f"must share frozen {field_name}."
-            )
-    if str(region_row.get("selected_units_sha256")) != str(
-        movement_result.get("selected_units_sha256")
-    ) or int(region_row.get("n_units", -1)) != int(
-        movement_result.get("n_units", -2)
-    ):
-        raise ValueError(
-            "PathSpecificPlaceDecoding regional spikes and movement must "
-            "contain identical persistent units."
-        )
+    _validate_region_movement_identity(
+        analysis_name="PathSpecificPlaceDecoding",
+        region_row=region_row,
+        movement_selection=movement_selection,
+        movement_result=movement_result,
+    )
     allowed_statuses = (
         {"no_units"}
         if int(region_row.get("n_units", -1)) == 0
@@ -4623,7 +3674,7 @@ def _validate_motor_position_rows(
     )
     if not primary_name or not reference_name or primary_name == reference_name:
         raise ValueError(
-            "MotorEncodingComparison requires distinct primary and "
+            "MotorEncoding requires distinct primary and "
             "orientation-reference position series."
         )
     for label, row in (
@@ -4632,7 +3683,7 @@ def _validate_motor_position_rows(
     ):
         if str(row.get("spatial_unit")) != "cm":
             raise ValueError(
-                f"MotorEncodingComparison {label} position must use centimeters."
+                f"MotorEncoding {label} position must use centimeters."
             )
     for field_name in (
         "nwb_file_name",
@@ -4651,12 +3702,12 @@ def _validate_motor_position_rows(
             orientation_reference_position_row.get(field_name)
         ):
             raise ValueError(
-                "MotorEncodingComparison position series must share aligned "
+                "MotorEncoding position series must share aligned "
                 f"sampling metadata: {field_name}."
             )
 
 
-def _motor_encoding_comparison_selection_row(
+def _motor_encoding_selection_row(
     *,
     key: Mapping[str, Any],
     region_sorted_spikes_group_table: Any,
@@ -4666,6 +3717,9 @@ def _motor_encoding_comparison_selection_row(
     epoch_intervals_table: Any,
     trajectory_intervals_table: Any,
     wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
     parameters_table: Any,
 ) -> dict[str, Any]:
     """Validate and identify one immutable nine-model motor comparison."""
@@ -4679,12 +3733,12 @@ def _motor_encoding_comparison_selection_row(
             ]
         },
     )
-    parameters = _validate_motor_encoding_comparison_parameter_row(
+    parameters = _validate_motor_encoding_parameter_row(
         _fetch1_dict(
             parameters_table,
             {
-                "motor_encoding_comparison_param_name": key[
-                    "motor_encoding_comparison_param_name"
+                "motor_encoding_param_name": key[
+                    "motor_encoding_param_name"
                 ]
             },
         )
@@ -4700,45 +3754,12 @@ def _motor_encoding_comparison_selection_row(
         movement_firing_rate_selection_table,
         movement_key,
     )
-    for field_name in (
-        "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "MotorEncodingComparison regional spikes and movement must "
-                f"share {field_name}."
-            )
-    if str(region_row.get("region_name")) != str(
-        movement_selection.get("region")
-    ):
-        raise ValueError(
-            "MotorEncodingComparison regional spikes and movement must "
-            "select the same region."
-        )
-    for field_name in (
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "MotorEncodingComparison regional spikes and movement must "
-                f"share frozen {field_name}."
-            )
-    if str(region_row.get("selected_units_sha256")) != str(
-        movement_result.get("selected_units_sha256")
-    ) or int(region_row.get("n_units", -1)) != int(
-        movement_result.get("n_units", -2)
-    ):
-        raise ValueError(
-            "MotorEncodingComparison regional spikes and movement must "
-            "contain identical persistent units."
-        )
+    _validate_region_movement_identity(
+        analysis_name="MotorEncoding",
+        region_row=region_row,
+        movement_selection=movement_selection,
+        movement_result=movement_result,
+    )
     allowed_movement_statuses = (
         {"no_units"}
         if int(region_row.get("n_units", -1)) == 0
@@ -4748,7 +3769,7 @@ def _motor_encoding_comparison_selection_row(
         allowed_movement_statuses
     ):
         raise ValueError(
-            "MotorEncodingComparison movement status is incompatible with "
+            "MotorEncoding movement status is incompatible with "
             "its regional unit count."
         )
 
@@ -4760,7 +3781,7 @@ def _motor_encoding_comparison_selection_row(
     ):
         if field_name in key and str(key[field_name]) != expected_value:
             raise ValueError(
-                "MotorEncodingComparison supplied source does not match its "
+                "MotorEncoding supplied source does not match its "
                 f"MovementFiringRate: {field_name}."
             )
     epoch_row = _fetch1_dict(
@@ -4768,7 +3789,7 @@ def _motor_encoding_comparison_selection_row(
         {"nwb_file_name": nwb_file_name, "epoch": epoch},
     )
     if epoch_row.get("epoch_type") not in (None, "run"):
-        raise ValueError("MotorEncodingComparison requires one run epoch.")
+        raise ValueError("MotorEncoding requires one run epoch.")
 
     primary_position_name = str(
         key.get(
@@ -4780,12 +3801,12 @@ def _motor_encoding_comparison_selection_row(
         movement_selection["position_series_name"]
     ):
         raise ValueError(
-            "MotorEncodingComparison primary position must be the position "
+            "MotorEncoding primary position must be the position "
             "used by MovementFiringRate."
         )
     if "orientation_reference_position_series_name" not in key:
         raise ValueError(
-            "MotorEncodingComparison requires an explicit "
+            "MotorEncoding requires an explicit "
             "orientation_reference_position_series_name."
         )
     orientation_reference_name = str(
@@ -4826,7 +3847,7 @@ def _motor_encoding_comparison_selection_row(
         trajectory_field = f"{trajectory_type}_trajectory_type"
         if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
             raise ValueError(
-                f"MotorEncodingComparison {trajectory_field} must equal "
+                f"MotorEncoding {trajectory_field} must equal "
                 f"{trajectory_type!r}."
             )
         trajectory_row = _fetch1_dict(
@@ -4842,7 +3863,7 @@ def _motor_encoding_comparison_selection_row(
         minimum_outer_train = n_laps - largest_outer_test
         if n_laps < outer_n_folds or minimum_outer_train < inner_n_folds:
             raise ValueError(
-                "MotorEncodingComparison requires enough laps for outer and "
+                "MotorEncoding requires enough laps for outer and "
                 f"nested inner CV for {trajectory_type!r}; found {n_laps}, "
                 f"outer_n_folds={outer_n_folds}, "
                 f"inner_n_folds={inner_n_folds}."
@@ -4850,7 +3871,7 @@ def _motor_encoding_comparison_selection_row(
         configuration_field = f"{trajectory_type}_configuration_name"
         if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
             raise ValueError(
-                "MotorEncodingComparison graph aliases must match their "
+                "MotorEncoding graph aliases must match their "
                 "trajectory types."
             )
         graph_row = _fetch1_dict(
@@ -4862,7 +3883,7 @@ def _motor_encoding_comparison_selection_row(
         )
         if str(graph_row.get("coordinate_unit")) != "cm":
             raise ValueError(
-                "MotorEncodingComparison graphs must use centimeters."
+                "MotorEncoding graphs must use centimeters."
             )
         source_fields[trajectory_field] = trajectory_type
         source_fields[configuration_field] = trajectory_type
@@ -4875,7 +3896,7 @@ def _motor_encoding_comparison_selection_row(
     )
     if full_w_name != _DPP_FULL_GRAPH_CONFIGURATION_NAME:
         raise ValueError(
-            "MotorEncodingComparison full_w_configuration_name must equal "
+            "MotorEncoding full_w_configuration_name must equal "
             f"{_DPP_FULL_GRAPH_CONFIGURATION_NAME!r}."
         )
     full_w_row = _fetch1_dict(
@@ -4886,18 +3907,90 @@ def _motor_encoding_comparison_selection_row(
         },
     )
     if str(full_w_row.get("coordinate_unit")) != "cm":
-        raise ValueError("MotorEncodingComparison graphs must use centimeters.")
+        raise ValueError("MotorEncoding graphs must use centimeters.")
     source_fields["full_w_configuration_name"] = full_w_name
+
+    stability_fields: dict[str, Any] = {}
+    legacy_tuning_parameters_sha256 = provenance_sha256(
+        dict(table_specs.LEGACY_TUNING_CURVE_PARAMETERS)
+    )
+    movement_status = str(movement_result.get("analysis_status"))
+    allowed_stability_statuses = {
+        "valid": {"valid", "no_valid_units"},
+        "no_valid_position": {"no_valid_position"},
+        "no_movement": {"no_movement"},
+        "no_units": {"no_units"},
+    }[movement_status]
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        field_name = f"{trajectory_type}_stability_id"
+        stability_id = key[field_name]
+        stability_key = {
+            "path_specific_place_stability_id": stability_id
+        }
+        stability_result = _fetch1_dict(stability_table, stability_key)
+        stability_selection = _fetch1_dict(
+            stability_selection_table,
+            stability_key,
+        )
+        if str(stability_result.get("selected_units_sha256")) != str(
+            movement_result.get("selected_units_sha256")
+        ) or int(stability_result.get("n_units", -1)) != int(
+            movement_result.get("n_units", -2)
+        ):
+            raise ValueError(
+                "MotorEncoding stability and movement rows must contain "
+                "the same persistent units."
+            )
+        if str(stability_result.get("analysis_status")) not in (
+            allowed_stability_statuses
+        ):
+            raise ValueError(
+                "MotorEncoding stability status is incompatible with its "
+                "MovementFiringRate status."
+            )
+        for subset in ("odd", "even"):
+            curve_id = stability_selection[
+                f"{subset}_path_specific_place_tuning_curve_id"
+            ]
+            curve_selection = _fetch1_dict(
+                tuning_curve_selection_table,
+                {"path_specific_place_tuning_curve_id": curve_id},
+            )
+            expected = {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+                "configuration_name": trajectory_type,
+                "movement_firing_rate_id": key["movement_firing_rate_id"],
+                "tuning_curve_param_name": (
+                    table_specs.LEGACY_TUNING_CURVE_PARAMETERS[
+                        "tuning_curve_param_name"
+                    ]
+                ),
+                "tuning_curve_parameters_sha256": (
+                    legacy_tuning_parameters_sha256
+                ),
+                "trial_subset": subset,
+            }
+            for expected_field, expected_value in expected.items():
+                if str(curve_selection.get(expected_field)) != str(
+                    expected_value
+                ):
+                    raise ValueError(
+                        "MotorEncoding stability input does not match its "
+                        f"{trajectory_type!r} slot: {expected_field}."
+                    )
+        stability_fields[field_name] = stability_id
 
     parameter_snapshot = _parameter_snapshot_field(
         parameters,
-        field_name="motor_encoding_comparison_parameters_sha256",
+        field_name="motor_encoding_parameters_sha256",
     )
     model_spec_sha256 = provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+        dict(table_specs.MOTOR_ENCODING_MODEL_SPEC)
     )
     output_rule_sha256 = provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+        dict(table_specs.MOTOR_ENCODING_OUTPUT_RULE)
     )
     natural_key = {
         "nwb_file_name": nwb_file_name,
@@ -4907,18 +4000,19 @@ def _motor_encoding_comparison_selection_row(
         ],
         "movement_firing_rate_id": key["movement_firing_rate_id"],
         **source_fields,
-        "motor_encoding_comparison_param_name": parameters[
-            "motor_encoding_comparison_param_name"
+        **stability_fields,
+        "motor_encoding_param_name": parameters[
+            "motor_encoding_param_name"
         ],
         **parameter_snapshot,
-        "motor_encoding_comparison_model_spec_sha256": model_spec_sha256,
-        "motor_encoding_comparison_output_rule_sha256": (
+        "motor_encoding_model_spec_sha256": model_spec_sha256,
+        "motor_encoding_output_rule_sha256": (
             output_rule_sha256
         ),
     }
     return {
-        "motor_encoding_comparison_id": selection_uuid(
-            "MotorEncodingComparison",
+        "motor_encoding_id": selection_uuid(
+            "MotorEncoding",
             natural_key,
         ),
         **natural_key,
@@ -4980,45 +4074,12 @@ def _dark_light_glm_selection_row(
     for condition_name in ("dark", "light"):
         movement_selection = movement_selections[condition_name]
         movement_result = movement_results[condition_name]
-        for field_name in (
-            "nwb_file_name",
-            "unit_filter_params_name",
-            "sorted_spikes_group_name",
-        ):
-            if str(region_row.get(field_name)) != str(
-                movement_selection.get(field_name)
-            ):
-                raise ValueError(
-                    "DarkLightGLM regional spikes and both movement rows must "
-                    f"share {field_name}."
-                )
-        if str(region_row.get("region_name")) != str(
-            movement_selection.get("region")
-        ):
-            raise ValueError(
-                "DarkLightGLM regional spikes and both movement rows must "
-                "select the same region."
-            )
-        for field_name in (
-            "sorting_group_members_sha256",
-            "unit_filter_params_sha256",
-        ):
-            if str(region_row.get(field_name)) != str(
-                movement_selection.get(field_name)
-            ):
-                raise ValueError(
-                    "DarkLightGLM regional spikes and both movement rows must "
-                    f"share frozen {field_name}."
-                )
-        if str(region_row.get("selected_units_sha256")) != str(
-            movement_result.get("selected_units_sha256")
-        ) or int(region_row.get("n_units", -1)) != int(
-            movement_result.get("n_units", -2)
-        ):
-            raise ValueError(
-                "DarkLightGLM regional spikes and both movement rows must "
-                "contain identical persistent units."
-            )
+        _validate_region_movement_identity(
+            analysis_name="DarkLightGLM",
+            region_row=region_row,
+            movement_selection=movement_selection,
+            movement_result=movement_result,
+        )
         allowed_movement_statuses = (
             {"no_units"}
             if int(region_row.get("n_units", -1)) == 0
@@ -5046,11 +4107,7 @@ def _dark_light_glm_selection_row(
 
     for field_name in (
         "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-        "region",
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
+        "region_sorted_spikes_group_id",
         "movement_param_name",
         "movement_parameters_sha256",
         "position_series_name",
@@ -5405,11 +4462,7 @@ def _swap_glm_selection_row(
     training_reference = training_movement_selections["dark"]
     for field_name in (
         "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-        "region",
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
+        "region_sorted_spikes_group_id",
         "movement_param_name",
         "movement_parameters_sha256",
         "position_series_name",
@@ -5426,36 +4479,12 @@ def _swap_glm_selection_row(
                 "SwapGLM training and held-out movement rows must share the "
                 f"same frozen source snapshot: {field_name}."
             )
-    for field_name in (
-        "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
-    ):
-        if str(region_row.get(field_name)) != str(
-            light_test_movement_selection.get(field_name)
-        ):
-            raise ValueError(
-                "SwapGLM regional spikes and held-out movement must share "
-                f"{field_name}."
-            )
-    if str(region_row.get("region_name")) != str(
-        light_test_movement_selection.get("region")
-    ):
-        raise ValueError(
-            "SwapGLM regional spikes and held-out movement must select the "
-            "same region."
-        )
-    if str(region_row.get("selected_units_sha256")) != str(
-        light_test_movement_result.get("selected_units_sha256")
-    ) or int(region_row.get("n_units", -1)) != int(
-        light_test_movement_result.get("n_units", -2)
-    ):
-        raise ValueError(
-            "SwapGLM regional spikes and held-out movement must contain "
-            "identical persistent units."
-        )
+    _validate_region_movement_identity(
+        analysis_name="SwapGLM",
+        region_row=region_row,
+        movement_selection=light_test_movement_selection,
+        movement_result=light_test_movement_result,
+    )
     allowed_movement_statuses = (
         {"no_units"}
         if int(region_row.get("n_units", -1)) == 0
@@ -5735,11 +4764,7 @@ def _swap_tuning_curve_comparison_selection_row(
     movement_reference = movement_selections["dark"]
     shared_movement_fields = (
         "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-        "region",
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
+        "region_sorted_spikes_group_id",
         "movement_param_name",
         "movement_parameters_sha256",
         "position_series_name",
@@ -5760,33 +4785,13 @@ def _swap_tuning_curve_comparison_selection_row(
                 f"SwapTuningCurveComparison {epoch_role}_epoch does not "
                 "match its MovementFiringRate row."
             )
-    for field_name in (
-        "nwb_file_name",
-        "unit_filter_params_name",
-        "sorted_spikes_group_name",
-        "sorting_group_members_sha256",
-        "unit_filter_params_sha256",
-    ):
-        if str(region_row.get(field_name)) != str(
-            movement_reference.get(field_name)
-        ):
-            raise ValueError(
-                "SwapTuningCurveComparison regional spikes and movement "
-                f"rows must share {field_name}."
-            )
-    if region != str(movement_reference.get("region")):
-        raise ValueError(
-            "SwapTuningCurveComparison regional spikes and movement rows "
-            "must select the same region."
-        )
     for epoch_role, movement_result in movement_results.items():
-        if str(movement_result.get("selected_units_sha256")) != (
-            selected_units_sha256
-        ) or int(movement_result.get("n_units", -1)) != n_units:
-            raise ValueError(
-                "SwapTuningCurveComparison movement rows must contain "
-                f"identical persistent units: {epoch_role}."
-            )
+        _validate_region_movement_identity(
+            analysis_name="SwapTuningCurveComparison",
+            region_row=region_row,
+            movement_selection=movement_selections[epoch_role],
+            movement_result=movement_result,
+        )
         allowed_statuses = (
             {"no_units"}
             if n_units == 0
@@ -6268,27 +5273,42 @@ def _load_group_unit_data(
     )
 
 
-def _load_group_spikes(
+def _load_registered_region_spikes(
     *,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    spike_sorting_output: Any,
+    region_sorted_spikes_group_table: Any,
     key: Mapping[str, Any],
-    region: str,
-    time_support: tuple[float, float],
+    time_support: Any | tuple[float, float] | None = None,
 ) -> dict[str, Any]:
-    """Build one Pynapple TsGroup from all validated sorting-group members."""
-    from v1ca1.spyglass.spikes import load_sorted_spikes_group
+    """Reload one registered regional group and verify its frozen identity."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
 
-    return load_sorted_spikes_group(
-        sorted_spikes_group,
-        unit_selection_params,
-        spike_sorting_output,
-        key,
-        region=region,
+    region_key = {
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ]
+    }
+    region_row = _fetch1_dict(region_sorted_spikes_group_table, region_key)
+    if "nwb_file_name" in key and str(region_row.get("nwb_file_name")) != str(
+        key["nwb_file_name"]
+    ):
+        raise ValueError(
+            "RegionSortedSpikesGroup and analysis selection must belong to "
+            "the same NWB file."
+        )
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        region_key,
         time_support=time_support,
-        allow_empty=True,
     )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    if unit_digest != str(region_row["selected_units_sha256"]):
+        raise ValueError(
+            "RegionSortedSpikesGroup selected units changed after registration."
+        )
+    if int(loaded["n_units"]) != int(region_row["n_units"]):
+        raise ValueError(
+            "RegionSortedSpikesGroup unit count changed after registration."
+        )
+    return {**loaded, "registration_row": region_row}
 
 
 def _load_ripple_glm_interval_inputs(
@@ -6399,7 +5419,7 @@ def _load_ripple_glm_context(
         selection["source_ripple_count"]
     ):
         raise ValueError(
-            "RippleGLM selected Ripples row changed after selection insertion."
+            "RippleGLM selected RippleInterval row changed after selection insertion."
         )
     region_rows = {
         role: _fetch1_dict(
@@ -6988,10 +6008,10 @@ def _register_existing_ripple_glm_row(
     }
 
 
-def _cross_region_xcorr_upstream_provenance(
+def _ripple_cross_region_xcorr_upstream_provenance(
     selection: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Return the exact CrossRegionXCorr selection snapshot for artifacts."""
+    """Return the exact RippleCrossRegionXCorr selection snapshot for artifacts."""
     fields = (
         "nwb_file_name",
         "epoch",
@@ -7010,11 +6030,11 @@ def _cross_region_xcorr_upstream_provenance(
         "target_unit_filter_params_sha256",
         "target_selected_units_sha256",
         "target_n_units",
-        "cross_region_xcorr_parameters_sha256",
-        "cross_region_xcorr_output_rule_sha256",
+        "ripple_cross_region_xcorr_parameters_sha256",
+        "ripple_cross_region_xcorr_output_rule_sha256",
     )
     provenance = {
-        "cross_region_xcorr_id": str(selection["cross_region_xcorr_id"]),
+        "ripple_cross_region_xcorr_id": str(selection["ripple_cross_region_xcorr_id"]),
         "source_region_sorted_spikes_group_id": str(
             selection["source_region_sorted_spikes_group_id"]
         ),
@@ -7033,24 +6053,24 @@ def _cross_region_xcorr_upstream_provenance(
     )
     provenance["speed_gated"] = _database_bool(
         provenance["speed_gated"],
-        name="CrossRegionXCorrSelection.speed_gated",
+        name="RippleCrossRegionXCorrSelection.speed_gated",
     )
     return provenance
 
 
-def _validate_cross_region_xcorr_upstream_link(
+def _validate_ripple_cross_region_xcorr_upstream_link(
     upstream: Mapping[str, Any],
     selection: Mapping[str, Any],
 ) -> None:
-    """Require a CrossRegionXCorr bundle to embed its exact selection."""
-    if dict(upstream) != _cross_region_xcorr_upstream_provenance(selection):
+    """Require a RippleCrossRegionXCorr bundle to embed its exact selection."""
+    if dict(upstream) != _ripple_cross_region_xcorr_upstream_provenance(selection):
         raise ValueError(
-            "CrossRegionXCorr upstream provenance does not match its "
+            "RippleCrossRegionXCorr upstream provenance does not match its "
             "immutable selection."
         )
 
 
-def _load_cross_region_xcorr_context(
+def _load_ripple_cross_region_xcorr_context(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -7060,23 +6080,23 @@ def _load_cross_region_xcorr_context(
     session_table: Any,
     nwbfile_table: Any,
 ) -> dict[str, Any]:
-    """Reload and verify all lightweight CrossRegionXCorr inputs."""
-    from v1ca1.spyglass import cross_region_xcorr
+    """Reload and verify all lightweight RippleCrossRegionXCorr inputs."""
+    from v1ca1.spyglass import ripple_cross_region_xcorr
 
     selection = dict(key)
-    parameters = _validate_cross_region_xcorr_parameter_row(
+    parameters = _validate_ripple_cross_region_xcorr_parameter_row(
         _fetch1_dict(parameters_table, selection)
     )
     _validate_frozen_parameters(
         selection,
         parameters,
-        field_name="cross_region_xcorr_parameters_sha256",
+        field_name="ripple_cross_region_xcorr_parameters_sha256",
     )
-    if str(selection.get("cross_region_xcorr_output_rule_sha256")) != (
-        cross_region_xcorr.OUTPUT_RULE_SHA256
+    if str(selection.get("ripple_cross_region_xcorr_output_rule_sha256")) != (
+        ripple_cross_region_xcorr.OUTPUT_RULE_SHA256
     ):
         raise ValueError(
-            "CrossRegionXCorr fixed output rule changed after selection "
+            "RippleCrossRegionXCorr fixed output rule changed after selection "
             "insertion. Create a new selection."
         )
     ripple_row = _fetch1_dict(ripples_table, selection)
@@ -7090,7 +6110,7 @@ def _load_cross_region_xcorr_context(
     )
     selected_speed_gated = _database_bool(
         selection.get("speed_gated"),
-        name="CrossRegionXCorrSelection.speed_gated",
+        name="RippleCrossRegionXCorrSelection.speed_gated",
     )
     if not math.isclose(
         selected_detector_threshold,
@@ -7099,7 +6119,7 @@ def _load_cross_region_xcorr_context(
         abs_tol=1e-12,
     ) or selected_speed_gated != speed_gated:
         raise ValueError(
-            "CrossRegionXCorr detector values changed after selection "
+            "RippleCrossRegionXCorr detector values changed after selection "
             "insertion."
         )
     selection["detector_zscore_threshold"] = selected_detector_threshold
@@ -7108,7 +6128,7 @@ def _load_cross_region_xcorr_context(
         selection["source_ripple_count"]
     ):
         raise ValueError(
-            "CrossRegionXCorr selected Ripples row changed after selection "
+            "RippleCrossRegionXCorr selected RippleInterval row changed after selection "
             "insertion."
         )
     region_rows = {
@@ -7126,12 +6146,12 @@ def _load_cross_region_xcorr_context(
         row = region_rows[role]
         if str(row.get("nwb_file_name")) != str(selection["nwb_file_name"]):
             raise ValueError(
-                "CrossRegionXCorr regional groups must remain in the "
+                "RippleCrossRegionXCorr regional groups must remain in the "
                 "selected NWB file."
             )
         if str(row.get("region_name")) != expected_region:
             raise ValueError(
-                f"CrossRegionXCorr {role} region must remain "
+                f"RippleCrossRegionXCorr {role} region must remain "
                 f"{expected_region!r}."
             )
         _validate_ripple_glm_group_snapshot(selection, row, role=role)
@@ -7142,7 +6162,7 @@ def _load_cross_region_xcorr_context(
         nwbfile_table=nwbfile_table,
     )
     event_selection = (
-        cross_region_xcorr.prepare_cross_region_xcorr_event_selection(
+        ripple_cross_region_xcorr.prepare_ripple_cross_region_xcorr_event_selection(
             epoch=str(selection["epoch"]),
             ripple_table=ripple_table,
         )
@@ -7152,19 +6172,19 @@ def _load_cross_region_xcorr_context(
         selection["source_ripple_count"]
     ):
         raise ValueError(
-            "CrossRegionXCorr exact ripple count changed after selection."
+            "RippleCrossRegionXCorr exact ripple count changed after selection."
         )
     if str(event_selection["selected_ripple_intervals_sha256"]) != str(
         selection["selected_ripple_intervals_sha256"]
     ):
         raise ValueError(
-            "CrossRegionXCorr exact ripple boundaries changed after selection."
+            "RippleCrossRegionXCorr exact ripple boundaries changed after selection."
         )
     if _ripple_glm_provenance_sha256(ripple_row) != str(
         selection["ripple_provenance_sha256"]
     ):
         raise ValueError(
-            "CrossRegionXCorr ripple detector provenance changed after "
+            "RippleCrossRegionXCorr ripple detector provenance changed after "
             "selection."
         )
     animal_name, session_date = _session_identity(session_table, selection)
@@ -7182,7 +6202,7 @@ def _load_cross_region_xcorr_context(
     }
 
 
-def _make_cross_region_xcorr_row(
+def _make_ripple_cross_region_xcorr_row(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -7193,16 +6213,16 @@ def _make_cross_region_xcorr_row(
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
-    """Compute and write one immutable CrossRegionXCorr bundle."""
-    from v1ca1.spyglass.cross_region_xcorr import (
+    """Compute and write one immutable RippleCrossRegionXCorr bundle."""
+    from v1ca1.spyglass.ripple_cross_region_xcorr import (
         BUNDLE_SCHEMA_VERSION,
         RESULT_SCHEMA_VERSION,
-        compute_cross_region_xcorr,
-        get_cross_region_xcorr_artifact_paths,
-        write_cross_region_xcorr_artifact,
+        compute_ripple_cross_region_xcorr,
+        get_ripple_cross_region_xcorr_artifact_paths,
+        write_ripple_cross_region_xcorr_artifact,
     )
 
-    context = _load_cross_region_xcorr_context(
+    context = _load_ripple_cross_region_xcorr_context(
         key=key,
         parameters_table=parameters_table,
         ripples_table=ripples_table,
@@ -7214,12 +6234,12 @@ def _make_cross_region_xcorr_row(
     loaded = _load_ripple_glm_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
-        analysis_name="CrossRegionXCorr",
+        analysis_name="RippleCrossRegionXCorr",
     )
     selection = context["selection"]
     parameters = context["parameters"]
-    result = compute_cross_region_xcorr(
-        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+    result = compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=selection["ripple_cross_region_xcorr_id"],
         animal_name=context["animal_name"],
         date=context["date"],
         epoch=str(selection["epoch"]),
@@ -7228,49 +6248,49 @@ def _make_cross_region_xcorr_row(
         ca1_stable_unit_ids=loaded["source"]["unit_ids"],
         v1_spikes=loaded["target"]["ts_group"],
         v1_stable_unit_ids=loaded["target"]["unit_ids"],
-        upstream_provenance=_cross_region_xcorr_upstream_provenance(
+        upstream_provenance=_ripple_cross_region_xcorr_upstream_provenance(
             selection
         ),
         expected_selected_ripple_intervals_sha256=selection[
             "selected_ripple_intervals_sha256"
         ],
-        parameter_name=parameters["cross_region_xcorr_param_name"],
+        parameter_name=parameters["ripple_cross_region_xcorr_param_name"],
         parameter_sha256=selection[
-            "cross_region_xcorr_parameters_sha256"
+            "ripple_cross_region_xcorr_parameters_sha256"
         ],
         output_rule_sha256=selection[
-            "cross_region_xcorr_output_rule_sha256"
+            "ripple_cross_region_xcorr_output_rule_sha256"
         ],
-        **_cross_region_xcorr_parameter_kwargs(parameters),
+        **_ripple_cross_region_xcorr_parameter_kwargs(parameters),
     )
-    _validate_cross_region_xcorr_upstream_link(
+    _validate_ripple_cross_region_xcorr_upstream_link(
         result["upstream_provenance"], selection
     )
     if str(result["selected_ripple_intervals_sha256"]) != str(
         selection["selected_ripple_intervals_sha256"]
     ):
         raise ValueError(
-            "CrossRegionXCorr computation changed its exact ripple intervals."
+            "RippleCrossRegionXCorr computation changed its exact ripple intervals."
         )
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
         path_kwargs["artifact_root"] = artifact_root
-    paths = get_cross_region_xcorr_artifact_paths(
+    paths = get_ripple_cross_region_xcorr_artifact_paths(
         animal_name=context["animal_name"],
         date=context["date"],
         epoch=str(selection["epoch"]),
-        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+        ripple_cross_region_xcorr_id=selection["ripple_cross_region_xcorr_id"],
         **path_kwargs,
     )
     artifact_dir = Path(paths["artifact_dir"])
     created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
-    written = write_cross_region_xcorr_artifact(result, artifact_dir)
+    written = write_ripple_cross_region_xcorr_artifact(result, artifact_dir)
     return {
         "artifact_manifest_path": str(written["artifact_manifest_path"]),
         "ca1_units_path": str(written["ca1_units_path"]),
         "v1_units_path": str(written["v1_units_path"]),
         "summary_path": str(written["summary_path"]),
-        "cross_region_xcorr_path": str(written["result_path"]),
+        "ripple_cross_region_xcorr_path": str(written["result_path"]),
         "schema_version": RESULT_SCHEMA_VERSION,
         "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
         **{
@@ -7296,7 +6316,7 @@ def _make_cross_region_xcorr_row(
     }
 
 
-def _validate_cross_region_xcorr_artifact_link(
+def _validate_ripple_cross_region_xcorr_artifact_link(
     *,
     bundle: Mapping[str, Any],
     result_row: Mapping[str, Any],
@@ -7306,17 +6326,17 @@ def _validate_cross_region_xcorr_artifact_link(
     date: str,
 ) -> None:
     """Require one loaded xcorr bundle to match its DataJoint rows."""
-    from v1ca1.spyglass.cross_region_xcorr import (
+    from v1ca1.spyglass.ripple_cross_region_xcorr import (
         BUNDLE_SCHEMA_VERSION,
         RESULT_SCHEMA_VERSION,
-        get_cross_region_xcorr_artifact_paths,
-        validate_cross_region_xcorr_result,
+        get_ripple_cross_region_xcorr_artifact_paths,
+        validate_ripple_cross_region_xcorr_result,
     )
 
-    validated = validate_cross_region_xcorr_result(bundle)
+    validated = validate_ripple_cross_region_xcorr_result(bundle)
     expected_metadata = {
-        "cross_region_xcorr_id": str(
-            selection_row["cross_region_xcorr_id"]
+        "ripple_cross_region_xcorr_id": str(
+            selection_row["ripple_cross_region_xcorr_id"]
         ),
         "animal_name": str(animal_name),
         "date": str(date),
@@ -7325,29 +6345,29 @@ def _validate_cross_region_xcorr_artifact_link(
     for field_name, expected_value in expected_metadata.items():
         if str(validated.get(field_name)) != expected_value:
             raise ValueError(
-                "CrossRegionXCorr artifact does not match its selection: "
+                "RippleCrossRegionXCorr artifact does not match its selection: "
                 f"{field_name}."
             )
-    parameters = _validate_cross_region_xcorr_parameter_row(parameters_row)
+    parameters = _validate_ripple_cross_region_xcorr_parameter_row(parameters_row)
     expected_parameters = {
-        "parameter_name": parameters["cross_region_xcorr_param_name"],
+        "parameter_name": parameters["ripple_cross_region_xcorr_param_name"],
         "parameter_sha256": selection_row[
-            "cross_region_xcorr_parameters_sha256"
+            "ripple_cross_region_xcorr_parameters_sha256"
         ],
         "output_rule_sha256": selection_row[
-            "cross_region_xcorr_output_rule_sha256"
+            "ripple_cross_region_xcorr_output_rule_sha256"
         ],
         **{
             field_name: value
             for field_name, value in parameters.items()
-            if field_name != "cross_region_xcorr_param_name"
+            if field_name != "ripple_cross_region_xcorr_param_name"
         },
     }
     if validated["parameters"] != expected_parameters:
         raise ValueError(
-            "CrossRegionXCorr artifact parameters do not match its selection."
+            "RippleCrossRegionXCorr artifact parameters do not match its selection."
         )
-    _validate_cross_region_xcorr_upstream_link(
+    _validate_ripple_cross_region_xcorr_upstream_link(
         validated["upstream_provenance"], selection_row
     )
     artifact_dir = Path(result_row["artifact_manifest_path"]).parent
@@ -7355,13 +6375,13 @@ def _validate_cross_region_xcorr_artifact_link(
         artifact_root = artifact_dir.parents[4]
     except IndexError as exc:
         raise ValueError(
-            "CrossRegionXCorr artifact does not use the canonical layout."
+            "RippleCrossRegionXCorr artifact does not use the canonical layout."
         ) from exc
-    expected_paths = get_cross_region_xcorr_artifact_paths(
+    expected_paths = get_ripple_cross_region_xcorr_artifact_paths(
         animal_name=animal_name,
         date=date,
         epoch=str(selection_row["epoch"]),
-        cross_region_xcorr_id=selection_row["cross_region_xcorr_id"],
+        ripple_cross_region_xcorr_id=selection_row["ripple_cross_region_xcorr_id"],
         artifact_root=artifact_root,
     )
     path_fields = {
@@ -7369,12 +6389,12 @@ def _validate_cross_region_xcorr_artifact_link(
         "ca1_units_path": "ca1_units_path",
         "v1_units_path": "v1_units_path",
         "summary_path": "summary_path",
-        "cross_region_xcorr_path": "result_path",
+        "ripple_cross_region_xcorr_path": "result_path",
     }
     for row_field, path_key in path_fields.items():
         if Path(result_row[row_field]) != Path(expected_paths[path_key]):
             raise ValueError(
-                "CrossRegionXCorr result paths do not use the canonical "
+                "RippleCrossRegionXCorr result paths do not use the canonical "
                 f"layout: {row_field}."
             )
     for field_name in (
@@ -7394,7 +6414,7 @@ def _validate_cross_region_xcorr_artifact_link(
     ):
         if str(result_row.get(field_name)) != str(validated[field_name]):
             raise ValueError(
-                "CrossRegionXCorr result metadata disagrees with its "
+                "RippleCrossRegionXCorr result metadata disagrees with its "
                 f"artifact: {field_name}."
             )
     if not math.isclose(
@@ -7404,24 +6424,24 @@ def _validate_cross_region_xcorr_artifact_link(
         abs_tol=1e-12,
     ):
         raise ValueError(
-            "CrossRegionXCorr result duration disagrees with its artifact."
+            "RippleCrossRegionXCorr result duration disagrees with its artifact."
         )
     if str(result_row.get("schema_version")) != RESULT_SCHEMA_VERSION or str(
         result_row.get("bundle_schema_version")
     ) != BUNDLE_SCHEMA_VERSION:
         raise ValueError(
-            "CrossRegionXCorr result schema versions disagree with its artifact."
+            "RippleCrossRegionXCorr result schema versions disagree with its artifact."
         )
     if result_row.get("legacy_artifact_provenance") != validated.get(
         "legacy_artifact_provenance"
     ):
         raise ValueError(
-            "CrossRegionXCorr result-row legacy provenance differs from its "
+            "RippleCrossRegionXCorr result-row legacy provenance differs from its "
             "artifact."
         )
 
 
-def _legacy_cross_region_xcorr_identity_resolver(
+def _legacy_ripple_cross_region_xcorr_identity_resolver(
     loaded_spikes: Mapping[str, Any],
     *,
     role: str,
@@ -7430,7 +6450,7 @@ def _legacy_cross_region_xcorr_identity_resolver(
     identity_by_sorting_id = _legacy_ripple_glm_unit_identity_resolver(
         loaded_spikes,
         role=role,
-        analysis_name="CrossRegionXCorr",
+        analysis_name="RippleCrossRegionXCorr",
     )
 
     def resolve(legacy_unit_ids: Any) -> list[dict[str, str]]:
@@ -7443,7 +6463,7 @@ def _legacy_cross_region_xcorr_identity_resolver(
             ]
             if len(matches) != 1:
                 raise ValueError(
-                    f"Legacy CrossRegionXCorr {role} unit "
+                    f"Legacy RippleCrossRegionXCorr {role} unit "
                     f"{legacy_unit_id!r} has {len(matches)} imported-sorting "
                     "identity matches."
                 )
@@ -7453,7 +6473,7 @@ def _legacy_cross_region_xcorr_identity_resolver(
     return resolve
 
 
-def _register_existing_cross_region_xcorr_row(
+def _register_existing_ripple_cross_region_xcorr_row(
     *,
     key: Mapping[str, Any],
     source_ca1_unit_filter_path: Path,
@@ -7471,14 +6491,14 @@ def _register_existing_cross_region_xcorr_row(
     artifact_root: Path | None,
 ) -> dict[str, Any]:
     """Recompute and register one exact legacy four-artifact xcorr set."""
-    from v1ca1.spyglass.cross_region_xcorr import (
+    from v1ca1.spyglass.ripple_cross_region_xcorr import (
         BUNDLE_SCHEMA_VERSION,
         RESULT_SCHEMA_VERSION,
-        get_cross_region_xcorr_artifact_paths,
-        register_existing_cross_region_xcorr_artifact,
+        get_ripple_cross_region_xcorr_artifact_paths,
+        register_existing_ripple_cross_region_xcorr_artifact,
     )
 
-    context = _load_cross_region_xcorr_context(
+    context = _load_ripple_cross_region_xcorr_context(
         key=key,
         parameters_table=parameters_table,
         ripples_table=ripples_table,
@@ -7490,10 +6510,10 @@ def _register_existing_cross_region_xcorr_row(
     loaded = _load_ripple_glm_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
-        analysis_name="CrossRegionXCorr",
+        analysis_name="RippleCrossRegionXCorr",
     )
     resolvers = {
-        role: _legacy_cross_region_xcorr_identity_resolver(
+        role: _legacy_ripple_cross_region_xcorr_identity_resolver(
             loaded[role],
             role=role,
         )
@@ -7504,23 +6524,23 @@ def _register_existing_cross_region_xcorr_row(
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
         path_kwargs["artifact_root"] = artifact_root
-    paths = get_cross_region_xcorr_artifact_paths(
+    paths = get_ripple_cross_region_xcorr_artifact_paths(
         animal_name=context["animal_name"],
         date=context["date"],
         epoch=str(selection["epoch"]),
-        cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+        ripple_cross_region_xcorr_id=selection["ripple_cross_region_xcorr_id"],
         **path_kwargs,
     )
     artifact_dir = Path(paths["artifact_dir"])
     created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
     try:
-        registered = register_existing_cross_region_xcorr_artifact(
+        registered = register_existing_ripple_cross_region_xcorr_artifact(
             source_ca1_unit_filter_path=Path(source_ca1_unit_filter_path),
             source_v1_unit_filter_path=Path(source_v1_unit_filter_path),
             source_summary_path=Path(source_summary_path),
             source_result_path=Path(source_result_path),
             destination_path=artifact_dir,
-            cross_region_xcorr_id=selection["cross_region_xcorr_id"],
+            ripple_cross_region_xcorr_id=selection["ripple_cross_region_xcorr_id"],
             animal_name=context["animal_name"],
             date=context["date"],
             epoch=str(selection["epoch"]),
@@ -7529,7 +6549,7 @@ def _register_existing_cross_region_xcorr_row(
             ca1_stable_unit_ids=loaded["source"]["unit_ids"],
             v1_spikes=loaded["target"]["ts_group"],
             v1_stable_unit_ids=loaded["target"]["unit_ids"],
-            upstream_provenance=_cross_region_xcorr_upstream_provenance(
+            upstream_provenance=_ripple_cross_region_xcorr_upstream_provenance(
                 selection
             ),
             expected_selected_ripple_intervals_sha256=selection[
@@ -7539,26 +6559,26 @@ def _register_existing_cross_region_xcorr_row(
             v1_legacy_identity_resolver=resolvers["target"],
             ca1_sorting_type="ImportedSpikeSorting",
             v1_sorting_type="ImportedSpikeSorting",
-            parameter_name=parameters["cross_region_xcorr_param_name"],
+            parameter_name=parameters["ripple_cross_region_xcorr_param_name"],
             parameter_sha256=selection[
-                "cross_region_xcorr_parameters_sha256"
+                "ripple_cross_region_xcorr_parameters_sha256"
             ],
             output_rule_sha256=selection[
-                "cross_region_xcorr_output_rule_sha256"
+                "ripple_cross_region_xcorr_output_rule_sha256"
             ],
             source_v1ca1_git_commit=source_v1ca1_git_commit,
             source_spyglass_git_commit=source_spyglass_git_commit,
             overwrite=False,
-            **_cross_region_xcorr_parameter_kwargs(parameters),
+            **_ripple_cross_region_xcorr_parameter_kwargs(parameters),
         )
-        _validate_cross_region_xcorr_upstream_link(
+        _validate_ripple_cross_region_xcorr_upstream_link(
             registered["upstream_provenance"], selection
         )
         if str(registered["selected_ripple_intervals_sha256"]) != str(
             selection["selected_ripple_intervals_sha256"]
         ):
             raise ValueError(
-                "Registered CrossRegionXCorr ripple boundaries disagree "
+                "Registered RippleCrossRegionXCorr ripple boundaries disagree "
                 "with its selection."
             )
     except Exception:
@@ -7569,7 +6589,7 @@ def _register_existing_cross_region_xcorr_row(
         "ca1_units_path": str(registered["ca1_units_path"]),
         "v1_units_path": str(registered["v1_units_path"]),
         "summary_path": str(registered["summary_path"]),
-        "cross_region_xcorr_path": str(registered["result_path"]),
+        "ripple_cross_region_xcorr_path": str(registered["result_path"]),
         "schema_version": RESULT_SCHEMA_VERSION,
         "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
         **{
@@ -7604,9 +6624,7 @@ def _make_ripple_modulation_row(
     ripples_table: Any,
     epoch_intervals_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    spike_sorting_output: Any,
+    region_sorted_spikes_group_table: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -7646,17 +6664,14 @@ def _make_ripple_modulation_row(
     with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
         ripple_intervals = load_interval_set(io.read(), ripple_row)
     ripple_table = _intervals_to_frame(ripple_intervals, epoch=str(key["epoch"]))
-    region = _analysis_region(key["region"])
-
-    loaded_spikes = _load_group_spikes(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_spikes = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=key,
-        region=region,
         time_support=(epoch_start, epoch_stop),
     )
-    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+    region = _analysis_region(
+        loaded_spikes["registration_row"]["region_name"]
+    )
     if loaded_spikes["status"] == "no_units":
         result = empty_ripple_modulation_result(
             animal_name=animal_name,
@@ -7691,7 +6706,7 @@ def _make_ripple_modulation_row(
     if int(result["n_ripples"]) != int(ripple_row["ripple_count"]):
         raise ValueError(
             "RippleModulation ripple count does not match the selected "
-            "Ripples catalog row."
+            "RippleInterval catalog row."
         )
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
@@ -7904,8 +6919,7 @@ def _register_existing_ripple_modulation_row(
     parameters_table: Any,
     ripples_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
     spike_sorting_output: Any,
     source_v1ca1_git_commit: str | None,
     source_spyglass_git_commit: str | None,
@@ -7929,11 +6943,17 @@ def _register_existing_ripple_modulation_row(
     ripple_row = _fetch1_dict(ripples_table, key)
     _validate_ripple_provenance(ripple_row, parameters)
     animal_name, session_date = _session_identity(session_table, key)
+    loaded_units = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        key=key,
+    )
     artifact_key = {
         "animal_name": animal_name,
         "date": session_date,
         "epoch": str(key["epoch"]),
-        "region": _analysis_region(key["region"]),
+        "region": _analysis_region(
+            loaded_units["registration_row"]["region_name"]
+        ),
     }
     plan_kwargs = {
         **artifact_key,
@@ -7947,15 +6967,6 @@ def _register_existing_ripple_modulation_row(
     }
     if artifact_root is not None:
         plan_kwargs["artifact_root"] = artifact_root
-    loaded_units = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
-        key=key,
-        region=artifact_key["region"],
-        allow_empty=True,
-    )
-    _validate_frozen_sorting_snapshot(key, loaded_units)
     non_imported = [
         str(merge_id)
         for merge_id in loaded_units["merge_ids"]
@@ -8071,7 +7082,7 @@ def _register_existing_ripple_modulation_row(
     ):
         raise ValueError(
             "Existing artifact n_ripples does not match the selected "
-            "Ripples catalog row."
+            "RippleInterval catalog row."
         )
     created_artifact_paths = [
         str(copy["destination"])
@@ -8566,9 +7577,7 @@ def _make_movement_firing_rate_row(
     epoch_intervals_table: Any,
     position_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    spike_sorting_output: Any,
+    region_sorted_spikes_group_table: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -8603,16 +7612,14 @@ def _make_movement_firing_rate_row(
     ):
         raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
 
-    region = _analysis_region(key["region"])
-    loaded_spikes = _load_group_spikes(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_spikes = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=key,
-        region=region,
         time_support=(epoch_start, epoch_stop),
     )
-    _validate_frozen_sorting_snapshot(key, loaded_spikes)
+    region = _analysis_region(
+        loaded_spikes["registration_row"]["region_name"]
+    )
 
     position = None
     if loaded_spikes["status"] != "no_units":
@@ -8810,9 +7817,7 @@ def _load_cv_pca_inputs(
             expected_metadata={
                 "animal_name": animal_name,
                 "date": session_date,
-                "region": selection.get("_resolved_region", "") or str(
-                    movement_selections[condition]["region"]
-                ),
+                "region": str(selection["_resolved_region"]),
                 "epoch": selection[f"{condition}_epoch"],
             },
         )
@@ -9330,10 +8335,8 @@ def _make_path_specific_place_tuning_curve_row(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    spike_sorting_output: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -9412,15 +8415,14 @@ def _make_path_specific_place_tuning_curve_row(
     ):
         raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
 
-    loaded_spikes = _load_group_spikes(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_spikes = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=_analysis_region(movement_selection["region"]),
         time_support=(epoch_start, epoch_stop),
     )
-    _validate_frozen_sorting_snapshot(movement_selection, loaded_spikes)
+    region = _analysis_region(
+        loaded_spikes["registration_row"]["region_name"]
+    )
     selected_units_sha256 = unit_identity_sha256(loaded_spikes["unit_ids"])
     if selected_units_sha256 != str(
         movement_result["selected_units_sha256"]
@@ -9434,7 +8436,7 @@ def _make_path_specific_place_tuning_curve_row(
         expected_metadata={
             "animal_name": animal_name,
             "date": session_date,
-            "region": _analysis_region(movement_selection["region"]),
+            "region": region,
             "epoch": str(movement_selection["epoch"]),
         },
     )
@@ -9461,7 +8463,7 @@ def _make_path_specific_place_tuning_curve_row(
     result = compute_selected_path_specific_place_tuning_curve(
         animal_name=animal_name,
         date=session_date,
-        region=_analysis_region(movement_selection["region"]),
+        region=region,
         epoch=str(movement_selection["epoch"]),
         trajectory_type=str(key["trajectory_type"]),
         spikes=loaded_spikes["ts_group"],
@@ -9491,7 +8493,7 @@ def _make_path_specific_place_tuning_curve_row(
         epoch=str(movement_selection["epoch"]),
         trajectory_type=str(key["trajectory_type"]),
         trial_subset=str(key["trial_subset"]),
-        region=_analysis_region(movement_selection["region"]),
+        region=region,
         path_specific_place_tuning_curve_id=key[
             "path_specific_place_tuning_curve_id"
         ],
@@ -9529,10 +8531,8 @@ def _make_dpp_tuning_curve_row(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
-    spike_sorting_output: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -9628,15 +8628,14 @@ def _make_dpp_tuning_curve_row(
     ):
         raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
 
-    loaded_spikes = _load_group_spikes(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_spikes = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=_analysis_region(movement_selection["region"]),
         time_support=(epoch_start, epoch_stop),
     )
-    _validate_frozen_sorting_snapshot(movement_selection, loaded_spikes)
+    region = _analysis_region(
+        loaded_spikes["registration_row"]["region_name"]
+    )
     selected_units_sha256 = unit_identity_sha256(loaded_spikes["unit_ids"])
     if selected_units_sha256 != str(
         movement_result["selected_units_sha256"]
@@ -9650,7 +8649,7 @@ def _make_dpp_tuning_curve_row(
         expected_metadata={
             "animal_name": animal_name,
             "date": session_date,
-            "region": _analysis_region(movement_selection["region"]),
+            "region": region,
             "epoch": str(movement_selection["epoch"]),
         },
     )
@@ -9683,7 +8682,7 @@ def _make_dpp_tuning_curve_row(
     result = compute_selected_dpp_tuning_curve(
         animal_name=animal_name,
         date=session_date,
-        region=_analysis_region(movement_selection["region"]),
+        region=region,
         epoch=str(movement_selection["epoch"]),
         turn_type=str(key["turn_type"]),
         trial_subset=str(key["trial_subset"]),
@@ -9713,7 +8712,7 @@ def _make_dpp_tuning_curve_row(
         epoch=str(movement_selection["epoch"]),
         turn_type=str(key["turn_type"]),
         trial_subset=str(key["trial_subset"]),
-        region=_analysis_region(movement_selection["region"]),
+        region=region,
         dpp_tuning_curve_id=key["dpp_tuning_curve_id"],
         **path_kwargs,
     )
@@ -9748,6 +8747,7 @@ def _make_path_specific_place_stability_row(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
     session_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -9818,7 +8818,21 @@ def _make_path_specific_place_stability_row(
         session_table,
         movement_selection,
     )
-    region = _analysis_region(movement_selection["region"])
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": movement_selection[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    _validate_region_movement_identity(
+        analysis_name="PathSpecificPlaceStability",
+        region_row=region_row,
+        movement_selection=movement_selection,
+        movement_result=movement_result,
+    )
+    region = _analysis_region(region_row["region_name"])
     movement = _load_movement_result_artifacts(
         result_row=movement_result,
         parameters=movement_parameters,
@@ -9896,6 +8910,7 @@ def _load_tuning_similarity_inputs(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
     session_table: Any,
 ) -> dict[str, Any]:
     """Load and cross-check the four curves and shared movement artifact."""
@@ -9995,7 +9010,21 @@ def _load_tuning_similarity_inputs(
         session_table,
         movement_selection,
     )
-    region = _analysis_region(movement_selection["region"])
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": movement_selection[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    _validate_region_movement_identity(
+        analysis_name="PathSpecificPlaceTuningSimilarity",
+        region_row=region_row,
+        movement_selection=movement_selection,
+        movement_result=movement_result,
+    )
+    region = _analysis_region(region_row["region_name"])
     epoch = str(movement_selection["epoch"])
     movement = _load_movement_result_artifacts(
         result_row=movement_result,
@@ -10107,6 +9136,7 @@ def _make_path_specific_place_tuning_similarity_row(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
     session_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
@@ -10128,6 +9158,7 @@ def _make_path_specific_place_tuning_similarity_row(
             movement_firing_rate_selection_table
         ),
         movement_parameters_table=movement_parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         session_table=session_table,
     )
     result = compute_tuning_similarity_from_curves(
@@ -10182,8 +9213,7 @@ def _register_existing_path_specific_place_tuning_similarity_row(
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
     spike_sorting_output: Any,
     source_v1ca1_git_commit: str | None,
     source_spyglass_git_commit: str | None,
@@ -10208,6 +9238,7 @@ def _register_existing_path_specific_place_tuning_similarity_row(
             movement_firing_rate_selection_table
         ),
         movement_parameters_table=movement_parameters_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         session_table=session_table,
     )
     tuning_curve_parameters = inputs["tuning_curve_parameters"]
@@ -10235,15 +9266,10 @@ def _register_existing_path_specific_place_tuning_similarity_row(
             )
 
     context = {**key, **inputs["movement_selection"]}
-    loaded_units = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_units = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=inputs["region"],
-        allow_empty=True,
     )
-    _validate_frozen_sorting_snapshot(inputs["movement_selection"], loaded_units)
     selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
     if selected_units_sha256 != inputs["selected_units_sha256"]:
         raise ValueError(
@@ -10345,8 +9371,7 @@ def _register_existing_path_specific_place_tuning_curve_row(
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
     spike_sorting_output: Any,
     nwbfile_table: Any,
     source_v1ca1_git_commit: str | None,
@@ -10437,16 +9462,13 @@ def _register_existing_path_specific_place_tuning_curve_row(
     ):
         raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
     animal_name, session_date = _session_identity(session_table, context)
-    region = _analysis_region(movement_selection["region"])
-    loaded_units = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_units = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=region,
-        allow_empty=True,
     )
-    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    region = _analysis_region(
+        loaded_units["registration_row"]["region_name"]
+    )
     selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
     if selected_units_sha256 != str(movement_result["selected_units_sha256"]):
         raise ValueError(
@@ -10636,8 +9658,7 @@ def _register_existing_dpp_tuning_curve_row(
     movement_firing_rate_selection_table: Any,
     movement_parameters_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
     spike_sorting_output: Any,
     nwbfile_table: Any,
     source_v1ca1_git_commit: str | None,
@@ -10728,16 +9749,13 @@ def _register_existing_dpp_tuning_curve_row(
     ):
         raise ValueError("EpochIntervals must contain finite start_time < stop_time.")
     animal_name, session_date = _session_identity(session_table, context)
-    region = _analysis_region(movement_selection["region"])
-    loaded_units = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_units = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=region,
-        allow_empty=True,
     )
-    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    region = _analysis_region(
+        loaded_units["registration_row"]["region_name"]
+    )
     selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
     if selected_units_sha256 != str(movement_result["selected_units_sha256"]):
         raise ValueError(
@@ -10993,8 +10011,7 @@ def _register_existing_path_specific_place_stability_row(
     movement_firing_rate_table: Any,
     movement_firing_rate_selection_table: Any,
     session_table: Any,
-    sorted_spikes_group: Any,
-    unit_selection_params: Any,
+    region_sorted_spikes_group_table: Any,
     spike_sorting_output: Any,
     source_v1ca1_git_commit: str | None,
     source_spyglass_git_commit: str | None,
@@ -11099,16 +10116,13 @@ def _register_existing_path_specific_place_stability_row(
             )
 
     animal_name, session_date = _session_identity(session_table, context)
-    region = _analysis_region(movement_selection["region"])
-    loaded_units = _load_group_unit_data(
-        sorted_spikes_group=sorted_spikes_group,
-        unit_selection_params=unit_selection_params,
-        spike_sorting_output=spike_sorting_output,
+    loaded_units = _load_registered_region_spikes(
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         key=context,
-        region=region,
-        allow_empty=True,
     )
-    _validate_frozen_sorting_snapshot(movement_selection, loaded_units)
+    region = _analysis_region(
+        loaded_units["registration_row"]["region_name"]
+    )
     selected_units_sha256 = unit_identity_sha256(loaded_units["unit_ids"])
     if selected_units_sha256 != str(
         movement_result["selected_units_sha256"]
@@ -11460,7 +10474,7 @@ def _load_dpp_stability_artifact(
     return table
 
 
-def _load_dpp_encoding_comparison_context(
+def _load_dpp_encoding_context(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -11477,7 +10491,7 @@ def _load_dpp_encoding_comparison_context(
     session_table: Any,
 ) -> dict[str, Any]:
     """Load and revalidate shared inputs for one encoding comparison."""
-    validated_selection = _dpp_encoding_comparison_selection_row(
+    validated_selection = _dpp_encoding_selection_row(
         key=key,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         movement_firing_rate_table=movement_firing_rate_table,
@@ -11492,17 +10506,17 @@ def _load_dpp_encoding_comparison_context(
         tuning_curve_selection_table=tuning_curve_selection_table,
         parameters_table=parameters_table,
     )
-    if str(validated_selection["dpp_encoding_comparison_id"]) != str(
-        key["dpp_encoding_comparison_id"]
+    if str(validated_selection["dpp_encoding_id"]) != str(
+        key["dpp_encoding_id"]
     ):
-        raise ValueError("DPPEncodingComparison selection UUID is stale.")
-    parameters = _validate_dpp_encoding_comparison_parameter_row(
+        raise ValueError("DPPEncoding selection UUID is stale.")
+    parameters = _validate_dpp_encoding_parameter_row(
         _fetch1_dict(parameters_table, key)
     )
     _validate_frozen_parameters(
         key,
         parameters,
-        field_name="dpp_encoding_comparison_parameters_sha256",
+        field_name="dpp_encoding_parameters_sha256",
     )
     region_row = _fetch1_dict(
         region_sorted_spikes_group_table,
@@ -11548,7 +10562,7 @@ def _load_dpp_encoding_comparison_context(
     )
     if movement["analysis_status"] != "valid":
         raise ValueError(
-            "DPPEncodingComparison requires valid movement support."
+            "DPPEncoding requires valid movement support."
         )
     epoch_row = _fetch1_dict(epoch_intervals_table, movement_selection)
     epoch_start = float(epoch_row["start_time"])
@@ -11597,7 +10611,7 @@ def _load_dpp_encoding_comparison_context(
     }
 
 
-def _load_dpp_encoding_comparison_nwb_inputs(
+def _load_dpp_encoding_nwb_inputs(
     *,
     context: Mapping[str, Any],
     position_table: Any,
@@ -11668,7 +10682,7 @@ def _load_dpp_encoding_comparison_nwb_inputs(
     }
 
 
-def _load_dpp_encoding_comparison_spikes(
+def _load_dpp_encoding_spikes(
     *,
     context: Mapping[str, Any],
     region_sorted_spikes_group_table: Any,
@@ -11690,14 +10704,14 @@ def _load_dpp_encoding_comparison_spikes(
         context["movement_result"]["selected_units_sha256"]
     ):
         raise ValueError(
-            "DPPEncodingComparison regional units changed after selection."
+            "DPPEncoding regional units changed after selection."
         )
     expected_count = int(context["region_row"]["n_units"])
     if int(loaded["n_units"]) != expected_count or len(
         loaded["unit_ids"]
     ) != expected_count:
         raise ValueError(
-            "DPPEncodingComparison regional unit count changed after selection."
+            "DPPEncoding regional unit count changed after selection."
         )
     return loaded
 
@@ -11736,11 +10750,11 @@ def _load_path_progression_decoding_context(
         tuning_curve_selection_table=tuning_curve_selection_table,
         parameters_table=parameters_table,
     )
-    if str(validated_selection["path_progression_decoding_comparison_id"]) != str(
-        key["path_progression_decoding_comparison_id"]
+    if str(validated_selection["path_progression_decoding_id"]) != str(
+        key["path_progression_decoding_id"]
     ):
         raise ValueError(
-            "PathProgressionDecodingComparison selection UUID is stale."
+            "PathProgressionDecoding selection UUID is stale."
         )
     parameters = _validate_path_progression_decoding_parameter_row(
         _fetch1_dict(parameters_table, key)
@@ -11795,7 +10809,7 @@ def _load_path_progression_decoding_context(
         )
         if movement["analysis_status"] != expected_movement_status:
             raise ValueError(
-                "PathProgressionDecodingComparison movement support does not "
+                "PathProgressionDecoding movement support does not "
                 "match the regional unit count."
             )
         epoch_row = _fetch1_dict(epoch_intervals_table, selection)
@@ -11963,7 +10977,7 @@ def _load_path_progression_decoding_spikes(
         for source_name in ("target", "cohort")
     ):
         raise ValueError(
-            "PathProgressionDecodingComparison regional units changed after "
+            "PathProgressionDecoding regional units changed after "
             "selection."
         )
     expected_count = int(context["region_row"]["n_units"])
@@ -11971,7 +10985,7 @@ def _load_path_progression_decoding_spikes(
         loaded["unit_ids"]
     ) != expected_count:
         raise ValueError(
-            "PathProgressionDecodingComparison regional unit count changed "
+            "PathProgressionDecoding regional unit count changed "
             "after selection."
         )
     return loaded
@@ -12191,7 +11205,7 @@ def _load_path_specific_place_decoding_spikes(
     return loaded
 
 
-def _load_motor_encoding_comparison_context(
+def _load_motor_encoding_context(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -12203,12 +11217,15 @@ def _load_motor_encoding_comparison_context(
     epoch_intervals_table: Any,
     trajectory_intervals_table: Any,
     wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
     session_table: Any,
 ) -> dict[str, Any]:
     """Load and revalidate one nine-model motor-encoding selection."""
     from v1ca1.spyglass.selection import provenance_sha256
 
-    validated_selection = _motor_encoding_comparison_selection_row(
+    validated_selection = _motor_encoding_selection_row(
         key=key,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
         movement_firing_rate_table=movement_firing_rate_table,
@@ -12219,38 +11236,41 @@ def _load_motor_encoding_comparison_context(
         epoch_intervals_table=epoch_intervals_table,
         trajectory_intervals_table=trajectory_intervals_table,
         wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
         parameters_table=parameters_table,
     )
-    if str(validated_selection["motor_encoding_comparison_id"]) != str(
-        key["motor_encoding_comparison_id"]
+    if str(validated_selection["motor_encoding_id"]) != str(
+        key["motor_encoding_id"]
     ):
-        raise ValueError("MotorEncodingComparison selection UUID is stale.")
-    parameters = _validate_motor_encoding_comparison_parameter_row(
+        raise ValueError("MotorEncoding selection UUID is stale.")
+    parameters = _validate_motor_encoding_parameter_row(
         _fetch1_dict(parameters_table, key)
     )
     _validate_frozen_parameters(
         key,
         parameters,
-        field_name="motor_encoding_comparison_parameters_sha256",
+        field_name="motor_encoding_parameters_sha256",
     )
     expected_model_spec_sha256 = provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+        dict(table_specs.MOTOR_ENCODING_MODEL_SPEC)
     )
-    if str(key.get("motor_encoding_comparison_model_spec_sha256", "")) != (
+    if str(key.get("motor_encoding_model_spec_sha256", "")) != (
         expected_model_spec_sha256
     ):
         raise ValueError(
-            "MotorEncodingComparison fixed model specification changed after "
+            "MotorEncoding fixed model specification changed after "
             "selection insertion. Create a new selection."
         )
     expected_output_rule_sha256 = provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+        dict(table_specs.MOTOR_ENCODING_OUTPUT_RULE)
     )
-    if str(key.get("motor_encoding_comparison_output_rule_sha256", "")) != (
+    if str(key.get("motor_encoding_output_rule_sha256", "")) != (
         expected_output_rule_sha256
     ):
         raise ValueError(
-            "MotorEncodingComparison fixed output rule changed after selection "
+            "MotorEncoding fixed output rule changed after selection "
             "insertion. Create a new selection."
         )
 
@@ -12305,6 +11325,24 @@ def _load_motor_encoding_comparison_context(
         raise ValueError(
             "EpochIntervals must contain finite start_time < stop_time."
         )
+    stability_tables: dict[str, Any] = {}
+    stability_rows: dict[str, dict[str, Any]] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        stability_key = {
+            "path_specific_place_stability_id": key[
+                f"{trajectory_type}_stability_id"
+            ]
+        }
+        stability_row = _fetch1_dict(stability_table, stability_key)
+        stability_tables[trajectory_type] = _load_dpp_stability_artifact(
+            result_row=stability_row,
+            trajectory_type=trajectory_type,
+            animal_name=animal_name,
+            date=session_date,
+            region=region,
+            epoch=str(movement_selection["epoch"]),
+        )
+        stability_rows[trajectory_type] = stability_row
     return {
         "selection": validated_selection,
         "parameters": parameters,
@@ -12319,10 +11357,12 @@ def _load_motor_encoding_comparison_context(
         "region": region,
         "epoch": str(movement_selection["epoch"]),
         "epoch_time_support": (epoch_start, epoch_stop),
+        "stability_tables": stability_tables,
+        "stability_rows": stability_rows,
     }
 
 
-def _load_motor_encoding_comparison_nwb_inputs(
+def _load_motor_encoding_nwb_inputs(
     *,
     context: Mapping[str, Any],
     position_table: Any,
@@ -12425,7 +11465,7 @@ def _load_motor_encoding_comparison_nwb_inputs(
             orientation_reference_timestamps,
         ):
             raise ValueError(
-                "MotorEncodingComparison primary and orientation-reference "
+                "MotorEncoding primary and orientation-reference "
                 "position timestamps must match exactly."
             )
         trajectory_intervals = {
@@ -12448,7 +11488,7 @@ def _load_motor_encoding_comparison_nwb_inputs(
     }
 
 
-def _load_motor_encoding_comparison_spikes(
+def _load_motor_encoding_spikes(
     *,
     context: Mapping[str, Any],
     region_sorted_spikes_group_table: Any,
@@ -12471,14 +11511,14 @@ def _load_motor_encoding_comparison_spikes(
         context["movement_result"]["selected_units_sha256"]
     ):
         raise ValueError(
-            "MotorEncodingComparison regional units changed after selection."
+            "MotorEncoding regional units changed after selection."
         )
     expected_count = int(context["region_row"]["n_units"])
     if int(loaded["n_units"]) != expected_count or len(
         loaded["unit_ids"]
     ) != expected_count:
         raise ValueError(
-            "MotorEncodingComparison regional unit count changed after "
+            "MotorEncoding regional unit count changed after "
             "selection."
         )
     return loaded
@@ -13530,7 +12570,7 @@ def _legacy_motor_unit_identity_resolver(
     ]
     if non_imported:
         raise ValueError(
-            "Legacy MotorEncodingComparison registration requires matching "
+            "Legacy MotorEncoding registration requires matching "
             "ImportedSpikeSorting units; found non-imported outputs "
             f"{non_imported!r}."
         )
@@ -13546,7 +12586,7 @@ def _legacy_motor_unit_identity_resolver(
         if not resolver_key or resolver_key in resolver:
             raise ValueError(
                 "Every selected unit requires a unique sorting_unit_id for "
-                "legacy MotorEncodingComparison registration."
+                "legacy MotorEncoding registration."
             )
         resolver[resolver_key] = {
             "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
@@ -13586,7 +12626,7 @@ def _validate_legacy_dpp_encoding_source_path(
     return source
 
 
-def _validate_dpp_encoding_comparison_artifact_link(
+def _validate_dpp_encoding_artifact_link(
     *,
     table: Any,
     result_row: Mapping[str, Any],
@@ -13597,21 +12637,21 @@ def _validate_dpp_encoding_comparison_artifact_link(
     date: str,
 ) -> None:
     """Require one canonical comparison artifact to match its result row."""
-    from v1ca1.spyglass.encoding_comparison import (
+    from v1ca1.spyglass.dpp_encoding import (
         ARTIFACT_DIRNAME,
         ARTIFACT_FILENAME,
-        summarize_encoding_comparison_table,
+        summarize_dpp_encoding_table,
     )
 
-    parameters = _validate_dpp_encoding_comparison_parameter_row(
+    parameters = _validate_dpp_encoding_parameter_row(
         parameters_row
     )
     _validate_frozen_parameters(
         selection_row,
         parameters,
-        field_name="dpp_encoding_comparison_parameters_sha256",
+        field_name="dpp_encoding_parameters_sha256",
     )
-    summary = summarize_encoding_comparison_table(table)
+    summary = summarize_dpp_encoding_table(table)
     for field_name in (
         "n_units_eligible",
         "n_units_valid",
@@ -13620,28 +12660,28 @@ def _validate_dpp_encoding_comparison_artifact_link(
     ):
         if str(result_row[field_name]) != str(summary[field_name]):
             raise ValueError(
-                "DPPEncodingComparison result metadata disagrees with its "
+                "DPPEncoding result metadata disagrees with its "
                 f"artifact: {field_name}."
             )
     if int(result_row["n_units_input"]) != int(region_row["n_units"]):
         raise ValueError(
-            "DPPEncodingComparison input-unit count disagrees with its "
+            "DPPEncoding input-unit count disagrees with its "
             "RegionSortedSpikesGroup."
         )
     if int(result_row["n_units_input"]) < int(summary["n_units_eligible"]):
         raise ValueError(
-            "DPPEncodingComparison n_units_input cannot be smaller than the "
+            "DPPEncoding n_units_input cannot be smaller than the "
             "eligible-unit count."
         )
 
-    comparison_id = str(selection_row["dpp_encoding_comparison_id"])
+    comparison_id = str(selection_row["dpp_encoding_id"])
     if not table.empty:
         artifact_ids = (
-            table["dpp_encoding_comparison_id"].astype(str).unique().tolist()
+            table["dpp_encoding_id"].astype(str).unique().tolist()
         )
         if artifact_ids != [comparison_id]:
             raise ValueError(
-                "DPPEncodingComparison artifact does not match its selection "
+                "DPPEncoding artifact does not match its selection "
                 "UUID."
             )
         expected_metadata = {
@@ -13654,7 +12694,7 @@ def _validate_dpp_encoding_comparison_artifact_link(
             observed = table[field_name].astype(str).unique().tolist()
             if observed != [str(expected_value)]:
                 raise ValueError(
-                    "DPPEncodingComparison artifact does not match its "
+                    "DPPEncoding artifact does not match its "
                     f"selection: {field_name}."
                 )
         for field_name in (
@@ -13679,11 +12719,11 @@ def _validate_dpp_encoding_comparison_artifact_link(
                 )
             if not matches:
                 raise ValueError(
-                    "DPPEncodingComparison artifact does not match its "
+                    "DPPEncoding artifact does not match its "
                     f"selected parameters: {field_name}."
                 )
 
-    artifact_path = Path(result_row["encoding_comparison_path"])
+    artifact_path = Path(result_row["dpp_encoding_path"])
     expected_path_tail = (
         str(animal_name),
         str(date),
@@ -13697,7 +12737,7 @@ def _validate_dpp_encoding_comparison_artifact_link(
         expected_path_tail
     ):
         raise ValueError(
-            "DPPEncodingComparison artifact path does not match its session, "
+            "DPPEncoding artifact path does not match its session, "
             "epoch, region, and selection UUID."
         )
 
@@ -13713,7 +12753,7 @@ def _validate_path_progression_decoding_artifact_link(
     date: str,
 ) -> None:
     """Require one canonical decoding bundle to match its DataJoint rows."""
-    from v1ca1.spyglass.decoding_comparison import (
+    from v1ca1.spyglass.path_progression_decoding import (
         ARTIFACT_DIRNAME,
         ELIGIBILITY_FILENAME,
         MANIFEST_FILENAME,
@@ -13741,12 +12781,12 @@ def _validate_path_progression_decoding_artifact_link(
     ):
         if str(result_row[field_name]) != str(summary[field_name]):
             raise ValueError(
-                "PathProgressionDecodingComparison result metadata "
+                "PathProgressionDecoding result metadata "
                 f"disagrees with its artifact: {field_name}."
             )
     if int(result_row["n_units_input"]) != int(region_row["n_units"]):
         raise ValueError(
-            "PathProgressionDecodingComparison input count disagrees with "
+            "PathProgressionDecoding input count disagrees with "
             "RegionSortedSpikesGroup."
         )
     from v1ca1.spyglass.selection import unit_identity_sha256
@@ -13758,13 +12798,13 @@ def _validate_path_progression_decoding_artifact_link(
     )
     if input_units_sha256 != str(region_row["selected_units_sha256"]):
         raise ValueError(
-            "PathProgressionDecodingComparison input identities disagree "
+            "PathProgressionDecoding input identities disagree "
             "with RegionSortedSpikesGroup."
         )
 
     expected_metadata = {
-        "path_progression_decoding_comparison_id": selection_row[
-            "path_progression_decoding_comparison_id"
+        "path_progression_decoding_id": selection_row[
+            "path_progression_decoding_id"
         ],
         "animal_name": animal_name,
         "date": date,
@@ -13788,14 +12828,14 @@ def _validate_path_progression_decoding_artifact_link(
     for field_name, expected_value in expected_metadata.items():
         if str(summary[field_name]) != str(expected_value):
             raise ValueError(
-                "PathProgressionDecodingComparison artifact does not match "
+                "PathProgressionDecoding artifact does not match "
                 f"its selection: {field_name}."
             )
 
     manifest_path = Path(result_row["artifact_manifest_path"])
     summary_path = Path(result_row["decoding_summary_path"])
     eligibility_path = Path(result_row["unit_eligibility_path"])
-    result_id = str(selection_row["path_progression_decoding_comparison_id"])
+    result_id = str(selection_row["path_progression_decoding_id"])
     expected_tail = (
         str(animal_name),
         str(date),
@@ -13807,14 +12847,14 @@ def _validate_path_progression_decoding_artifact_link(
     )
     if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
         raise ValueError(
-            "PathProgressionDecodingComparison manifest path does not match "
+            "PathProgressionDecoding manifest path does not match "
             "its canonical session/epoch/region/UUID layout."
         )
     if summary_path != manifest_path.parent / METRICS_FILENAME or (
         eligibility_path != manifest_path.parent / ELIGIBILITY_FILENAME
     ):
         raise ValueError(
-            "PathProgressionDecodingComparison result paths do not describe "
+            "PathProgressionDecoding result paths do not describe "
             "one canonical artifact bundle."
         )
     if Path(bundle["path"]) != manifest_path.parent:
@@ -13930,7 +12970,7 @@ def _validate_path_specific_place_decoding_artifact_link(
             )
 
 
-def _validate_motor_encoding_comparison_artifact_link(
+def _validate_motor_encoding_artifact_link(
     *,
     bundle: Mapping[str, Any],
     result_row: Mapping[str, Any],
@@ -13956,8 +12996,8 @@ def _validate_motor_encoding_comparison_artifact_link(
 
     validated = validate_motor_encoding_result(bundle)
     expected_metadata = {
-        "motor_encoding_comparison_id": selection_row[
-            "motor_encoding_comparison_id"
+        "motor_encoding_id": selection_row[
+            "motor_encoding_id"
         ],
         "animal_name": animal_name,
         "date": date,
@@ -13967,37 +13007,37 @@ def _validate_motor_encoding_comparison_artifact_link(
     for field_name, expected_value in expected_metadata.items():
         if str(validated["metadata"].get(field_name)) != str(expected_value):
             raise ValueError(
-                "MotorEncodingComparison artifact does not match its "
+                "MotorEncoding artifact does not match its "
                 f"selection: {field_name}."
             )
 
-    parameters = _validate_motor_encoding_comparison_parameter_row(
+    parameters = _validate_motor_encoding_parameter_row(
         parameters_row
     )
     expected_parameters = {
         "parameter_name": parameters[
-            "motor_encoding_comparison_param_name"
+            "motor_encoding_param_name"
         ],
         "parameter_sha256": selection_row[
-            "motor_encoding_comparison_parameters_sha256"
+            "motor_encoding_parameters_sha256"
         ],
         "model_spec_sha256": selection_row[
-            "motor_encoding_comparison_model_spec_sha256"
+            "motor_encoding_model_spec_sha256"
         ],
         "output_rule_sha256": selection_row[
-            "motor_encoding_comparison_output_rule_sha256"
+            "motor_encoding_output_rule_sha256"
         ],
         **{
             field_name: value
             for field_name, value in parameters.items()
-            if field_name != "motor_encoding_comparison_param_name"
+            if field_name != "motor_encoding_param_name"
         },
     }
     if provenance_sha256(dict(validated["parameters"])) != provenance_sha256(
         expected_parameters
     ):
         raise ValueError(
-            "MotorEncodingComparison artifact parameters disagree with its "
+            "MotorEncoding artifact parameters disagree with its "
             "selection."
         )
 
@@ -14018,12 +13058,12 @@ def _validate_motor_encoding_comparison_artifact_link(
     for field_name, expected_value in expected_scalars.items():
         if str(result_row[field_name]) != str(expected_value):
             raise ValueError(
-                "MotorEncodingComparison result disagrees with its artifact: "
+                "MotorEncoding result disagrees with its artifact: "
                 f"{field_name}."
             )
     if int(result_row["n_units_input"]) != int(region_row["n_units"]):
         raise ValueError(
-            "MotorEncodingComparison input count disagrees with "
+            "MotorEncoding input count disagrees with "
             "RegionSortedSpikesGroup."
         )
     selected_unit_digest = unit_identity_sha256(
@@ -14033,7 +13073,7 @@ def _validate_motor_encoding_comparison_artifact_link(
     )
     if selected_unit_digest != str(region_row["selected_units_sha256"]):
         raise ValueError(
-            "MotorEncodingComparison input identities disagree with "
+            "MotorEncoding input identities disagree with "
             "RegionSortedSpikesGroup."
         )
     for dataset_name in ("nested_cv", "full_refit"):
@@ -14049,12 +13089,12 @@ def _validate_motor_encoding_comparison_artifact_link(
         for field_name, expected_value in expected_sources.items():
             if str(dataset.attrs.get(field_name, "")) != str(expected_value):
                 raise ValueError(
-                    "MotorEncodingComparison artifact position provenance "
+                    "MotorEncoding artifact position provenance "
                     f"disagrees with its selection: {field_name}."
                 )
 
     manifest_path = Path(result_row["artifact_manifest_path"])
-    result_id = str(selection_row["motor_encoding_comparison_id"])
+    result_id = str(selection_row["motor_encoding_id"])
     expected_tail = (
         str(animal_name),
         str(date),
@@ -14066,7 +13106,7 @@ def _validate_motor_encoding_comparison_artifact_link(
     )
     if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
         raise ValueError(
-            "MotorEncodingComparison manifest path does not match its "
+            "MotorEncoding manifest path does not match its "
             "canonical session/epoch/region/UUID layout."
         )
     expected_paths = {
@@ -14077,7 +13117,7 @@ def _validate_motor_encoding_comparison_artifact_link(
     for field_name, filename in expected_paths.items():
         if Path(result_row[field_name]) != manifest_path.parent / filename:
             raise ValueError(
-                "MotorEncodingComparison result paths do not describe one "
+                "MotorEncoding result paths do not describe one "
                 f"canonical bundle: {field_name}."
             )
 
@@ -14608,7 +13648,7 @@ def _validate_swap_tuning_curve_comparison_artifact_link(
             )
 
 
-def _make_dpp_encoding_comparison_row(
+def _make_dpp_encoding_row(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -14628,13 +13668,13 @@ def _make_dpp_encoding_comparison_row(
     artifact_root: Path | None,
 ) -> dict[str, Any]:
     """Compute and write one strict four-model encoding comparison."""
-    from v1ca1.spyglass.encoding_comparison import (
-        compute_selected_dpp_encoding_comparison,
-        get_encoding_comparison_artifact_path,
-        write_encoding_comparison_artifact,
+    from v1ca1.spyglass.dpp_encoding import (
+        compute_selected_dpp_encoding,
+        get_dpp_encoding_artifact_path,
+        write_dpp_encoding_artifact,
     )
 
-    context = _load_dpp_encoding_comparison_context(
+    context = _load_dpp_encoding_context(
         key=key,
         parameters_table=parameters_table,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
@@ -14651,11 +13691,11 @@ def _make_dpp_encoding_comparison_row(
         tuning_curve_selection_table=tuning_curve_selection_table,
         session_table=session_table,
     )
-    loaded_spikes = _load_dpp_encoding_comparison_spikes(
+    loaded_spikes = _load_dpp_encoding_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
     )
-    nwb_inputs = _load_dpp_encoding_comparison_nwb_inputs(
+    nwb_inputs = _load_dpp_encoding_nwb_inputs(
         context=context,
         position_table=position_table,
         trajectory_intervals_table=trajectory_intervals_table,
@@ -14663,7 +13703,7 @@ def _make_dpp_encoding_comparison_row(
         nwbfile_table=nwbfile_table,
     )
     parameters = context["parameters"]
-    result = compute_selected_dpp_encoding_comparison(
+    result = compute_selected_dpp_encoding(
         animal_name=context["animal_name"],
         date=context["date"],
         region=context["region"],
@@ -14682,7 +13722,7 @@ def _make_dpp_encoding_comparison_row(
         minimum_stability_correlation=parameters[
             "minimum_stability_correlation"
         ],
-        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        dpp_encoding_id=key["dpp_encoding_id"],
         n_folds=parameters["n_folds"],
         evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
         spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
@@ -14694,23 +13734,23 @@ def _make_dpp_encoding_comparison_row(
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
         path_kwargs["artifact_root"] = artifact_root
-    artifact_path = get_encoding_comparison_artifact_path(
+    artifact_path = get_dpp_encoding_artifact_path(
         animal_name=context["animal_name"],
         date=context["date"],
         epoch=context["epoch"],
         region=context["region"],
-        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        dpp_encoding_id=key["dpp_encoding_id"],
         **path_kwargs,
     )
     created_artifact_paths = (
         [] if artifact_path.exists() else [str(artifact_path)]
     )
-    written_path = write_encoding_comparison_artifact(
+    written_path = write_dpp_encoding_artifact(
         result["table"],
         artifact_path,
     )
     return {
-        "encoding_comparison_path": str(written_path),
+        "dpp_encoding_path": str(written_path),
         "n_units_input": int(context["region_row"]["n_units"]),
         "n_units_eligible": int(result["n_units_eligible"]),
         "n_units_valid": int(result["n_units_valid"]),
@@ -14721,10 +13761,10 @@ def _make_dpp_encoding_comparison_row(
     }
 
 
-def _register_existing_dpp_encoding_comparison_row(
+def _register_existing_dpp_encoding_row(
     *,
     key: Mapping[str, Any],
-    encoding_comparison_path: Path,
+    dpp_encoding_path: Path,
     overwrite: bool,
     parameters_table: Any,
     region_sorted_spikes_group_table: Any,
@@ -14743,16 +13783,16 @@ def _register_existing_dpp_encoding_comparison_row(
     artifact_root: Path | None,
 ) -> dict[str, Any]:
     """Normalize and register one exact-coverage legacy comparison."""
-    from v1ca1.spyglass.encoding_comparison import (
-        get_encoding_comparison_artifact_path,
-        register_existing_encoding_comparison_artifact,
+    from v1ca1.spyglass.dpp_encoding import (
+        get_dpp_encoding_artifact_path,
+        register_existing_dpp_encoding_artifact,
     )
 
     if overwrite:
         raise ValueError(
-            "Registered DPPEncodingComparison artifacts are immutable."
+            "Registered DPPEncoding artifacts are immutable."
         )
-    context = _load_dpp_encoding_comparison_context(
+    context = _load_dpp_encoding_context(
         key=key,
         parameters_table=parameters_table,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
@@ -14769,14 +13809,14 @@ def _register_existing_dpp_encoding_comparison_row(
         tuning_curve_selection_table=tuning_curve_selection_table,
         session_table=session_table,
     )
-    loaded_spikes = _load_dpp_encoding_comparison_spikes(
+    loaded_spikes = _load_dpp_encoding_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
     )
     resolver = _legacy_dpp_unit_identity_resolver(loaded_spikes)
     parameters = context["parameters"]
     source_path = _validate_legacy_dpp_encoding_source_path(
-        Path(encoding_comparison_path),
+        Path(dpp_encoding_path),
         region=context["region"],
         epoch=context["epoch"],
         parameters=parameters,
@@ -14784,15 +13824,15 @@ def _register_existing_dpp_encoding_comparison_row(
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
         path_kwargs["artifact_root"] = artifact_root
-    destination = get_encoding_comparison_artifact_path(
+    destination = get_dpp_encoding_artifact_path(
         animal_name=context["animal_name"],
         date=context["date"],
         epoch=context["epoch"],
         region=context["region"],
-        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        dpp_encoding_id=key["dpp_encoding_id"],
         **path_kwargs,
     )
-    registered = register_existing_encoding_comparison_artifact(
+    registered = register_existing_dpp_encoding_artifact(
         source_path=source_path,
         destination_path=destination,
         animal_name=context["animal_name"],
@@ -14810,7 +13850,7 @@ def _register_existing_dpp_encoding_comparison_row(
             "minimum_stability_correlation"
         ],
         unit_identity_resolver=resolver,
-        dpp_encoding_comparison_id=key["dpp_encoding_comparison_id"],
+        dpp_encoding_id=key["dpp_encoding_id"],
         n_folds=parameters["n_folds"],
         evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
         spatial_bin_size_cm=parameters["spatial_bin_size_cm"],
@@ -14842,7 +13882,7 @@ def _register_existing_dpp_encoding_comparison_row(
         "not_reconstructable_from_legacy_summary"
     )
     return {
-        "encoding_comparison_path": str(registered["path"]),
+        "dpp_encoding_path": str(registered["path"]),
         "n_units_input": int(context["region_row"]["n_units"]),
         "n_units_eligible": int(registered["n_units_eligible"]),
         "n_units_valid": int(registered["n_units_valid"]),
@@ -14857,7 +13897,7 @@ def _register_existing_dpp_encoding_comparison_row(
     }
 
 
-def _make_path_progression_decoding_comparison_row(
+def _make_path_progression_decoding_row(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -14877,8 +13917,8 @@ def _make_path_progression_decoding_comparison_row(
     artifact_root: Path | None,
 ) -> dict[str, Any]:
     """Compute and persist one shared-cohort cross-path decoding bundle."""
-    from v1ca1.spyglass.decoding_comparison import (
-        compute_path_progression_decoding_comparison,
+    from v1ca1.spyglass.path_progression_decoding import (
+        compute_path_progression_decoding,
         get_decoding_artifact_paths,
         write_decoding_artifact_bundle,
     )
@@ -14913,14 +13953,14 @@ def _make_path_progression_decoding_comparison_row(
         nwbfile_table=nwbfile_table,
     )
     parameters = context["parameters"]
-    result = compute_path_progression_decoding_comparison(
+    result = compute_path_progression_decoding(
         animal_name=context["animal_name"],
         date=context["date"],
         region=context["region"],
         epoch=context["epoch"],
         cohort_epoch=context["cohort_epoch"],
-        path_progression_decoding_comparison_id=key[
-            "path_progression_decoding_comparison_id"
+        path_progression_decoding_id=key[
+            "path_progression_decoding_id"
         ],
         spikes=loaded_spikes["ts_group"],
         stable_unit_ids=loaded_spikes["unit_ids"],
@@ -14970,8 +14010,8 @@ def _make_path_progression_decoding_comparison_row(
         epoch=context["epoch"],
         cohort_epoch=context["cohort_epoch"],
         region=context["region"],
-        path_progression_decoding_comparison_id=key[
-            "path_progression_decoding_comparison_id"
+        path_progression_decoding_id=key[
+            "path_progression_decoding_id"
         ],
         **path_kwargs,
     )
@@ -15265,7 +14305,7 @@ def _register_existing_path_specific_place_decoding_row(
     }
 
 
-def _make_motor_encoding_comparison_row(
+def _make_motor_encoding_row(
     *,
     key: Mapping[str, Any],
     parameters_table: Any,
@@ -15277,18 +14317,21 @@ def _make_motor_encoding_comparison_row(
     epoch_intervals_table: Any,
     trajectory_intervals_table: Any,
     wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
     session_table: Any,
     nwbfile_table: Any,
     artifact_root: Path | None,
 ) -> dict[str, Any]:
     """Compute and persist one nine-model motor-encoding bundle."""
     from v1ca1.spyglass.motor_encoding import (
-        compute_motor_encoding_comparison,
+        compute_motor_encoding,
         get_motor_encoding_artifact_paths,
         write_motor_encoding_artifact,
     )
 
-    context = _load_motor_encoding_comparison_context(
+    context = _load_motor_encoding_context(
         key=key,
         parameters_table=parameters_table,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
@@ -15301,13 +14344,16 @@ def _make_motor_encoding_comparison_row(
         epoch_intervals_table=epoch_intervals_table,
         trajectory_intervals_table=trajectory_intervals_table,
         wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
         session_table=session_table,
     )
-    loaded_spikes = _load_motor_encoding_comparison_spikes(
+    loaded_spikes = _load_motor_encoding_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
     )
-    nwb_inputs = _load_motor_encoding_comparison_nwb_inputs(
+    nwb_inputs = _load_motor_encoding_nwb_inputs(
         context=context,
         position_table=position_table,
         trajectory_intervals_table=trajectory_intervals_table,
@@ -15316,13 +14362,13 @@ def _make_motor_encoding_comparison_row(
     )
     parameters = context["parameters"]
     selection = context["selection"]
-    result = compute_motor_encoding_comparison(
+    result = compute_motor_encoding(
         animal_name=context["animal_name"],
         date=context["date"],
         region=context["region"],
         epoch=context["epoch"],
-        motor_encoding_comparison_id=key[
-            "motor_encoding_comparison_id"
+        motor_encoding_id=key[
+            "motor_encoding_id"
         ],
         spikes=loaded_spikes["ts_group"],
         stable_unit_ids=loaded_spikes["unit_ids"],
@@ -15340,20 +14386,24 @@ def _make_motor_encoding_comparison_row(
         graph_inputs_by_configuration=nwb_inputs["graph_inputs"],
         movement_intervals=context["movement"]["movement_intervals"],
         movement_firing_rate_table=context["movement"]["table"],
+        stability_tables_by_trajectory=context["stability_tables"],
         minimum_movement_firing_rate_hz=parameters[
             "minimum_movement_firing_rate_hz"
         ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
         parameter_name=parameters[
-            "motor_encoding_comparison_param_name"
+            "motor_encoding_param_name"
         ],
         parameter_sha256=selection[
-            "motor_encoding_comparison_parameters_sha256"
+            "motor_encoding_parameters_sha256"
         ],
         model_spec_sha256=selection[
-            "motor_encoding_comparison_model_spec_sha256"
+            "motor_encoding_model_spec_sha256"
         ],
         output_rule_sha256=selection[
-            "motor_encoding_comparison_output_rule_sha256"
+            "motor_encoding_output_rule_sha256"
         ],
         evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
         outer_n_folds=parameters["outer_n_folds"],
@@ -15381,8 +14431,8 @@ def _make_motor_encoding_comparison_row(
         date=context["date"],
         epoch=context["epoch"],
         region=context["region"],
-        motor_encoding_comparison_id=key[
-            "motor_encoding_comparison_id"
+        motor_encoding_id=key[
+            "motor_encoding_id"
         ],
         **path_kwargs,
     )
@@ -15410,7 +14460,7 @@ def _make_motor_encoding_comparison_row(
     }
 
 
-def _register_existing_motor_encoding_comparison_row(
+def _register_existing_motor_encoding_row(
     *,
     key: Mapping[str, Any],
     source_nested_cv_path: Path,
@@ -15424,6 +14474,9 @@ def _register_existing_motor_encoding_comparison_row(
     epoch_intervals_table: Any,
     trajectory_intervals_table: Any,
     wtrack_graph_table: Any,
+    stability_table: Any,
+    stability_selection_table: Any,
+    tuning_curve_selection_table: Any,
     session_table: Any,
     nwbfile_table: Any,
     source_v1ca1_git_commit: str | None,
@@ -15436,7 +14489,7 @@ def _register_existing_motor_encoding_comparison_row(
         register_existing_motor_encoding_artifact,
     )
 
-    context = _load_motor_encoding_comparison_context(
+    context = _load_motor_encoding_context(
         key=key,
         parameters_table=parameters_table,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
@@ -15449,13 +14502,16 @@ def _register_existing_motor_encoding_comparison_row(
         epoch_intervals_table=epoch_intervals_table,
         trajectory_intervals_table=trajectory_intervals_table,
         wtrack_graph_table=wtrack_graph_table,
+        stability_table=stability_table,
+        stability_selection_table=stability_selection_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
         session_table=session_table,
     )
-    loaded_spikes = _load_motor_encoding_comparison_spikes(
+    loaded_spikes = _load_motor_encoding_spikes(
         context=context,
         region_sorted_spikes_group_table=region_sorted_spikes_group_table,
     )
-    nwb_inputs = _load_motor_encoding_comparison_nwb_inputs(
+    nwb_inputs = _load_motor_encoding_nwb_inputs(
         context=context,
         position_table=position_table,
         trajectory_intervals_table=trajectory_intervals_table,
@@ -15473,8 +14529,8 @@ def _register_existing_motor_encoding_comparison_row(
         date=context["date"],
         epoch=context["epoch"],
         region=context["region"],
-        motor_encoding_comparison_id=key[
-            "motor_encoding_comparison_id"
+        motor_encoding_id=key[
+            "motor_encoding_id"
         ],
         **path_kwargs,
     )
@@ -15488,10 +14544,11 @@ def _register_existing_motor_encoding_comparison_row(
         date=context["date"],
         region=context["region"],
         epoch=context["epoch"],
-        motor_encoding_comparison_id=key[
-            "motor_encoding_comparison_id"
+        motor_encoding_id=key[
+            "motor_encoding_id"
         ],
         movement_firing_rate_table=context["movement"]["table"],
+        stability_tables_by_trajectory=context["stability_tables"],
         graph_inputs_by_configuration=nwb_inputs["graph_inputs"],
         unit_identity_resolver=resolver,
         primary_position_source=selection[
@@ -15503,17 +14560,20 @@ def _register_existing_motor_encoding_comparison_row(
         minimum_movement_firing_rate_hz=parameters[
             "minimum_movement_firing_rate_hz"
         ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
         parameter_name=parameters[
-            "motor_encoding_comparison_param_name"
+            "motor_encoding_param_name"
         ],
         parameter_sha256=selection[
-            "motor_encoding_comparison_parameters_sha256"
+            "motor_encoding_parameters_sha256"
         ],
         model_spec_sha256=selection[
-            "motor_encoding_comparison_model_spec_sha256"
+            "motor_encoding_model_spec_sha256"
         ],
         output_rule_sha256=selection[
-            "motor_encoding_comparison_output_rule_sha256"
+            "motor_encoding_output_rule_sha256"
         ],
         evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
         outer_n_folds=parameters["outer_n_folds"],
@@ -16715,14 +15775,6 @@ def _construct_tables(
         "epoch_motor_behavior_register_existing",
         _register_existing_epoch_motor_behavior_row,
     )
-    ripple_band_lfp_compute_hook = runtime_hooks.get(
-        "ripple_band_lfp_compute",
-        _make_ripple_band_lfp_row,
-    )
-    ripple_band_lfp_register_hook = runtime_hooks.get(
-        "ripple_band_lfp_register_existing",
-        _register_existing_ripple_band_lfp_row,
-    )
     cv_pca_compute_hook = runtime_hooks.get(
         "cv_pca_compute",
         _make_cv_pca_row,
@@ -16763,17 +15815,17 @@ def _construct_tables(
         "path_specific_place_stability_register_existing",
         _register_existing_path_specific_place_stability_row,
     )
-    dpp_encoding_comparison_compute_hook = runtime_hooks.get(
-        "dpp_encoding_comparison_compute",
-        _make_dpp_encoding_comparison_row,
+    dpp_encoding_compute_hook = runtime_hooks.get(
+        "dpp_encoding_compute",
+        _make_dpp_encoding_row,
     )
-    dpp_encoding_comparison_register_hook = runtime_hooks.get(
-        "dpp_encoding_comparison_register_existing",
-        _register_existing_dpp_encoding_comparison_row,
+    dpp_encoding_register_hook = runtime_hooks.get(
+        "dpp_encoding_register_existing",
+        _register_existing_dpp_encoding_row,
     )
     path_progression_decoding_compute_hook = runtime_hooks.get(
-        "path_progression_decoding_comparison_compute",
-        _make_path_progression_decoding_comparison_row,
+        "path_progression_decoding_compute",
+        _make_path_progression_decoding_row,
     )
     path_specific_place_decoding_compute_hook = runtime_hooks.get(
         "path_specific_place_decoding_compute",
@@ -16783,13 +15835,13 @@ def _construct_tables(
         "path_specific_place_decoding_register_existing",
         _register_existing_path_specific_place_decoding_row,
     )
-    motor_encoding_comparison_compute_hook = runtime_hooks.get(
-        "motor_encoding_comparison_compute",
-        _make_motor_encoding_comparison_row,
+    motor_encoding_compute_hook = runtime_hooks.get(
+        "motor_encoding_compute",
+        _make_motor_encoding_row,
     )
-    motor_encoding_comparison_register_hook = runtime_hooks.get(
-        "motor_encoding_comparison_register_existing",
-        _register_existing_motor_encoding_comparison_row,
+    motor_encoding_register_hook = runtime_hooks.get(
+        "motor_encoding_register_existing",
+        _register_existing_motor_encoding_row,
     )
     dark_light_glm_compute_hook = runtime_hooks.get(
         "dark_light_glm_compute",
@@ -16823,13 +15875,13 @@ def _construct_tables(
         "ripple_glm_register_existing",
         _register_existing_ripple_glm_row,
     )
-    cross_region_xcorr_compute_hook = runtime_hooks.get(
-        "cross_region_xcorr_compute",
-        _make_cross_region_xcorr_row,
+    ripple_cross_region_xcorr_compute_hook = runtime_hooks.get(
+        "ripple_cross_region_xcorr_compute",
+        _make_ripple_cross_region_xcorr_row,
     )
-    cross_region_xcorr_register_hook = runtime_hooks.get(
-        "cross_region_xcorr_register_existing",
-        _register_existing_cross_region_xcorr_row,
+    ripple_cross_region_xcorr_register_hook = runtime_hooks.get(
+        "ripple_cross_region_xcorr_register_existing",
+        _register_existing_ripple_cross_region_xcorr_row,
     )
     if not all(
         callable(hook)
@@ -16839,8 +15891,6 @@ def _construct_tables(
             movement_compute_hook,
             epoch_motor_behavior_compute_hook,
             epoch_motor_behavior_register_hook,
-            ripple_band_lfp_compute_hook,
-            ripple_band_lfp_register_hook,
             cv_pca_compute_hook,
             cv_pca_register_hook,
             tuning_curve_compute_hook,
@@ -16851,13 +15901,13 @@ def _construct_tables(
             dpp_tuning_curve_register_hook,
             stability_compute_hook,
             stability_register_hook,
-            dpp_encoding_comparison_compute_hook,
-            dpp_encoding_comparison_register_hook,
+            dpp_encoding_compute_hook,
+            dpp_encoding_register_hook,
             path_progression_decoding_compute_hook,
             path_specific_place_decoding_compute_hook,
             path_specific_place_decoding_register_hook,
-            motor_encoding_comparison_compute_hook,
-            motor_encoding_comparison_register_hook,
+            motor_encoding_compute_hook,
+            motor_encoding_register_hook,
             dark_light_glm_compute_hook,
             dark_light_glm_register_hook,
             swap_glm_compute_hook,
@@ -16866,8 +15916,8 @@ def _construct_tables(
             swap_tuning_curve_comparison_register_hook,
             ripple_glm_compute_hook,
             ripple_glm_register_hook,
-            cross_region_xcorr_compute_hook,
-            cross_region_xcorr_register_hook,
+            ripple_cross_region_xcorr_compute_hook,
+            ripple_cross_region_xcorr_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -16923,8 +15973,8 @@ def _construct_tables(
     TrajectoryIntervals = main_schema(TrajectoryIntervals)
     main_context["TrajectoryIntervals"] = TrajectoryIntervals
 
-    class Ripples(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.RIPPLES_DEFINITION
+    class RippleInterval(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_INTERVAL_DEFINITION
 
         @classmethod
         def load_intervals(cls, key: Mapping[str, Any]) -> Any:
@@ -16938,199 +15988,8 @@ def _construct_tables(
                 loader=load_interval_set,
             )
 
-    Ripples = main_schema(Ripples)
-    main_context["Ripples"] = Ripples
-
-    class RippleBandLFPParameters(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.RIPPLE_BAND_LFP_PARAMETERS_DEFINITION
-
-        @classmethod
-        def insert_parameters(
-            cls,
-            row: Mapping[str, Any],
-            *,
-            skip_duplicates: bool = False,
-        ) -> dict[str, Any]:
-            """Validate and insert one named ripple-band filter definition."""
-            validated = _validate_ripple_band_lfp_parameter_row(row)
-            cls.insert1(validated, skip_duplicates=skip_duplicates)
-            return validated
-
-        @classmethod
-        def insert_default(
-            cls, *, skip_duplicates: bool = True
-        ) -> dict[str, Any]:
-            """Explicitly insert the legacy-compatible manuscript preset."""
-            return cls.insert_parameters(
-                table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS,
-                skip_duplicates=skip_duplicates,
-            )
-
-    RippleBandLFPParameters = main_schema(RippleBandLFPParameters)
-    main_context["RippleBandLFPParameters"] = RippleBandLFPParameters
-
-    class RippleBandLFPSelection(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.RIPPLE_BAND_LFP_SELECTION_DEFINITION
-
-        @classmethod
-        def insert_selection(
-            cls,
-            key: Mapping[str, Any],
-            *,
-            skip_duplicates: bool = False,
-        ) -> dict[str, Any]:
-            """Inspect raw-NWB metadata, freeze it, and insert one UUIDv5 row."""
-            row = _ripple_band_lfp_selection_row(
-                key=key,
-                ripples_table=Ripples,
-                epoch_intervals_table=EpochIntervals,
-                parameters_table=RippleBandLFPParameters,
-                nwbfile_table=nwbfile_table,
-            )
-            cls.insert1(row, skip_duplicates=skip_duplicates)
-            return row
-
-    RippleBandLFPSelection = main_schema(RippleBandLFPSelection)
-    main_context["RippleBandLFPSelection"] = RippleBandLFPSelection
-
-    class RippleBandLFP(spyglass_mixin, dj_module.Computed):
-        definition = table_specs.RIPPLE_BAND_LFP_DEFINITION
-        _compute_hook = staticmethod(ripple_band_lfp_compute_hook)
-        _register_existing_hook = staticmethod(ripple_band_lfp_register_hook)
-
-        def make(self, key: Mapping[str, Any]) -> None:
-            """Compute, write, and insert one immutable epoch LFP bundle."""
-            selection = _fetch1_dict(RippleBandLFPSelection, key)
-            artifact_row = dict(
-                self._compute_hook(
-                    key=selection,
-                    parameters_table=RippleBandLFPParameters,
-                    ripples_table=Ripples,
-                    epoch_intervals_table=EpochIntervals,
-                    session_table=session_table,
-                    nwbfile_table=nwbfile_table,
-                    artifact_root=artifact_root,
-                )
-            )
-            created_artifact_paths = list(
-                artifact_row.pop("_created_artifact_paths", ())
-            )
-            try:
-                self.insert1(
-                    {
-                        "ripple_band_lfp_id": selection[
-                            "ripple_band_lfp_id"
-                        ],
-                        **artifact_row,
-                        "artifact_origin": "computed",
-                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
-                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
-                    }
-                )
-            except Exception:
-                _remove_created_artifacts(created_artifact_paths)
-                raise
-
-        @classmethod
-        def load_ripple_band_lfp_bundle(
-            cls, key: Mapping[str, Any]
-        ) -> dict[str, Any]:
-            """Load, checksum, and verify one canonical epoch LFP bundle."""
-            from v1ca1.spyglass.ripple_band_lfp import (
-                load_ripple_band_lfp_artifact,
-            )
-
-            row = _fetch1_dict(cls, key)
-            selection = _fetch1_dict(
-                RippleBandLFPSelection,
-                {"ripple_band_lfp_id": row["ripple_band_lfp_id"]},
-            )
-            parameters = _fetch1_dict(
-                RippleBandLFPParameters, selection
-            )
-            animal_name, session_date = _session_identity(
-                session_table, selection
-            )
-            bundle = load_ripple_band_lfp_artifact(
-                Path(row["artifact_manifest_path"]).parent
-            )
-            _validate_ripple_band_lfp_artifact_link(
-                bundle=bundle,
-                result_row=row,
-                selection_row=selection,
-                parameters_row=parameters,
-                animal_name=animal_name,
-                date=session_date,
-            )
-            return bundle
-
-        @classmethod
-        def register_existing(
-            cls,
-            key: Mapping[str, Any],
-            *,
-            legacy_result_path: Path | str,
-            legacy_run_log_path: Path | str | None = None,
-            overwrite: bool = False,
-            skip_duplicates: bool = False,
-        ) -> dict[str, Any]:
-            """Exactly recompute and register one legacy detector NetCDF."""
-            if overwrite:
-                raise ValueError(
-                    "RippleBandLFP results are immutable; create a new "
-                    "selection instead of overwriting."
-                )
-            selection = _fetch1_dict(RippleBandLFPSelection, key)
-            result_key = {
-                "ripple_band_lfp_id": selection["ripple_band_lfp_id"]
-            }
-            existing = _existing_result_row(cls, result_key)
-            if existing is not None:
-                if skip_duplicates:
-                    return existing
-                raise ValueError(
-                    "RippleBandLFP already contains this immutable selection."
-                )
-            artifact_row = dict(
-                cls._register_existing_hook(
-                    key=selection,
-                    legacy_result_path=Path(legacy_result_path),
-                    legacy_run_log_path=(
-                        None
-                        if legacy_run_log_path is None
-                        else Path(legacy_run_log_path)
-                    ),
-                    parameters_table=RippleBandLFPParameters,
-                    ripples_table=Ripples,
-                    epoch_intervals_table=EpochIntervals,
-                    session_table=session_table,
-                    nwbfile_table=nwbfile_table,
-                    artifact_root=artifact_root,
-                )
-            )
-            created_artifact_paths = list(
-                artifact_row.pop("_created_artifact_paths", ())
-            )
-            row = {
-                **result_key,
-                **artifact_row,
-                "artifact_origin": "registered_existing",
-                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
-                "runtime_spyglass_git_commit": _spyglass_git_commit(),
-            }
-            try:
-                cls.insert1(
-                    row,
-                    skip_duplicates=False,
-                    allow_direct_insert=True,
-                )
-            except Exception:
-                _remove_created_artifacts(created_artifact_paths)
-                raise
-            return row
-
-    RippleBandLFP = main_schema(RippleBandLFP)
-    main_context["RippleBandLFP"] = RippleBandLFP
+    RippleInterval = main_schema(RippleInterval)
+    main_context["RippleInterval"] = RippleInterval
 
     class Position(spyglass_mixin, dj_module.Manual):
         definition = table_specs.POSITION_DEFINITION
@@ -17511,8 +16370,7 @@ def _construct_tables(
                 key=key,
                 position_table=Position,
                 parameters_table=MovementParameters,
-                sorted_spikes_group=sorted_spikes_group,
-                unit_selection_params=unit_selection_params,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
@@ -17534,9 +16392,9 @@ def _construct_tables(
                     epoch_intervals_table=EpochIntervals,
                     position_table=Position,
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
-                    spike_sorting_output=spike_sorting_output,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
                 )
@@ -17833,11 +16691,10 @@ def _construct_tables(
             """Validate, freeze, identify, and insert one selection."""
             row = _ripple_modulation_selection_row(
                 key=key,
-                ripples_table=Ripples,
+                ripples_table=RippleInterval,
                 epoch_intervals_table=EpochIntervals,
                 parameters_table=RippleModulationParameters,
-                sorted_spikes_group=sorted_spikes_group,
-                unit_selection_params=unit_selection_params,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
@@ -17857,12 +16714,12 @@ def _construct_tables(
                 self._compute_hook(
                     key=selection,
                     parameters_table=RippleModulationParameters,
-                    ripples_table=Ripples,
+                    ripples_table=RippleInterval,
                     epoch_intervals_table=EpochIntervals,
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
-                    spike_sorting_output=spike_sorting_output,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
                 )
@@ -17924,10 +16781,11 @@ def _construct_tables(
                     ),
                     overwrite=False,
                     parameters_table=RippleModulationParameters,
-                    ripples_table=Ripples,
+                    ripples_table=RippleInterval,
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     spike_sorting_output=spike_sorting_output,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
                     source_spyglass_git_commit=source_spyglass_git_commit,
@@ -18085,10 +16943,10 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
-                    spike_sorting_output=spike_sorting_output,
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
                 )
@@ -18188,9 +17046,10 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     nwbfile_table=nwbfile_table,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
@@ -18290,6 +17149,9 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
                     artifact_root=artifact_root,
                 )
@@ -18343,6 +17205,9 @@ def _construct_tables(
                     MovementFiringRateSelection
                 ),
                 movement_parameters_table=MovementParameters,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
                 session_table=session_table,
             )
             table = load_tuning_similarity_artifact(
@@ -18412,9 +17277,10 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
                     source_spyglass_git_commit=source_spyglass_git_commit,
@@ -18500,10 +17366,10 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
-                    spike_sorting_output=spike_sorting_output,
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
                 )
@@ -18588,9 +17454,10 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     nwbfile_table=nwbfile_table,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
@@ -18670,6 +17537,9 @@ def _construct_tables(
                         MovementFiringRateSelection
                     ),
                     movement_parameters_table=MovementParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
                     artifact_root=artifact_root,
                 )
@@ -18739,9 +17609,10 @@ def _construct_tables(
                     movement_firing_rate_selection_table=(
                         MovementFiringRateSelection
                     ),
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
                     session_table=session_table,
-                    sorted_spikes_group=sorted_spikes_group,
-                    unit_selection_params=unit_selection_params,
                     spike_sorting_output=spike_sorting_output,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
                     source_spyglass_git_commit=source_spyglass_git_commit,
@@ -18774,8 +17645,8 @@ def _construct_tables(
     PathSpecificPlaceStability = main_schema(PathSpecificPlaceStability)
     main_context["PathSpecificPlaceStability"] = PathSpecificPlaceStability
 
-    class DPPEncodingComparisonParameters(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.DPP_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+    class DPPEncodingParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DPP_ENCODING_PARAMETERS_DEFINITION
 
         @classmethod
         def insert_parameters(
@@ -18785,7 +17656,7 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate and insert one encoding-comparison parameter row."""
-            validated = _validate_dpp_encoding_comparison_parameter_row(row)
+            validated = _validate_dpp_encoding_parameter_row(row)
             cls.insert1(validated, skip_duplicates=skip_duplicates)
             return validated
 
@@ -18801,7 +17672,7 @@ def _construct_tables(
                     preset,
                     skip_duplicates=skip_duplicates,
                 )
-                for preset in table_specs.DPP_ENCODING_COMPARISON_PARAMETER_PRESETS
+                for preset in table_specs.DPP_ENCODING_PARAMETER_PRESETS
             ]
 
         @classmethod
@@ -18812,19 +17683,19 @@ def _construct_tables(
         ) -> dict[str, Any]:
             """Explicitly insert the manuscript 50-ms preset."""
             return cls.insert_parameters(
-                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS,
+                table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS,
                 skip_duplicates=skip_duplicates,
             )
 
-    DPPEncodingComparisonParameters = main_schema(
-        DPPEncodingComparisonParameters
+    DPPEncodingParameters = main_schema(
+        DPPEncodingParameters
     )
-    main_context["DPPEncodingComparisonParameters"] = (
-        DPPEncodingComparisonParameters
+    main_context["DPPEncodingParameters"] = (
+        DPPEncodingParameters
     )
 
-    class DPPEncodingComparisonSelection(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.DPP_ENCODING_COMPARISON_SELECTION_DEFINITION
+    class DPPEncodingSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.DPP_ENCODING_SELECTION_DEFINITION
 
         @classmethod
         def insert_selection(
@@ -18834,7 +17705,7 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate, freeze, identify, and insert one comparison."""
-            row = _dpp_encoding_comparison_selection_row(
+            row = _dpp_encoding_selection_row(
                 key=key,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
                 movement_firing_rate_table=MovementFiringRate,
@@ -18851,32 +17722,32 @@ def _construct_tables(
                 tuning_curve_selection_table=(
                     PathSpecificPlaceTuningCurveSelection
                 ),
-                parameters_table=DPPEncodingComparisonParameters,
+                parameters_table=DPPEncodingParameters,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
 
-    DPPEncodingComparisonSelection = main_schema(
-        DPPEncodingComparisonSelection
+    DPPEncodingSelection = main_schema(
+        DPPEncodingSelection
     )
-    main_context["DPPEncodingComparisonSelection"] = (
-        DPPEncodingComparisonSelection
+    main_context["DPPEncodingSelection"] = (
+        DPPEncodingSelection
     )
 
-    class DPPEncodingComparison(spyglass_mixin, dj_module.Computed):
-        definition = table_specs.DPP_ENCODING_COMPARISON_DEFINITION
-        _compute_hook = staticmethod(dpp_encoding_comparison_compute_hook)
+    class DPPEncoding(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.DPP_ENCODING_DEFINITION
+        _compute_hook = staticmethod(dpp_encoding_compute_hook)
         _register_existing_hook = staticmethod(
-            dpp_encoding_comparison_register_hook
+            dpp_encoding_register_hook
         )
 
         def make(self, key: Mapping[str, Any]) -> None:
             """Compute, write, and insert one four-model comparison."""
-            selection = _fetch1_dict(DPPEncodingComparisonSelection, key)
+            selection = _fetch1_dict(DPPEncodingSelection, key)
             row = dict(
                 self._compute_hook(
                     key=selection,
-                    parameters_table=DPPEncodingComparisonParameters,
+                    parameters_table=DPPEncodingParameters,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
                     ),
@@ -18907,8 +17778,8 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        "dpp_encoding_comparison_id": selection[
-                            "dpp_encoding_comparison_id"
+                        "dpp_encoding_id": selection[
+                            "dpp_encoding_id"
                         ],
                         **row,
                         "artifact_origin": "computed",
@@ -18921,29 +17792,29 @@ def _construct_tables(
                 raise
 
         @classmethod
-        def load_encoding_comparison(
+        def load_dpp_encoding(
             cls,
             key: Mapping[str, Any],
         ) -> Any:
             """Load and validate one canonical comparison Parquet."""
-            from v1ca1.spyglass.encoding_comparison import (
-                load_encoding_comparison_artifact,
+            from v1ca1.spyglass.dpp_encoding import (
+                load_dpp_encoding_artifact,
             )
 
             row = _fetch1_dict(cls, key)
             selection = _fetch1_dict(
-                DPPEncodingComparisonSelection,
+                DPPEncodingSelection,
                 {
-                    "dpp_encoding_comparison_id": row[
-                        "dpp_encoding_comparison_id"
+                    "dpp_encoding_id": row[
+                        "dpp_encoding_id"
                     ]
                 },
             )
             parameters = _fetch1_dict(
-                DPPEncodingComparisonParameters,
+                DPPEncodingParameters,
                 {
-                    "dpp_encoding_comparison_param_name": selection[
-                        "dpp_encoding_comparison_param_name"
+                    "dpp_encoding_param_name": selection[
+                        "dpp_encoding_param_name"
                     ]
                 },
             )
@@ -18959,10 +17830,10 @@ def _construct_tables(
                 session_table,
                 selection,
             )
-            table = load_encoding_comparison_artifact(
-                Path(row["encoding_comparison_path"])
+            table = load_dpp_encoding_artifact(
+                Path(row["dpp_encoding_path"])
             )
-            _validate_dpp_encoding_comparison_artifact_link(
+            _validate_dpp_encoding_artifact_link(
                 table=table,
                 result_row=row,
                 selection_row=selection,
@@ -18978,7 +17849,7 @@ def _construct_tables(
             cls,
             key: Mapping[str, Any],
             *,
-            encoding_comparison_path: Path | str,
+            dpp_encoding_path: Path | str,
             overwrite: bool = False,
             source_v1ca1_git_commit: str | None = None,
             source_spyglass_git_commit: str | None = None,
@@ -18987,13 +17858,13 @@ def _construct_tables(
             """Normalize one exact-coverage legacy artifact and insert it."""
             if overwrite:
                 raise ValueError(
-                    "Registered DPPEncodingComparison results are immutable; "
+                    "Registered DPPEncoding results are immutable; "
                     "create a new selection instead of overwriting an artifact."
                 )
-            selection = _fetch1_dict(DPPEncodingComparisonSelection, key)
+            selection = _fetch1_dict(DPPEncodingSelection, key)
             result_key = {
-                "dpp_encoding_comparison_id": selection[
-                    "dpp_encoding_comparison_id"
+                "dpp_encoding_id": selection[
+                    "dpp_encoding_id"
                 ]
             }
             existing = _existing_result_row(cls, result_key)
@@ -19001,17 +17872,17 @@ def _construct_tables(
                 if skip_duplicates:
                     return existing
                 raise ValueError(
-                    "DPPEncodingComparison already contains this immutable "
+                    "DPPEncoding already contains this immutable "
                     "selection."
                 )
             artifact_row = dict(
                 cls._register_existing_hook(
                     key=selection,
-                    encoding_comparison_path=Path(
-                        encoding_comparison_path
+                    dpp_encoding_path=Path(
+                        dpp_encoding_path
                     ),
                     overwrite=False,
-                    parameters_table=DPPEncodingComparisonParameters,
+                    parameters_table=DPPEncodingParameters,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
                     ),
@@ -19040,8 +17911,8 @@ def _construct_tables(
                 artifact_row.pop("_created_artifact_paths", ())
             )
             row = {
-                "dpp_encoding_comparison_id": selection[
-                    "dpp_encoding_comparison_id"
+                "dpp_encoding_id": selection[
+                    "dpp_encoding_id"
                 ],
                 **artifact_row,
                 "artifact_origin": "registered_existing",
@@ -19059,8 +17930,8 @@ def _construct_tables(
                 raise
             return row
 
-    DPPEncodingComparison = main_schema(DPPEncodingComparison)
-    main_context["DPPEncodingComparison"] = DPPEncodingComparison
+    DPPEncoding = main_schema(DPPEncoding)
+    main_context["DPPEncoding"] = DPPEncoding
 
     class PathProgressionDecodingParameters(
         spyglass_mixin,
@@ -19118,7 +17989,7 @@ def _construct_tables(
         PathProgressionDecodingParameters
     )
 
-    class PathProgressionDecodingComparisonSelection(
+    class PathProgressionDecodingSelection(
         spyglass_mixin,
         dj_module.Manual,
     ):
@@ -19155,14 +18026,14 @@ def _construct_tables(
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
 
-    PathProgressionDecodingComparisonSelection = main_schema(
-        PathProgressionDecodingComparisonSelection
+    PathProgressionDecodingSelection = main_schema(
+        PathProgressionDecodingSelection
     )
-    main_context["PathProgressionDecodingComparisonSelection"] = (
-        PathProgressionDecodingComparisonSelection
+    main_context["PathProgressionDecodingSelection"] = (
+        PathProgressionDecodingSelection
     )
 
-    class PathProgressionDecodingComparison(
+    class PathProgressionDecoding(
         spyglass_mixin,
         dj_module.Computed,
     ):
@@ -19172,7 +18043,7 @@ def _construct_tables(
         def make(self, key: Mapping[str, Any]) -> None:
             """Compute, write, and insert one shared-cohort decoder bundle."""
             selection = _fetch1_dict(
-                PathProgressionDecodingComparisonSelection,
+                PathProgressionDecodingSelection,
                 key,
             )
             row = dict(
@@ -19209,8 +18080,8 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        "path_progression_decoding_comparison_id": selection[
-                            "path_progression_decoding_comparison_id"
+                        "path_progression_decoding_id": selection[
+                            "path_progression_decoding_id"
                         ],
                         **row,
                         "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
@@ -19227,16 +18098,16 @@ def _construct_tables(
             key: Mapping[str, Any],
         ) -> dict[str, Any]:
             """Load and validate one canonical cross-path decoding bundle."""
-            from v1ca1.spyglass.decoding_comparison import (
+            from v1ca1.spyglass.path_progression_decoding import (
                 load_decoding_artifact_bundle,
             )
 
             row = _fetch1_dict(cls, key)
             selection = _fetch1_dict(
-                PathProgressionDecodingComparisonSelection,
+                PathProgressionDecodingSelection,
                 {
-                    "path_progression_decoding_comparison_id": row[
-                        "path_progression_decoding_comparison_id"
+                    "path_progression_decoding_id": row[
+                        "path_progression_decoding_id"
                     ]
                 },
             )
@@ -19274,11 +18145,11 @@ def _construct_tables(
             )
             return bundle
 
-    PathProgressionDecodingComparison = main_schema(
-        PathProgressionDecodingComparison
+    PathProgressionDecoding = main_schema(
+        PathProgressionDecoding
     )
-    main_context["PathProgressionDecodingComparison"] = (
-        PathProgressionDecodingComparison
+    main_context["PathProgressionDecoding"] = (
+        PathProgressionDecoding
     )
 
     class PathSpecificPlaceDecodingParameters(
@@ -19576,12 +18447,12 @@ def _construct_tables(
     PathSpecificPlaceDecoding = main_schema(PathSpecificPlaceDecoding)
     main_context["PathSpecificPlaceDecoding"] = PathSpecificPlaceDecoding
 
-    class MotorEncodingComparisonParameters(
+    class MotorEncodingParameters(
         spyglass_mixin,
         dj_module.Manual,
     ):
         definition = (
-            table_specs.MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+            table_specs.MOTOR_ENCODING_PARAMETERS_DEFINITION
         )
 
         @classmethod
@@ -19592,7 +18463,7 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate and insert one motor-comparison parameter row."""
-            validated = _validate_motor_encoding_comparison_parameter_row(
+            validated = _validate_motor_encoding_parameter_row(
                 row
             )
             cls.insert1(validated, skip_duplicates=skip_duplicates)
@@ -19611,7 +18482,7 @@ def _construct_tables(
                     skip_duplicates=skip_duplicates,
                 )
                 for preset in (
-                    table_specs.MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS
+                    table_specs.MOTOR_ENCODING_PARAMETER_PRESETS
                 )
             ]
 
@@ -19626,10 +18497,10 @@ def _construct_tables(
             canonical_region = _analysis_region(region)
             preset = {
                 "v1": (
-                    table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+                    table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS
                 ),
                 "ca1": (
-                    table_specs.MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+                    table_specs.MANUSCRIPT_CA1_MOTOR_ENCODING_PARAMETERS
                 ),
             }[canonical_region]
             return cls.insert_parameters(
@@ -19637,19 +18508,19 @@ def _construct_tables(
                 skip_duplicates=skip_duplicates,
             )
 
-    MotorEncodingComparisonParameters = main_schema(
-        MotorEncodingComparisonParameters
+    MotorEncodingParameters = main_schema(
+        MotorEncodingParameters
     )
-    main_context["MotorEncodingComparisonParameters"] = (
-        MotorEncodingComparisonParameters
+    main_context["MotorEncodingParameters"] = (
+        MotorEncodingParameters
     )
 
-    class MotorEncodingComparisonSelection(
+    class MotorEncodingSelection(
         spyglass_mixin,
         dj_module.Manual,
     ):
         definition = (
-            table_specs.MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION
+            table_specs.MOTOR_ENCODING_SELECTION_DEFINITION
         )
 
         @classmethod
@@ -19660,7 +18531,7 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate, freeze, identify, and insert one motor comparison."""
-            row = _motor_encoding_comparison_selection_row(
+            row = _motor_encoding_selection_row(
                 key=key,
                 region_sorted_spikes_group_table=(
                     RegionSortedSpikesGroup
@@ -19673,38 +18544,45 @@ def _construct_tables(
                 epoch_intervals_table=EpochIntervals,
                 trajectory_intervals_table=TrajectoryIntervals,
                 wtrack_graph_table=WTrackGraph,
-                parameters_table=MotorEncodingComparisonParameters,
+                stability_table=PathSpecificPlaceStability,
+                stability_selection_table=(
+                    PathSpecificPlaceStabilitySelection
+                ),
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                parameters_table=MotorEncodingParameters,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
 
-    MotorEncodingComparisonSelection = main_schema(
-        MotorEncodingComparisonSelection
+    MotorEncodingSelection = main_schema(
+        MotorEncodingSelection
     )
-    main_context["MotorEncodingComparisonSelection"] = (
-        MotorEncodingComparisonSelection
+    main_context["MotorEncodingSelection"] = (
+        MotorEncodingSelection
     )
 
-    class MotorEncodingComparison(
+    class MotorEncoding(
         spyglass_mixin,
         dj_module.Computed,
     ):
-        definition = table_specs.MOTOR_ENCODING_COMPARISON_DEFINITION
-        _compute_hook = staticmethod(motor_encoding_comparison_compute_hook)
+        definition = table_specs.MOTOR_ENCODING_DEFINITION
+        _compute_hook = staticmethod(motor_encoding_compute_hook)
         _register_existing_hook = staticmethod(
-            motor_encoding_comparison_register_hook
+            motor_encoding_register_hook
         )
 
         def make(self, key: Mapping[str, Any]) -> None:
             """Compute, write, and insert one nine-model comparison bundle."""
             selection = _fetch1_dict(
-                MotorEncodingComparisonSelection,
+                MotorEncodingSelection,
                 key,
             )
             row = dict(
                 self._compute_hook(
                     key=selection,
-                    parameters_table=MotorEncodingComparisonParameters,
+                    parameters_table=MotorEncodingParameters,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
                     ),
@@ -19717,6 +18595,13 @@ def _construct_tables(
                     epoch_intervals_table=EpochIntervals,
                     trajectory_intervals_table=TrajectoryIntervals,
                     wtrack_graph_table=WTrackGraph,
+                    stability_table=PathSpecificPlaceStability,
+                    stability_selection_table=(
+                        PathSpecificPlaceStabilitySelection
+                    ),
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
                     session_table=session_table,
                     nwbfile_table=nwbfile_table,
                     artifact_root=artifact_root,
@@ -19728,8 +18613,8 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        "motor_encoding_comparison_id": selection[
-                            "motor_encoding_comparison_id"
+                        "motor_encoding_id": selection[
+                            "motor_encoding_id"
                         ],
                         **row,
                         "artifact_origin": "computed",
@@ -19753,18 +18638,18 @@ def _construct_tables(
 
             row = _fetch1_dict(cls, key)
             selection = _fetch1_dict(
-                MotorEncodingComparisonSelection,
+                MotorEncodingSelection,
                 {
-                    "motor_encoding_comparison_id": row[
-                        "motor_encoding_comparison_id"
+                    "motor_encoding_id": row[
+                        "motor_encoding_id"
                     ]
                 },
             )
             parameters = _fetch1_dict(
-                MotorEncodingComparisonParameters,
+                MotorEncodingParameters,
                 {
-                    "motor_encoding_comparison_param_name": selection[
-                        "motor_encoding_comparison_param_name"
+                    "motor_encoding_param_name": selection[
+                        "motor_encoding_param_name"
                     ]
                 },
             )
@@ -19783,7 +18668,7 @@ def _construct_tables(
             bundle = load_motor_encoding_artifact(
                 Path(row["artifact_manifest_path"]).parent
             )
-            _validate_motor_encoding_comparison_artifact_link(
+            _validate_motor_encoding_artifact_link(
                 bundle=bundle,
                 result_row=row,
                 selection_row=selection,
@@ -19809,16 +18694,16 @@ def _construct_tables(
             """Normalize one paired legacy motor fit and insert it."""
             if overwrite:
                 raise ValueError(
-                    "Registered MotorEncodingComparison results are immutable; "
+                    "Registered MotorEncoding results are immutable; "
                     "create a new selection instead of overwriting."
                 )
             selection = _fetch1_dict(
-                MotorEncodingComparisonSelection,
+                MotorEncodingSelection,
                 key,
             )
             result_key = {
-                "motor_encoding_comparison_id": selection[
-                    "motor_encoding_comparison_id"
+                "motor_encoding_id": selection[
+                    "motor_encoding_id"
                 ]
             }
             existing = _existing_result_row(cls, result_key)
@@ -19826,7 +18711,7 @@ def _construct_tables(
                 if skip_duplicates:
                     return existing
                 raise ValueError(
-                    "MotorEncodingComparison already contains this immutable "
+                    "MotorEncoding already contains this immutable "
                     "selection."
                 )
             artifact_row = dict(
@@ -19834,7 +18719,7 @@ def _construct_tables(
                     key=selection,
                     source_nested_cv_path=Path(source_nested_cv_path),
                     source_full_refit_path=Path(source_full_refit_path),
-                    parameters_table=MotorEncodingComparisonParameters,
+                    parameters_table=MotorEncodingParameters,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
                     ),
@@ -19847,6 +18732,13 @@ def _construct_tables(
                     epoch_intervals_table=EpochIntervals,
                     trajectory_intervals_table=TrajectoryIntervals,
                     wtrack_graph_table=WTrackGraph,
+                    stability_table=PathSpecificPlaceStability,
+                    stability_selection_table=(
+                        PathSpecificPlaceStabilitySelection
+                    ),
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
                     session_table=session_table,
                     nwbfile_table=nwbfile_table,
                     source_v1ca1_git_commit=source_v1ca1_git_commit,
@@ -19858,8 +18750,8 @@ def _construct_tables(
                 artifact_row.pop("_created_artifact_paths", ())
             )
             row = {
-                "motor_encoding_comparison_id": selection[
-                    "motor_encoding_comparison_id"
+                "motor_encoding_id": selection[
+                    "motor_encoding_id"
                 ],
                 **artifact_row,
                 "artifact_origin": "registered_existing",
@@ -19877,8 +18769,8 @@ def _construct_tables(
                 raise
             return row
 
-    MotorEncodingComparison = main_schema(MotorEncodingComparison)
-    main_context["MotorEncodingComparison"] = MotorEncodingComparison
+    MotorEncoding = main_schema(MotorEncoding)
+    main_context["MotorEncoding"] = MotorEncoding
 
     class DarkLightGLMParameters(spyglass_mixin, dj_module.Manual):
         definition = table_specs.DARK_LIGHT_GLM_PARAMETERS_DEFINITION
@@ -20701,7 +19593,7 @@ def _construct_tables(
             """Validate, freeze, identify, and insert one RippleGLM row."""
             row = _ripple_glm_selection_row(
                 key=key,
-                ripples_table=Ripples,
+                ripples_table=RippleInterval,
                 epoch_intervals_table=EpochIntervals,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
                 parameters_table=RippleGLMParameters,
@@ -20725,7 +19617,7 @@ def _construct_tables(
                 self._compute_hook(
                     key=selection,
                     parameters_table=RippleGLMParameters,
-                    ripples_table=Ripples,
+                    ripples_table=RippleInterval,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -20813,7 +19705,7 @@ def _construct_tables(
                     key=selection,
                     source_result_path=Path(source_result_path),
                     parameters_table=RippleGLMParameters,
-                    ripples_table=Ripples,
+                    ripples_table=RippleInterval,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -20849,8 +19741,8 @@ def _construct_tables(
     RippleGLM = main_schema(RippleGLM)
     main_context["RippleGLM"] = RippleGLM
 
-    class CrossRegionXCorrParameters(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.CROSS_REGION_XCORR_PARAMETERS_DEFINITION
+    class RippleCrossRegionXCorrParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_CROSS_REGION_XCORR_PARAMETERS_DEFINITION
 
         @classmethod
         def insert_parameters(
@@ -20860,7 +19752,7 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate and insert one fixed ripple-xcorr parameter row."""
-            validated = _validate_cross_region_xcorr_parameter_row(row)
+            validated = _validate_ripple_cross_region_xcorr_parameter_row(row)
             cls.insert1(validated, skip_duplicates=skip_duplicates)
             return validated
 
@@ -20872,19 +19764,19 @@ def _construct_tables(
         ) -> list[dict[str, Any]]:
             """Explicitly insert the fixed manuscript xcorr preset."""
             rows = [
-                _validate_cross_region_xcorr_parameter_row(parameters)
+                _validate_ripple_cross_region_xcorr_parameter_row(parameters)
                 for parameters in (
-                    table_specs.CROSS_REGION_XCORR_PARAMETER_PRESETS
+                    table_specs.RIPPLE_CROSS_REGION_XCORR_PARAMETER_PRESETS
                 )
             ]
             cls.insert(rows, skip_duplicates=skip_duplicates)
             return rows
 
-    CrossRegionXCorrParameters = main_schema(CrossRegionXCorrParameters)
-    main_context["CrossRegionXCorrParameters"] = CrossRegionXCorrParameters
+    RippleCrossRegionXCorrParameters = main_schema(RippleCrossRegionXCorrParameters)
+    main_context["RippleCrossRegionXCorrParameters"] = RippleCrossRegionXCorrParameters
 
-    class CrossRegionXCorrSelection(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.CROSS_REGION_XCORR_SELECTION_DEFINITION
+    class RippleCrossRegionXCorrSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_CROSS_REGION_XCORR_SELECTION_DEFINITION
 
         @classmethod
         def insert_selection(
@@ -20894,35 +19786,35 @@ def _construct_tables(
             skip_duplicates: bool = False,
         ) -> dict[str, Any]:
             """Validate, freeze, identify, and insert one exact-ripple xcorr."""
-            row = _cross_region_xcorr_selection_row(
+            row = _ripple_cross_region_xcorr_selection_row(
                 key=key,
-                ripples_table=Ripples,
+                ripples_table=RippleInterval,
                 epoch_intervals_table=EpochIntervals,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
-                parameters_table=CrossRegionXCorrParameters,
+                parameters_table=RippleCrossRegionXCorrParameters,
                 nwbfile_table=nwbfile_table,
             )
             cls.insert1(row, skip_duplicates=skip_duplicates)
             return row
 
-    CrossRegionXCorrSelection = main_schema(CrossRegionXCorrSelection)
-    main_context["CrossRegionXCorrSelection"] = CrossRegionXCorrSelection
+    RippleCrossRegionXCorrSelection = main_schema(RippleCrossRegionXCorrSelection)
+    main_context["RippleCrossRegionXCorrSelection"] = RippleCrossRegionXCorrSelection
 
-    class CrossRegionXCorr(spyglass_mixin, dj_module.Computed):
-        definition = table_specs.CROSS_REGION_XCORR_DEFINITION
-        _compute_hook = staticmethod(cross_region_xcorr_compute_hook)
+    class RippleCrossRegionXCorr(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.RIPPLE_CROSS_REGION_XCORR_DEFINITION
+        _compute_hook = staticmethod(ripple_cross_region_xcorr_compute_hook)
         _register_existing_hook = staticmethod(
-            cross_region_xcorr_register_hook
+            ripple_cross_region_xcorr_register_hook
         )
 
         def make(self, key: Mapping[str, Any]) -> None:
-            """Compute, write, and insert one CrossRegionXCorr bundle."""
-            selection = _fetch1_dict(CrossRegionXCorrSelection, key)
+            """Compute, write, and insert one RippleCrossRegionXCorr bundle."""
+            selection = _fetch1_dict(RippleCrossRegionXCorrSelection, key)
             artifact_row = dict(
                 self._compute_hook(
                     key=selection,
-                    parameters_table=CrossRegionXCorrParameters,
-                    ripples_table=Ripples,
+                    parameters_table=RippleCrossRegionXCorrParameters,
+                    ripples_table=RippleInterval,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -20938,8 +19830,8 @@ def _construct_tables(
             try:
                 self.insert1(
                     {
-                        "cross_region_xcorr_id": selection[
-                            "cross_region_xcorr_id"
+                        "ripple_cross_region_xcorr_id": selection[
+                            "ripple_cross_region_xcorr_id"
                         ],
                         **artifact_row,
                         "artifact_origin": "computed",
@@ -20952,32 +19844,32 @@ def _construct_tables(
                 raise
 
         @classmethod
-        def load_cross_region_xcorr_bundle(
+        def load_ripple_cross_region_xcorr_bundle(
             cls,
             key: Mapping[str, Any],
         ) -> dict[str, Any]:
-            """Load and validate one canonical CrossRegionXCorr bundle."""
-            from v1ca1.spyglass.cross_region_xcorr import (
-                load_cross_region_xcorr_artifact,
+            """Load and validate one canonical RippleCrossRegionXCorr bundle."""
+            from v1ca1.spyglass.ripple_cross_region_xcorr import (
+                load_ripple_cross_region_xcorr_artifact,
             )
 
             row = _fetch1_dict(cls, key)
             selection = _fetch1_dict(
-                CrossRegionXCorrSelection,
-                {"cross_region_xcorr_id": row["cross_region_xcorr_id"]},
+                RippleCrossRegionXCorrSelection,
+                {"ripple_cross_region_xcorr_id": row["ripple_cross_region_xcorr_id"]},
             )
             parameters = _fetch1_dict(
-                CrossRegionXCorrParameters,
+                RippleCrossRegionXCorrParameters,
                 selection,
             )
             animal_name, session_date = _session_identity(
                 session_table,
                 selection,
             )
-            bundle = load_cross_region_xcorr_artifact(
+            bundle = load_ripple_cross_region_xcorr_artifact(
                 Path(row["artifact_manifest_path"]).parent
             )
-            _validate_cross_region_xcorr_artifact_link(
+            _validate_ripple_cross_region_xcorr_artifact_link(
                 bundle=bundle,
                 result_row=row,
                 selection_row=selection,
@@ -21004,19 +19896,19 @@ def _construct_tables(
             """Verify and insert one exact legacy four-artifact xcorr set."""
             if overwrite:
                 raise ValueError(
-                    "Registered CrossRegionXCorr results are immutable; "
+                    "Registered RippleCrossRegionXCorr results are immutable; "
                     "create a new selection instead of overwriting."
                 )
-            selection = _fetch1_dict(CrossRegionXCorrSelection, key)
+            selection = _fetch1_dict(RippleCrossRegionXCorrSelection, key)
             result_key = {
-                "cross_region_xcorr_id": selection["cross_region_xcorr_id"]
+                "ripple_cross_region_xcorr_id": selection["ripple_cross_region_xcorr_id"]
             }
             existing = _existing_result_row(cls, result_key)
             if existing is not None:
                 if skip_duplicates:
                     return existing
                 raise ValueError(
-                    "CrossRegionXCorr already contains this immutable selection."
+                    "RippleCrossRegionXCorr already contains this immutable selection."
                 )
             artifact_row = dict(
                 cls._register_existing_hook(
@@ -21029,8 +19921,8 @@ def _construct_tables(
                     ),
                     source_summary_path=Path(source_summary_path),
                     source_result_path=Path(source_result_path),
-                    parameters_table=CrossRegionXCorrParameters,
-                    ripples_table=Ripples,
+                    parameters_table=RippleCrossRegionXCorrParameters,
+                    ripples_table=RippleInterval,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -21046,8 +19938,8 @@ def _construct_tables(
                 artifact_row.pop("_created_artifact_paths", ())
             )
             row = {
-                "cross_region_xcorr_id": selection[
-                    "cross_region_xcorr_id"
+                "ripple_cross_region_xcorr_id": selection[
+                    "ripple_cross_region_xcorr_id"
                 ],
                 **artifact_row,
                 "artifact_origin": "registered_existing",
@@ -21065,8 +19957,8 @@ def _construct_tables(
                 raise
             return row
 
-    CrossRegionXCorr = main_schema(CrossRegionXCorr)
-    main_context["CrossRegionXCorr"] = CrossRegionXCorr
+    RippleCrossRegionXCorr = main_schema(RippleCrossRegionXCorr)
+    main_context["RippleCrossRegionXCorr"] = RippleCrossRegionXCorr
 
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
@@ -21098,10 +19990,7 @@ def _construct_tables(
     return {
         "epoch_intervals": EpochIntervals,
         "trajectory_intervals": TrajectoryIntervals,
-        "ripples": Ripples,
-        "ripple_band_lfp_parameters": RippleBandLFPParameters,
-        "ripple_band_lfp_selection": RippleBandLFPSelection,
-        "ripple_band_lfp": RippleBandLFP,
+        "ripple_interval": RippleInterval,
         "position": Position,
         "wtrack_graph": WTrackGraph,
         "spike_sorting_figurl": SpikeSortingFigurl,
@@ -21136,19 +20025,19 @@ def _construct_tables(
             PathSpecificPlaceStabilitySelection
         ),
         "path_specific_place_stability": PathSpecificPlaceStability,
-        "dpp_encoding_comparison_parameters": (
-            DPPEncodingComparisonParameters
+        "dpp_encoding_parameters": (
+            DPPEncodingParameters
         ),
-        "dpp_encoding_comparison_selection": DPPEncodingComparisonSelection,
-        "dpp_encoding_comparison": DPPEncodingComparison,
+        "dpp_encoding_selection": DPPEncodingSelection,
+        "dpp_encoding": DPPEncoding,
         "path_progression_decoding_parameters": (
             PathProgressionDecodingParameters
         ),
-        "path_progression_decoding_comparison_selection": (
-            PathProgressionDecodingComparisonSelection
+        "path_progression_decoding_selection": (
+            PathProgressionDecodingSelection
         ),
-        "path_progression_decoding_comparison": (
-            PathProgressionDecodingComparison
+        "path_progression_decoding": (
+            PathProgressionDecoding
         ),
         "path_specific_place_decoding_parameters": (
             PathSpecificPlaceDecodingParameters
@@ -21157,13 +20046,13 @@ def _construct_tables(
             PathSpecificPlaceDecodingSelection
         ),
         "path_specific_place_decoding": PathSpecificPlaceDecoding,
-        "motor_encoding_comparison_parameters": (
-            MotorEncodingComparisonParameters
+        "motor_encoding_parameters": (
+            MotorEncodingParameters
         ),
-        "motor_encoding_comparison_selection": (
-            MotorEncodingComparisonSelection
+        "motor_encoding_selection": (
+            MotorEncodingSelection
         ),
-        "motor_encoding_comparison": MotorEncodingComparison,
+        "motor_encoding": MotorEncoding,
         "dark_light_glm_parameters": DarkLightGLMParameters,
         "dark_light_glm_selection": DarkLightGLMSelection,
         "dark_light_glm": DarkLightGLM,
@@ -21180,9 +20069,9 @@ def _construct_tables(
         "ripple_glm_parameters": RippleGLMParameters,
         "ripple_glm_selection": RippleGLMSelection,
         "ripple_glm": RippleGLM,
-        "cross_region_xcorr_parameters": CrossRegionXCorrParameters,
-        "cross_region_xcorr_selection": CrossRegionXCorrSelection,
-        "cross_region_xcorr": CrossRegionXCorr,
+        "ripple_cross_region_xcorr_parameters": RippleCrossRegionXCorrParameters,
+        "ripple_cross_region_xcorr_selection": RippleCrossRegionXCorrSelection,
+        "ripple_cross_region_xcorr": RippleCrossRegionXCorr,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

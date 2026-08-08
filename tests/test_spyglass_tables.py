@@ -24,49 +24,44 @@ from v1ca1.spyglass.tables import (
     _analysis_region,
     _attach_registered_unit_identity,
     _construct_tables,
-    _cross_region_xcorr_selection_row,
+    _ripple_cross_region_xcorr_selection_row,
     _cv_pca_selection_row,
     _dark_light_glm_selection_row,
-    _dpp_encoding_comparison_selection_row,
+    _dpp_encoding_selection_row,
     _dpp_tuning_curve_selection_row,
     _filter_registered_table,
     _intervals_to_frame,
     _legacy_dpp_unit_identity_resolver,
     _legacy_dark_light_unit_identity_resolver,
     _legacy_ripple_glm_unit_identity_resolver,
-    _legacy_cross_region_xcorr_identity_resolver,
+    _legacy_ripple_cross_region_xcorr_identity_resolver,
     _legacy_swap_glm_unit_identity_resolver,
     _legacy_swap_tuning_curve_comparison_unit_identity_resolver,
     _load_tuning_similarity_inputs,
-    _load_ripple_band_lfp_context,
-    _make_dpp_encoding_comparison_row,
+    _make_dpp_encoding_row,
     _make_dpp_tuning_curve_row,
     _make_movement_firing_rate_row,
-    _make_path_progression_decoding_comparison_row,
+    _make_path_progression_decoding_row,
     _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
-    _make_ripple_band_lfp_row,
     _make_ripple_glm_row,
-    _make_cross_region_xcorr_row,
+    _make_ripple_cross_region_xcorr_row,
     _make_cv_pca_row,
     _make_swap_glm_row,
     _make_swap_tuning_curve_comparison_row,
-    _motor_encoding_comparison_selection_row,
+    _motor_encoding_selection_row,
     _movement_firing_rate_selection_row,
     _path_progression_decoding_selection_row,
     _path_specific_place_decoding_selection_row,
     _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
-    _ripple_band_lfp_selection_row,
-    _ordered_ripple_band_lfp_electrode_ids,
     _ripple_glm_selection_row,
     _register_existing_ripple_glm_row,
-    _register_existing_cross_region_xcorr_row,
+    _register_existing_ripple_cross_region_xcorr_row,
     _register_existing_cv_pca_row,
-    _register_existing_ripple_band_lfp_row,
     _registered_nwb_source_identity,
-    _register_existing_dpp_encoding_comparison_row,
+    _register_existing_dpp_encoding_row,
     _register_existing_dark_light_glm_row,
     _register_existing_swap_glm_row,
     _register_existing_swap_tuning_curve_comparison_row,
@@ -75,18 +70,16 @@ from v1ca1.spyglass.tables import (
     _swap_tuning_curve_comparison_selection_row,
     _tuning_similarity_selection_row,
     _validate_analysis_schema_prefix,
-    _validate_dpp_encoding_comparison_artifact_link,
+    _validate_dpp_encoding_artifact_link,
     _validate_dark_light_glm_parameter_row,
-    _validate_frozen_sorting_snapshot,
     _validate_legacy_dpp_encoding_source_path,
     _validate_legacy_tuning_curve_inputs,
     _validate_legacy_stability_schema,
     _validate_path_progression_decoding_artifact_link,
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
-    _validate_ripple_band_lfp_artifact_link,
     _validate_ripple_glm_parameter_row,
-    _validate_cross_region_xcorr_parameter_row,
+    _validate_ripple_cross_region_xcorr_parameter_row,
     _validate_cv_pca_artifact_link,
     _validate_cv_pca_parameter_row,
     _validate_swap_glm_artifact_link,
@@ -287,9 +280,9 @@ def _ripple_selection_key() -> dict[str, Any]:
         "nwb_file_name": "L1420240102_.nwb",
         "epoch": "02_r1",
         "ripple_modulation_param_name": "default",
-        "unit_filter_params_name": "curated_units",
-        "sorted_spikes_group_name": "all shanks",
-        "region": "ca1",
+        "region_sorted_spikes_group_id": uuid.UUID(
+            "61111111-1111-5111-8111-111111111111"
+        ),
     }
 
 
@@ -299,9 +292,9 @@ def _movement_selection_key() -> dict[str, Any]:
         "epoch": "02_r1",
         "position_series_name": "head_position",
         "movement_param_name": "default",
-        "unit_filter_params_name": "curated_units",
-        "sorted_spikes_group_name": "all shanks",
-        "region": "ca1",
+        "region_sorted_spikes_group_id": uuid.UUID(
+            "61111111-1111-5111-8111-111111111111"
+        ),
     }
 
 
@@ -415,7 +408,7 @@ def _dpp_encoding_selection_inputs() -> dict[str, Any]:
             }
 
     parameters = dict(
-        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
     )
     return {
         "key": {
@@ -425,8 +418,8 @@ def _dpp_encoding_selection_inputs() -> dict[str, Any]:
                 f"{trajectory_type}_stability_id": stability_id
                 for trajectory_type, stability_id in stability_ids.items()
             },
-            "dpp_encoding_comparison_param_name": parameters[
-                "dpp_encoding_comparison_param_name"
+            "dpp_encoding_param_name": parameters[
+                "dpp_encoding_param_name"
             ],
         },
         "region_row": {
@@ -448,6 +441,7 @@ def _dpp_encoding_selection_inputs() -> dict[str, Any]:
         },
         "movement_selection": {
             "movement_firing_rate_id": movement_id,
+            "region_sorted_spikes_group_id": region_group_id,
             "nwb_file_name": "L1420240102_.nwb",
             "epoch": "02_r1",
             "unit_filter_params_name": "curated_units",
@@ -495,7 +489,7 @@ def _dpp_encoding_selection_inputs() -> dict[str, Any]:
 
 def _build_dpp_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
     """Build one DPP selection row from mutable fake upstream tables."""
-    return _dpp_encoding_comparison_selection_row(
+    return _dpp_encoding_selection_row(
         key=inputs["key"],
         region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
         movement_firing_rate_table=_FakeRelation(inputs["movement_result"]),
@@ -528,7 +522,7 @@ def _dpp_encoding_runtime_inputs(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Return selected context, imported spikes, and NWB-derived sentinels."""
     parameters = dict(
-        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
     )
     unit_ids = [
         {"spikesorting_merge_id": "merge-a", "unit_id": 10},
@@ -574,7 +568,7 @@ def _dpp_encoding_runtime_inputs(
             for trajectory_type in _DPP_ENCODING_TRAJECTORIES
         },
         "selection": {
-            "dpp_encoding_comparison_id": comparison_id,
+            "dpp_encoding_id": comparison_id,
         },
     }
     nwb_inputs = {
@@ -673,6 +667,7 @@ def _path_progression_decoding_selection_inputs() -> dict[str, Any]:
     movement_selections = {
         movement_id: {
             "movement_firing_rate_id": movement_id,
+            "region_sorted_spikes_group_id": region_group_id,
             "nwb_file_name": nwb_file_name,
             "epoch": epoch,
             "unit_filter_params_name": "curated_units",
@@ -878,7 +873,7 @@ def _motor_encoding_selection_inputs() -> dict[str, Any]:
     """Return internally consistent motor-encoding selection inputs."""
     base = _dpp_encoding_selection_inputs()
     parameters = dict(
-        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS
     )
     base["region_row"]["region_name"] = "v1"
     base["movement_selection"]["region"] = "v1"
@@ -890,10 +885,16 @@ def _motor_encoding_selection_inputs() -> dict[str, Any]:
             "region_sorted_spikes_group_id"
         ],
         "movement_firing_rate_id": base["key"]["movement_firing_rate_id"],
+        **{
+            f"{trajectory_type}_stability_id": base["key"][
+                f"{trajectory_type}_stability_id"
+            ]
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
         "primary_position_series_name": "head_position",
         "orientation_reference_position_series_name": "body_position",
-        "motor_encoding_comparison_param_name": parameters[
-            "motor_encoding_comparison_param_name"
+        "motor_encoding_param_name": parameters[
+            "motor_encoding_param_name"
         ],
     }
     common_position = {
@@ -928,7 +929,7 @@ def _motor_encoding_selection_inputs() -> dict[str, Any]:
 
 def _build_motor_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
     """Build one motor selection row from mutable fake upstream tables."""
-    return _motor_encoding_comparison_selection_row(
+    return _motor_encoding_selection_row(
         key=inputs["key"],
         region_sorted_spikes_group_table=_FakeRelation(inputs["region_row"]),
         movement_firing_rate_table=_FakeRelation(inputs["movement_result"]),
@@ -941,6 +942,18 @@ def _build_motor_encoding_selection(inputs: dict[str, Any]) -> dict[str, Any]:
             inputs["trajectory_rows"]
         ),
         wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        stability_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_results"],
+        ),
+        stability_selection_table=_FakeKeyedRelation(
+            "path_specific_place_stability_id",
+            inputs["stability_selections"],
+        ),
+        tuning_curve_selection_table=_FakeKeyedRelation(
+            "path_specific_place_tuning_curve_id",
+            inputs["curve_selections"],
+        ),
         parameters_table=_FakeRelation(inputs["parameters"]),
     )
 
@@ -963,6 +976,7 @@ def _dark_light_glm_selection_inputs() -> dict[str, Any]:
     movement_selections = {
         movement_ids[condition_name]: {
             "movement_firing_rate_id": movement_ids[condition_name],
+            "region_sorted_spikes_group_id": region_group_id,
             "nwb_file_name": nwb_file_name,
             "epoch": epoch,
             "position_series_name": "head_position",
@@ -1267,6 +1281,7 @@ def _swap_tuning_curve_comparison_selection_inputs() -> dict[str, Any]:
     movement_selections = {
         movement_id: {
             "movement_firing_rate_id": movement_id,
+            "region_sorted_spikes_group_id": region_group_id,
             "nwb_file_name": nwb_file_name,
             "epoch": epochs[epoch_role],
             "position_series_name": "head_position",
@@ -1503,9 +1518,6 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "epoch_motor_behavior_parameters",
         "epoch_motor_behavior_selection",
         "epoch_motor_behavior",
-        "ripple_band_lfp_parameters",
-        "ripple_band_lfp_selection",
-        "ripple_band_lfp",
         "movement_firing_rate_selection",
         "movement_firing_rate",
         "cv_pca_parameters",
@@ -1524,18 +1536,18 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "dpp_tuning_curve",
         "path_specific_place_stability_selection",
         "path_specific_place_stability",
-        "dpp_encoding_comparison_parameters",
-        "dpp_encoding_comparison_selection",
-        "dpp_encoding_comparison",
+        "dpp_encoding_parameters",
+        "dpp_encoding_selection",
+        "dpp_encoding",
         "path_progression_decoding_parameters",
-        "path_progression_decoding_comparison_selection",
-        "path_progression_decoding_comparison",
+        "path_progression_decoding_selection",
+        "path_progression_decoding",
         "path_specific_place_decoding_parameters",
         "path_specific_place_decoding_selection",
         "path_specific_place_decoding",
-        "motor_encoding_comparison_parameters",
-        "motor_encoding_comparison_selection",
-        "motor_encoding_comparison",
+        "motor_encoding_parameters",
+        "motor_encoding_selection",
+        "motor_encoding",
         "dark_light_glm_parameters",
         "dark_light_glm_selection",
         "dark_light_glm",
@@ -1548,9 +1560,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "ripple_glm_parameters",
         "ripple_glm_selection",
         "ripple_glm",
-        "cross_region_xcorr_parameters",
-        "cross_region_xcorr_selection",
-        "cross_region_xcorr",
+        "ripple_cross_region_xcorr_parameters",
+        "ripple_cross_region_xcorr_selection",
+        "ripple_cross_region_xcorr",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -1572,18 +1584,15 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "CVPCAParameters" in schemas[0].context
     assert "CVPCASelection" in schemas[0].context
     assert "CVPCA" in schemas[0].context
-    assert "RippleBandLFPParameters" in schemas[0].context
-    assert "RippleBandLFPSelection" in schemas[0].context
-    assert "RippleBandLFP" in schemas[0].context
-    assert "DPPEncodingComparisonParameters" in schemas[0].context
-    assert "DPPEncodingComparisonSelection" in schemas[0].context
-    assert "DPPEncodingComparison" in schemas[0].context
+    assert "DPPEncodingParameters" in schemas[0].context
+    assert "DPPEncodingSelection" in schemas[0].context
+    assert "DPPEncoding" in schemas[0].context
     assert "PathSpecificPlaceDecodingParameters" in schemas[0].context
     assert "PathSpecificPlaceDecodingSelection" in schemas[0].context
     assert "PathSpecificPlaceDecoding" in schemas[0].context
-    assert "MotorEncodingComparisonParameters" in schemas[0].context
-    assert "MotorEncodingComparisonSelection" in schemas[0].context
-    assert "MotorEncodingComparison" in schemas[0].context
+    assert "MotorEncodingParameters" in schemas[0].context
+    assert "MotorEncodingSelection" in schemas[0].context
+    assert "MotorEncoding" in schemas[0].context
     assert "DarkLightGLMParameters" in schemas[0].context
     assert "DarkLightGLMSelection" in schemas[0].context
     assert "DarkLightGLM" in schemas[0].context
@@ -1596,14 +1605,14 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "RippleGLMParameters" in schemas[0].context
     assert "RippleGLMSelection" in schemas[0].context
     assert "RippleGLM" in schemas[0].context
-    assert "CrossRegionXCorrParameters" in schemas[0].context
-    assert "CrossRegionXCorrSelection" in schemas[0].context
-    assert "CrossRegionXCorr" in schemas[0].context
+    assert "RippleCrossRegionXCorrParameters" in schemas[0].context
+    assert "RippleCrossRegionXCorrSelection" in schemas[0].context
+    assert "RippleCrossRegionXCorr" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
-        "PathProgressionDecodingComparisonSelection" in schemas[0].context
+        "PathProgressionDecodingSelection" in schemas[0].context
     )
-    assert "PathProgressionDecodingComparison" in schemas[0].context
+    assert "PathProgressionDecoding" in schemas[0].context
     legacy_stability_prefix = "".join(("TaskProgression", "Stability"))
     assert not any(
         name.startswith(legacy_stability_prefix) for name in schemas[0].context
@@ -1620,7 +1629,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert analysis_nwbfile._registry_calls == 1
 
     position_definition = bundle["position"].definition
-    for source_name in ("trajectory_intervals", "ripples", "position"):
+    for source_name in ("trajectory_intervals", "ripple_interval", "position"):
         source_definition = bundle[source_name].definition
         assert "-> EpochIntervals" in source_definition
         assert "-> Session" not in source_definition
@@ -1633,11 +1642,10 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     ripple_selection = bundle["ripple_modulation_selection"].definition
     assert "ripple_modulation_id: uuid" in ripple_selection
-    assert "-> Ripples" in ripple_selection
+    assert "-> RippleInterval" in ripple_selection
     assert "-> RippleModulationParameters" in ripple_selection
-    assert "-> SortedSpikesGroup" in ripple_selection
-    assert "sorting_group_members_sha256: char(64)" in ripple_selection
-    assert "unit_filter_params_sha256: char(64)" in ripple_selection
+    assert "-> RegionSortedSpikesGroup" in ripple_selection
+    assert "-> SortedSpikesGroup" not in ripple_selection
     assert "ripple_modulation_parameters_sha256: char(64)" in ripple_selection
 
     ripple_result = bundle["ripple_modulation"].definition
@@ -1646,35 +1654,12 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "selected_units_sha256: char(64)" in ripple_result
     assert "RippleModulationComputed" not in ripple_result
 
-    ripple_band_selection = bundle["ripple_band_lfp_selection"].definition
-    assert "ripple_band_lfp_id: uuid" in ripple_band_selection
-    assert "-> Ripples" in ripple_band_selection
-    assert "-> RippleBandLFPParameters" in ripple_band_selection
-    assert "-> EpochIntervals" not in ripple_band_selection
-    assert "ordered_electrode_ids: longblob" in ripple_band_selection
-    assert "registered_source_contents_hash: char(36)" in (
-        ripple_band_selection
-    )
-    assert "registered_source_size_bytes: bigint unsigned" in (
-        ripple_band_selection
-    )
-    assert "source_slice_provenance: longblob" in ripple_band_selection
-
-    ripple_band_result = bundle["ripple_band_lfp"].definition
-    assert "-> RippleBandLFPSelection" in ripple_band_result
-    assert "ripple_band_lfp_path: filepath@analysis" in ripple_band_result
-    assert "artifact_origin: enum('computed', 'registered_existing')" in (
-        ripple_band_result
-    )
-    assert hasattr(bundle["ripple_band_lfp"], "register_existing")
-
     movement_selection = bundle["movement_firing_rate_selection"].definition
     assert "movement_firing_rate_id: uuid" in movement_selection
     assert "-> Position" in movement_selection
     assert "-> MovementParameters" in movement_selection
-    assert "-> SortedSpikesGroup" in movement_selection
-    assert "sorting_group_members_sha256: char(64)" in movement_selection
-    assert "unit_filter_params_sha256: char(64)" in movement_selection
+    assert "-> RegionSortedSpikesGroup" in movement_selection
+    assert "-> SortedSpikesGroup" not in movement_selection
     assert "movement_parameters_sha256: char(64)" in movement_selection
 
     movement_result = bundle["movement_firing_rate"].definition
@@ -1830,7 +1815,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "unit_ids" not in region_group
 
     encoding_parameters = bundle[
-        "dpp_encoding_comparison_parameters"
+        "dpp_encoding_parameters"
     ].definition
     assert "evaluation_bin_size_s: double" in encoding_parameters
     assert "spatial_bin_size_cm: double" in encoding_parameters
@@ -1838,9 +1823,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "minimum_stability_correlation: double" in encoding_parameters
 
     encoding_selection = bundle[
-        "dpp_encoding_comparison_selection"
+        "dpp_encoding_selection"
     ].definition
-    assert "dpp_encoding_comparison_id: uuid" in encoding_selection
+    assert "dpp_encoding_id: uuid" in encoding_selection
     assert "-> RegionSortedSpikesGroup" in encoding_selection
     assert "-> MovementFiringRate" in encoding_selection
     assert "full_w_configuration_name='configuration_name'" in encoding_selection
@@ -1858,9 +1843,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         )
         assert f"{trajectory_type}_stability_id=" in encoding_selection
 
-    encoding_result = bundle["dpp_encoding_comparison"].definition
-    assert "-> DPPEncodingComparisonSelection" in encoding_result
-    assert "encoding_comparison_path: filepath@analysis" in encoding_result
+    encoding_result = bundle["dpp_encoding"].definition
+    assert "-> DPPEncodingSelection" in encoding_result
+    assert "dpp_encoding_path: filepath@analysis" in encoding_result
     assert "n_units_input: int unsigned" in encoding_result
     assert "n_units_eligible: int unsigned" in encoding_result
     assert "n_units_valid: int unsigned" in encoding_result
@@ -1882,9 +1867,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "n_folds" not in decoding_parameters
 
     decoding_selection = bundle[
-        "path_progression_decoding_comparison_selection"
+        "path_progression_decoding_selection"
     ].definition
-    assert "path_progression_decoding_comparison_id: uuid" in (
+    assert "path_progression_decoding_id: uuid" in (
         decoding_selection
     )
     assert "-> RegionSortedSpikesGroup" in decoding_selection
@@ -1910,9 +1895,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         assert f"cohort_{trajectory_type}_stability_id=" in decoding_selection
 
     decoding_result = bundle[
-        "path_progression_decoding_comparison"
+        "path_progression_decoding"
     ].definition
-    assert "-> PathProgressionDecodingComparisonSelection" in decoding_result
+    assert "-> PathProgressionDecodingSelection" in decoding_result
     assert "artifact_manifest_path: filepath@analysis" in decoding_result
     assert "decoding_summary_path: filepath@analysis" in decoding_result
     assert "unit_eligibility_path: filepath@analysis" in decoding_result
@@ -1920,7 +1905,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "n_transfer_pairs_valid: smallint unsigned" in decoding_result
     assert "'partial_valid'" in decoding_result
     assert not hasattr(
-        bundle["path_progression_decoding_comparison"],
+        bundle["path_progression_decoding"],
         "register_existing",
     )
 
@@ -1954,7 +1939,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     )
 
     motor_parameters = bundle[
-        "motor_encoding_comparison_parameters"
+        "motor_encoding_parameters"
     ].definition
     assert "outer_n_folds: smallint unsigned" in motor_parameters
     assert "inner_n_folds: smallint unsigned" in motor_parameters
@@ -1963,9 +1948,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "minimum_movement_firing_rate_hz: double" in motor_parameters
 
     motor_selection = bundle[
-        "motor_encoding_comparison_selection"
+        "motor_encoding_selection"
     ].definition
-    assert "motor_encoding_comparison_id: uuid" in motor_selection
+    assert "motor_encoding_id: uuid" in motor_selection
     assert "-> RegionSortedSpikesGroup" in motor_selection
     assert "-> MovementFiringRate" in motor_selection
     assert "primary_position_series_name='position_series_name'" in (
@@ -1976,16 +1961,16 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         in motor_selection
     )
     assert "full_w_configuration_name='configuration_name'" in motor_selection
-    assert "motor_encoding_comparison_model_spec_sha256" in motor_selection
-    assert "motor_encoding_comparison_output_rule_sha256" in motor_selection
+    assert "motor_encoding_model_spec_sha256" in motor_selection
+    assert "motor_encoding_output_rule_sha256" in motor_selection
 
-    motor_result = bundle["motor_encoding_comparison"].definition
-    assert "-> MotorEncodingComparisonSelection" in motor_result
+    motor_result = bundle["motor_encoding"].definition
+    assert "-> MotorEncodingSelection" in motor_result
     assert "nested_cv_path: filepath@analysis" in motor_result
     assert "full_refit_path: filepath@analysis" in motor_result
     assert "selected_units_path: filepath@analysis" in motor_result
     assert "'partial_valid'" in motor_result
-    assert hasattr(bundle["motor_encoding_comparison"], "register_existing")
+    assert hasattr(bundle["motor_encoding"], "register_existing")
 
     dark_light_parameters = bundle["dark_light_glm_parameters"].definition
     assert "basis_candidate_mode:" in dark_light_parameters
@@ -2086,7 +2071,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "source_predictor_mode:" in ripple_glm_parameters
     ripple_glm_selection = bundle["ripple_glm_selection"].definition
     assert "ripple_glm_id: uuid" in ripple_glm_selection
-    assert "-> Ripples" in ripple_glm_selection
+    assert "-> RippleInterval" in ripple_glm_selection
     assert "source_region_sorted_spikes_group_id=" in ripple_glm_selection
     assert "target_region_sorted_spikes_group_id=" in ripple_glm_selection
     assert "detector_zscore_threshold: double" in ripple_glm_selection
@@ -2100,22 +2085,22 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "n_valid_target_units: int unsigned" in ripple_glm_result
     assert hasattr(bundle["ripple_glm"], "register_existing")
 
-    xcorr_parameters = bundle["cross_region_xcorr_parameters"].definition
+    xcorr_parameters = bundle["ripple_cross_region_xcorr_parameters"].definition
     assert "bin_size_s: double" in xcorr_parameters
     assert "min_ripple_spikes: int unsigned" in xcorr_parameters
-    xcorr_selection = bundle["cross_region_xcorr_selection"].definition
-    assert "cross_region_xcorr_id: uuid" in xcorr_selection
-    assert "-> Ripples" in xcorr_selection
+    xcorr_selection = bundle["ripple_cross_region_xcorr_selection"].definition
+    assert "ripple_cross_region_xcorr_id: uuid" in xcorr_selection
+    assert "-> RippleInterval" in xcorr_selection
     assert "source_region_sorted_spikes_group_id=" in xcorr_selection
     assert "target_region_sorted_spikes_group_id=" in xcorr_selection
     assert "selected_ripple_intervals_sha256: char(64)" in xcorr_selection
-    xcorr_result = bundle["cross_region_xcorr"].definition
-    assert "-> CrossRegionXCorrSelection" in xcorr_result
+    xcorr_result = bundle["ripple_cross_region_xcorr"].definition
+    assert "-> RippleCrossRegionXCorrSelection" in xcorr_result
     assert "ca1_units_path: filepath@analysis" in xcorr_result
     assert "v1_units_path: filepath@analysis" in xcorr_result
-    assert "cross_region_xcorr_path: filepath@analysis" in xcorr_result
+    assert "ripple_cross_region_xcorr_path: filepath@analysis" in xcorr_result
     assert "n_valid_pairs: int unsigned" in xcorr_result
-    assert hasattr(bundle["cross_region_xcorr"], "register_existing")
+    assert hasattr(bundle["ripple_cross_region_xcorr"], "register_existing")
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
     monkeypatch,
@@ -2199,22 +2184,20 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     bundle, _, _ = _fake_bundle()
     movement_parameters = bundle["movement_parameters"]
     ripple_parameters = bundle["ripple_modulation_parameters"]
-    ripple_band_parameters = bundle["ripple_band_lfp_parameters"]
     tuning_parameters = bundle["tuning_curve_parameters"]
     similarity_parameters = bundle["tuning_similarity_parameters"]
-    encoding_parameters = bundle["dpp_encoding_comparison_parameters"]
+    encoding_parameters = bundle["dpp_encoding_parameters"]
     decoding_parameters = bundle["path_progression_decoding_parameters"]
-    motor_parameters = bundle["motor_encoding_comparison_parameters"]
+    motor_parameters = bundle["motor_encoding_parameters"]
     swap_tuning_parameters = bundle[
         "swap_tuning_curve_comparison_parameters"
     ]
     ripple_glm_parameters = bundle["ripple_glm_parameters"]
-    xcorr_parameters = bundle["cross_region_xcorr_parameters"]
+    xcorr_parameters = bundle["ripple_cross_region_xcorr_parameters"]
     cv_pca_parameters = bundle["cv_pca_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
-    ripple_band_row = ripple_band_parameters.insert_default()
     tuning_rows = tuning_parameters.insert_presets()
     similarity_rows = similarity_parameters.insert_presets()
     encoding_row = encoding_parameters.insert_default()
@@ -2234,17 +2217,6 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert movement_parameters._insert_calls == [
         (movement_row, {"skip_duplicates": True})
     ]
-    assert ripple_band_row == dict(
-        table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS
-    )
-    assert ripple_band_parameters._insert_calls == [
-        (ripple_band_row, {"skip_duplicates": True})
-    ]
-    for field_name in ("filter_order", "notch_harmonics"):
-        with pytest.raises(ValueError, match="smallint unsigned"):
-            ripple_band_parameters.insert_parameters(
-                {**ripple_band_row, field_name: 65_536}
-            )
     assert cv_pca_rows == [
         dict(row) for row in table_specs.CV_PCA_PARAMETER_PRESETS
     ]
@@ -2321,10 +2293,10 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     ]
 
     assert encoding_row == dict(
-        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
     )
     assert encoding_row == {
-        "dpp_encoding_comparison_param_name": (
+        "dpp_encoding_param_name": (
             "manuscript_5fold_50ms_4cm_sigma1"
         ),
         "n_folds": 5,
@@ -2356,7 +2328,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     ]
     assert motor_rows == [
         dict(row)
-        for row in table_specs.MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS
+        for row in table_specs.MOTOR_ENCODING_PARAMETER_PRESETS
     ]
     assert [
         row["minimum_movement_firing_rate_hz"] for row in motor_rows
@@ -2411,7 +2383,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         fetched_ripple_glm_row
     ) == ripple_glm_rows[0]
     assert xcorr_rows == [
-        dict(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+        dict(table_specs.MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS)
     ]
     assert xcorr_parameters._insert_many_calls == [
         (xcorr_rows, {"skip_duplicates": True})
@@ -2421,7 +2393,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
         "norm": np.int64(1),
         "require_speed_gated": np.bool_(True),
     }
-    assert _validate_cross_region_xcorr_parameter_row(
+    assert _validate_ripple_cross_region_xcorr_parameter_row(
         fetched_xcorr_row
     ) == xcorr_rows[0]
     with pytest.raises(TypeError, match="numeric scalar"):
@@ -2535,7 +2507,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
             {**xcorr_rows[0], "require_speed_gated": False}
         )
     with pytest.raises(TypeError, match="database integer 0/1"):
-        _validate_cross_region_xcorr_parameter_row(
+        _validate_ripple_cross_region_xcorr_parameter_row(
             {**xcorr_rows[0], "norm": 2}
         )
 
@@ -2580,7 +2552,7 @@ def test_path_progression_decoding_preset_and_definitions_are_exact() -> None:
     }
 
     selection_definition = bundle[
-        "path_progression_decoding_comparison_selection"
+        "path_progression_decoding_selection"
     ].definition
     assert selection_definition.count(
         "-> PathSpecificPlaceStability.proj("
@@ -2588,7 +2560,7 @@ def test_path_progression_decoding_preset_and_definitions_are_exact() -> None:
     assert selection_definition.count(
         "-> MovementFiringRate"
     ) == 2
-    result = bundle["path_progression_decoding_comparison"]
+    result = bundle["path_progression_decoding"]
     assert result.definition == table_specs.PATH_PROGRESSION_DECODING_DEFINITION
     assert "artifact_origin" not in result.definition
     assert "legacy_artifact_provenance" not in result.definition
@@ -2654,38 +2626,54 @@ def test_source_table_loaders_delegate_without_copying_arrays(monkeypatch) -> No
     assert calls[1][2]["loader_kwargs"] == {"apply_analysis_offset": False}
 
 
-def test_ripple_selection_uuid_is_deterministic_and_freezes_sorting_snapshot() -> None:
+def test_ripple_selection_uuid_captures_region_group_and_parameters() -> None:
     key = _ripple_selection_key()
+    region_group_id = key["region_sorted_spikes_group_id"]
+    changed_region_group_id = uuid.UUID(
+        "62222222-2222-5222-8222-222222222222"
+    )
+    region_groups = _FakeKeyedRelation(
+        "region_sorted_spikes_group_id",
+        {
+            region_group_id: {
+                "region_sorted_spikes_group_id": region_group_id,
+                "nwb_file_name": key["nwb_file_name"],
+                "region_name": "ca1",
+            },
+            changed_region_group_id: {
+                "region_sorted_spikes_group_id": changed_region_group_id,
+                "nwb_file_name": key["nwb_file_name"],
+                "region_name": "ca1",
+            },
+        },
+    )
     parameter_values = dict(table_specs.DEFAULT_RIPPLE_MODULATION_PARAMETERS)
     parameters = _FakeRelation(parameter_values)
     source = _FakeRelation({})
-    unit_parameters = _FakeRelation(
-        {"include_labels": ["accepted"], "exclude_labels": ["noise", "mua"]}
-    )
 
     first = _ripple_modulation_selection_row(
         key=key,
         ripples_table=source,
         epoch_intervals_table=source,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-b", "merge-a"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
-    reordered = _ripple_modulation_selection_row(
+    repeated = _ripple_modulation_selection_row(
         key=key,
         ripples_table=source,
         epoch_intervals_table=source,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
-    changed = _ripple_modulation_selection_row(
-        key=key,
+    changed_region_group = _ripple_modulation_selection_row(
+        key={
+            **key,
+            "region_sorted_spikes_group_id": changed_region_group_id,
+        },
         ripples_table=source,
         epoch_intervals_table=source,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-c"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
     changed_parameter_values = {**parameter_values, "bin_size_s": 0.025}
     changed_parameters = _ripple_modulation_selection_row(
@@ -2693,18 +2681,17 @@ def test_ripple_selection_uuid_is_deterministic_and_freezes_sorting_snapshot() -
         ripples_table=source,
         epoch_intervals_table=source,
         parameters_table=_FakeRelation(changed_parameter_values),
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
 
     assert isinstance(first["ripple_modulation_id"], uuid.UUID)
     assert first["ripple_modulation_id"].version == 5
-    assert first["ripple_modulation_id"] == reordered["ripple_modulation_id"]
-    assert first["ripple_modulation_id"] != changed["ripple_modulation_id"]
+    assert first["ripple_modulation_id"] == repeated["ripple_modulation_id"]
+    assert first["ripple_modulation_id"] != changed_region_group[
+        "ripple_modulation_id"
+    ]
     assert first["ripple_modulation_id"] != changed_parameters["ripple_modulation_id"]
-    assert first["sorting_group_members"] == ["merge-a", "merge-b"]
-    assert first["unit_filter_include_labels"] == ["accepted"]
-    assert first["unit_filter_exclude_labels"] == ["mua", "noise"]
+    assert first["region_sorted_spikes_group_id"] == region_group_id
     assert first["ripple_modulation_parameters_sha256"] == provenance_sha256(
         parameter_values
     )
@@ -2712,41 +2699,52 @@ def test_ripple_selection_uuid_is_deterministic_and_freezes_sorting_snapshot() -
         "ripple_modulation_parameters_sha256"
     ] == provenance_sha256(changed_parameter_values)
 
-    current = _sorting_provenance()
-    _validate_frozen_sorting_snapshot(first, current)
-    with pytest.raises(ValueError, match="changed after selection insertion"):
-        _validate_frozen_sorting_snapshot(first, _sorting_provenance(("merge-a",)))
 
-
-def test_movement_selection_uuid_freezes_sorting_and_parameter_values() -> None:
+def test_movement_selection_uuid_captures_region_group_and_parameters() -> None:
     key = _movement_selection_key()
+    region_group_id = key["region_sorted_spikes_group_id"]
+    changed_region_group_id = uuid.UUID(
+        "62222222-2222-5222-8222-222222222222"
+    )
+    region_groups = _FakeKeyedRelation(
+        "region_sorted_spikes_group_id",
+        {
+            region_group_id: {
+                "region_sorted_spikes_group_id": region_group_id,
+                "nwb_file_name": key["nwb_file_name"],
+                "region_name": "ca1",
+            },
+            changed_region_group_id: {
+                "region_sorted_spikes_group_id": changed_region_group_id,
+                "nwb_file_name": key["nwb_file_name"],
+                "region_name": "ca1",
+            },
+        },
+    )
     position = _FakeRelation({"spatial_unit": "cm"})
     parameter_values = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     parameters = _FakeRelation(parameter_values)
-    unit_parameters = _FakeRelation(
-        {"include_labels": ["accepted"], "exclude_labels": ["noise", "mua"]}
-    )
 
     first = _movement_firing_rate_selection_row(
         key=key,
         position_table=position,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-b", "merge-a"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
-    reordered = _movement_firing_rate_selection_row(
+    repeated = _movement_firing_rate_selection_row(
         key=key,
         position_table=position,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
-    changed_membership = _movement_firing_rate_selection_row(
-        key=key,
+    changed_region_group = _movement_firing_rate_selection_row(
+        key={
+            **key,
+            "region_sorted_spikes_group_id": changed_region_group_id,
+        },
         position_table=position,
         parameters_table=parameters,
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-c"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
     changed_parameter_values = {
         **parameter_values,
@@ -2756,22 +2754,19 @@ def test_movement_selection_uuid_freezes_sorting_and_parameter_values() -> None:
         key=key,
         position_table=position,
         parameters_table=_FakeRelation(changed_parameter_values),
-        sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a", "merge-b"]),
-        unit_selection_params=unit_parameters,
+        region_sorted_spikes_group_table=region_groups,
     )
 
     assert isinstance(first["movement_firing_rate_id"], uuid.UUID)
     assert first["movement_firing_rate_id"].version == 5
-    assert first["movement_firing_rate_id"] == reordered["movement_firing_rate_id"]
-    assert first["movement_firing_rate_id"] != changed_membership[
+    assert first["movement_firing_rate_id"] == repeated["movement_firing_rate_id"]
+    assert first["movement_firing_rate_id"] != changed_region_group[
         "movement_firing_rate_id"
     ]
     assert first["movement_firing_rate_id"] != changed_parameters[
         "movement_firing_rate_id"
     ]
-    assert first["sorting_group_members"] == ["merge-a", "merge-b"]
-    assert first["unit_filter_include_labels"] == ["accepted"]
-    assert first["unit_filter_exclude_labels"] == ["mua", "noise"]
+    assert first["region_sorted_spikes_group_id"] == region_group_id
     assert first["movement_parameters_sha256"] == provenance_sha256(
         parameter_values
     )
@@ -2784,8 +2779,7 @@ def test_movement_selection_uuid_freezes_sorting_and_parameter_values() -> None:
             key=key,
             position_table=_FakeRelation({"spatial_unit": "m"}),
             parameters_table=parameters,
-            sorted_spikes_group=_FakeSortedSpikesGroup(["merge-a"]),
-            unit_selection_params=unit_parameters,
+            region_sorted_spikes_group_table=region_groups,
         )
 
 
@@ -3237,8 +3231,8 @@ def test_dpp_encoding_selection_uuid_freezes_exact_upstream_rows() -> None:
         _dpp_encoding_selection_inputs()
     )
 
-    assert isinstance(row["dpp_encoding_comparison_id"], uuid.UUID)
-    assert row["dpp_encoding_comparison_id"].version == 5
+    assert isinstance(row["dpp_encoding_id"], uuid.UUID)
+    assert row["dpp_encoding_id"].version == 5
     assert row == repeated
     assert row["nwb_file_name"] == "L1420240102_.nwb"
     assert row["epoch"] == "02_r1"
@@ -3255,19 +3249,19 @@ def test_dpp_encoding_selection_uuid_freezes_exact_upstream_rows() -> None:
             f"{trajectory_type}_stability_id"
         ]
     assert row["full_w_configuration_name"] == "full_w"
-    assert row["dpp_encoding_comparison_parameters_sha256"] == (
+    assert row["dpp_encoding_parameters_sha256"] == (
         provenance_sha256(inputs["parameters"])
     )
 
     alternate = _dpp_encoding_selection_inputs()
     alternate_name = "same_values_alternate_name"
     alternate["parameters"][
-        "dpp_encoding_comparison_param_name"
+        "dpp_encoding_param_name"
     ] = alternate_name
-    alternate["key"]["dpp_encoding_comparison_param_name"] = alternate_name
+    alternate["key"]["dpp_encoding_param_name"] = alternate_name
     alternate_row = _build_dpp_encoding_selection(alternate)
-    assert row["dpp_encoding_comparison_id"] != alternate_row[
-        "dpp_encoding_comparison_id"
+    assert row["dpp_encoding_id"] != alternate_row[
+        "dpp_encoding_id"
     ]
 
 
@@ -3278,10 +3272,6 @@ def test_dpp_encoding_selection_uuid_freezes_exact_upstream_rows() -> None:
         ("epoch", "slot: epoch"),
         ("supplied_session", "MovementFiringRate: nwb_file_name"),
         ("supplied_epoch", "MovementFiringRate: epoch"),
-        ("region", "same region"),
-        ("group", "same sorted_spikes_group_name"),
-        ("group_snapshot", "same frozen sorting_group_members_sha256"),
-        ("filter_snapshot", "same frozen unit_filter_params_sha256"),
         ("trajectory_alias", "center_to_left_trajectory_type must equal"),
         ("graph_alias", "center_to_left_configuration_name must equal"),
         ("stability_slot", "stability input.*trajectory_type"),
@@ -3318,14 +3308,6 @@ def test_dpp_encoding_selection_rejects_mismatched_upstreams(
         inputs["key"]["nwb_file_name"] = "L1520240102_.nwb"
     elif mismatch == "supplied_epoch":
         inputs["key"]["epoch"] = "04_r2"
-    elif mismatch == "region":
-        inputs["region_row"]["region_name"] = "v1"
-    elif mismatch == "group":
-        inputs["region_row"]["sorted_spikes_group_name"] = "subset"
-    elif mismatch == "group_snapshot":
-        inputs["region_row"]["sorting_group_members_sha256"] = "d" * 64
-    elif mismatch == "filter_snapshot":
-        inputs["region_row"]["unit_filter_params_sha256"] = "d" * 64
     elif mismatch == "trajectory_alias":
         inputs["key"]["center_to_left_trajectory_type"] = "center_to_right"
     elif mismatch == "graph_alias":
@@ -3385,7 +3367,7 @@ def test_dpp_encoding_selection_requires_all_trajectory_and_graph_rows(
 
 
 def test_path_progression_decoding_selection_uuid_freezes_shared_cohort() -> None:
-    from v1ca1.spyglass.decoding_comparison import TRANSFER_SPEC_SHA256
+    from v1ca1.spyglass.path_progression_decoding import TRANSFER_SPEC_SHA256
     from v1ca1.spyglass.selection import selection_uuid
 
     inputs = _path_progression_decoding_selection_inputs()
@@ -3395,10 +3377,10 @@ def test_path_progression_decoding_selection_uuid_freezes_shared_cohort() -> Non
     )
 
     assert isinstance(
-        row["path_progression_decoding_comparison_id"],
+        row["path_progression_decoding_id"],
         uuid.UUID,
     )
-    assert row["path_progression_decoding_comparison_id"].version == 5
+    assert row["path_progression_decoding_id"].version == 5
     assert row == repeated
     assert row["nwb_file_name"] == "L1420240102_.nwb"
     assert row["epoch"] == "02_r1"
@@ -3429,10 +3411,10 @@ def test_path_progression_decoding_selection_uuid_freezes_shared_cohort() -> Non
     natural_key = {
         name: value
         for name, value in row.items()
-        if name != "path_progression_decoding_comparison_id"
+        if name != "path_progression_decoding_id"
     }
-    assert row["path_progression_decoding_comparison_id"] == selection_uuid(
-        "PathProgressionDecodingComparison",
+    assert row["path_progression_decoding_id"] == selection_uuid(
+        "PathProgressionDecoding",
         natural_key,
     )
 
@@ -3441,7 +3423,7 @@ def test_path_progression_decoding_artifact_link_checks_session_and_all_units(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from v1ca1.spyglass import decoding_comparison as decoding
+    from v1ca1.spyglass import path_progression_decoding as decoding
     from v1ca1.spyglass.selection import unit_identity_sha256
 
     result_id = uuid.UUID("74444444-4444-5444-8444-444444444444")
@@ -3449,7 +3431,7 @@ def test_path_progression_decoding_artifact_link_checks_session_and_all_units(
         table_specs.MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS
     )
     selection = {
-        "path_progression_decoding_comparison_id": result_id,
+        "path_progression_decoding_id": result_id,
         "epoch": "02_r1",
         "cohort_epoch": "08_r4",
         "path_progression_decoding_param_name": parameters[
@@ -3489,7 +3471,7 @@ def test_path_progression_decoding_artifact_link_checks_session_and_all_units(
     )
     bundle = {"path": artifact_dir, "unit_eligibility": identities}
     summary = {
-        "path_progression_decoding_comparison_id": str(result_id),
+        "path_progression_decoding_id": str(result_id),
         "animal_name": "L14",
         "date": "20240102",
         "region": "ca1",
@@ -3695,44 +3677,44 @@ def test_path_progression_decoding_selection_rejects_key_mismatch(
 def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
     tmp_path: Path,
 ) -> None:
-    from v1ca1.spyglass.encoding_comparison import (
-        empty_encoding_comparison_table,
-        summarize_encoding_comparison_table,
+    from v1ca1.spyglass.dpp_encoding import (
+        empty_dpp_encoding_table,
+        summarize_dpp_encoding_table,
     )
 
     comparison_id = uuid.uuid5(
         uuid.NAMESPACE_URL,
         "v1ca1-test-dpp-artifact-link",
     )
-    table = empty_encoding_comparison_table()
+    table = empty_dpp_encoding_table()
     result_row = {
-        **summarize_encoding_comparison_table(table),
+        **summarize_dpp_encoding_table(table),
         "n_units_input": 5,
-        "encoding_comparison_path": str(
+        "dpp_encoding_path": str(
             tmp_path
             / "L14"
             / "20240102"
-            / "dpp_encoding_comparison"
+            / "dpp_encoding"
             / "02_r1"
             / "ca1"
             / str(comparison_id)
-            / "encoding_comparison.parquet"
+            / "dpp_encoding.parquet"
         ),
     }
     selection_row = {
-        "dpp_encoding_comparison_id": comparison_id,
+        "dpp_encoding_id": comparison_id,
         "epoch": "02_r1",
-        "dpp_encoding_comparison_parameters_sha256": provenance_sha256(
-            dict(table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS)
+        "dpp_encoding_parameters_sha256": provenance_sha256(
+            dict(table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS)
         ),
     }
 
-    _validate_dpp_encoding_comparison_artifact_link(
+    _validate_dpp_encoding_artifact_link(
         table=table,
         result_row=result_row,
         selection_row=selection_row,
         parameters_row=dict(
-            table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+            table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
         ),
         region_row={"region_name": "ca1", "n_units": 5},
         animal_name="L14",
@@ -3740,29 +3722,29 @@ def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
     )
 
     with pytest.raises(ValueError, match="n_units_eligible"):
-        _validate_dpp_encoding_comparison_artifact_link(
+        _validate_dpp_encoding_artifact_link(
             table=table,
             result_row={**result_row, "n_units_eligible": 1},
             selection_row=selection_row,
             parameters_row=dict(
-                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+                table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
             ),
             region_row={"region_name": "ca1", "n_units": 5},
             animal_name="L14",
             date="20240102",
         )
     with pytest.raises(ValueError, match="artifact path does not match"):
-        _validate_dpp_encoding_comparison_artifact_link(
+        _validate_dpp_encoding_artifact_link(
             table=table,
             result_row={
                 **result_row,
-                "encoding_comparison_path": str(
-                    tmp_path / str(uuid.uuid4()) / "encoding_comparison.parquet"
+                "dpp_encoding_path": str(
+                    tmp_path / str(uuid.uuid4()) / "dpp_encoding.parquet"
                 ),
             },
             selection_row=selection_row,
             parameters_row=dict(
-                table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+                table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
             ),
             region_row={"region_name": "ca1", "n_units": 5},
             animal_name="L14",
@@ -3847,6 +3829,7 @@ def test_similarity_input_loader_rejects_stale_tuning_parameters(
             movement_firing_rate_table=object(),
             movement_firing_rate_selection_table=object(),
             movement_parameters_table=object(),
+            region_sorted_spikes_group_table=object(),
             session_table=object(),
         )
 
@@ -3869,9 +3852,7 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             ripples_table=object(),
             epoch_intervals_table=object(),
             session_table=object(),
-            sorted_spikes_group=object(),
-            unit_selection_params=object(),
-            spike_sorting_output=object(),
+            region_sorted_spikes_group_table=object(),
             nwbfile_table=object(),
             artifact_root=None,
         )
@@ -3891,9 +3872,7 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             epoch_intervals_table=object(),
             position_table=object(),
             session_table=object(),
-            sorted_spikes_group=object(),
-            unit_selection_params=object(),
-            spike_sorting_output=object(),
+            region_sorted_spikes_group_table=object(),
             nwbfile_table=object(),
             artifact_root=None,
         )
@@ -3920,9 +3899,7 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             movement_firing_rate_selection_table=object(),
             movement_parameters_table=object(),
             session_table=object(),
-            sorted_spikes_group=object(),
-            unit_selection_params=object(),
-            spike_sorting_output=object(),
+            region_sorted_spikes_group_table=object(),
             nwbfile_table=object(),
             artifact_root=None,
         )
@@ -3948,9 +3925,7 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
             movement_firing_rate_selection_table=object(),
             movement_parameters_table=object(),
             session_table=object(),
-            sorted_spikes_group=object(),
-            unit_selection_params=object(),
-            spike_sorting_output=object(),
+            region_sorted_spikes_group_table=object(),
             nwbfile_table=object(),
             artifact_root=None,
         )
@@ -4145,8 +4120,8 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     assert calls[6][1]["overwrite"] is False
     for call_index in (0, 1, 2, 3, 4):
         assert calls[call_index][1][
-            "unit_selection_params"
-        ] is unit_selection_params
+            "region_sorted_spikes_group_table"
+        ] is bundle["region_sorted_spikes_group"]
     assert ripple._insert_calls[0][0]["ripple_modulation_id"] == ripple_id
     assert ripple._insert_calls[1][0]["artifact_origin"] == "registered_existing"
     assert ripple._insert_calls[1][1] == {
@@ -4270,7 +4245,9 @@ def test_dpp_result_hooks_receive_fetched_selection(monkeypatch) -> None:
         assert call["movement_firing_rate_table"] is bundle[
             "movement_firing_rate"
         ]
-        assert call["unit_selection_params"] is unit_selection_params
+        assert call["region_sorted_spikes_group_table"] is bundle[
+            "region_sorted_spikes_group"
+        ]
     assert result._insert_calls[0][0]["dpp_tuning_curve_id"] == selection_id
     assert result._insert_calls[0][0]["artifact_origin"] == "computed"
     assert result._insert_calls[1][0]["artifact_origin"] == (
@@ -4287,15 +4264,15 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
 ) -> None:
     comparison_id = uuid.UUID("86666666-6666-5666-8666-666666666666")
     selection = {
-        "path_progression_decoding_comparison_id": comparison_id,
+        "path_progression_decoding_id": comparison_id,
         "nwb_file_name": "L1420240102_.nwb",
         "epoch": "02_r1",
         "cohort_epoch": "08_r4",
     }
     default_bundle, _, _ = _fake_bundle()
     assert default_bundle[
-        "path_progression_decoding_comparison"
-    ]._compute_hook is _make_path_progression_decoding_comparison_row
+        "path_progression_decoding"
+    ]._compute_hook is _make_path_progression_decoding_row
 
     calls = []
 
@@ -4316,10 +4293,10 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
 
     def fetch_selection(table, key):
         assert table.__name__ == (
-            "PathProgressionDecodingComparisonSelection"
+            "PathProgressionDecodingSelection"
         )
         assert key == {
-            "path_progression_decoding_comparison_id": comparison_id
+            "path_progression_decoding_id": comparison_id
         }
         return dict(selection)
 
@@ -4340,13 +4317,13 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
     )
     bundle, _, _ = _fake_bundle(
         runtime_hooks={
-            "path_progression_decoding_comparison_compute": compute,
+            "path_progression_decoding_compute": compute,
         }
     )
-    result = bundle["path_progression_decoding_comparison"]
+    result = bundle["path_progression_decoding"]
 
     result().make(
-        {"path_progression_decoding_comparison_id": comparison_id}
+        {"path_progression_decoding_id": comparison_id}
     )
 
     assert len(calls) == 1
@@ -4368,7 +4345,7 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
     inserted, insert_kwargs = result._insert_calls[0]
     assert insert_kwargs == {}
     assert inserted == {
-        "path_progression_decoding_comparison_id": comparison_id,
+        "path_progression_decoding_id": comparison_id,
         "artifact_manifest_path": "/analysis/manifest.parquet",
         "decoding_summary_path": "/analysis/decoding-summary.parquet",
         "unit_eligibility_path": "/analysis/unit-eligibility.parquet",
@@ -4420,15 +4397,15 @@ def test_path_progression_decoding_failed_insert_removes_new_bundle(
         _construct_tables.__globals__,
         "_fetch1_dict",
         lambda table, key: {
-            "path_progression_decoding_comparison_id": comparison_id
+            "path_progression_decoding_id": comparison_id
         },
     )
     bundle, _, _ = _fake_bundle(
         runtime_hooks={
-            "path_progression_decoding_comparison_compute": compute,
+            "path_progression_decoding_compute": compute,
         }
     )
-    result = bundle["path_progression_decoding_comparison"]
+    result = bundle["path_progression_decoding"]
 
     def fail_insert(cls, row, **kwargs):
         raise RuntimeError("database insert failed")
@@ -4436,7 +4413,7 @@ def test_path_progression_decoding_failed_insert_removes_new_bundle(
     result.insert1 = classmethod(fail_insert)
     with pytest.raises(RuntimeError, match="database insert failed"):
         result().make(
-            {"path_progression_decoding_comparison_id": comparison_id}
+            {"path_progression_decoding_id": comparison_id}
         )
 
     assert not artifact_dir.exists()
@@ -4470,25 +4447,25 @@ def test_motor_encoding_selection_is_deterministic_and_freezes_rules() -> None:
     )
 
     assert first == second
-    assert first["motor_encoding_comparison_id"].version == 5
+    assert first["motor_encoding_id"].version == 5
     assert first["primary_position_series_name"] == "head_position"
     assert first[
         "orientation_reference_position_series_name"
     ] == "body_position"
     assert first[
-        "motor_encoding_comparison_parameters_sha256"
+        "motor_encoding_parameters_sha256"
     ] == provenance_sha256(
-        dict(table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS)
+        dict(table_specs.MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS)
     )
     assert first[
-        "motor_encoding_comparison_model_spec_sha256"
+        "motor_encoding_model_spec_sha256"
     ] == provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+        dict(table_specs.MOTOR_ENCODING_MODEL_SPEC)
     )
     assert first[
-        "motor_encoding_comparison_output_rule_sha256"
+        "motor_encoding_output_rule_sha256"
     ] == provenance_sha256(
-        dict(table_specs.MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+        dict(table_specs.MOTOR_ENCODING_OUTPUT_RULE)
     )
 
 
@@ -5031,27 +5008,27 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
     assert row["legacy_artifact_provenance"] == {"source": "legacy"}
 
 
-def _cross_region_xcorr_selection_inputs() -> dict[str, Any]:
+def _ripple_cross_region_xcorr_selection_inputs() -> dict[str, Any]:
     """Return one complete exact-ripple xcorr selection input set."""
     inputs = _ripple_glm_selection_inputs()
-    parameters = dict(table_specs.MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS)
+    parameters = dict(table_specs.MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS)
     key = {
         name: value
         for name, value in inputs["key"].items()
         if name != "ripple_glm_param_name"
     }
-    key["cross_region_xcorr_param_name"] = parameters[
-        "cross_region_xcorr_param_name"
+    key["ripple_cross_region_xcorr_param_name"] = parameters[
+        "ripple_cross_region_xcorr_param_name"
     ]
     inputs.update({"key": key, "parameters": parameters})
     return inputs
 
 
-def _build_cross_region_xcorr_selection(
+def _build_ripple_cross_region_xcorr_selection(
     inputs: dict[str, Any],
 ) -> dict[str, Any]:
     """Build one xcorr selection from mutable database-free inputs."""
-    return _cross_region_xcorr_selection_row(
+    return _ripple_cross_region_xcorr_selection_row(
         key=inputs["key"],
         ripples_table=_FakeRelation(inputs["ripple_row"]),
         epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
@@ -5064,60 +5041,60 @@ def _build_cross_region_xcorr_selection(
     )
 
 
-def test_cross_region_xcorr_selection_freezes_exact_inputs() -> None:
-    inputs = _cross_region_xcorr_selection_inputs()
-    first = _build_cross_region_xcorr_selection(inputs)
-    second = _build_cross_region_xcorr_selection(
-        _cross_region_xcorr_selection_inputs()
+def test_ripple_cross_region_xcorr_selection_freezes_exact_inputs() -> None:
+    inputs = _ripple_cross_region_xcorr_selection_inputs()
+    first = _build_ripple_cross_region_xcorr_selection(inputs)
+    second = _build_ripple_cross_region_xcorr_selection(
+        _ripple_cross_region_xcorr_selection_inputs()
     )
 
     assert first == second
-    assert first["cross_region_xcorr_id"].version == 5
+    assert first["ripple_cross_region_xcorr_id"].version == 5
     assert first["source_region"] == "ca1"
     assert first["target_region"] == "v1"
     assert first["source_ripple_count"] == 5
     assert first["detector_zscore_threshold"] == pytest.approx(2.0)
     assert first["speed_gated"] is True
     assert len(first["selected_ripple_intervals_sha256"]) == 64
-    assert first["cross_region_xcorr_parameters_sha256"] == (
+    assert first["ripple_cross_region_xcorr_parameters_sha256"] == (
         provenance_sha256(inputs["parameters"])
     )
-    from v1ca1.spyglass.cross_region_xcorr import OUTPUT_RULE_SHA256
+    from v1ca1.spyglass.ripple_cross_region_xcorr import OUTPUT_RULE_SHA256
 
-    assert first["cross_region_xcorr_output_rule_sha256"] == (
+    assert first["ripple_cross_region_xcorr_output_rule_sha256"] == (
         OUTPUT_RULE_SHA256
     )
-    upstream = tables_module._cross_region_xcorr_upstream_provenance(first)
+    upstream = tables_module._ripple_cross_region_xcorr_upstream_provenance(first)
     assert upstream["detector_zscore_threshold"] == pytest.approx(2.0)
     assert upstream["speed_gated"] is True
 
-    changed_end = _cross_region_xcorr_selection_inputs()
+    changed_end = _ripple_cross_region_xcorr_selection_inputs()
     changed_end["ripple_table"].loc[0, "end_time"] = 1.075
-    assert _build_cross_region_xcorr_selection(changed_end)[
-        "cross_region_xcorr_id"
-    ] != first["cross_region_xcorr_id"]
+    assert _build_ripple_cross_region_xcorr_selection(changed_end)[
+        "ripple_cross_region_xcorr_id"
+    ] != first["ripple_cross_region_xcorr_id"]
 
-    changed_provenance = _cross_region_xcorr_selection_inputs()
+    changed_provenance = _ripple_cross_region_xcorr_selection_inputs()
     changed_provenance["ripple_row"]["detection_parameters"] = {
         "speed_threshold": 3.0
     }
-    assert _build_cross_region_xcorr_selection(changed_provenance)[
-        "cross_region_xcorr_id"
-    ] != first["cross_region_xcorr_id"]
+    assert _build_ripple_cross_region_xcorr_selection(changed_provenance)[
+        "ripple_cross_region_xcorr_id"
+    ] != first["ripple_cross_region_xcorr_id"]
 
 
-def test_cross_region_xcorr_selection_rejects_region_or_nwb_mismatch() -> None:
-    inputs = _cross_region_xcorr_selection_inputs()
+def test_ripple_cross_region_xcorr_selection_rejects_region_or_nwb_mismatch() -> None:
+    inputs = _ripple_cross_region_xcorr_selection_inputs()
     source_id = inputs["key"]["source_region_sorted_spikes_group_id"]
     inputs["group_rows"][source_id]["region_name"] = "v1"
     with pytest.raises(ValueError, match="source group.*ca1"):
-        _build_cross_region_xcorr_selection(inputs)
+        _build_ripple_cross_region_xcorr_selection(inputs)
 
-    inputs = _cross_region_xcorr_selection_inputs()
+    inputs = _ripple_cross_region_xcorr_selection_inputs()
     target_id = inputs["key"]["target_region_sorted_spikes_group_id"]
     inputs["group_rows"][target_id]["nwb_file_name"] = "other.nwb"
     with pytest.raises(ValueError, match="same NWB"):
-        _build_cross_region_xcorr_selection(inputs)
+        _build_ripple_cross_region_xcorr_selection(inputs)
 
 
 class _TestIntervals:
@@ -5128,7 +5105,7 @@ class _TestIntervals:
         self.end = np.asarray(end, dtype=float)
 
 
-def _cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
+def _ripple_cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
     """Return minimal separate imported CA1 and V1 sorting groups."""
     return {
         role: {
@@ -5158,12 +5135,12 @@ def _cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
     }
 
 
-def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
+def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    inputs = _cross_region_xcorr_selection_inputs()
-    selection = _build_cross_region_xcorr_selection(inputs)
+    inputs = _ripple_cross_region_xcorr_selection_inputs()
+    selection = _build_ripple_cross_region_xcorr_selection(inputs)
     context = {
         "selection": selection,
         "parameters": inputs["parameters"],
@@ -5171,10 +5148,10 @@ def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
         "animal_name": "L14",
         "date": "20240102",
     }
-    loaded = _cross_region_xcorr_loaded_spikes()
+    loaded = _ripple_cross_region_xcorr_loaded_spikes()
     monkeypatch.setattr(
         tables_module,
-        "_load_cross_region_xcorr_context",
+        "_load_ripple_cross_region_xcorr_context",
         lambda **kwargs: context,
     )
     monkeypatch.setattr(
@@ -5182,7 +5159,7 @@ def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
         "_load_ripple_glm_spikes",
         lambda **kwargs: loaded,
     )
-    from v1ca1.spyglass import cross_region_xcorr
+    from v1ca1.spyglass import ripple_cross_region_xcorr
 
     calls = []
 
@@ -5191,7 +5168,7 @@ def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
         artifact_dir = Path(kwargs["destination_path"])
         return {
             "upstream_provenance": (
-                tables_module._cross_region_xcorr_upstream_provenance(
+                tables_module._ripple_cross_region_xcorr_upstream_provenance(
                     selection
                 )
             ),
@@ -5215,15 +5192,15 @@ def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
             "ca1_units_path": artifact_dir / "ca1_units.parquet",
             "v1_units_path": artifact_dir / "v1_units.parquet",
             "summary_path": artifact_dir / "summary.parquet",
-            "result_path": artifact_dir / "cross_region_xcorr.nc",
+            "result_path": artifact_dir / "ripple_cross_region_xcorr.nc",
         }
 
     monkeypatch.setattr(
-        cross_region_xcorr,
-        "register_existing_cross_region_xcorr_artifact",
+        ripple_cross_region_xcorr,
+        "register_existing_ripple_cross_region_xcorr_artifact",
         register_existing,
     )
-    row = _register_existing_cross_region_xcorr_row(
+    row = _register_existing_ripple_cross_region_xcorr_row(
         key=selection,
         source_ca1_unit_filter_path=tmp_path / "ca1.parquet",
         source_v1_unit_filter_path=tmp_path / "v1.parquet",
@@ -5255,11 +5232,11 @@ def test_cross_region_xcorr_registration_uses_separate_imported_resolvers(
     assert row["legacy_artifact_provenance"] == {"source": "legacy"}
 
 
-def test_cross_region_xcorr_resolver_rejects_nonimported_groups() -> None:
-    loaded = _cross_region_xcorr_loaded_spikes()["source"]
+def test_ripple_cross_region_xcorr_resolver_rejects_nonimported_groups() -> None:
+    loaded = _ripple_cross_region_xcorr_loaded_spikes()["source"]
     loaded["member_provenance"][0]["merge_parent"] = "CurationV1"
-    with pytest.raises(ValueError, match="CrossRegionXCorr.*Imported"):
-        _legacy_cross_region_xcorr_identity_resolver(loaded, role="source")
+    with pytest.raises(ValueError, match="RippleCrossRegionXCorr.*Imported"):
+        _legacy_ripple_cross_region_xcorr_identity_resolver(loaded, role="source")
 
 
 def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:
@@ -6104,7 +6081,7 @@ def test_swap_tuning_selection_rejects_mixed_sources_and_conditions() -> None:
     inputs["movement_results"][movement_id]["selected_units_sha256"] = (
         "f" * 64
     )
-    with pytest.raises(ValueError, match="identical persistent units"):
+    with pytest.raises(ValueError, match="same persistent units"):
         _build_swap_tuning_curve_comparison_selection(inputs)
 
 
@@ -6667,7 +6644,9 @@ def test_tuning_similarity_result_hooks_receive_fetched_selection(
     assert calls[1][1]["tuning_curve_parameters_table"] is bundle[
         "tuning_curve_parameters"
     ]
-    assert calls[1][1]["unit_selection_params"] is unit_selection_params
+    assert calls[1][1]["region_sorted_spikes_group_table"] is bundle[
+        "region_sorted_spikes_group"
+    ]
     assert result._insert_calls[0][0][
         "path_specific_place_tuning_similarity_id"
     ] == selection_id
@@ -6692,7 +6671,7 @@ def test_legacy_dpp_encoding_filename_attests_encoded_parameters(
     tmp_path: Path,
 ) -> None:
     parameters = dict(
-        table_specs.MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS
+        table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
     )
     expected = (
         tmp_path
@@ -6772,7 +6751,7 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from v1ca1.spyglass import encoding_comparison
+    from v1ca1.spyglass import dpp_encoding
 
     comparison_id = uuid.uuid5(
         uuid.NAMESPACE_URL,
@@ -6787,26 +6766,26 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
         tmp_path
         / "L14"
         / "20240102"
-        / "dpp_encoding_comparison"
+        / "dpp_encoding"
         / "02_r1"
         / "ca1"
         / str(comparison_id)
-        / "encoding_comparison.parquet"
+        / "dpp_encoding.parquet"
     )
 
     monkeypatch.setitem(
-        _make_dpp_encoding_comparison_row.__globals__,
-        "_load_dpp_encoding_comparison_context",
+        _make_dpp_encoding_row.__globals__,
+        "_load_dpp_encoding_context",
         lambda **kwargs: context,
     )
     monkeypatch.setitem(
-        _make_dpp_encoding_comparison_row.__globals__,
-        "_load_dpp_encoding_comparison_spikes",
+        _make_dpp_encoding_row.__globals__,
+        "_load_dpp_encoding_spikes",
         lambda **kwargs: loaded_spikes,
     )
     monkeypatch.setitem(
-        _make_dpp_encoding_comparison_row.__globals__,
-        "_load_dpp_encoding_comparison_nwb_inputs",
+        _make_dpp_encoding_row.__globals__,
+        "_load_dpp_encoding_nwb_inputs",
         lambda **kwargs: nwb_inputs,
     )
 
@@ -6825,18 +6804,18 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
         return Path(path)
 
     monkeypatch.setattr(
-        encoding_comparison,
-        "compute_selected_dpp_encoding_comparison",
+        dpp_encoding,
+        "compute_selected_dpp_encoding",
         compute,
     )
     monkeypatch.setattr(
-        encoding_comparison,
-        "write_encoding_comparison_artifact",
+        dpp_encoding,
+        "write_dpp_encoding_artifact",
         write,
     )
 
-    row = _make_dpp_encoding_comparison_row(
-        key={"dpp_encoding_comparison_id": comparison_id},
+    row = _make_dpp_encoding_row(
+        key={"dpp_encoding_id": comparison_id},
         parameters_table=object(),
         region_sorted_spikes_group_table=object(),
         movement_firing_rate_table=object(),
@@ -6896,10 +6875,10 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
     assert compute_call["stability_tables_by_trajectory"] is context[
         "stability_tables"
     ]
-    assert compute_call["dpp_encoding_comparison_id"] == comparison_id
+    assert compute_call["dpp_encoding_id"] == comparison_id
     assert calls["write"] == {"table": result_table, "path": expected_path}
     assert row == {
-        "encoding_comparison_path": str(expected_path),
+        "dpp_encoding_path": str(expected_path),
         "n_units_input": 2,
         "n_units_eligible": 2,
         "n_units_valid": 1,
@@ -6914,7 +6893,7 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from v1ca1.spyglass import encoding_comparison
+    from v1ca1.spyglass import dpp_encoding
 
     comparison_id = uuid.uuid5(
         uuid.NAMESPACE_URL,
@@ -6932,11 +6911,11 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         / "analysis"
         / "L14"
         / "20240102"
-        / "dpp_encoding_comparison"
+        / "dpp_encoding"
         / "02_r1"
         / "ca1"
         / str(comparison_id)
-        / "encoding_comparison.parquet"
+        / "dpp_encoding.parquet"
     )
     base_provenance = {
         "source_path": str(source_path),
@@ -6945,13 +6924,13 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
     calls: dict[str, Any] = {}
 
     monkeypatch.setitem(
-        _register_existing_dpp_encoding_comparison_row.__globals__,
-        "_load_dpp_encoding_comparison_context",
+        _register_existing_dpp_encoding_row.__globals__,
+        "_load_dpp_encoding_context",
         lambda **kwargs: context,
     )
     monkeypatch.setitem(
-        _register_existing_dpp_encoding_comparison_row.__globals__,
-        "_load_dpp_encoding_comparison_spikes",
+        _register_existing_dpp_encoding_row.__globals__,
+        "_load_dpp_encoding_spikes",
         lambda **kwargs: loaded_spikes,
     )
 
@@ -6968,14 +6947,14 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         }
 
     monkeypatch.setattr(
-        encoding_comparison,
-        "register_existing_encoding_comparison_artifact",
+        dpp_encoding,
+        "register_existing_dpp_encoding_artifact",
         register,
     )
 
-    row = _register_existing_dpp_encoding_comparison_row(
-        key={"dpp_encoding_comparison_id": comparison_id},
-        encoding_comparison_path=source_path,
+    row = _register_existing_dpp_encoding_row(
+        key={"dpp_encoding_id": comparison_id},
+        dpp_encoding_path=source_path,
         overwrite=False,
         parameters_table=object(),
         region_sorted_spikes_group_table=object(),
@@ -7049,7 +7028,7 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         ),
     }
     assert row == {
-        "encoding_comparison_path": str(destination),
+        "dpp_encoding_path": str(destination),
         "n_units_input": 2,
         "n_units_eligible": 2,
         "n_units_valid": 1,
@@ -7097,10 +7076,10 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             {"stability_path": "old-stability.parquet"},
         ),
         (
-            "dpp_encoding_comparison",
-            "dpp_encoding_comparison_id",
-            "dpp_encoding_comparison_register_existing",
-            {"encoding_comparison_path": "old-encoding.parquet"},
+            "dpp_encoding",
+            "dpp_encoding_id",
+            "dpp_encoding_register_existing",
+            {"dpp_encoding_path": "old-encoding.parquet"},
         ),
         (
             "cv_pca",
@@ -7112,9 +7091,9 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             },
         ),
         (
-            "motor_encoding_comparison",
-            "motor_encoding_comparison_id",
-            "motor_encoding_comparison_register_existing",
+            "motor_encoding",
+            "motor_encoding_id",
+            "motor_encoding_register_existing",
             {
                 "source_nested_cv_path": "old-nested.nc",
                 "source_full_refit_path": "old-full-refit.nc",
@@ -7201,10 +7180,10 @@ def test_register_existing_rejects_overwrite_before_hook(
             {"stability_path": "old-stability.parquet"},
         ),
         (
-            "dpp_encoding_comparison",
-            "dpp_encoding_comparison_id",
-            "dpp_encoding_comparison_register_existing",
-            {"encoding_comparison_path": "old-encoding.parquet"},
+            "dpp_encoding",
+            "dpp_encoding_id",
+            "dpp_encoding_register_existing",
+            {"dpp_encoding_path": "old-encoding.parquet"},
         ),
         (
             "cv_pca",
@@ -7216,9 +7195,9 @@ def test_register_existing_rejects_overwrite_before_hook(
             },
         ),
         (
-            "motor_encoding_comparison",
-            "motor_encoding_comparison_id",
-            "motor_encoding_comparison_register_existing",
+            "motor_encoding",
+            "motor_encoding_id",
+            "motor_encoding_register_existing",
             {
                 "source_nested_cv_path": "old-nested.nc",
                 "source_full_refit_path": "old-full-refit.nc",
@@ -7333,15 +7312,15 @@ def test_register_existing_preflights_duplicate_before_hook(
             (("stability_path", "stability.parquet"),),
         ),
         (
-            "dpp_encoding_comparison",
-            "dpp_encoding_comparison_id",
-            "dpp_encoding_comparison_compute",
-            (("encoding_comparison_path", "encoding_comparison.parquet"),),
+            "dpp_encoding",
+            "dpp_encoding_id",
+            "dpp_encoding_compute",
+            (("dpp_encoding_path", "dpp_encoding.parquet"),),
         ),
         (
-            "motor_encoding_comparison",
-            "motor_encoding_comparison_id",
-            "motor_encoding_comparison_compute",
+            "motor_encoding",
+            "motor_encoding_id",
+            "motor_encoding_compute",
             (
                 ("artifact_manifest_path", "manifest.parquet"),
                 ("selected_units_path", "selected_units.parquet"),
@@ -7438,7 +7417,7 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
                     "n_units_with_valid_comparison": 1,
                 }
             )
-        if table_key == "dpp_encoding_comparison":
+        if table_key == "dpp_encoding":
             row.pop("n_units")
             row.pop("selected_units_sha256")
             row.update(
@@ -7448,7 +7427,7 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
                     "eligible_units_sha256": "c" * 64,
                 }
             )
-        if table_key == "motor_encoding_comparison":
+        if table_key == "motor_encoding":
             row.pop("n_units")
             row.pop("n_valid_units")
             row.update(
@@ -8203,6 +8182,7 @@ def _cv_pca_selection_inputs(tmp_path: Path) -> dict[str, Any]:
         position_name = f"head_{epoch}"
         movement_selections[condition] = {
             "movement_firing_rate_id": movement_ids[condition],
+            "region_sorted_spikes_group_id": group_id,
             "nwb_file_name": nwb_file_name,
             "epoch": epoch,
             "position_series_name": position_name,
@@ -8929,884 +8909,4 @@ def test_registered_nwb_identity_real_fallback_and_failures(
         _registered_nwb_source_identity(
             nwbfile_table=_FakeFallbackNwbfileTable(path, wrong_size),
             nwb_file_name=path.name,
-        )
-
-
-def _ripple_band_source_snapshot(
-    path: Path,
-    *,
-    electrode_ids: tuple[int, ...] = (201, 17),
-) -> dict[str, Any]:
-    """Return one complete metadata-only raw-NWB inspection snapshot."""
-    n_electrodes = len(electrode_ids)
-    return {
-        "source_nwb_file_name": path.name,
-        "source_electrical_series_path": "/acquisition/e-series",
-        "electrode_ids": list(electrode_ids),
-        "gain_to_uv": [2.0 + index for index in range(n_electrodes)],
-        "offset_to_uv": [-0.5 * index for index in range(n_electrodes)],
-        "source_sampling_frequency_hz": 4096.0,
-        "sampling_frequency_provenance": {
-            "method": (
-                "spikeinterface_nwb_first_timestamp_differences_median"
-            ),
-            "samples_for_rate_estimation": 1000,
-            "reference_start_index": 0,
-            "reference_stop_index_exclusive": 1000,
-            "reference_timestamps_sha256": "a" * 64,
-            "estimated_sampling_frequency_hz": 4096.0,
-        },
-        "source_slice_provenance": {
-            "epoch": "08_r4",
-            "data_path": "/acquisition/e-series/data",
-            "timestamps_path": "/acquisition/e-series/timestamps",
-            "electrodes_path": "/acquisition/e-series/electrodes",
-            "interval_table_path": "/intervals/ephys_recording_intervals",
-            "electrodes_table_path": (
-                "/general/extracellular_ephys/electrodes"
-            ),
-            "interval_table_row_index": 7,
-            "source_start_index": 100,
-            "source_stop_index_exclusive": 4196,
-            "epoch_start_time_s": 10.0,
-            "epoch_stop_time_s": 10.999755859375,
-            "electrical_series_object_id": "electrical-series-object",
-            "electrodes_region_object_id": "electrode-region-object",
-            "electrodes_table_object_id": "electrode-table-object",
-            "interval_table_object_id": "interval-table-object",
-            "electrodes_region_sha256": "b" * 64,
-            "electrodes_table_ids_sha256": "c" * 64,
-            "selected_data_column_indices": list(range(n_electrodes)),
-            "selected_electrode_table_rows": list(range(n_electrodes)),
-        },
-    }
-
-
-def _ripple_band_selection_inputs(tmp_path: Path) -> dict[str, Any]:
-    """Return fake catalog rows and raw-file registry for one LFP selection."""
-    path = tmp_path / "L14_20240102_augmented.nwb"
-    path.write_bytes(b"small-managed-nwb-fixture")
-    ripple_row = {
-        "nwb_file_name": path.name,
-        "epoch": "08_r4",
-        "ripple_count": 0,
-        "detector_zscore_threshold": 2.0,
-        "speed_gated": True,
-        "detection_parameters": {
-            "ripple_channels": [201, 17],
-            "notch_filter_enabled": False,
-            "notch_base_freq_hz": 60.0,
-            "notch_harmonics": 10,
-            "notch_quality": 50.0,
-        },
-        "source_object_id": "ripples-object",
-    }
-    return {
-        "key": {
-            "nwb_file_name": path.name,
-            "epoch": "08_r4",
-            "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
-        },
-        "path": path,
-        "nwbfile_table": _FakeNwbfileRegistry(path),
-        "ripple_row": ripple_row,
-        "epoch_row": {
-            "nwb_file_name": path.name,
-            "epoch": "08_r4",
-            "start_time": 10.0,
-            "stop_time": 11.0,
-            "source_object_id": "epoch-object",
-        },
-        "parameters": dict(
-            table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS
-        ),
-        "source_snapshot": _ripple_band_source_snapshot(path),
-    }
-
-
-def _build_ripple_band_selection(inputs: Mapping[str, Any]) -> dict[str, Any]:
-    """Build one RippleBandLFP selection from dependency-free fake rows."""
-    return _ripple_band_lfp_selection_row(
-        key=inputs["key"],
-        ripples_table=_FakeRelation(inputs["ripple_row"]),
-        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
-        parameters_table=_FakeRelation(inputs["parameters"]),
-        nwbfile_table=inputs["nwbfile_table"],
-        source_snapshot=inputs["source_snapshot"],
-    )
-
-
-def test_ripple_band_selection_freezes_order_registry_and_uuid(
-    tmp_path: Path,
-) -> None:
-    """Channel order and the managed raw-file identity participate in UUIDv5."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    first = _build_ripple_band_selection(inputs)
-
-    assert first == _build_ripple_band_selection(inputs)
-    assert first["ripple_band_lfp_id"].version == 5
-    assert first["ordered_electrode_ids"] == [201, 17]
-    assert first["registered_source_contents_hash"] == str(
-        inputs["nwbfile_table"].contents_hash
-    )
-    assert first["registered_source_size_bytes"] == inputs["path"].stat().st_size
-    assert first["input_sample_count"] == 4096
-    assert first["decimation_factor"] == 4
-    assert first["actual_sampling_frequency_hz"] == 1024.0
-    assert first["ripple_band_lfp_output_rule_sha256"] == (
-        ripple_band_lfp.OUTPUT_RULE_SHA256
-    )
-    assert dict(table_specs.RIPPLE_BAND_LFP_OUTPUT_RULE) == dict(
-        ripple_band_lfp.OUTPUT_RULE
-    )
-    assert {
-        "ripple_band_lfp_parameters",
-        "ripple_band_lfp_selection",
-        "ripple_band_lfp",
-    }.issubset(table_specs.TABLE_DEFINITIONS)
-
-    reordered = copy.deepcopy(inputs)
-    reordered["ripple_row"]["detection_parameters"]["ripple_channels"] = [
-        17,
-        201,
-    ]
-    reordered["source_snapshot"]["electrode_ids"] = [17, 201]
-    reordered["source_snapshot"]["gain_to_uv"].reverse()
-    reordered["source_snapshot"]["offset_to_uv"].reverse()
-    reordered["source_snapshot"]["source_slice_provenance"][
-        "selected_data_column_indices"
-    ].reverse()
-    reordered["source_snapshot"]["source_slice_provenance"][
-        "selected_electrode_table_rows"
-    ].reverse()
-    assert _build_ripple_band_selection(reordered)[
-        "ripple_band_lfp_id"
-    ] != first["ripple_band_lfp_id"]
-
-    changed_hash = copy.deepcopy(inputs)
-    changed_hash["nwbfile_table"].contents_hash = uuid.UUID(
-        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    )
-    assert _build_ripple_band_selection(changed_hash)[
-        "ripple_band_lfp_id"
-    ] != first["ripple_band_lfp_id"]
-
-
-@pytest.mark.parametrize(
-    ("channels", "error_type", "message"),
-    [
-        (None, TypeError, "ordered integer sequence"),
-        ([1, 1], ValueError, "unique"),
-        ([1, -2], ValueError, "non-negative"),
-        ([1, 2.5], TypeError, "only integer"),
-    ],
-)
-def test_ripple_band_channels_reject_malformed_ids(
-    channels: object,
-    error_type: type[Exception],
-    message: str,
-) -> None:
-    """No channel_id fallback, sorting, coercion, or duplication is accepted."""
-    row = {"detection_parameters": {"ripple_channels": channels}}
-    with pytest.raises(error_type, match=message):
-        _ordered_ripple_band_lfp_electrode_ids(row)
-
-
-def test_ripple_band_context_rejects_registry_drift_before_inspection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Raw filepath registry drift fails before any HDF5 metadata or data read."""
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    inputs["nwbfile_table"].contents_hash = uuid.UUID(
-        "cccccccc-cccc-cccc-cccc-cccccccccccc"
-    )
-    inspected = []
-    monkeypatch.setitem(
-        _load_ripple_band_lfp_context.__globals__,
-        "_inspect_ripple_band_lfp_source",
-        lambda **kwargs: inspected.append(kwargs),
-    )
-
-    with pytest.raises(ValueError, match="raw NWB identity changed"):
-        _load_ripple_band_lfp_context(
-            key=selection,
-            ripples_table=_FakeRelation(inputs["ripple_row"]),
-            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
-            parameters_table=_FakeRelation(inputs["parameters"]),
-            session_table=_FakeRelation(
-                {
-                    "subject_id": "L14",
-                    "session_start_time": datetime(2024, 1, 2),
-                }
-            ),
-            nwbfile_table=inputs["nwbfile_table"],
-        )
-    assert inspected == []
-
-    inputs["nwbfile_table"].contents_hash = uuid.UUID(
-        selection["registered_source_contents_hash"]
-    )
-    inputs["nwbfile_table"].registered_size += 1
-    with pytest.raises(ValueError, match="byte size differs"):
-        _load_ripple_band_lfp_context(
-            key=selection,
-            ripples_table=_FakeRelation(inputs["ripple_row"]),
-            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
-            parameters_table=_FakeRelation(inputs["parameters"]),
-            session_table=_FakeRelation(
-                {
-                    "subject_id": "L14",
-                    "session_start_time": datetime(2024, 1, 2),
-                }
-            ),
-            nwbfile_table=inputs["nwbfile_table"],
-        )
-    assert inspected == []
-
-
-def test_ripple_band_context_rejects_metadata_drift_before_epoch_load(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A changed HDF5 object snapshot fails before selected arrays are read."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    changed = copy.deepcopy(inputs["source_snapshot"])
-    changed["source_slice_provenance"]["electrical_series_object_id"] = (
-        "changed-object"
-    )
-    monkeypatch.setitem(
-        _load_ripple_band_lfp_context.__globals__,
-        "_inspect_ripple_band_lfp_source",
-        lambda **_kwargs: changed,
-    )
-    loads = []
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "load_selected_ripple_band_lfp_nwb_inputs",
-        lambda **kwargs: loads.append(kwargs),
-    )
-
-    with pytest.raises(ValueError, match="selection changed after insertion"):
-        _load_ripple_band_lfp_context(
-            key=selection,
-            ripples_table=_FakeRelation(inputs["ripple_row"]),
-            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
-            parameters_table=_FakeRelation(inputs["parameters"]),
-            session_table=_FakeRelation(
-                {
-                    "subject_id": "L14",
-                    "session_start_time": datetime(2024, 1, 2),
-                }
-            ),
-            nwbfile_table=inputs["nwbfile_table"],
-        )
-    assert loads == []
-
-
-def test_ripple_band_make_passes_exact_selected_epoch_and_columns(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The table adapter forwards only the frozen epoch and ordered columns."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    raw_timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
-    raw_traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
-    context = {
-        "selection": selection,
-        "parameters": inputs["parameters"],
-        "animal_name": "L14",
-        "date": "20240102",
-        "ripple_row": inputs["ripple_row"],
-        "nwb_inputs": {
-            **inputs["source_snapshot"],
-            "raw_timestamps": raw_timestamps,
-            "raw_traces": raw_traces,
-        },
-    }
-    monkeypatch.setitem(
-        _make_ripple_band_lfp_row.__globals__,
-        "_load_ripple_band_lfp_context",
-        lambda **_kwargs: context,
-    )
-    captured = []
-    sentinel = {"computed": True}
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "compute_selected_ripple_band_lfp",
-        lambda **kwargs: captured.append(kwargs) or sentinel,
-    )
-    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        artifact_root=tmp_path / "analysis",
-    )
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "get_ripple_band_lfp_artifact_paths",
-        lambda **_kwargs: paths,
-    )
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "write_ripple_band_lfp_artifact",
-        lambda result, path: paths,
-    )
-    monkeypatch.setitem(
-        _make_ripple_band_lfp_row.__globals__,
-        "_ripple_band_lfp_result_row",
-        lambda result, written, created_artifact_paths: {
-            "sentinel": result,
-            "_created_artifact_paths": list(created_artifact_paths),
-        },
-    )
-
-    row = _make_ripple_band_lfp_row(
-        key=selection,
-        parameters_table=object(),
-        ripples_table=object(),
-        epoch_intervals_table=object(),
-        session_table=object(),
-        nwbfile_table=object(),
-        artifact_root=tmp_path / "analysis",
-    )
-
-    call = captured[0]
-    assert call["epoch"] == "08_r4"
-    assert call["electrode_ids"] == [201, 17]
-    assert call["raw_timestamps"] is raw_timestamps
-    assert call["raw_traces"] is raw_traces
-    assert call["upstream_provenance"][
-        "registered_source_contents_hash"
-    ] == selection["registered_source_contents_hash"]
-    assert call["artifact_origin"] == "computed"
-    assert row["sentinel"] is sentinel
-    assert row["_created_artifact_paths"] == [str(paths["artifact_dir"])]
-
-
-def test_ripple_band_make_cleans_new_bundle_after_adapter_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Post-write validation failure removes only the new UUID bundle."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    context = {
-        "selection": selection,
-        "parameters": inputs["parameters"],
-        "animal_name": "L14",
-        "date": "20240102",
-        "ripple_row": inputs["ripple_row"],
-        "nwb_inputs": {
-            **inputs["source_snapshot"],
-            "raw_timestamps": np.arange(4096, dtype=float) / 4096.0,
-            "raw_traces": np.zeros((4096, 2), dtype=np.int16),
-        },
-    }
-    monkeypatch.setitem(
-        _make_ripple_band_lfp_row.__globals__,
-        "_load_ripple_band_lfp_context",
-        lambda **_kwargs: context,
-    )
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "compute_selected_ripple_band_lfp",
-        lambda **_kwargs: {"computed": True},
-    )
-    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        artifact_root=tmp_path / "analysis",
-    )
-    artifact_dir = Path(paths["artifact_dir"])
-    artifact_dir.parent.mkdir(parents=True)
-    retained = artifact_dir.parent / "retained.txt"
-    retained.write_bytes(b"keep")
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "get_ripple_band_lfp_artifact_paths",
-        lambda **_kwargs: paths,
-    )
-
-    def write_bundle(_result, path):
-        assert Path(path) == artifact_dir
-        artifact_dir.mkdir()
-        (artifact_dir / "lfp.nc").write_bytes(b"new")
-        return paths
-
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "write_ripple_band_lfp_artifact",
-        write_bundle,
-    )
-
-    def fail_adapter(*_args, **_kwargs):
-        raise ValueError("adapter validation failed")
-
-    monkeypatch.setitem(
-        _make_ripple_band_lfp_row.__globals__,
-        "_ripple_band_lfp_result_row",
-        fail_adapter,
-    )
-
-    with pytest.raises(ValueError, match="adapter validation failed"):
-        _make_ripple_band_lfp_row(
-            key=selection,
-            parameters_table=object(),
-            ripples_table=object(),
-            epoch_intervals_table=object(),
-            session_table=object(),
-            nwbfile_table=object(),
-            artifact_root=tmp_path / "analysis",
-        )
-    assert not artifact_dir.exists()
-    assert retained.read_bytes() == b"keep"
-
-
-def test_ripple_band_table_terminal_insert_and_failed_insert_cleanup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Zero-ripple epochs still insert LFP; failed inserts remove only new UUID."""
-    result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
-
-    def compute(**_kwargs):
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        for filename in ("manifest.parquet", "channel_qc.parquet", "lfp.nc"):
-            (artifact_dir / filename).write_bytes(b"new")
-        return {
-            "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-            "channel_qc_path": str(artifact_dir / "channel_qc.parquet"),
-            "ripple_band_lfp_path": str(artifact_dir / "lfp.nc"),
-            "bundle_schema_version": "1",
-            "n_channels": 2,
-            "input_sample_count": 0,
-            "output_sample_count": 0,
-            "source_sampling_frequency_hz": 4096.0,
-            "actual_sampling_frequency_hz": 1024.0,
-            "decimation_factor": 4,
-            "raw_timestamps_sha256": "a" * 64,
-            "raw_traces_sha256": "b" * 64,
-            "analysis_status": "empty_input",
-            "legacy_artifact_provenance": None,
-            "_created_artifact_paths": [str(artifact_dir)],
-        }
-
-    monkeypatch.setitem(
-        _construct_tables.__globals__,
-        "_fetch1_dict",
-        lambda table, key: {"ripple_band_lfp_id": result_id},
-    )
-    bundle, _schemas, _params = _fake_bundle(
-        runtime_hooks={"ripple_band_lfp_compute": compute}
-    )
-    result = bundle["ripple_band_lfp"]
-    result().make({"ripple_band_lfp_id": result_id})
-    inserted, insert_kwargs = result._insert_calls[0]
-    assert insert_kwargs == {}
-    assert inserted["analysis_status"] == "empty_input"
-    assert inserted["artifact_origin"] == "computed"
-
-    def fail_insert(cls, row, **kwargs):
-        raise RuntimeError("database insert failed")
-
-    result.insert1 = classmethod(fail_insert)
-    with pytest.raises(RuntimeError, match="database insert failed"):
-        result().make({"ripple_band_lfp_id": result_id})
-    assert not artifact_dir.exists()
-
-
-def test_ripple_band_registration_recomputes_exact_selected_inputs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy registration receives the same frozen raw slice as computation."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    raw_timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
-    raw_traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
-    context = {
-        "selection": selection,
-        "parameters": inputs["parameters"],
-        "animal_name": "L14",
-        "date": "20240102",
-        "ripple_row": inputs["ripple_row"],
-        "nwb_inputs": {
-            **inputs["source_snapshot"],
-            "raw_timestamps": raw_timestamps,
-            "raw_traces": raw_traces,
-        },
-    }
-    monkeypatch.setitem(
-        _register_existing_ripple_band_lfp_row.__globals__,
-        "_load_ripple_band_lfp_context",
-        lambda **_kwargs: context,
-    )
-    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        artifact_root=tmp_path / "analysis",
-    )
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "get_ripple_band_lfp_artifact_paths",
-        lambda **_kwargs: paths,
-    )
-    captured = []
-    sentinel = {"registered": True}
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "register_existing_ripple_band_lfp_artifact",
-        lambda **kwargs: captured.append(kwargs) or sentinel,
-    )
-    monkeypatch.setitem(
-        _register_existing_ripple_band_lfp_row.__globals__,
-        "_ripple_band_lfp_result_row",
-        lambda result, written, created_artifact_paths: {
-            "sentinel": result,
-            "_created_artifact_paths": list(created_artifact_paths),
-        },
-    )
-    legacy_result = tmp_path / "08_r4_ripple_channels_lfp.nc"
-    legacy_log = tmp_path / "run_log.json"
-
-    row = _register_existing_ripple_band_lfp_row(
-        key=selection,
-        legacy_result_path=legacy_result,
-        legacy_run_log_path=legacy_log,
-        parameters_table=object(),
-        ripples_table=object(),
-        epoch_intervals_table=object(),
-        session_table=object(),
-        nwbfile_table=object(),
-        artifact_root=tmp_path / "analysis",
-    )
-
-    call = captured[0]
-    assert call["source_result_path"] == legacy_result
-    assert call["source_run_log_path"] == legacy_log
-    assert call["destination_path"] == paths["artifact_dir"]
-    assert call["overwrite"] is False
-    assert call["electrode_ids"] == [201, 17]
-    assert call["raw_timestamps"] is raw_timestamps
-    assert call["raw_traces"] is raw_traces
-    assert call["upstream_provenance"][
-        "registered_source_contents_hash"
-    ] == selection["registered_source_contents_hash"]
-    assert row["sentinel"] is sentinel
-
-
-def test_ripple_band_registration_cleans_new_bundle_after_adapter_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Registration adapter failure removes only its new UUID bundle."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    context = {
-        "selection": selection,
-        "parameters": inputs["parameters"],
-        "animal_name": "L14",
-        "date": "20240102",
-        "ripple_row": inputs["ripple_row"],
-        "nwb_inputs": {
-            **inputs["source_snapshot"],
-            "raw_timestamps": np.arange(4096, dtype=float) / 4096.0,
-            "raw_traces": np.zeros((4096, 2), dtype=np.int16),
-        },
-    }
-    monkeypatch.setitem(
-        _register_existing_ripple_band_lfp_row.__globals__,
-        "_load_ripple_band_lfp_context",
-        lambda **_kwargs: context,
-    )
-    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        artifact_root=tmp_path / "analysis",
-    )
-    artifact_dir = Path(paths["artifact_dir"])
-    artifact_dir.parent.mkdir(parents=True)
-    retained = artifact_dir.parent / "retained.txt"
-    retained.write_bytes(b"keep")
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "get_ripple_band_lfp_artifact_paths",
-        lambda **_kwargs: paths,
-    )
-
-    def register_bundle(**kwargs):
-        assert Path(kwargs["destination_path"]) == artifact_dir
-        artifact_dir.mkdir()
-        (artifact_dir / "lfp.nc").write_bytes(b"new")
-        return {"registered": True}
-
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "register_existing_ripple_band_lfp_artifact",
-        register_bundle,
-    )
-
-    def fail_adapter(*_args, **_kwargs):
-        raise ValueError("adapter validation failed")
-
-    monkeypatch.setitem(
-        _register_existing_ripple_band_lfp_row.__globals__,
-        "_ripple_band_lfp_result_row",
-        fail_adapter,
-    )
-
-    with pytest.raises(ValueError, match="adapter validation failed"):
-        _register_existing_ripple_band_lfp_row(
-            key=selection,
-            legacy_result_path=tmp_path / "legacy.nc",
-            legacy_run_log_path=tmp_path / "run_log.json",
-            parameters_table=object(),
-            ripples_table=object(),
-            epoch_intervals_table=object(),
-            session_table=object(),
-            nwbfile_table=object(),
-            artifact_root=tmp_path / "analysis",
-        )
-    assert not artifact_dir.exists()
-    assert retained.read_bytes() == b"keep"
-
-
-def test_ripple_band_table_registration_is_immutable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Registration preflights immutability and direct-inserts audited rows."""
-    result_id = uuid.uuid4()
-    calls = []
-
-    def register(**kwargs):
-        calls.append(kwargs)
-        return {
-            "artifact_manifest_path": str(tmp_path / "manifest.parquet"),
-            "channel_qc_path": str(tmp_path / "channel_qc.parquet"),
-            "ripple_band_lfp_path": str(tmp_path / "ripple_band_lfp.nc"),
-            "bundle_schema_version": "1",
-            "n_channels": 2,
-            "input_sample_count": 4096,
-            "output_sample_count": 1024,
-            "source_sampling_frequency_hz": 4096.0,
-            "actual_sampling_frequency_hz": 1024.0,
-            "decimation_factor": 4,
-            "raw_timestamps_sha256": "a" * 64,
-            "raw_traces_sha256": "b" * 64,
-            "analysis_status": "valid",
-            "legacy_artifact_provenance": {"verification": "exact"},
-            "_created_artifact_paths": [],
-        }
-
-    monkeypatch.setitem(
-        _construct_tables.__globals__,
-        "_fetch1_dict",
-        lambda table, key: {"ripple_band_lfp_id": result_id},
-    )
-    bundle, _schemas, _params = _fake_bundle(
-        runtime_hooks={"ripple_band_lfp_register_existing": register}
-    )
-    result = bundle["ripple_band_lfp"]
-    with pytest.raises(ValueError, match="immutable"):
-        result.register_existing(
-            {"ripple_band_lfp_id": result_id},
-            legacy_result_path=tmp_path / "legacy.nc",
-            overwrite=True,
-        )
-    assert calls == []
-
-    row = result.register_existing(
-        {"ripple_band_lfp_id": result_id},
-        legacy_result_path=tmp_path / "legacy.nc",
-        legacy_run_log_path=tmp_path / "run_log.json",
-    )
-    inserted, kwargs = result._insert_calls[0]
-    assert row == inserted
-    assert kwargs == {"skip_duplicates": False, "allow_direct_insert": True}
-    assert inserted["artifact_origin"] == "registered_existing"
-    assert inserted["legacy_artifact_provenance"] == {
-        "verification": "exact"
-    }
-    assert calls[0]["legacy_result_path"] == tmp_path / "legacy.nc"
-    assert calls[0]["legacy_run_log_path"] == tmp_path / "run_log.json"
-
-
-def test_ripple_band_result_loader_validates_datajoint_link(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The table loader delegates checksums and complete link validation."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
-    result_row = {
-        "ripple_band_lfp_id": result_id,
-        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-    }
-    selection = {
-        "ripple_band_lfp_id": result_id,
-        "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
-        "nwb_file_name": "L14_20240102_augmented.nwb",
-        "epoch": "08_r4",
-    }
-    parameters = dict(table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS)
-    loaded_bundle = {"loaded": True}
-    bundle, _schemas, _params = _fake_bundle()
-    result = bundle["ripple_band_lfp"]
-
-    def fetch(table, key):
-        if table is result:
-            return result_row
-        if table is bundle["ripple_band_lfp_selection"]:
-            return selection
-        if table is bundle["ripple_band_lfp_parameters"]:
-            return parameters
-        raise AssertionError(f"Unexpected table {table!r}")
-
-    monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
-    monkeypatch.setattr(
-        ripple_band_lfp,
-        "load_ripple_band_lfp_artifact",
-        lambda path: loaded_bundle,
-    )
-    validations = []
-    monkeypatch.setitem(
-        _construct_tables.__globals__,
-        "_validate_ripple_band_lfp_artifact_link",
-        lambda **kwargs: validations.append(kwargs),
-    )
-
-    loaded = result.load_ripple_band_lfp_bundle(
-        {"ripple_band_lfp_id": result_id}
-    )
-    assert loaded is loaded_bundle
-    assert validations[0]["bundle"] is loaded_bundle
-    assert validations[0]["result_row"] == result_row
-    assert validations[0]["selection_row"] == selection
-    assert validations[0]["parameters_row"] == parameters
-
-
-def test_ripple_band_artifact_link_rejects_provenance_drift(
-    tmp_path: Path,
-) -> None:
-    """Canonical result metadata and embedded selection provenance are linked."""
-    from v1ca1.spyglass import ripple_band_lfp
-
-    inputs = _ripple_band_selection_inputs(tmp_path)
-    selection = _build_ripple_band_selection(inputs)
-    timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
-    traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
-    result = ripple_band_lfp.compute_selected_ripple_band_lfp(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        source_nwb_file_name=inputs["path"].name,
-        source_electrical_series_path="/acquisition/e-series",
-        raw_timestamps=timestamps,
-        raw_traces=traces,
-        electrode_ids=selection["ordered_electrode_ids"],
-        gain_to_uv=selection["ordered_gain_to_uv"],
-        offset_to_uv=selection["ordered_offset_to_uv"],
-        source_sampling_frequency_hz=4096.0,
-        sampling_frequency_provenance=selection[
-            "sampling_frequency_provenance"
-        ],
-        source_slice_provenance=selection["source_slice_provenance"],
-        parameter_name=selection["ripple_band_lfp_param_name"],
-        parameter_sha256=selection[
-            "ripple_band_lfp_parameters_sha256"
-        ],
-        output_rule_sha256=selection[
-            "ripple_band_lfp_output_rule_sha256"
-        ],
-        upstream_provenance=(
-            tables_module._ripple_band_lfp_upstream_provenance(selection)
-        ),
-        **{
-            field_name: inputs["parameters"][field_name]
-            for field_name in (
-                "lowcut_hz",
-                "highcut_hz",
-                "filter_order",
-                "target_sampling_frequency_hz",
-                "enable_notch_filter",
-                "notch_base_freq_hz",
-                "notch_harmonics",
-                "notch_quality",
-            )
-        },
-    )
-    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        epoch="08_r4",
-        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
-        artifact_root=tmp_path / "analysis",
-    )
-    result_row = {
-        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
-        "channel_qc_path": str(paths["channel_qc_path"]),
-        "ripple_band_lfp_path": str(paths["result_path"]),
-        "bundle_schema_version": ripple_band_lfp.BUNDLE_SCHEMA_VERSION,
-        "n_channels": 2,
-        "input_sample_count": result["input_sample_count"],
-        "output_sample_count": result["output_sample_count"],
-        "source_sampling_frequency_hz": 4096.0,
-        "actual_sampling_frequency_hz": 1024.0,
-        "decimation_factor": 4,
-        "raw_timestamps_sha256": result["raw_timestamps_sha256"],
-        "raw_traces_sha256": result["raw_traces_sha256"],
-        "analysis_status": "valid",
-        "artifact_origin": "computed",
-        "legacy_artifact_provenance": None,
-    }
-    _validate_ripple_band_lfp_artifact_link(
-        bundle=result,
-        result_row=result_row,
-        selection_row=selection,
-        parameters_row=inputs["parameters"],
-        animal_name="L14",
-        date="20240102",
-    )
-
-    changed = copy.deepcopy(result)
-    changed["upstream_provenance"] = dict(changed["upstream_provenance"])
-    changed["upstream_provenance"][
-        "registered_source_contents_hash"
-    ] = "dddddddd-dddd-dddd-dddd-dddddddddddd"
-    with pytest.raises(ValueError, match="upstream provenance"):
-        _validate_ripple_band_lfp_artifact_link(
-            bundle=changed,
-            result_row=result_row,
-            selection_row=selection,
-            parameters_row=inputs["parameters"],
-            animal_name="L14",
-            date="20240102",
         )

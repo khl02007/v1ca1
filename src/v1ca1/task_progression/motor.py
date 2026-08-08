@@ -2370,6 +2370,7 @@ def run_nested_lap_cv(
     motor_zscore_eps: float,
     motor_spline_k: int,
     motor_spline_order: int,
+    allowed_unit_mask: np.ndarray | None = None,
     print_prefix: str = "",
     isolate_unit_failures: bool = False,
 ) -> dict[str, Any]:
@@ -2388,6 +2389,14 @@ def run_nested_lap_cv(
     n_spatial = len(position_basis_configs)
     n_ridges = len(ridge_values)
     n_units = int(data["response"].shape[1])
+    if allowed_unit_mask is None:
+        allowed_unit_mask = np.ones(n_units, dtype=bool)
+    else:
+        allowed_unit_mask = np.asarray(allowed_unit_mask, dtype=bool)
+        if allowed_unit_mask.shape != (n_units,):
+            raise ValueError(
+                "allowed_unit_mask must contain one value per response unit."
+            )
 
     outer_ll_sum = np.full((n_outer, n_models, n_units), np.nan, dtype=float)
     outer_null_ll_sum = np.full((n_outer, n_units), np.nan, dtype=float)
@@ -2428,6 +2437,7 @@ def run_nested_lap_cv(
             train_rows,
             threshold_hz=min_firing_rate_hz,
         )
+        unit_mask &= allowed_unit_mask
         n_selected = int(np.sum(unit_mask))
         print(
             f"{print_prefix}Outer fold {outer_index + 1}/{n_outer}: "

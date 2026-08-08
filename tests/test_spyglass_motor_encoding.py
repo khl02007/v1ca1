@@ -17,8 +17,8 @@ from v1ca1.spyglass import motor_encoding as motor
 from v1ca1.spyglass.movement import empty_movement_firing_rate_table
 from v1ca1.spyglass.selection import provenance_sha256
 from v1ca1.spyglass.table_specs import (
-    MOTOR_ENCODING_COMPARISON_MODEL_SPEC,
-    MOTOR_ENCODING_COMPARISON_OUTPUT_RULE,
+    MOTOR_ENCODING_MODEL_SPEC,
+    MOTOR_ENCODING_OUTPUT_RULE,
 )
 
 
@@ -85,7 +85,8 @@ def _graphs(*, full_length_scale: float = 1.0) -> dict[str, dict[str, object]]:
 
 def _parameter_bundle(name: str = "test") -> dict[str, object]:
     effective = motor.validate_motor_encoding_parameters(
-        minimum_movement_firing_rate_hz=0.5
+        minimum_movement_firing_rate_hz=0.5,
+        minimum_stability_correlation=0.5,
     )
     return motor._parameter_metadata(
         parameter_name=name,
@@ -98,7 +99,7 @@ def _parameter_bundle(name: str = "test") -> dict[str, object]:
 
 def _metadata() -> dict[str, str]:
     return motor._common_metadata(
-        motor_encoding_comparison_id=uuid.uuid4(),
+        motor_encoding_id=uuid.uuid4(),
         animal_name="L14",
         date="20240611",
         region="v1",
@@ -123,6 +124,37 @@ def _identity() -> pd.DataFrame:
             },
         ]
     )
+
+
+def _stability_tables(
+    correlations: tuple[float, float] = (0.7, 0.2),
+) -> dict[str, pd.DataFrame]:
+    """Return four aligned path-stability tables for two test units."""
+    return {
+        trajectory_type: pd.DataFrame.from_records(
+            [
+                {
+                    "spikesorting_merge_id": "merge-a",
+                    "unit_id": unit_id,
+                    "stable_unit_id": f"merge-a:{unit_id}",
+                    "group_unit_id": group_unit_id,
+                    "animal_name": "L14",
+                    "date": "20240611",
+                    "region": "v1",
+                    "epoch": "08_r4",
+                    "trajectory_type": trajectory_type,
+                    "firing_rate_hz": firing_rate_hz,
+                    "stability_correlation": correlation,
+                    "stability_status": "valid",
+                }
+                for unit_id, group_unit_id, firing_rate_hz, correlation in (
+                    ("11", 0, 1.0, correlations[0]),
+                    ("12", 1, 0.1, correlations[1]),
+                )
+            ]
+        )
+        for trajectory_type in TRAJECTORY_TYPES
+    }
 
 
 def _raw_datasets() -> tuple[xr.Dataset, xr.Dataset]:
@@ -186,10 +218,19 @@ def _valid_result() -> dict[str, object]:
     parameters = _parameter_bundle()
     identity = _identity()
     nested, full = _raw_datasets()
-    selected = motor._build_selected_units_table(
+    eligibility = motor._build_unit_eligibility_table(
         identity=identity,
         movement_firing_rates_hz=np.asarray([1.0, 0.1]),
+        stability_tables_by_trajectory=_stability_tables(),
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="08_r4",
         minimum_movement_firing_rate_hz=0.5,
+        minimum_stability_correlation=0.5,
+    )
+    selected = motor._build_selected_units_table(
+        eligibility=eligibility,
         nested_cv=nested,
         full_refit=full,
     )
@@ -270,17 +311,17 @@ def _movement_table() -> pd.DataFrame:
 
 
 def test_model_spec_and_parameter_digest_match_table_contract() -> None:
-    assert dict(motor.MODEL_SPEC) == dict(MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+    assert dict(motor.MODEL_SPEC) == dict(MOTOR_ENCODING_MODEL_SPEC)
     assert motor.MODEL_SPEC_SHA256 == provenance_sha256(
-        dict(MOTOR_ENCODING_COMPARISON_MODEL_SPEC)
+        dict(MOTOR_ENCODING_MODEL_SPEC)
     )
-    assert dict(motor.OUTPUT_RULE) == dict(MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+    assert dict(motor.OUTPUT_RULE) == dict(MOTOR_ENCODING_OUTPUT_RULE)
     assert motor.OUTPUT_RULE_SHA256 == provenance_sha256(
-        dict(MOTOR_ENCODING_COMPARISON_OUTPUT_RULE)
+        dict(MOTOR_ENCODING_OUTPUT_RULE)
     )
     parameters = _parameter_bundle("preset")
     raw = {
-        "motor_encoding_comparison_param_name": "preset",
+        "motor_encoding_param_name": "preset",
         **{
             key: value
             for key, value in parameters.items()
@@ -344,8 +385,8 @@ def test_write_load_round_trip_and_checksum(tmp_path: Path) -> None:
         date=result["metadata"]["date"],
         epoch=result["metadata"]["epoch"],
         region=result["metadata"]["region"],
-        motor_encoding_comparison_id=result["metadata"][
-            "motor_encoding_comparison_id"
+        motor_encoding_id=result["metadata"][
+            "motor_encoding_id"
         ],
         artifact_root=tmp_path,
     )
@@ -369,12 +410,12 @@ def test_write_load_round_trip_and_checksum(tmp_path: Path) -> None:
 
 
 def test_compute_no_units_returns_terminal_bundle() -> None:
-    result = motor.compute_motor_encoding_comparison(
+    result = motor.compute_motor_encoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="08_r4",
-        motor_encoding_comparison_id=uuid.uuid4(),
+        motor_encoding_id=uuid.uuid4(),
         spikes={},
         stable_unit_ids=[],
         primary_position=_Position(),
@@ -385,7 +426,11 @@ def test_compute_no_units_returns_terminal_bundle() -> None:
         graph_inputs_by_configuration={},
         movement_intervals=_Intervals(0.0),
         movement_firing_rate_table=empty_movement_firing_rate_table(),
+        stability_tables_by_trajectory={
+            name: pd.DataFrame() for name in TRAJECTORY_TYPES
+        },
         minimum_movement_firing_rate_hz=0.5,
+        minimum_stability_correlation=0.5,
     )
     assert result["analysis_status"] == "no_units"
     assert result["n_units_input"] == 0
@@ -449,12 +494,12 @@ def test_compute_orchestrates_existing_motor_helpers(monkeypatch) -> None:
             },
         },
     )
-    result = motor.compute_motor_encoding_comparison(
+    result = motor.compute_motor_encoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="08_r4",
-        motor_encoding_comparison_id=uuid.uuid4(),
+        motor_encoding_id=uuid.uuid4(),
         spikes={0: object(), 1: object()},
         stable_unit_ids=[
             {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
@@ -468,7 +513,9 @@ def test_compute_orchestrates_existing_motor_helpers(monkeypatch) -> None:
         graph_inputs_by_configuration=_graphs(),
         movement_intervals=_Intervals(10.0),
         movement_firing_rate_table=_movement_table(),
+        stability_tables_by_trajectory=_stability_tables(),
         minimum_movement_firing_rate_hz=0.5,
+        minimum_stability_correlation=0.5,
         speed_smoothing_sigma_s=0.2,
     )
     assert result["analysis_status"] == "valid"
@@ -476,6 +523,7 @@ def test_compute_orchestrates_existing_motor_helpers(monkeypatch) -> None:
     assert result["n_units_eligible"] == 1
     assert calls["prepare"]["speed_smoothing_sigma_s"] == pytest.approx(0.2)
     assert calls["nested"]["min_firing_rate_hz"] == pytest.approx(0.5)
+    assert calls["nested"]["allowed_unit_mask"].tolist() == [True, False]
     assert calls["hyper"]["unit_mask"].tolist() == [True, False]
     assert calls["nested"]["isolate_unit_failures"] is True
     assert calls["hyper"]["isolate_unit_failures"] is True

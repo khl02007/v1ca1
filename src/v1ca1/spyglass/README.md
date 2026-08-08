@@ -16,22 +16,22 @@ register artifacts, or write to NWB.
   demand.
 - `ingest.py` explicitly inserts NWB object pointers and small metadata into
   the custom source tables after standard Spyglass session ingestion.
-- `spikes.py` is the shared adapter for `SortedSpikesGroup`,
-  `UnitSelectionParams`, and `SpikeSortingOutput` parents. It loads canonical
-  ephys-referenced seconds and provides Pynapple and SpikeInterface adapters.
+- `spikes.py` is the adapter used by `RegionSortedSpikesGroup` to resolve
+  standard `SortedSpikesGroup`, `UnitSelectionParams`, and
+  `SpikeSortingOutput` parents. It loads canonical ephys-referenced seconds
+  and provides Pynapple and SpikeInterface adapters.
 - `region_sorted_spikes.py` freezes a region-specific logical view of one
   standard sorting group without materializing units or spike times.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
 - `movement.py`, `epoch_motor_behavior.py`, `ripple_modulation.py`,
-  `ripple_band_lfp.py`,
   `cv_pca.py`, `path_specific_place.py`, `dpp.py`,
-  `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
-  `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
-  `dark_light_glm.py`, `swap_glm.py`, and `swap_tuning.py` provide
-  database-free computation and atomic
-  artifact writing.
-- `cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
+  `tuning_similarity.py`, `stability.py`, `dpp_encoding.py`,
+  `path_progression_decoding.py`, `path_specific_decoding.py`,
+  `motor_encoding.py`, `dark_light_glm.py`, `swap_glm.py`, and
+  `swap_tuning.py` provide database-free computation and atomic artifact
+  writing.
+- `ripple_cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
   cross-correlation computation and strict four-artifact legacy registration.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
@@ -40,14 +40,16 @@ register artifacts, or write to NWB.
 
 ## NWB source catalog
 
-The source tables are `EpochIntervals`, `TrajectoryIntervals`, `Ripples`,
+The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleInterval`,
 `Position`, `WTrackGraph`, and `SpikeSortingFigurl`. They store object paths,
 object IDs, row selectors, and small metadata rather than duplicating NWB
 arrays. Source loaders reopen the registered NWB read-only.
-`TrajectoryIntervals`, `Ripples`, and `Position` depend directly on
+`TrajectoryIntervals`, `RippleInterval`, and `Position` depend directly on
 `EpochIntervals`, which enforces an audited parent for every epoch-specific
 source row. A provenance-selected ripple epoch is inserted even when its NWB
 interval table has no events; that row has `ripple_count=0`.
+`RippleInterval` indexes the existing NWB `/intervals/ripples` source; the
+project table name does not rename or rewrite that NWB object.
 
 `Position` is keyed by `epoch` and the actual `position_series_name`, with a
 descriptive `position_role`. The current augmented files catalog both
@@ -63,11 +65,12 @@ the catalog without inserting it.
 
 ## Units and immutable selections
 
-All analyses use one shared `SortedSpikesGroup` adapter. It resolves every
-group member through `SpikeSortingOutput`, supports imported and curated merge
-parents, applies the associated `UnitSelectionParams` include/exclude labels,
-checks session and region provenance, and combines canonical spike times in
-ephys-referenced seconds. Persistent unit identity is
+`RegionSortedSpikesGroup` is the sole direct spike source for project analyses.
+Its shared adapter resolves every standard sorting-group member through
+`SpikeSortingOutput`, supports imported and curated merge parents, applies the
+associated `UnitSelectionParams` include/exclude labels, checks session and
+region provenance, and combines canonical spike times in ephys-referenced
+seconds. Persistent unit identity is
 `(spikesorting_merge_id, unit_id)`; consecutive Pynapple `TsGroup` keys are
 temporary computation keys only. There is no project table with one database
 row per unit.
@@ -81,13 +84,14 @@ explicit insertion operation and skips requested regions with no units;
 `load_spikes()` reloads the standard sources and rejects any changed snapshot.
 Importing the package or calling `activate()` does not register regional views.
 
-An explicit `insert_selection()` snapshots the sorting-group membership,
-unit-label filters, and a SHA-256 digest of every selected parameter value. The
-natural source/parameter key plus that snapshot is canonicalized into a
+Spike-using selections reference the immutable regional-group UUID rather than
+selecting the standard sorting tables again. An explicit `insert_selection()`
+also records a SHA-256 digest of every selected parameter value. The natural
+source/parameter key plus those immutable references is canonicalized into a
 table-specific UUIDv5. Repeating an identical selection therefore produces the
-same ID, while changing membership, filters, or parameter values produces a
-new one. Computation revalidates both snapshots before loading data, so editing
-a Manual parameter row after selection is rejected rather than silently
+same ID, while changing units or parameter values produces a new one.
+Computation revalidates the regional and parameter snapshots before loading
+data, so editing an upstream Manual row is rejected rather than silently
 changing an existing UUID's meaning.
 
 ## Dependency overview
@@ -108,21 +112,21 @@ flowchart LR
     Session --> SpikeSortingFigurl
     EpochIntervals --> Position
     EpochIntervals --> TrajectoryIntervals
-    EpochIntervals --> Ripples
+    EpochIntervals --> RippleInterval
     SortedSpikesGroup["Spyglass SortedSpikesGroup"] --> RegionSortedSpikesGroup
+    RegionSortedSpikesGroup --> MovementFiringRate
     Position --> MovementFiringRate
     MovementParameters --> MovementFiringRate
-    SortedSpikesGroup --> MovementFiringRate
     Nwbfile["Spyglass Nwbfile"] --> AnalysisNwbfile
 ```
 
 `WTrackGraph` and `SpikeSortingFigurl` are session-level catalog tables;
-`Position`, `TrajectoryIntervals`, and `Ripples` are epoch-level children.
-`MovementFiringRate` directly selects standard `SortedSpikesGroup`, whereas
-analyses that need an explicit regional view select
-`RegionSortedSpikesGroup`. `AnalysisNwbfile` currently has no analysis-table
-children, and `SpikeSortingFigurl` is provenance/display metadata rather than
-an analysis input.
+`Position`, `TrajectoryIntervals`, and `RippleInterval` are epoch-level children.
+`RegionSortedSpikesGroup` is the only project table that directly selects
+standard `SortedSpikesGroup`; every spike-using analysis, including
+`MovementFiringRate`, selects the regional view. `AnalysisNwbfile` currently
+has no analysis-table children, and `SpikeSortingFigurl` is
+provenance/display metadata rather than an analysis input.
 
 ### Behavioral, tuning, and model result dependencies
 
@@ -139,12 +143,13 @@ flowchart TD
     TC --> STC[SwapTuningCurveComparison]
     MFR --> STC
     MFR --> CVPCA
-    MFR --> ENC[DPPEncodingComparison]
+    MFR --> ENC[DPPEncoding]
     ST --> ENC
-    MFR --> DEC[PathProgressionDecodingComparison]
+    MFR --> DEC[PathProgressionDecoding]
     ST --> DEC
     MFR --> PSD[PathSpecificPlaceDecoding]
-    MFR --> MOTOR[MotorEncodingComparison]
+    MFR --> MOTOR[MotorEncoding]
+    ST --> MOTOR
     MFR --> DLG[DarkLightGLM]
     DLG --> SGLM[SwapGLM]
     MFR --> SGLM
@@ -158,16 +163,18 @@ The important multiplicities and exceptions are:
 - `PathSpecificPlaceTuningSimilarity` consumes four matching `all`-trial
   tuning rows. `SwapTuningCurveComparison` consumes twelve: four paths in
   each of three epochs.
-- `DPPEncodingComparison` consumes four path-specific stability rows. It does
+- `DPPEncoding` consumes four path-specific stability rows. It does
   not consume `DPPTuningCurve`; it refits fold-specific model inputs from the
   underlying movement, trajectory, graph, and spike sources.
-- `PathProgressionDecodingComparison` consumes two `MovementFiringRate` rows
+- `PathProgressionDecoding` consumes two `MovementFiringRate` rows
   and eight stability rows: four each for the target and cohort epochs.
+- `MotorEncoding` consumes four path-specific stability rows and retains units
+  passing the fixed at-least-one-path stability policy.
 - `SwapGLM` is the only result directly downstream of `DarkLightGLM`; it adds
   a held-out light epoch without refitting the upstream models.
 - `DPPTuningCurve`, `PathSpecificPlaceTuningSimilarity`, `CVPCA`,
-  `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
-  `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `SwapGLM`, and
+  `DPPEncoding`, `PathProgressionDecoding`,
+  `PathSpecificPlaceDecoding`, `MotorEncoding`, `SwapGLM`, and
   `SwapTuningCurveComparison` are currently leaves in the custom table DAG.
   `EpochMotorBehavior` is also a leaf and depends only on catalog and
   parameter rows, so it has no edge in this result-to-result map.
@@ -176,22 +183,17 @@ The important multiplicities and exceptions are:
 
 ```mermaid
 flowchart LR
-    Ripples --> RippleBandLFP
-    Ripples --> RippleModulation
-    Ripples --> RippleGLM
-    Ripples --> CrossRegionXCorr
-    SortedSpikesGroup["Spyglass SortedSpikesGroup"] --> RippleModulation
+    RippleInterval --> RippleModulation
+    RippleInterval --> RippleGLM
+    RippleInterval --> RippleCrossRegionXCorr
+    RegionSortedSpikesGroup --> RippleModulation
     RegionSortedSpikesGroup --> RippleGLM
-    RegionSortedSpikesGroup --> CrossRegionXCorr
+    RegionSortedSpikesGroup --> RippleCrossRegionXCorr
 ```
 
-`RippleGLM` and `CrossRegionXCorr` each select two regional spike groups.
-`RippleBandLFP` is an independent raw-LFP result keyed by the persisted
-`Ripples` row and its ordered detector-channel provenance. It filters the
-selected full-epoch raw trace; its values are not derived from the
-ripple-event intervals, and it is not upstream of ripple detection,
-`RippleModulation`, `RippleGLM`, or `CrossRegionXCorr`. All four ripple result
-tables are currently leaves.
+`RippleModulation` selects one regional spike group. `RippleGLM` and
+`RippleCrossRegionXCorr` each select separate CA1 and V1 regional groups. All
+three select the persisted `RippleInterval` row and are currently leaves.
 
 The diagrams show declared dependencies after collapsing each Parameters,
 Selection, and result-table chain. At runtime, NWB-backed loaders also resolve
@@ -207,56 +209,23 @@ not drawn as extra foreign-key edges.
 Ripple modulation uses:
 
 ```text
-Ripples + EpochIntervals + RippleModulationParameters
-    + SortedSpikesGroup / UnitSelectionParams snapshot
+RippleInterval + EpochIntervals + RippleModulationParameters
+    + RegionSortedSpikesGroup
     -> RippleModulationSelection (ripple_modulation_id)
     -> RippleModulation
     -> summary.parquet + peri_ripple_firing_rate.parquet
 ```
 
-The canonical `Ripples` rows contain the speed-gated events that passed the
+The canonical `RippleInterval` rows contain the speed-gated events that passed the
 detector. The default parameters require the source detector threshold to be
 2.0 and require `speed_gated=True`. `RippleModulation` uses every event in that
 selected source row; it has no downstream ripple-mean-z-score threshold. A
 selected row with `ripple_count=0` remains an explicit `no_ripples` result.
 
-Ripple-band LFP extraction uses:
-
-```text
-Ripples + RippleBandLFPParameters
-    -> RippleBandLFPSelection (ripple_band_lfp_id)
-    -> RippleBandLFP
-    -> manifest.parquet + channel_qc.parquet + ripple_band_lfp.nc
-```
-
-Each row covers one selected ripple epoch, even when `ripple_count=0`.
-Ordered, unique, non-negative NWB electrode-table IDs come only from
-`Ripples.detection_parameters['ripple_channels']`; the pipeline never consults
-the repeated `channel_id` column or a session channel lookup and never sorts
-the order. Selection performs a metadata-only HDF5 inspection and freezes the
-ElectricalSeries and interval-table object IDs, exact epoch sample slice,
-electrode-region mapping, selected data columns and table rows, per-channel
-gain/offset, and the first-1,000-timestamp SpikeInterface sampling-rate
-estimate. Computation re-inspects and compares all of that metadata before it
-loads only the selected epoch and columns.
-
-The selection also freezes the `filepath@raw` registry's full-file
-`contents_hash` and byte size and rechecks the registry plus current file size
-before loading. This follows Spyglass/DataJoint's managed-raw-file immutability
-contract: in-place changes outside DataJoint are unsupported. It deliberately
-does not hash a multi-gigabyte epoch slice at selection time; the completed
-result records exact SHA-256 digests of the selected raw timestamps and int16
-traces. Raw counts are scaled exactly as SpikeInterface 0.103.2 did—float32
-raw values times float32 gain plus float32 offset in microvolts—and that
-scaled array is then cast to float64 exactly as `detect_ripples.py` does before
-the optional legacy notch stack, fourth-order 150–250 Hz Butterworth filter,
-and integer-stride decimation toward 1 kHz. This transform is not
-interchangeable with the standard Spyglass LFP pipeline.
-
 Ripple population encoding uses:
 
 ```text
-Ripples + EpochIntervals
+RippleInterval + EpochIntervals
     + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
     + RippleGLMParameters
     -> RippleGLMSelection (ripple_glm_id)
@@ -281,17 +250,17 @@ NetCDF artifacts rather than becoming one DataJoint row per unit.
 Ripple-restricted cross-region correlation uses:
 
 ```text
-Ripples + EpochIntervals
+RippleInterval + EpochIntervals
     + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
-    + CrossRegionXCorrParameters
-    -> CrossRegionXCorrSelection (cross_region_xcorr_id)
-    -> CrossRegionXCorr
+    + RippleCrossRegionXCorrParameters
+    -> RippleCrossRegionXCorrSelection (ripple_cross_region_xcorr_id)
+    -> RippleCrossRegionXCorr
     -> manifest.parquet + ca1_units.parquet + v1_units.parquet
-       + summary.parquet + cross_region_xcorr.nc
+       + summary.parquet + ripple_cross_region_xcorr.nc
 ```
 
 Each result covers one epoch and only the exact start/end intervals in its
-selected `Ripples` row; it does not pool epochs, substitute generic intervals,
+selected `RippleInterval` row; it does not pool epochs, substitute generic intervals,
 or construct fixed event windows. The fixed manuscript rule uses CA1 as the
 reference and V1 as the target, 5-ms bins, lags through 0.5 s, normalized
 correlation, and at least 30 ripple spikes per included unit. Both groups must
@@ -328,14 +297,14 @@ Movement firing rate uses:
 
 ```text
 Position + MovementParameters
-    + SortedSpikesGroup / UnitSelectionParams snapshot
+    + RegionSortedSpikesGroup
     -> MovementFiringRateSelection (movement_firing_rate_id)
     -> MovementFiringRate
     -> movement_firing_rate.parquet + movement_intervals.npz
 ```
 
 `MovementFiringRateSelection` identifies one named, epoch-specific position
-series, region, sorting group, unit filter, and movement parameter set. The
+series, immutable regional spike group, and movement parameter set. The
 default parameters define movement as speed above 4.0 cm/s after smoothing
 speed with a 0.1 s sigma. `MovementFiringRate.make()` applies the position
 series' NWB-recorded analysis offset, derives movement once, and saves both the
@@ -468,7 +437,7 @@ support summaries. The two graph paths must have one common physical length;
 this preserves the legacy interpretation of a shared centimeter bin size on
 the pooled normalized coordinate.
 
-The DPP encoding comparison uses:
+DPP encoding uses:
 
 ```text
 RegionSortedSpikesGroup + MovementFiringRate
@@ -476,10 +445,10 @@ RegionSortedSpikesGroup + MovementFiringRate
     + full_w WTrackGraph
     + four PathSpecificPlaceStability rows backed by
       legacy_4cm_unsmoothed odd/even curves
-    + DPPEncodingComparisonParameters
-    -> DPPEncodingComparisonSelection
-    -> DPPEncodingComparison
-    -> encoding_comparison.parquet
+    + DPPEncodingParameters
+    -> DPPEncodingSelection
+    -> DPPEncoding
+    -> dpp_encoding.parquet
 ```
 
 The manuscript preset fixes five lap-wise folds, 50-ms evaluation bins, 4-cm
@@ -501,14 +470,13 @@ held-out log likelihoods in nats, information relative to the null model in
 bits per spike, DPP-minus-alternative contrasts, and model/unit QC. It does
 not create one DataJoint row per unit.
 
-The computed table names are `RippleModulation`, `RippleBandLFP`,
-`MovementFiringRate`,
+The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
-`DPPEncodingComparison`, `CVPCA`, `PathProgressionDecodingComparison`,
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`,
+`DPPEncoding`, `CVPCA`, `PathProgressionDecoding`,
+`PathSpecificPlaceDecoding`, `MotorEncoding`, `DarkLightGLM`,
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
-and `CrossRegionXCorr`—there is no `Computed` suffix.
+and `RippleCrossRegionXCorr`—there is no `Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
 rather than being silently omitted.
 Its explicit selection and parameter rows do not populate it automatically.
@@ -521,8 +489,8 @@ RegionSortedSpikesGroup
     + cohort MovementFiringRate + four cohort stability rows
     + target four TrajectoryIntervals + four WTrackGraph rows
     + PathProgressionDecodingParameters
-    -> PathProgressionDecodingComparisonSelection
-    -> PathProgressionDecodingComparison
+    -> PathProgressionDecodingSelection
+    -> PathProgressionDecoding
     -> manifest.parquet + unit_eligibility.parquet
        + decoding_summary.parquet + Pynapple true/decoded NPZ files
 ```
@@ -581,15 +549,16 @@ silently removing units. Legacy true/decoded NPZ pairs can be registered only
 against an explicit current selection; their parameter assumptions and
 reconstructed fold coverage are retained as provenance.
 
-The motor encoding comparison uses:
+Motor encoding uses:
 
 ```text
 RegionSortedSpikesGroup + MovementFiringRate
     + primary Position + orientation-reference Position
     + four TrajectoryIntervals + four trajectory WTrackGraph rows
-    + full_w WTrackGraph + MotorEncodingComparisonParameters
-    -> MotorEncodingComparisonSelection
-    -> MotorEncodingComparison
+    + full_w WTrackGraph + four PathSpecificPlaceStability rows
+    + MotorEncodingParameters
+    -> MotorEncodingSelection
+    -> MotorEncoding
     -> manifest.parquet + selected_units.parquet
        + nested_cv.nc + full_refit.nc
 ```
@@ -605,16 +574,20 @@ rather than an animal-name geometry lookup.
 
 The fixed family is the existing nine-model motor/DPP/place comparison. Each
 model selects ridge and, where applicable, spatial resolution by inner
-lap-wise CV inside each outer lap-wise fold. The V1 and CA1 manuscript presets
-differ only in their strict movement-firing-rate thresholds (`> 0.5` and
-`> 0.0` Hz). `nested_cv.nc` is held-out evidence. `full_refit.nc` refits the
-selected hyperparameters to all eligible samples for coefficient and
-rate-curve visualization; it is not held-out evidence. The Parquet unit audit
-maps temporary group keys to persistent sorting-output/unit identities and
-records fold-level eligibility without creating one DataJoint row per unit.
-If a population fit fails or returns non-finite parameters for only some units,
-those units are retried independently; unresolved units remain explicit invalid
-entries in the audit and do not discard finite evidence from other units.
+lap-wise CV inside each outer lap-wise fold. Both manuscript presets require a
+stability correlation of at least 0.5 on at least one of the four paths; the V1
+and CA1 presets differ only in their strict movement-firing-rate thresholds
+(`> 0.5` and `> 0.0` Hz). The selected stability rows are all-unit upstream
+artifacts, so the threshold changes eligibility without changing their saved
+contents. `nested_cv.nc` is held-out evidence. `full_refit.nc` refits the
+selected hyperparameters to all eligible samples for coefficient and rate-curve
+visualization; it is not held-out evidence. The Parquet unit audit maps
+temporary group keys to persistent sorting-output/unit identities and records
+movement-rate and at-least-one-path stability eligibility without creating one
+DataJoint row per unit. If a population fit fails or returns non-finite
+parameters for only some units, those units are retried independently;
+unresolved units remain explicit invalid entries in the audit and do not
+discard finite evidence from other units.
 
 The dark/light GLM comparison uses:
 
@@ -744,11 +717,6 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     progression_summary.parquet
     trajectory_qc.parquet
 
-<root>/<animal>/<date>/ripple_band_lfp/<epoch>/<uuid>/
-    manifest.parquet
-    channel_qc.parquet
-    ripple_band_lfp.nc
-
 <root>/<animal>/<date>/cv_pca/<light>_vs_<dark>/<region>/<uuid>/
     manifest.parquet
     cv_pca.nc
@@ -770,10 +738,10 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
 <root>/<animal>/<date>/path_specific_place_stability/<epoch>/<trajectory>/<region>/<uuid>/
     stability.parquet
 
-<root>/<animal>/<date>/dpp_encoding_comparison/<epoch>/<region>/<uuid>/
-    encoding_comparison.parquet
+<root>/<animal>/<date>/dpp_encoding/<epoch>/<region>/<uuid>/
+    dpp_encoding.parquet
 
-<root>/<animal>/<date>/path_progression_decoding_comparison/<epoch>/<region>/<uuid>/
+<root>/<animal>/<date>/path_progression_decoding/<epoch>/<region>/<uuid>/
     manifest.parquet
     unit_eligibility.parquet
     decoding_summary.parquet
@@ -788,7 +756,7 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     decoding_error_by_position.parquet
     {true,decoded}_place.npz
 
-<root>/<animal>/<date>/motor_encoding_comparison/<epoch>/<region>/<uuid>/
+<root>/<animal>/<date>/motor_encoding/<epoch>/<region>/<uuid>/
     manifest.parquet
     selected_units.parquet
     nested_cv.nc
@@ -818,12 +786,12 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     summary.parquet
     ripple_glm.nc
 
-<root>/<animal>/<date>/cross_region_xcorr/<epoch>/<uuid>/
+<root>/<animal>/<date>/ripple_cross_region_xcorr/<epoch>/<uuid>/
     manifest.parquet
     ca1_units.parquet
     v1_units.parquet
     summary.parquet
-    cross_region_xcorr.nc
+    ripple_cross_region_xcorr.nc
 
 ```
 
@@ -839,11 +807,10 @@ inserts the result row. It never writes results into the source NWB.
 `MovementFiringRate` is compute-only: its Parquet and Pynapple-backed NPZ are
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
-`DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
-`CVPCA`, `PathSpecificPlaceDecoding`, `MotorEncodingComparison`,
+`DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncoding`,
+`CVPCA`, `PathSpecificPlaceDecoding`, `MotorEncoding`,
 `DarkLightGLM`, `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
-`CrossRegionXCorr`, `EpochMotorBehavior`, and `RippleBandLFP`
-additionally provide
+`RippleCrossRegionXCorr`, and `EpochMotorBehavior` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without invoking the computed table's
@@ -867,14 +834,6 @@ rows before writing the canonical bundle. An optional original run log is
 validated and retained as provenance. The trajectory-QC table is always
 generated from the current frozen NWB recomputation rather than trusted from
 legacy files.
-Ripple-band-LFP registration requires the exact detector cache NetCDF and can
-optionally pair it with its original run log. It requires the detector's fixed
-bandpass/stride and notch settings, recomputes the selected raw NWB slice, and
-compares every timestamp, channel ID, sampling-rate value, and filtered value
-exactly. A supplied run log must match the session, epoch, ordered ripple
-channels, notch settings, cache directory, and epoch cache path. Stable
-pre/post file fingerprints bind validation and recorded provenance to the same
-legacy bytes.
 cvPCA registration requires the complete legacy seed-specific NetCDF and
 summary pair. It recomputes the exact selected NWB inputs, compares all
 retained scientific coordinates and variables, and then writes a compact
@@ -892,7 +851,7 @@ Similarity registration accepts only a complete `*_all_units.parquet` source
 for the legacy 4 cm unsmoothed, all-trial tuning configuration and matching
 imported sorting selection; it validates all four comparisons for every
 selected unit before copying the canonical result.
-`DPPEncodingComparison.register_existing()` accepts one
+`DPPEncoding.register_existing()` accepts one
 matching legacy epoch summary, resolves it against the selected regional
 group, movement rates, and four stability rows, validates the exact eligible
 unit set, converts legacy per-spike likelihoods to canonical total nats, and
@@ -928,7 +887,7 @@ peri-event data must also contain one complete, common time grid for every
 unit. Canonical empty artifacts are accepted and recorded with the applicable
 terminal status.
 
-`PathProgressionDecodingComparison` is compute-only. Legacy decoding NPZ
+`PathProgressionDecoding` is compute-only. Legacy decoding NPZ
 files contain decoded values and times but no selected-unit identities,
 sorting snapshot, parameters, graph identifiers, or output checksums. The
 untagged manuscript runs also lack companion selected-unit audit tables, so a

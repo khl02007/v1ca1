@@ -46,7 +46,9 @@ def test_insert_catalog_rows_uses_explicit_tables() -> None:
 def test_ingest_dry_run_never_activates_tables(monkeypatch) -> None:
     from v1ca1.spyglass import ingest as ingest_module
 
-    catalog = {key: [] for key in ingest_module.SOURCE_TABLE_KEYS}
+    catalog = {
+        key: [] for key in ingest_module.NWB_CATALOG_KEY_BY_TABLE.values()
+    }
     catalog["ripples"] = [{"nwb_file_name": "test.nwb", "epoch": "01_s1"}]
     fake_nwb_module = SimpleNamespace(
         catalog_augmented_nwb=lambda nwbfile, nwb_file_name: catalog
@@ -60,8 +62,8 @@ def test_ingest_dry_run_never_activates_tables(monkeypatch) -> None:
     )
 
     assert result["inserted"] is False
-    assert result["counts"]["ripples"] == 1
-    assert result["rows"]["ripples"] == catalog["ripples"]
+    assert result["counts"]["ripple_interval"] == 1
+    assert result["rows"]["ripple_interval"] == catalog["ripples"]
 
 
 def test_non_dry_ingestion_rejects_unverifiable_open_nwb_object() -> None:

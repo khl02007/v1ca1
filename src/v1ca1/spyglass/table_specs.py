@@ -62,7 +62,7 @@ source_object_id = NULL: varchar(64)
 """
 
 
-RIPPLES_DEFINITION = """
+RIPPLE_INTERVAL_DEFINITION = """
 # One augmented-NWB ripple selector; individual events remain in NWB.
 -> EpochIntervals
 ---
@@ -76,75 +76,6 @@ source_table_path: varchar(1024)
 source_table_object_id = NULL: varchar(64)
 source_object_path: varchar(1024)
 source_object_id = NULL: varchar(64)
-"""
-
-
-RIPPLE_BAND_LFP_PARAMETERS_DEFINITION = """
-# Named parameters for the legacy-compatible ripple-band LFP transform.
-ripple_band_lfp_param_name: varchar(64)
----
-lowcut_hz: double
-highcut_hz: double
-filter_order: smallint unsigned
-target_sampling_frequency_hz: double
-enable_notch_filter: bool
-notch_base_freq_hz: double
-notch_harmonics: smallint unsigned
-notch_quality: double
-"""
-
-
-RIPPLE_BAND_LFP_SELECTION_DEFINITION = """
-# One immutable raw-NWB epoch/channel snapshot selected by ripple provenance.
-ripple_band_lfp_id: uuid
----
--> Ripples
--> RippleBandLFPParameters
-source_nwb_file_name: varchar(255)
-registered_source_contents_hash: char(36)
-registered_source_size_bytes: bigint unsigned
-source_electrical_series_path: varchar(1024)
-ordered_electrode_ids: longblob
-ordered_electrode_ids_sha256: char(64)
-ordered_gain_to_uv: longblob
-ordered_offset_to_uv: longblob
-trace_scaling_sha256: char(64)
-sampling_frequency_provenance: longblob
-sampling_frequency_provenance_sha256: char(64)
-source_slice_provenance: longblob
-source_slice_provenance_sha256: char(64)
-ripple_catalog_row_sha256: char(64)
-epoch_intervals_catalog_row_sha256: char(64)
-source_sampling_frequency_hz: double
-input_sample_count: bigint unsigned
-decimation_factor: int unsigned
-actual_sampling_frequency_hz: double
-ripple_band_lfp_parameters_sha256: char(64)
-ripple_band_lfp_output_rule_sha256: char(64)
-"""
-
-
-RIPPLE_BAND_LFP_DEFINITION = """
-# One immutable raw-NWB-derived ripple-band LFP artifact bundle.
--> RippleBandLFPSelection
----
-artifact_manifest_path: filepath@analysis
-channel_qc_path: filepath@analysis
-ripple_band_lfp_path: filepath@analysis
-bundle_schema_version: varchar(8)
-n_channels: int unsigned
-input_sample_count: bigint unsigned
-output_sample_count: bigint unsigned
-source_sampling_frequency_hz: double
-actual_sampling_frequency_hz: double
-decimation_factor: int unsigned
-raw_timestamps_sha256: char(64)
-raw_traces_sha256: char(64)
-analysis_status: enum('valid', 'empty_input')
-artifact_origin: enum('computed', 'registered_existing')
-runtime_v1ca1_git_commit = NULL: varchar(64)
-runtime_spyglass_git_commit = NULL: varchar(64)
-legacy_artifact_provenance = NULL: longblob
 """
 
 
@@ -408,18 +339,12 @@ legacy_artifact_provenance = NULL: longblob
 
 
 MOVEMENT_FIRING_RATE_SELECTION_DEFINITION = """
-# One immutable position, sorting-group snapshot, region, and movement definition.
+# One immutable position, regional spike group, and movement definition.
 movement_firing_rate_id: uuid
 ---
 -> Position
 -> MovementParameters
--> SortedSpikesGroup
-region: enum('v1', 'ca1')
-sorting_group_members: longblob
-sorting_group_members_sha256: char(64)
-unit_filter_include_labels: longblob
-unit_filter_exclude_labels: longblob
-unit_filter_params_sha256: char(64)
+-> RegionSortedSpikesGroup
 movement_parameters_sha256: char(64)
 """
 
@@ -460,18 +385,12 @@ heatmap_normalize: enum('max', 'zscore')
 
 
 RIPPLE_MODULATION_SELECTION_DEFINITION = """
-# One immutable ripple epoch, sorting-group snapshot, and region selection.
+# One immutable ripple epoch and regional spike-group selection.
 ripple_modulation_id: uuid
 ---
--> Ripples
+-> RippleInterval
 -> RippleModulationParameters
--> SortedSpikesGroup
-region: enum('v1', 'ca1')
-sorting_group_members: longblob
-sorting_group_members_sha256: char(64)
-unit_filter_include_labels: longblob
-unit_filter_exclude_labels: longblob
-unit_filter_params_sha256: char(64)
+-> RegionSortedSpikesGroup
 ripple_modulation_parameters_sha256: char(64)
 """
 
@@ -639,9 +558,9 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
-DPP_ENCODING_COMPARISON_PARAMETERS_DEFINITION = """
+DPP_ENCODING_PARAMETERS_DEFINITION = """
 # Named cross-validation, binning, smoothing, and unit-filter parameters.
-dpp_encoding_comparison_param_name: varchar(64)
+dpp_encoding_param_name: varchar(64)
 ---
 n_folds: smallint unsigned
 evaluation_bin_size_s: double
@@ -653,9 +572,9 @@ minimum_stability_correlation: double
 """
 
 
-DPP_ENCODING_COMPARISON_SELECTION_DEFINITION = """
+DPP_ENCODING_SELECTION_DEFINITION = """
 # One immutable epoch-level four-model encoding-comparison selection.
-dpp_encoding_comparison_id: uuid
+dpp_encoding_id: uuid
 ---
 -> RegionSortedSpikesGroup
 -> MovementFiringRate
@@ -672,16 +591,16 @@ dpp_encoding_comparison_id: uuid
 -> PathSpecificPlaceStability.proj(center_to_right_stability_id='path_specific_place_stability_id')
 -> PathSpecificPlaceStability.proj(left_to_center_stability_id='path_specific_place_stability_id')
 -> PathSpecificPlaceStability.proj(right_to_center_stability_id='path_specific_place_stability_id')
--> DPPEncodingComparisonParameters
-dpp_encoding_comparison_parameters_sha256: char(64)
+-> DPPEncodingParameters
+dpp_encoding_parameters_sha256: char(64)
 """
 
 
-DPP_ENCODING_COMPARISON_DEFINITION = """
+DPP_ENCODING_DEFINITION = """
 # One eligible-unit four-model cross-validated encoding Parquet artifact.
--> DPPEncodingComparisonSelection
+-> DPPEncodingSelection
 ---
-encoding_comparison_path: filepath@analysis
+dpp_encoding_path: filepath@analysis
 n_units_input: int unsigned
 n_units_eligible: int unsigned
 n_units_valid: int unsigned
@@ -708,7 +627,7 @@ minimum_stability_correlation = NULL: double
 
 PATH_PROGRESSION_DECODING_SELECTION_DEFINITION = """
 # One immutable epoch-level decoding selection with an explicit cohort epoch.
-path_progression_decoding_comparison_id: uuid
+path_progression_decoding_id: uuid
 ---
 -> RegionSortedSpikesGroup
 -> MovementFiringRate
@@ -740,7 +659,7 @@ decoding_output_rule_sha256: char(64)
 
 PATH_PROGRESSION_DECODING_DEFINITION = """
 # One shared-cohort path-progression decoding artifact bundle.
--> PathProgressionDecodingComparisonSelection
+-> PathProgressionDecodingSelection
 ---
 artifact_manifest_path: filepath@analysis
 decoding_summary_path: filepath@analysis
@@ -811,9 +730,9 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
-MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION = """
+MOTOR_ENCODING_PARAMETERS_DEFINITION = """
 # Named nested-CV, basis, motor-feature, and unit-filter parameters.
-motor_encoding_comparison_param_name: varchar(64)
+motor_encoding_param_name: varchar(64)
 ---
 evaluation_bin_size_s: double
 outer_n_folds: smallint unsigned
@@ -822,6 +741,7 @@ random_seed: int
 ridge_values: longblob
 spatial_bin_sizes_cm: longblob
 minimum_movement_firing_rate_hz: double
+minimum_stability_correlation: double
 motor_feature_mode: enum('zscore', 'spline')
 motor_zscore_eps: double
 motor_spline_n_basis: smallint unsigned
@@ -832,9 +752,9 @@ generalized_place_branch_gap_cm: double
 """
 
 
-MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION = """
+MOTOR_ENCODING_SELECTION_DEFINITION = """
 # One immutable epoch-level nine-model motor-encoding selection.
-motor_encoding_comparison_id: uuid
+motor_encoding_id: uuid
 ---
 -> RegionSortedSpikesGroup
 -> MovementFiringRate
@@ -849,16 +769,20 @@ motor_encoding_comparison_id: uuid
 -> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
 -> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
 -> WTrackGraph.proj(full_w_configuration_name='configuration_name')
--> MotorEncodingComparisonParameters
-motor_encoding_comparison_parameters_sha256: char(64)
-motor_encoding_comparison_model_spec_sha256: char(64)
-motor_encoding_comparison_output_rule_sha256: char(64)
+-> PathSpecificPlaceStability.proj(center_to_left_stability_id='path_specific_place_stability_id')
+-> PathSpecificPlaceStability.proj(center_to_right_stability_id='path_specific_place_stability_id')
+-> PathSpecificPlaceStability.proj(left_to_center_stability_id='path_specific_place_stability_id')
+-> PathSpecificPlaceStability.proj(right_to_center_stability_id='path_specific_place_stability_id')
+-> MotorEncodingParameters
+motor_encoding_parameters_sha256: char(64)
+motor_encoding_model_spec_sha256: char(64)
+motor_encoding_output_rule_sha256: char(64)
 """
 
 
-MOTOR_ENCODING_COMPARISON_DEFINITION = """
+MOTOR_ENCODING_DEFINITION = """
 # One nested-CV and full-refit motor-encoding artifact bundle.
--> MotorEncodingComparisonSelection
+-> MotorEncodingSelection
 ---
 artifact_manifest_path: filepath@analysis
 nested_cv_path: filepath@analysis
@@ -1116,7 +1040,7 @@ RIPPLE_GLM_SELECTION_DEFINITION = """
 # One immutable epoch-level CA1-to-V1 ripple population-GLM selection.
 ripple_glm_id: uuid
 ---
--> Ripples
+-> RippleInterval
 -> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RippleGLMParameters
@@ -1168,9 +1092,9 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
-CROSS_REGION_XCORR_PARAMETERS_DEFINITION = """
+RIPPLE_CROSS_REGION_XCORR_PARAMETERS_DEFINITION = """
 # Named fixed parameters for ripple-restricted CA1-to-V1 cross-correlation.
-cross_region_xcorr_param_name: varchar(64)
+ripple_cross_region_xcorr_param_name: varchar(64)
 ---
 bin_size_s: double
 max_lag_s: double
@@ -1182,14 +1106,14 @@ require_speed_gated: bool
 """
 
 
-CROSS_REGION_XCORR_SELECTION_DEFINITION = """
+RIPPLE_CROSS_REGION_XCORR_SELECTION_DEFINITION = """
 # One immutable epoch-level exact-ripple CA1-to-V1 xcorr selection.
-cross_region_xcorr_id: uuid
+ripple_cross_region_xcorr_id: uuid
 ---
--> Ripples
+-> RippleInterval
 -> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
--> CrossRegionXCorrParameters
+-> RippleCrossRegionXCorrParameters
 source_region: enum('ca1')
 target_region: enum('v1')
 source_ripple_count: int unsigned
@@ -1205,20 +1129,20 @@ target_sorting_group_members_sha256: char(64)
 target_unit_filter_params_sha256: char(64)
 target_selected_units_sha256: char(64)
 target_n_units: int unsigned
-cross_region_xcorr_parameters_sha256: char(64)
-cross_region_xcorr_output_rule_sha256: char(64)
+ripple_cross_region_xcorr_parameters_sha256: char(64)
+ripple_cross_region_xcorr_output_rule_sha256: char(64)
 """
 
 
-CROSS_REGION_XCORR_DEFINITION = """
+RIPPLE_CROSS_REGION_XCORR_DEFINITION = """
 # One exact-ripple CA1-to-V1 xcorr audit, pair summary, and NetCDF bundle.
--> CrossRegionXCorrSelection
+-> RippleCrossRegionXCorrSelection
 ---
 artifact_manifest_path: filepath@analysis
 ca1_units_path: filepath@analysis
 v1_units_path: filepath@analysis
 summary_path: filepath@analysis
-cross_region_xcorr_path: filepath@analysis
+ripple_cross_region_xcorr_path: filepath@analysis
 schema_version: varchar(8)
 bundle_schema_version: varchar(8)
 n_ripples: int unsigned
@@ -1268,58 +1192,6 @@ DEFAULT_RIPPLE_MODULATION_PARAMETERS = MappingProxyType(
         "expected_detector_zscore_threshold": 2.0,
         "require_speed_gated": True,
         "heatmap_normalize": "max",
-    }
-)
-
-
-MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS = MappingProxyType(
-    {
-        "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
-        "lowcut_hz": 150.0,
-        "highcut_hz": 250.0,
-        "filter_order": 4,
-        "target_sampling_frequency_hz": 1000.0,
-        "enable_notch_filter": False,
-        "notch_base_freq_hz": 60.0,
-        "notch_harmonics": 10,
-        "notch_quality": 50.0,
-    }
-)
-
-
-RIPPLE_BAND_LFP_OUTPUT_RULE = MappingProxyType(
-    {
-        "version": 1,
-        "row_granularity": "one_session_epoch",
-        "source": "raw_nwb_acquisition_electrical_series_int16",
-        "time_source": "explicit_nwb_ephys_timestamps_seconds",
-        "channel_identity": "ordered_nwb_electrodes_table_id",
-        "electrode_membership_validation": "upstream_selected_nwb_loader",
-        "channel_order_policy": (
-            "preserve_exactly_first_channel_is_figure_channel"
-        ),
-        "notch_policy": "optional_legacy_iirnotch_stack_before_bandpass",
-        "bandpass_implementation": (
-            "detect_ripples.butter_filter_and_decimate"
-        ),
-        "default_band_hz": (150.0, 250.0),
-        "default_filter_order": 4,
-        "default_target_sampling_frequency_hz": 1000.0,
-        "decimation": "integer_stride_round_source_fs_over_target_fs",
-        "actual_sampling_frequency": "source_fs_divided_by_stride",
-        "voltage_scaling": (
-            "spikeinterface_0_103_2_float32_scaling_then_float64_filter_input"
-        ),
-        "registered_raw_identity": (
-            "datajoint_filepath_contents_hash_and_size"
-        ),
-        "in_place_mutation_outside_datajoint": "unsupported",
-        "sampling_frequency_estimation": (
-            "spikeinterface_nwb_first_timestamp_differences_median"
-        ),
-        "standard_spyglass_lfp_interchangeable": False,
-        "source_nwb_mutation": False,
-        "time_unit": "s",
     }
 )
 
@@ -1468,9 +1340,9 @@ TUNING_SIMILARITY_PARAMETER_PRESETS = (
 )
 
 
-MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
+MANUSCRIPT_DPP_ENCODING_PARAMETERS = MappingProxyType(
     {
-        "dpp_encoding_comparison_param_name": "manuscript_5fold_50ms_4cm_sigma1",
+        "dpp_encoding_param_name": "manuscript_5fold_50ms_4cm_sigma1",
         "n_folds": 5,
         "evaluation_bin_size_s": 0.05,
         "spatial_bin_size_cm": 4.0,
@@ -1482,8 +1354,8 @@ MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
 )
 
 
-DPP_ENCODING_COMPARISON_PARAMETER_PRESETS = (
-    MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS,
+DPP_ENCODING_PARAMETER_PRESETS = (
+    MANUSCRIPT_DPP_ENCODING_PARAMETERS,
 )
 
 
@@ -1574,7 +1446,7 @@ PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS = (
 )
 
 
-MOTOR_ENCODING_COMPARISON_MODEL_SPEC = MappingProxyType(
+MOTOR_ENCODING_MODEL_SPEC = MappingProxyType(
     {
         "motor": "strict motor covariates only",
         "motor_tp": (
@@ -1603,10 +1475,10 @@ MOTOR_ENCODING_COMPARISON_MODEL_SPEC = MappingProxyType(
 )
 
 
-MOTOR_ENCODING_COMPARISON_OUTPUT_RULE = MappingProxyType(
+MOTOR_ENCODING_OUTPUT_RULE = MappingProxyType(
     {
-        "version": 1,
-        "model_names": tuple(MOTOR_ENCODING_COMPARISON_MODEL_SPEC),
+        "version": 2,
+        "model_names": tuple(MOTOR_ENCODING_MODEL_SPEC),
         "cross_validation": "nested_lap_level_by_trajectory_movement_only",
         "hyperparameter_selection": (
             "per_model_population_median_unit_information_bits_per_spike"
@@ -1614,9 +1486,9 @@ MOTOR_ENCODING_COMPARISON_OUTPUT_RULE = MappingProxyType(
         "unit_fit_failure_policy": (
             "retry_nonfinite_or_failed_population_units_independently"
         ),
-        "unit_selection": (
-            "strict_greater_than_movement_firing_rate_threshold"
-        ),
+        "movement_operator": "greater_than_or_equal",
+        "stability_aggregation": "at_least_one_trajectory",
+        "stability_operator": "greater_than_or_equal",
         "full_refit_role": "visualization_not_heldout_inference",
         "primary_position_role": (
             "speed_acceleration_and_track_linearization"
@@ -1631,9 +1503,9 @@ MOTOR_ENCODING_COMPARISON_OUTPUT_RULE = MappingProxyType(
 )
 
 
-MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
+MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS = MappingProxyType(
     {
-        "motor_encoding_comparison_param_name": (
+        "motor_encoding_param_name": (
             "manuscript_v1_nested5x3_50ms_zscore"
         ),
         "evaluation_bin_size_s": 0.05,
@@ -1643,6 +1515,7 @@ MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
         "ridge_values": (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6),
         "spatial_bin_sizes_cm": (2.0, 4.0, 8.0),
         "minimum_movement_firing_rate_hz": 0.5,
+        "minimum_stability_correlation": 0.5,
         "motor_feature_mode": "zscore",
         "motor_zscore_eps": 1e-12,
         "motor_spline_n_basis": 5,
@@ -1654,10 +1527,10 @@ MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
 )
 
 
-MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
+MANUSCRIPT_CA1_MOTOR_ENCODING_PARAMETERS = MappingProxyType(
     {
-        **MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
-        "motor_encoding_comparison_param_name": (
+        **MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS,
+        "motor_encoding_param_name": (
             "manuscript_ca1_nested5x3_50ms_zscore"
         ),
         "minimum_movement_firing_rate_hz": 0.0,
@@ -1665,9 +1538,9 @@ MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS = MappingProxyType(
 )
 
 
-MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS = (
-    MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
-    MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS,
+MOTOR_ENCODING_PARAMETER_PRESETS = (
+    MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS,
+    MANUSCRIPT_CA1_MOTOR_ENCODING_PARAMETERS,
 )
 
 
@@ -2054,7 +1927,7 @@ RIPPLE_GLM_PARAMETER_PRESETS = (
 )
 
 
-CROSS_REGION_XCORR_OUTPUT_RULE = MappingProxyType(
+RIPPLE_CROSS_REGION_XCORR_OUTPUT_RULE = MappingProxyType(
     {
         "version": 1,
         "direction": "ca1_reference_to_v1_target",
@@ -2087,9 +1960,9 @@ CROSS_REGION_XCORR_OUTPUT_RULE = MappingProxyType(
 )
 
 
-MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS = MappingProxyType(
+MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS = MappingProxyType(
     {
-        "cross_region_xcorr_param_name": (
+        "ripple_cross_region_xcorr_param_name": (
             "manuscript_ripple_5ms_lag500ms_min30"
         ),
         "bin_size_s": 0.005,
@@ -2103,8 +1976,8 @@ MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS = MappingProxyType(
 )
 
 
-CROSS_REGION_XCORR_PARAMETER_PRESETS = (
-    MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS,
+RIPPLE_CROSS_REGION_XCORR_PARAMETER_PRESETS = (
+    MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS,
 )
 
 
@@ -2112,12 +1985,7 @@ TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
         "trajectory_intervals": TRAJECTORY_INTERVALS_DEFINITION,
-        "ripples": RIPPLES_DEFINITION,
-        "ripple_band_lfp_parameters": (
-            RIPPLE_BAND_LFP_PARAMETERS_DEFINITION
-        ),
-        "ripple_band_lfp_selection": RIPPLE_BAND_LFP_SELECTION_DEFINITION,
-        "ripple_band_lfp": RIPPLE_BAND_LFP_DEFINITION,
+        "ripple_interval": RIPPLE_INTERVAL_DEFINITION,
         "position": POSITION_DEFINITION,
         "wtrack_graph": WTRACK_GRAPH_DEFINITION,
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,
@@ -2160,20 +2028,20 @@ TABLE_DEFINITIONS = MappingProxyType(
             PATH_SPECIFIC_PLACE_STABILITY_SELECTION_DEFINITION
         ),
         "path_specific_place_stability": PATH_SPECIFIC_PLACE_STABILITY_DEFINITION,
-        "dpp_encoding_comparison_parameters": (
-            DPP_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+        "dpp_encoding_parameters": (
+            DPP_ENCODING_PARAMETERS_DEFINITION
         ),
-        "dpp_encoding_comparison_selection": (
-            DPP_ENCODING_COMPARISON_SELECTION_DEFINITION
+        "dpp_encoding_selection": (
+            DPP_ENCODING_SELECTION_DEFINITION
         ),
-        "dpp_encoding_comparison": DPP_ENCODING_COMPARISON_DEFINITION,
+        "dpp_encoding": DPP_ENCODING_DEFINITION,
         "path_progression_decoding_parameters": (
             PATH_PROGRESSION_DECODING_PARAMETERS_DEFINITION
         ),
-        "path_progression_decoding_comparison_selection": (
+        "path_progression_decoding_selection": (
             PATH_PROGRESSION_DECODING_SELECTION_DEFINITION
         ),
-        "path_progression_decoding_comparison": (
+        "path_progression_decoding": (
             PATH_PROGRESSION_DECODING_DEFINITION
         ),
         "path_specific_place_decoding_parameters": (
@@ -2185,13 +2053,13 @@ TABLE_DEFINITIONS = MappingProxyType(
         "path_specific_place_decoding": (
             PATH_SPECIFIC_PLACE_DECODING_DEFINITION
         ),
-        "motor_encoding_comparison_parameters": (
-            MOTOR_ENCODING_COMPARISON_PARAMETERS_DEFINITION
+        "motor_encoding_parameters": (
+            MOTOR_ENCODING_PARAMETERS_DEFINITION
         ),
-        "motor_encoding_comparison_selection": (
-            MOTOR_ENCODING_COMPARISON_SELECTION_DEFINITION
+        "motor_encoding_selection": (
+            MOTOR_ENCODING_SELECTION_DEFINITION
         ),
-        "motor_encoding_comparison": MOTOR_ENCODING_COMPARISON_DEFINITION,
+        "motor_encoding": MOTOR_ENCODING_DEFINITION,
         "dark_light_glm_parameters": DARK_LIGHT_GLM_PARAMETERS_DEFINITION,
         "dark_light_glm_selection": DARK_LIGHT_GLM_SELECTION_DEFINITION,
         "dark_light_glm": DARK_LIGHT_GLM_DEFINITION,
@@ -2210,13 +2078,13 @@ TABLE_DEFINITIONS = MappingProxyType(
         "ripple_glm_parameters": RIPPLE_GLM_PARAMETERS_DEFINITION,
         "ripple_glm_selection": RIPPLE_GLM_SELECTION_DEFINITION,
         "ripple_glm": RIPPLE_GLM_DEFINITION,
-        "cross_region_xcorr_parameters": (
-            CROSS_REGION_XCORR_PARAMETERS_DEFINITION
+        "ripple_cross_region_xcorr_parameters": (
+            RIPPLE_CROSS_REGION_XCORR_PARAMETERS_DEFINITION
         ),
-        "cross_region_xcorr_selection": (
-            CROSS_REGION_XCORR_SELECTION_DEFINITION
+        "ripple_cross_region_xcorr_selection": (
+            RIPPLE_CROSS_REGION_XCORR_SELECTION_DEFINITION
         ),
-        "cross_region_xcorr": CROSS_REGION_XCORR_DEFINITION,
+        "ripple_cross_region_xcorr": RIPPLE_CROSS_REGION_XCORR_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -2249,19 +2117,19 @@ __all__ = [
     "EPOCH_MOTOR_BEHAVIOR_SELECTION_DEFINITION",
     "DEFAULT_RIPPLE_MODULATION_PARAMETERS",
     "DEFAULT_SCHEMA_NAME",
-    "DPP_ENCODING_COMPARISON_PARAMETER_PRESETS",
+    "DPP_ENCODING_PARAMETER_PRESETS",
     "EXPECTED_SPYGLASS_GIT_COMMIT",
-    "MANUSCRIPT_DPP_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_DPP_ENCODING_PARAMETERS",
     "MANUSCRIPT_CA1_CV_PCA_PARAMETERS",
     "MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS",
-    "MANUSCRIPT_CA1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_CA1_MOTOR_ENCODING_PARAMETERS",
     "MANUSCRIPT_PATH_PROGRESSION_DECODING_PARAMETERS",
     "MANUSCRIPT_PATH_SPECIFIC_PLACE_DECODING_PARAMETERS",
-    "MANUSCRIPT_V1_MOTOR_ENCODING_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_V1_MOTOR_ENCODING_PARAMETERS",
     "MANUSCRIPT_V1_CV_PCA_PARAMETERS",
-    "MOTOR_ENCODING_COMPARISON_MODEL_SPEC",
-    "MOTOR_ENCODING_COMPARISON_OUTPUT_RULE",
-    "MOTOR_ENCODING_COMPARISON_PARAMETER_PRESETS",
+    "MOTOR_ENCODING_MODEL_SPEC",
+    "MOTOR_ENCODING_OUTPUT_RULE",
+    "MOTOR_ENCODING_PARAMETER_PRESETS",
     "PATH_SPECIFIC_PLACE_DECODING_OUTPUT_RULE",
     "PATH_SPECIFIC_PLACE_DECODING_PARAMETER_PRESETS",
     "PATH_PROGRESSION_DECODING_ELIGIBILITY_RULE",
@@ -2277,23 +2145,18 @@ __all__ = [
     "MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
     "MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
     "MANUSCRIPT_MEAN_ACTIVITY_RIPPLE_GLM_PARAMETERS",
-    "MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS",
     "MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS",
-    "RIPPLE_BAND_LFP_DEFINITION",
-    "RIPPLE_BAND_LFP_OUTPUT_RULE",
-    "RIPPLE_BAND_LFP_PARAMETERS_DEFINITION",
-    "RIPPLE_BAND_LFP_SELECTION_DEFINITION",
     "RIPPLE_GLM_DEFINITION",
     "RIPPLE_GLM_OUTPUT_RULE",
     "RIPPLE_GLM_PARAMETERS_DEFINITION",
     "RIPPLE_GLM_PARAMETER_PRESETS",
     "RIPPLE_GLM_SELECTION_DEFINITION",
-    "CROSS_REGION_XCORR_DEFINITION",
-    "CROSS_REGION_XCORR_OUTPUT_RULE",
-    "CROSS_REGION_XCORR_PARAMETERS_DEFINITION",
-    "CROSS_REGION_XCORR_PARAMETER_PRESETS",
-    "CROSS_REGION_XCORR_SELECTION_DEFINITION",
-    "MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS",
+    "RIPPLE_CROSS_REGION_XCORR_DEFINITION",
+    "RIPPLE_CROSS_REGION_XCORR_OUTPUT_RULE",
+    "RIPPLE_CROSS_REGION_XCORR_PARAMETERS_DEFINITION",
+    "RIPPLE_CROSS_REGION_XCORR_PARAMETER_PRESETS",
+    "RIPPLE_CROSS_REGION_XCORR_SELECTION_DEFINITION",
+    "MANUSCRIPT_RIPPLE_CROSS_REGION_XCORR_PARAMETERS",
     "SWAP_TUNING_CURVE_COMPARISON_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS",

@@ -16,8 +16,8 @@ from v1ca1.helper.session import TRAJECTORY_TYPES, TURN_TRAJECTORY_PAIRS
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
-ARTIFACT_DIRNAME = "dpp_encoding_comparison"
-ARTIFACT_FILENAME = "encoding_comparison.parquet"
+ARTIFACT_DIRNAME = "dpp_encoding"
+ARTIFACT_FILENAME = "dpp_encoding.parquet"
 FULL_W_CONFIGURATION_NAME = "full_w"
 MODEL_NAMES = (
     "path_specific_place",
@@ -55,7 +55,7 @@ CONTRAST_COLUMNS = (
 )
 TABLE_COLUMNS = (
     *IDENTITY_COLUMNS,
-    "dpp_encoding_comparison_id",
+    "dpp_encoding_id",
     "animal_name",
     "date",
     "region",
@@ -132,13 +132,13 @@ def _uuid_component(value: Any, *, name: str) -> str:
         raise ValueError(f"{name} must be a UUID, got {value!r}.") from exc
 
 
-def get_encoding_comparison_artifact_path(
+def get_dpp_encoding_artifact_path(
     *,
     animal_name: str,
     date: str,
     epoch: str,
     region: str,
-    dpp_encoding_comparison_id: Any,
+    dpp_encoding_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> Path:
     """Return one UUID-keyed, session-first encoding-comparison path."""
@@ -152,8 +152,8 @@ def get_encoding_comparison_artifact_path(
         }.items()
     }
     comparison_id = _uuid_component(
-        dpp_encoding_comparison_id,
-        name="dpp_encoding_comparison_id",
+        dpp_encoding_id,
+        name="dpp_encoding_id",
     )
     return (
         Path(artifact_root)
@@ -167,14 +167,14 @@ def get_encoding_comparison_artifact_path(
     )
 
 
-def empty_encoding_comparison_table() -> pd.DataFrame:
+def empty_dpp_encoding_table() -> pd.DataFrame:
     """Return an empty encoding-comparison table with its canonical schema."""
     columns: dict[str, pd.Series] = {
         name: pd.Series(dtype=str) for name in IDENTITY_COLUMNS
     }
     columns.update(
         {
-            "dpp_encoding_comparison_id": pd.Series(dtype=str),
+            "dpp_encoding_id": pd.Series(dtype=str),
             "animal_name": pd.Series(dtype=str),
             "date": pd.Series(dtype=str),
             "region": pd.Series(dtype=str),
@@ -1202,7 +1202,7 @@ def _unit_metric_row(
     return row
 
 
-def compute_selected_dpp_encoding_comparison(
+def compute_selected_dpp_encoding(
     *,
     animal_name: str,
     date: str,
@@ -1218,7 +1218,7 @@ def compute_selected_dpp_encoding_comparison(
     stability_tables_by_trajectory: Mapping[str, pd.DataFrame],
     minimum_movement_firing_rate_hz: float,
     minimum_stability_correlation: float,
-    dpp_encoding_comparison_id: Any,
+    dpp_encoding_id: Any,
     n_folds: int = 5,
     evaluation_bin_size_s: float = 0.05,
     spatial_bin_size_cm: float = 4.0,
@@ -1234,8 +1234,8 @@ def compute_selected_dpp_encoding_comparison(
         random_seed=random_seed,
     )
     comparison_id = _uuid_component(
-        dpp_encoding_comparison_id,
-        name="dpp_encoding_comparison_id",
+        dpp_encoding_id,
+        name="dpp_encoding_id",
     )
     firing_rate_threshold, stability_threshold = _validate_thresholds(
         minimum_movement_firing_rate_hz=minimum_movement_firing_rate_hz,
@@ -1255,8 +1255,8 @@ def compute_selected_dpp_encoding_comparison(
     )
     eligible_mask = eligibility["eligible"].to_numpy(dtype=bool)
     if not np.any(eligible_mask):
-        table = empty_encoding_comparison_table()
-        return {"table": table, **summarize_encoding_comparison_table(table)}
+        table = empty_dpp_encoding_table()
+        return {"table": table, **summarize_dpp_encoding_table(table)}
 
     from v1ca1.task_progression.encoding_comparison import (
         select_spikes_by_unit_mask,
@@ -1303,7 +1303,7 @@ def compute_selected_dpp_encoding_comparison(
                     name: str(unit[name])
                     for name in IDENTITY_COLUMNS
                 },
-                "dpp_encoding_comparison_id": comparison_id,
+                "dpp_encoding_id": comparison_id,
                 "animal_name": str(animal_name),
                 "date": str(date),
                 "region": str(region),
@@ -1332,8 +1332,8 @@ def compute_selected_dpp_encoding_comparison(
             }
         )
     table = pd.DataFrame.from_records(rows).loc[:, list(TABLE_COLUMNS)]
-    validate_encoding_comparison_table(table)
-    return {"table": table, **summarize_encoding_comparison_table(table)}
+    validate_dpp_encoding_table(table)
+    return {"table": table, **summarize_dpp_encoding_table(table)}
 
 
 def _validate_nonnegative_integer_column(
@@ -1351,7 +1351,7 @@ def _validate_nonnegative_integer_column(
     return np.rint(values).astype(np.int64)
 
 
-def validate_encoding_comparison_table(table: pd.DataFrame) -> pd.DataFrame:
+def validate_dpp_encoding_table(table: pd.DataFrame) -> pd.DataFrame:
     """Validate and return one canonical eligible-unit comparison table."""
     if not isinstance(table, pd.DataFrame):
         raise TypeError("Encoding-comparison artifact must be a pandas DataFrame.")
@@ -1377,7 +1377,7 @@ def validate_encoding_comparison_table(table: pd.DataFrame) -> pd.DataFrame:
     ].duplicated().any():
         raise ValueError("Encoding-comparison identities must be one-to-one.")
     for field_name in (
-        "dpp_encoding_comparison_id",
+        "dpp_encoding_id",
         "animal_name",
         "date",
         "region",
@@ -1387,8 +1387,8 @@ def validate_encoding_comparison_table(table: pd.DataFrame) -> pd.DataFrame:
         if len(values) != 1 or not values[0]:
             raise ValueError(f"{field_name} must contain one non-empty value.")
     _uuid_component(
-        table["dpp_encoding_comparison_id"].iloc[0],
-        name="dpp_encoding_comparison_id",
+        table["dpp_encoding_id"].iloc[0],
+        name="dpp_encoding_id",
     )
     n_folds_values = _validate_nonnegative_integer_column(table, "n_folds")
     random_seed_values = _validate_nonnegative_integer_column(table, "random_seed")
@@ -1606,9 +1606,9 @@ def validate_encoding_comparison_table(table: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-def summarize_encoding_comparison_table(table: pd.DataFrame) -> dict[str, Any]:
+def summarize_dpp_encoding_table(table: pd.DataFrame) -> dict[str, Any]:
     """Return result-level counts and status for one canonical table."""
-    validate_encoding_comparison_table(table)
+    validate_dpp_encoding_table(table)
     from v1ca1.spyglass.selection import unit_identity_sha256
 
     n_units_eligible = int(len(table))
@@ -1630,22 +1630,22 @@ def summarize_encoding_comparison_table(table: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def load_encoding_comparison_artifact(path: Path) -> pd.DataFrame:
+def load_dpp_encoding_artifact(path: Path) -> pd.DataFrame:
     """Load and validate one canonical encoding-comparison Parquet."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Encoding-comparison artifact not found: {path}")
-    return validate_encoding_comparison_table(pd.read_parquet(path))
+    return validate_dpp_encoding_table(pd.read_parquet(path))
 
 
-def write_encoding_comparison_artifact(
+def write_dpp_encoding_artifact(
     table: pd.DataFrame,
     path: Path,
     *,
     overwrite: bool = False,
 ) -> Path:
     """Atomically write one validated Parquet without implicit overwrite."""
-    validate_encoding_comparison_table(table)
+    validate_dpp_encoding_table(table)
     path = Path(path)
     if path.exists() and not overwrite:
         raise FileExistsError(
@@ -1657,7 +1657,7 @@ def write_encoding_comparison_artifact(
     had_existing = path.exists()
     try:
         table.to_parquet(temporary, index=False)
-        load_encoding_comparison_artifact(temporary)
+        load_dpp_encoding_artifact(temporary)
         if had_existing:
             os.replace(path, backup)
         os.replace(temporary, path)
@@ -1711,7 +1711,7 @@ def _resolve_legacy_identity(
     return next(iter(stable_ids))
 
 
-def normalize_legacy_encoding_comparison_table(
+def normalize_legacy_dpp_encoding_table(
     legacy_table: pd.DataFrame,
     *,
     animal_name: str,
@@ -1725,7 +1725,7 @@ def normalize_legacy_encoding_comparison_table(
     minimum_movement_firing_rate_hz: float,
     minimum_stability_correlation: float,
     unit_identity_resolver: Mapping[Any, Mapping[str, Any]],
-    dpp_encoding_comparison_id: Any,
+    dpp_encoding_id: Any,
     n_folds: int = 5,
     evaluation_bin_size_s: float = 0.05,
     spatial_bin_size_cm: float = 4.0,
@@ -1746,8 +1746,8 @@ def normalize_legacy_encoding_comparison_table(
         random_seed=random_seed,
     )
     comparison_id = _uuid_component(
-        dpp_encoding_comparison_id,
-        name="dpp_encoding_comparison_id",
+        dpp_encoding_id,
+        name="dpp_encoding_id",
     )
     firing_rate_threshold, stability_threshold = _validate_thresholds(
         minimum_movement_firing_rate_hz=minimum_movement_firing_rate_hz,
@@ -1858,7 +1858,7 @@ def normalize_legacy_encoding_comparison_table(
         rows.append(
             {
                 **{name: str(unit[name]) for name in IDENTITY_COLUMNS},
-                "dpp_encoding_comparison_id": comparison_id,
+                "dpp_encoding_id": comparison_id,
                 "animal_name": str(animal_name),
                 "date": str(date),
                 "region": str(region),
@@ -1887,9 +1887,9 @@ def normalize_legacy_encoding_comparison_table(
             }
         )
     if not rows:
-        return empty_encoding_comparison_table()
+        return empty_dpp_encoding_table()
     table = pd.DataFrame.from_records(rows).loc[:, list(TABLE_COLUMNS)]
-    return validate_encoding_comparison_table(table)
+    return validate_dpp_encoding_table(table)
 
 
 def _file_sha256(path: Path) -> str:
@@ -1901,7 +1901,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def register_existing_encoding_comparison_artifact(
+def register_existing_dpp_encoding_artifact(
     source_path: Path,
     destination_path: Path,
     *,
@@ -1916,7 +1916,7 @@ def register_existing_encoding_comparison_artifact(
     minimum_movement_firing_rate_hz: float,
     minimum_stability_correlation: float,
     unit_identity_resolver: Mapping[Any, Mapping[str, Any]],
-    dpp_encoding_comparison_id: Any,
+    dpp_encoding_id: Any,
     n_folds: int = 5,
     evaluation_bin_size_s: float = 0.05,
     spatial_bin_size_cm: float = 4.0,
@@ -1929,7 +1929,7 @@ def register_existing_encoding_comparison_artifact(
     if not source.is_file():
         raise FileNotFoundError(f"Legacy encoding artifact not found: {source}")
     legacy = pd.read_parquet(source)
-    table = normalize_legacy_encoding_comparison_table(
+    table = normalize_legacy_dpp_encoding_table(
         legacy,
         animal_name=animal_name,
         date=date,
@@ -1942,18 +1942,18 @@ def register_existing_encoding_comparison_artifact(
         minimum_movement_firing_rate_hz=minimum_movement_firing_rate_hz,
         minimum_stability_correlation=minimum_stability_correlation,
         unit_identity_resolver=unit_identity_resolver,
-        dpp_encoding_comparison_id=dpp_encoding_comparison_id,
+        dpp_encoding_id=dpp_encoding_id,
         n_folds=n_folds,
         evaluation_bin_size_s=evaluation_bin_size_s,
         spatial_bin_size_cm=spatial_bin_size_cm,
         gaussian_smoothing_sigma_bins=gaussian_smoothing_sigma_bins,
         random_seed=random_seed,
     )
-    written = write_encoding_comparison_artifact(table, destination_path)
+    written = write_dpp_encoding_artifact(table, destination_path)
     return {
         "table": table,
         "path": written,
-        **summarize_encoding_comparison_table(table),
+        **summarize_dpp_encoding_table(table),
         "legacy_artifact_provenance": {
             "source_path": str(source.resolve()),
             "source_sha256": _file_sha256(source),
@@ -1982,14 +1982,14 @@ __all__ = [
     "build_encoding_eligibility_table",
     "build_encoding_model_inputs",
     "build_strict_cross_validation_folds",
-    "compute_selected_dpp_encoding_comparison",
-    "empty_encoding_comparison_table",
-    "get_encoding_comparison_artifact_path",
-    "load_encoding_comparison_artifact",
-    "normalize_legacy_encoding_comparison_table",
-    "register_existing_encoding_comparison_artifact",
-    "summarize_encoding_comparison_table",
-    "validate_encoding_comparison_table",
+    "compute_selected_dpp_encoding",
+    "empty_dpp_encoding_table",
+    "get_dpp_encoding_artifact_path",
+    "load_dpp_encoding_artifact",
+    "normalize_legacy_dpp_encoding_table",
+    "register_existing_dpp_encoding_artifact",
+    "summarize_dpp_encoding_table",
+    "validate_dpp_encoding_table",
     "validate_trajectory_lap_counts",
-    "write_encoding_comparison_artifact",
+    "write_dpp_encoding_artifact",
 ]

@@ -13,11 +13,20 @@ if TYPE_CHECKING:
 SOURCE_TABLE_KEYS = (
     "epoch_intervals",
     "trajectory_intervals",
-    "ripples",
+    "ripple_interval",
     "position",
     "wtrack_graph",
     "spike_sorting_figurl",
 )
+
+NWB_CATALOG_KEY_BY_TABLE = {
+    "epoch_intervals": "epoch_intervals",
+    "trajectory_intervals": "trajectory_intervals",
+    "ripple_interval": "ripples",
+    "position": "position",
+    "wtrack_graph": "wtrack_graph",
+    "spike_sorting_figurl": "spike_sorting_figurl",
+}
 
 
 def _open_nwb_file(nwb_path: Path) -> AbstractContextManager["pynwb.NWBFile"]:
@@ -53,13 +62,17 @@ def _require_standard_ingestion(nwb_file_name: str, session_table: Any) -> None:
 
 def _normalize_catalog(catalog: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Validate the catalog keys and copy rows into insertion-ready dictionaries."""
-    missing = [key for key in SOURCE_TABLE_KEYS if key not in catalog]
+    missing = [
+        catalog_key
+        for catalog_key in NWB_CATALOG_KEY_BY_TABLE.values()
+        if catalog_key not in catalog
+    ]
     if missing:
         raise ValueError(f"Augmented NWB catalog is missing source groups: {missing!r}.")
 
     normalized: dict[str, list[dict[str, Any]]] = {}
-    for table_key in SOURCE_TABLE_KEYS:
-        rows = catalog[table_key]
+    for table_key, catalog_key in NWB_CATALOG_KEY_BY_TABLE.items():
+        rows = catalog[catalog_key]
         normalized[table_key] = [dict(row) for row in rows]
     return normalized
 

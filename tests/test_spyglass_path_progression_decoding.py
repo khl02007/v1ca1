@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from v1ca1.helper.session import TRAJECTORY_TYPES
-from v1ca1.spyglass import decoding_comparison as decoding
+from v1ca1.spyglass import path_progression_decoding as decoding
 
 
 COMPARISON_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -161,13 +161,13 @@ def _compute(monkeypatch, *, failure_policy=None, different_time_grids=False):
     monkeypatch.setattr(decoding, "_build_path_progressions", fake_progressions)
     monkeypatch.setattr(decoding, "_decode_cross_path_pair", fake_decode)
     eligibility = _eligibility_inputs()
-    result = decoding.compute_path_progression_decoding_comparison(
+    result = decoding.compute_path_progression_decoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="02_r1",
         cohort_epoch="04_r2",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         spikes=_spikes(),
         stable_unit_ids=STABLE_UNIT_IDS,
         target_movement_firing_rate_table=eligibility[
@@ -249,7 +249,7 @@ def test_canonical_artifact_paths_are_session_first(tmp_path: Path) -> None:
         epoch="02_r1",
         cohort_epoch="04_r2",
         region="v1",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
     expected = (
@@ -335,13 +335,13 @@ def test_ephemeral_group_keys_may_differ_across_epochs_and_reload(
         "_decode_cross_path_pair",
         lambda **kwargs: _decoded_pair(),
     )
-    result = decoding.compute_path_progression_decoding_comparison(
+    result = decoding.compute_path_progression_decoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="02_r1",
         cohort_epoch="04_r2",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         spikes=_spikes(),
         stable_unit_ids=STABLE_UNIT_IDS,
         target_movement_firing_rate_table=eligibility[
@@ -507,7 +507,7 @@ def test_expected_transfer_support_failure_is_partial_and_audited(
         epoch="02_r1",
         cohort_epoch="04_r2",
         region="v1",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
     written = decoding.write_decoding_artifact_bundle(result, paths)
@@ -554,13 +554,13 @@ def test_no_eligible_units_is_a_terminal_audited_result(
         "_build_path_progressions",
         lambda **kwargs: pytest.fail("terminal results must not build graphs"),
     )
-    result = decoding.compute_path_progression_decoding_comparison(
+    result = decoding.compute_path_progression_decoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="02_r1",
         cohort_epoch="04_r2",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         spikes=_spikes(),
         stable_unit_ids=STABLE_UNIT_IDS,
         target_movement_firing_rate_table=eligibility[
@@ -594,7 +594,7 @@ def test_no_eligible_units_is_a_terminal_audited_result(
         epoch="02_r1",
         cohort_epoch="04_r2",
         region="v1",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
     written = decoding.write_decoding_artifact_bundle(result, paths)
@@ -637,13 +637,13 @@ def test_no_units_is_a_terminal_roundtrip(
     )
     target_movement = movement.copy()
     cohort_movement = movement.copy()
-    result = decoding.compute_path_progression_decoding_comparison(
+    result = decoding.compute_path_progression_decoding(
         animal_name="L14",
         date="20240611",
         region="v1",
         epoch="02_r1",
         cohort_epoch="04_r2",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         spikes=spikes,
         stable_unit_ids=(),
         target_movement_firing_rate_table=target_movement,
@@ -665,7 +665,7 @@ def test_no_units_is_a_terminal_roundtrip(
         epoch="02_r1",
         cohort_epoch="04_r2",
         region="v1",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
     written = decoding.write_decoding_artifact_bundle(result, paths)
@@ -711,7 +711,7 @@ def test_artifact_bundle_roundtrip_refuses_overwrite_and_detects_tamper(
         epoch="02_r1",
         cohort_epoch="04_r2",
         region="v1",
-        path_progression_decoding_comparison_id=COMPARISON_ID,
+        path_progression_decoding_id=COMPARISON_ID,
         artifact_root=tmp_path,
     )
     written = decoding.write_decoding_artifact_bundle(result, paths)

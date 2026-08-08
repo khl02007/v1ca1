@@ -19,7 +19,7 @@ from v1ca1.helper.session import TRAJECTORY_TYPES, TURN_TRAJECTORY_PAIRS
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
-ARTIFACT_DIRNAME = "path_progression_decoding_comparison"
+ARTIFACT_DIRNAME = "path_progression_decoding"
 MANIFEST_FILENAME = "manifest.parquet"
 UNIT_FILENAME = "selected_units.parquet"
 METRICS_FILENAME = "decoding_summary.parquet"
@@ -57,7 +57,7 @@ METRIC_NAMES = (
     "n_samples",
 )
 METRIC_COLUMNS = (
-    "path_progression_decoding_comparison_id",
+    "path_progression_decoding_id",
     "animal_name",
     "date",
     "region",
@@ -83,7 +83,7 @@ BINNED_VALUE_COLUMNS = (
     "yerr_high",
 )
 BINNED_COLUMNS = (
-    "path_progression_decoding_comparison_id",
+    "path_progression_decoding_id",
     "animal_name",
     "date",
     "region",
@@ -139,7 +139,7 @@ MANIFEST_COLUMNS = (
     "value_role",
     "file_size_bytes",
     "sha256",
-    "path_progression_decoding_comparison_id",
+    "path_progression_decoding_id",
     "animal_name",
     "date",
     "region",
@@ -331,7 +331,7 @@ def get_decoding_comparison_artifact_path(
     date: str,
     epoch: str,
     region: str,
-    path_progression_decoding_comparison_id: Any,
+    path_progression_decoding_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> Path:
     """Return the canonical session-first UUID artifact directory."""
@@ -345,8 +345,8 @@ def get_decoding_comparison_artifact_path(
         }.items()
     }
     result_id = _uuid_string(
-        path_progression_decoding_comparison_id,
-        name="path_progression_decoding_comparison_id",
+        path_progression_decoding_id,
+        name="path_progression_decoding_id",
     )
     return (
         Path(artifact_root)
@@ -366,7 +366,7 @@ def get_decoding_artifact_paths(
     epoch: str,
     cohort_epoch: str,
     region: str,
-    path_progression_decoding_comparison_id: Any,
+    path_progression_decoding_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> dict[str, Path]:
     """Return all canonical paths for one UUID-keyed artifact bundle."""
@@ -376,8 +376,8 @@ def get_decoding_artifact_paths(
         date=date,
         epoch=epoch,
         region=region,
-        path_progression_decoding_comparison_id=(
-            path_progression_decoding_comparison_id
+        path_progression_decoding_id=(
+            path_progression_decoding_id
         ),
         artifact_root=artifact_root,
     )
@@ -1007,7 +1007,7 @@ def _analysis_status(
     return "partial_valid"
 
 
-def compute_path_progression_decoding_comparison(
+def compute_path_progression_decoding(
     *,
     animal_name: str,
     date: str,
@@ -1028,7 +1028,7 @@ def compute_path_progression_decoding_comparison(
     trajectory_intervals: Mapping[str, Any],
     graph_inputs: Mapping[str, Mapping[str, Any]],
     movement_interval: Any,
-    path_progression_decoding_comparison_id: Any,
+    path_progression_decoding_id: Any,
     decoding_bin_size_s: float = DEFAULT_DECODING_BIN_SIZE_S,
     sliding_window_size_bins: int = DEFAULT_SLIDING_WINDOW_SIZE_BINS,
     spatial_bin_size_cm: float = DEFAULT_SPATIAL_BIN_SIZE_CM,
@@ -1065,8 +1065,8 @@ def compute_path_progression_decoding_comparison(
         }.items()
     }
     result_id = _uuid_string(
-        path_progression_decoding_comparison_id,
-        name="path_progression_decoding_comparison_id",
+        path_progression_decoding_id,
+        name="path_progression_decoding_id",
     )
     parameter_name = str(parameter_name).strip()
     if not parameter_name or len(parameter_name) > 64:
@@ -1187,7 +1187,7 @@ def compute_path_progression_decoding_comparison(
         )
     )
     metadata = {
-        "path_progression_decoding_comparison_id": result_id,
+        "path_progression_decoding_id": result_id,
         **metadata_components,
         "parameter_name": parameter_name,
         "parameter_sha256": parameter_sha256,
@@ -1198,7 +1198,7 @@ def compute_path_progression_decoding_comparison(
     table_metadata = {
         name: metadata[name]
         for name in (
-            "path_progression_decoding_comparison_id",
+            "path_progression_decoding_id",
             "animal_name",
             "date",
             "region",
@@ -1381,7 +1381,7 @@ def validate_decoding_comparison_result(result: Mapping[str, Any]) -> dict[str, 
         raise ValueError("Decoding result keys do not match the canonical schema.")
     metadata = dict(result["metadata"])
     metadata_fields = {
-        "path_progression_decoding_comparison_id",
+        "path_progression_decoding_id",
         "animal_name",
         "date",
         "region",
@@ -1396,8 +1396,8 @@ def validate_decoding_comparison_result(result: Mapping[str, Any]) -> dict[str, 
     if set(metadata) != metadata_fields:
         raise ValueError("Decoding result metadata is incomplete.")
     _uuid_string(
-        metadata["path_progression_decoding_comparison_id"],
-        name="path_progression_decoding_comparison_id",
+        metadata["path_progression_decoding_id"],
+        name="path_progression_decoding_id",
     )
     for name in ("animal_name", "date", "region", "epoch", "cohort_epoch"):
         _path_component(metadata[name], name=name)
@@ -1614,7 +1614,7 @@ def validate_decoding_comparison_result(result: Mapping[str, Any]) -> dict[str, 
         ("cross_path_binned_error", binned),
     ):
         for column in (
-            "path_progression_decoding_comparison_id",
+            "path_progression_decoding_id",
             "animal_name",
             "date",
             "region",
@@ -1836,8 +1836,8 @@ def write_decoding_comparison_artifact(
     result = validate_decoding_comparison_result(result)
     destination = Path(path)
     result_id = _uuid_string(
-        result["metadata"]["path_progression_decoding_comparison_id"],
-        name="path_progression_decoding_comparison_id",
+        result["metadata"]["path_progression_decoding_id"],
+        name="path_progression_decoding_id",
     )
     if destination.name != result_id:
         raise ValueError("Artifact directory name must equal the result UUID.")
@@ -2025,7 +2025,7 @@ def load_decoding_comparison_artifact(
     metadata = {
         name: str(first[name])
         for name in (
-            "path_progression_decoding_comparison_id",
+            "path_progression_decoding_id",
             "animal_name",
             "date",
             "region",
@@ -2039,8 +2039,8 @@ def load_decoding_comparison_artifact(
         )
     }
     result_id = _uuid_string(
-        metadata["path_progression_decoding_comparison_id"],
-        name="path_progression_decoding_comparison_id",
+        metadata["path_progression_decoding_id"],
+        name="path_progression_decoding_id",
     )
     if not _allow_temporary_name and directory.name != result_id:
         raise ValueError("Manifest UUID does not match its artifact directory.")
@@ -2249,7 +2249,7 @@ __all__ = [
     "TRANSFER_SPEC_SHA256",
     "build_cross_path_transfer_specs",
     "build_symmetric_cohort_eligibility_table",
-    "compute_path_progression_decoding_comparison",
+    "compute_path_progression_decoding",
     "get_decoding_artifact_paths",
     "get_decoding_comparison_artifact_path",
     "get_shared_eligible_stable_unit_ids",

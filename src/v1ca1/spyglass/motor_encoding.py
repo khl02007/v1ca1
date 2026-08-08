@@ -1,4 +1,4 @@
-"""Database-free nine-model motor encoding comparison artifacts."""
+"""Database-free nine-model motor-encoding artifacts."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from v1ca1.helper.session import TRAJECTORY_TYPES
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
-ARTIFACT_DIRNAME = "motor_encoding_comparison"
+ARTIFACT_DIRNAME = "motor_encoding"
 MANIFEST_FILENAME = "manifest.parquet"
 SELECTED_UNITS_FILENAME = "selected_units.parquet"
 NESTED_CV_FILENAME = "nested_cv.nc"
@@ -78,7 +78,7 @@ MODEL_SPEC = MappingProxyType(
 )
 OUTPUT_RULE = MappingProxyType(
     {
-        "version": 1,
+        "version": 2,
         "model_names": MODEL_NAMES,
         "cross_validation": "nested_lap_level_by_trajectory_movement_only",
         "hyperparameter_selection": (
@@ -87,7 +87,9 @@ OUTPUT_RULE = MappingProxyType(
         "unit_fit_failure_policy": (
             "retry_nonfinite_or_failed_population_units_independently"
         ),
-        "unit_selection": "strict_greater_than_movement_firing_rate_threshold",
+        "movement_operator": "greater_than_or_equal",
+        "stability_aggregation": "at_least_one_trajectory",
+        "stability_operator": "greater_than_or_equal",
         "full_refit_role": "visualization_not_heldout_inference",
         "primary_position_role": "speed_acceleration_and_track_linearization",
         "orientation_reference_role": "primary_minus_reference_head_direction",
@@ -117,6 +119,9 @@ SELECTED_UNIT_COLUMNS = (
     "selection_index",
     "movement_firing_rate_hz",
     "passes_movement_firing_rate",
+    *(f"{trajectory_type}_stability_correlation" for trajectory_type in TRAJECTORY_TYPES),
+    "passes_stability",
+    "eligible",
     "n_outer_folds_selected",
     "n_outer_folds_with_finite_evidence",
     "valid_nested_cv",
@@ -127,7 +132,7 @@ MANIFEST_COLUMNS = (
     "artifact_kind",
     "file_size_bytes",
     "sha256",
-    "motor_encoding_comparison_id",
+    "motor_encoding_id",
     "animal_name",
     "date",
     "region",
@@ -181,7 +186,7 @@ def get_motor_encoding_artifact_paths(
     date: str,
     epoch: str,
     region: str,
-    motor_encoding_comparison_id: Any,
+    motor_encoding_id: Any,
     artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
 ) -> dict[str, Path]:
     """Return one UUID-keyed, session-first motor artifact bundle."""
@@ -195,8 +200,8 @@ def get_motor_encoding_artifact_paths(
         }.items()
     }
     result_id = _uuid_string(
-        motor_encoding_comparison_id,
-        name="motor_encoding_comparison_id",
+        motor_encoding_id,
+        name="motor_encoding_id",
     )
     artifact_dir = (
         Path(artifact_root)
@@ -219,6 +224,7 @@ def get_motor_encoding_artifact_paths(
 def validate_motor_encoding_parameters(
     *,
     minimum_movement_firing_rate_hz: float,
+    minimum_stability_correlation: float,
     evaluation_bin_size_s: float = DEFAULT_BIN_SIZE_S,
     outer_n_folds: int = DEFAULT_N_FOLDS,
     inner_n_folds: int = DEFAULT_INNER_N_FOLDS,
@@ -266,6 +272,9 @@ def validate_motor_encoding_parameters(
         "minimum_movement_firing_rate_hz": float(
             minimum_movement_firing_rate_hz
         ),
+        "minimum_stability_correlation": float(
+            minimum_stability_correlation
+        ),
         "evaluation_bin_size_s": float(evaluation_bin_size_s),
         "motor_zscore_eps": float(motor_zscore_eps),
         "speed_smoothing_sigma_s": float(speed_smoothing_sigma_s),
@@ -278,6 +287,12 @@ def validate_motor_encoding_parameters(
     ):
         raise ValueError(
             "minimum_movement_firing_rate_hz must be finite and non-negative."
+        )
+    if not np.isfinite(numeric["minimum_stability_correlation"]) or not (
+        -1.0 <= numeric["minimum_stability_correlation"] <= 1.0
+    ):
+        raise ValueError(
+            "minimum_stability_correlation must be finite and within [-1, 1]."
         )
     for name in ("evaluation_bin_size_s", "motor_zscore_eps"):
         if not np.isfinite(numeric[name]) or numeric[name] <= 0.0:
@@ -317,12 +332,14 @@ MANUSCRIPT_PARAMETERS_BY_REGION = MappingProxyType(
     {
         "v1": MappingProxyType(
             validate_motor_encoding_parameters(
-                minimum_movement_firing_rate_hz=0.5
+                minimum_movement_firing_rate_hz=0.5,
+                minimum_stability_correlation=0.5,
             )
         ),
         "ca1": MappingProxyType(
             validate_motor_encoding_parameters(
-                minimum_movement_firing_rate_hz=0.0
+                minimum_movement_firing_rate_hz=0.0,
+                minimum_stability_correlation=0.5,
             )
         ),
     }
@@ -609,6 +626,165 @@ def _aligned_movement_rates(
     return status, rates
 
 
+def _build_unit_eligibility_table(
+    *,
+    identity: pd.DataFrame,
+    movement_firing_rates_hz: np.ndarray,
+    stability_tables_by_trajectory: Mapping[str, pd.DataFrame],
+    animal_name: str,
+    date: str,
+    region: str,
+    epoch: str,
+    minimum_movement_firing_rate_hz: float,
+    minimum_stability_correlation: float,
+) -> pd.DataFrame:
+    """Align movement and four path-stability inputs to the selected units."""
+    rates = np.asarray(movement_firing_rates_hz, dtype=float).reshape(-1)
+    if rates.size != len(identity):
+        raise ValueError("Movement firing rates do not align to selected units.")
+    actual_trajectories = set(stability_tables_by_trajectory)
+    expected_trajectories = set(TRAJECTORY_TYPES)
+    if actual_trajectories != expected_trajectories:
+        raise ValueError(
+            "stability_tables_by_trajectory must contain exactly the four "
+            "trajectory types; "
+            f"missing={sorted(expected_trajectories - actual_trajectories)!r}, "
+            f"extra={sorted(actual_trajectories - expected_trajectories)!r}."
+        )
+
+    output = identity.copy()
+    output["movement_firing_rate_hz"] = rates
+    stability_arrays: list[np.ndarray] = []
+    expected_ids = identity["stable_unit_id"].astype(str).tolist()
+    for trajectory_type in TRAJECTORY_TYPES:
+        table = stability_tables_by_trajectory[trajectory_type]
+        if not isinstance(table, pd.DataFrame):
+            raise TypeError(
+                f"Stability[{trajectory_type}] must be one pandas DataFrame."
+            )
+        if identity.empty:
+            if not table.empty:
+                raise ValueError(
+                    "No selected units require empty stability tables."
+                )
+            correlations = np.asarray([], dtype=float)
+        else:
+            required = {
+                "spikesorting_merge_id",
+                "unit_id",
+                "stable_unit_id",
+                "animal_name",
+                "date",
+                "region",
+                "epoch",
+                "trajectory_type",
+                "stability_correlation",
+            }
+            missing = sorted(required.difference(table.columns))
+            if missing:
+                raise ValueError(
+                    f"Stability[{trajectory_type}] is missing columns "
+                    f"{missing!r}."
+                )
+            observed = table.copy()
+            for field_name, expected_value in {
+                "animal_name": animal_name,
+                "date": date,
+                "region": region,
+                "epoch": epoch,
+                "trajectory_type": trajectory_type,
+            }.items():
+                values = observed[field_name].astype(str).unique().tolist()
+                if values != [str(expected_value)]:
+                    raise ValueError(
+                        f"Stability[{trajectory_type}] has mismatched "
+                        f"{field_name}."
+                    )
+            for field_name in (
+                "spikesorting_merge_id",
+                "unit_id",
+                "stable_unit_id",
+            ):
+                observed[field_name] = observed[field_name].astype(str)
+            if observed["stable_unit_id"].duplicated().any():
+                raise ValueError(
+                    f"Stability[{trajectory_type}] has duplicate stable units."
+                )
+            observed = observed.set_index("stable_unit_id", drop=False)
+            if set(observed.index) != set(expected_ids):
+                raise ValueError(
+                    f"Stability[{trajectory_type}] identities do not exactly "
+                    "match the selected units."
+                )
+            observed = observed.loc[expected_ids]
+            for field_name in ("spikesorting_merge_id", "unit_id"):
+                if observed[field_name].tolist() != identity[
+                    field_name
+                ].astype(str).tolist():
+                    raise ValueError(
+                        f"Stability[{trajectory_type}] {field_name} does not "
+                        "match the selected units."
+                    )
+            correlations = pd.to_numeric(
+                observed["stability_correlation"],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            finite = np.isfinite(correlations)
+            if np.any(np.isinf(correlations)) or np.any(
+                (correlations[finite] < -1.0 - 1e-9)
+                | (correlations[finite] > 1.0 + 1e-9)
+            ):
+                raise ValueError(
+                    "Stability correlations must be within [-1, 1] or NaN."
+                )
+            if "stability_status" in observed:
+                statuses = observed["stability_status"].astype(str).to_numpy()
+                if not np.array_equal(finite, statuses == "valid"):
+                    raise ValueError(
+                        "Finite stability correlations must correspond exactly "
+                        "to stability_status='valid'."
+                    )
+            if "firing_rate_hz" in observed:
+                stability_rates = pd.to_numeric(
+                    observed["firing_rate_hz"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                if not np.allclose(
+                    stability_rates,
+                    rates,
+                    rtol=1e-9,
+                    atol=1e-12,
+                    equal_nan=True,
+                ):
+                    raise ValueError(
+                        f"Stability[{trajectory_type}] firing rates disagree "
+                        "with MovementFiringRate."
+                    )
+        output[f"{trajectory_type}_stability_correlation"] = correlations
+        stability_arrays.append(correlations)
+
+    if identity.empty:
+        passes_stability = np.asarray([], dtype=bool)
+    else:
+        stability_matrix = np.column_stack(stability_arrays)
+        passes_stability = np.any(
+            np.isfinite(stability_matrix)
+            & (
+                stability_matrix
+                >= float(minimum_stability_correlation)
+            ),
+            axis=1,
+        )
+    passes_movement = (
+        np.isfinite(rates)
+        & (rates >= float(minimum_movement_firing_rate_hz))
+    )
+    output["passes_movement_firing_rate"] = passes_movement
+    output["passes_stability"] = passes_stability
+    output["eligible"] = passes_movement & passes_stability
+    return output
+
+
 def _parameter_metadata(
     *,
     parameter_name: str,
@@ -624,7 +800,7 @@ def _parameter_metadata(
             "parameter_name must be non-empty and at most 64 characters."
         )
     expected_parameter_sha256 = _provenance_sha256(
-        {"motor_encoding_comparison_param_name": name, **dict(parameters)}
+        {"motor_encoding_param_name": name, **dict(parameters)}
     )
     if parameter_sha256 is None:
         parameter_sha256 = expected_parameter_sha256
@@ -657,17 +833,13 @@ def _unit_index_by_group(identity: pd.DataFrame) -> dict[str, int]:
 
 def _build_selected_units_table(
     *,
-    identity: pd.DataFrame,
-    movement_firing_rates_hz: np.ndarray,
-    minimum_movement_firing_rate_hz: float,
+    eligibility: pd.DataFrame,
     nested_cv: Any,
     full_refit: Any,
 ) -> pd.DataFrame:
     """Build the all-input unit audit for eligibility and held-out validity."""
-    n_units = len(identity)
-    rates = np.asarray(movement_firing_rates_hz, dtype=float).reshape(-1)
-    if rates.size != n_units:
-        raise ValueError("Movement firing rates do not align to selected units.")
+    identity = eligibility.loc[:, list(IDENTITY_COLUMNS)]
+    n_units = len(eligibility)
     nested_units = [str(value) for value in np.asarray(nested_cv.unit.values)]
     group_lookup = _unit_index_by_group(identity)
     if len(nested_units) != n_units or set(nested_units) != set(group_lookup):
@@ -676,7 +848,7 @@ def _build_selected_units_table(
     if not np.array_equal(nested_order, np.arange(n_units)):
         raise ValueError("Nested-CV units must preserve selected TsGroup order.")
 
-    eligible = rates > float(minimum_movement_firing_rate_hz)
+    eligible = eligibility["eligible"].to_numpy(dtype=bool)
     full_units = {str(value) for value in np.asarray(full_refit.unit.values)}
     expected_full_units = {
         str(identity.iloc[index]["group_unit_id"])
@@ -714,12 +886,10 @@ def _build_selected_units_table(
         & np.all(np.isfinite(pooled), axis=0)
         & np.any(finite_by_fold, axis=0)
     )
-    output = identity.copy()
+    output = eligibility.copy()
     for field in IDENTITY_COLUMNS:
         output[field] = output[field].map(str)
     output["selection_index"] = np.arange(n_units, dtype=int)
-    output["movement_firing_rate_hz"] = rates
-    output["passes_movement_firing_rate"] = eligible
     output["n_outer_folds_selected"] = np.sum(selected, axis=0).astype(int)
     output["n_outer_folds_with_finite_evidence"] = np.sum(
         finite_by_fold, axis=0
@@ -730,7 +900,7 @@ def _build_selected_units_table(
 
 def _analysis_status(selected_units: pd.DataFrame) -> str:
     """Return the fixed all-unit audit status."""
-    n_eligible = int(selected_units["passes_movement_firing_rate"].sum())
+    n_eligible = int(selected_units["eligible"].sum())
     n_valid = int(selected_units["valid_nested_cv"].sum())
     if n_valid == 0:
         return "no_valid_units"
@@ -824,7 +994,7 @@ def _canonicalize_computed_dataset(
 
 def _common_metadata(
     *,
-    motor_encoding_comparison_id: Any,
+    motor_encoding_id: Any,
     animal_name: str,
     date: str,
     region: str,
@@ -832,9 +1002,9 @@ def _common_metadata(
 ) -> dict[str, str]:
     """Return validated result metadata."""
     return {
-        "motor_encoding_comparison_id": _uuid_string(
-            motor_encoding_comparison_id,
-            name="motor_encoding_comparison_id",
+        "motor_encoding_id": _uuid_string(
+            motor_encoding_id,
+            name="motor_encoding_id",
         ),
         **{
             name: _path_component(value, name=name)
@@ -849,26 +1019,13 @@ def _common_metadata(
 
 
 def _terminal_selected_units(
-    identity: pd.DataFrame,
-    rates: np.ndarray,
-    *,
-    minimum_movement_firing_rate_hz: float,
-    movement_status: str,
+    eligibility: pd.DataFrame,
 ) -> pd.DataFrame:
     """Return an all-input audit for a terminal computation."""
-    output = identity.copy()
+    output = eligibility.copy()
     for field in IDENTITY_COLUMNS:
         output[field] = output[field].map(str)
-    values = np.asarray(rates, dtype=float).reshape(-1)
-    if values.size != len(output):
-        raise ValueError("Terminal movement rates do not align to selected units.")
     output["selection_index"] = np.arange(len(output), dtype=int)
-    output["movement_firing_rate_hz"] = values
-    output["passes_movement_firing_rate"] = (
-        np.isfinite(values)
-        & (values > float(minimum_movement_firing_rate_hz))
-        & (movement_status == "valid")
-    )
     output["n_outer_folds_selected"] = np.zeros(len(output), dtype=int)
     output["n_outer_folds_with_finite_evidence"] = np.zeros(
         len(output), dtype=int
@@ -970,9 +1127,7 @@ def _terminal_result(
     *,
     metadata: Mapping[str, str],
     parameters: Mapping[str, Any],
-    identity: pd.DataFrame,
-    rates: np.ndarray,
-    movement_status: str,
+    eligibility: pd.DataFrame,
     analysis_status: str,
     primary_position_source: str,
     orientation_reference_position_source: str,
@@ -981,12 +1136,7 @@ def _terminal_result(
     if analysis_status not in ANALYSIS_STATUSES:
         raise ValueError("Unsupported terminal analysis status.")
     selected_units = _terminal_selected_units(
-        identity,
-        rates,
-        minimum_movement_firing_rate_hz=parameters[
-            "minimum_movement_firing_rate_hz"
-        ],
-        movement_status=movement_status,
+        eligibility,
     )
     nested_cv, full_refit = _terminal_datasets(
         selected_units=selected_units,
@@ -1013,7 +1163,7 @@ def _terminal_result(
         "full_refit": full_refit,
         "n_units_input": len(selected_units),
         "n_units_eligible": int(
-            selected_units["passes_movement_firing_rate"].sum()
+            selected_units["eligible"].sum()
         ),
         "n_units_valid": 0,
         "n_outer_folds_expected": int(parameters["outer_n_folds"]),
@@ -1026,13 +1176,13 @@ def _terminal_result(
     return validate_motor_encoding_result(result)
 
 
-def compute_motor_encoding_comparison(
+def compute_motor_encoding(
     *,
     animal_name: str,
     date: str,
     region: str,
     epoch: str,
-    motor_encoding_comparison_id: Any,
+    motor_encoding_id: Any,
     spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]],
     primary_position: Any,
@@ -1043,7 +1193,9 @@ def compute_motor_encoding_comparison(
     graph_inputs_by_configuration: Mapping[str, Mapping[str, Any]],
     movement_intervals: Any,
     movement_firing_rate_table: pd.DataFrame,
+    stability_tables_by_trajectory: Mapping[str, pd.DataFrame],
     minimum_movement_firing_rate_hz: float,
+    minimum_stability_correlation: float,
     parameter_name: str = "default",
     parameter_sha256: str | None = None,
     model_spec_sha256: str | None = None,
@@ -1066,7 +1218,7 @@ def compute_motor_encoding_comparison(
 ) -> dict[str, Any]:
     """Run the existing nested-CV motor implementation on selected NWB inputs."""
     metadata = _common_metadata(
-        motor_encoding_comparison_id=motor_encoding_comparison_id,
+        motor_encoding_id=motor_encoding_id,
         animal_name=animal_name,
         date=date,
         region=region,
@@ -1074,6 +1226,7 @@ def compute_motor_encoding_comparison(
     )
     parameters = validate_motor_encoding_parameters(
         minimum_movement_firing_rate_hz=minimum_movement_firing_rate_hz,
+        minimum_stability_correlation=minimum_stability_correlation,
         evaluation_bin_size_s=evaluation_bin_size_s,
         outer_n_folds=outer_n_folds,
         inner_n_folds=inner_n_folds,
@@ -1114,13 +1267,26 @@ def compute_motor_encoding_comparison(
         epoch=metadata["epoch"],
         movement_intervals=movement_intervals,
     )
+    eligibility = _build_unit_eligibility_table(
+        identity=identity,
+        movement_firing_rates_hz=movement_rates,
+        stability_tables_by_trajectory=stability_tables_by_trajectory,
+        animal_name=metadata["animal_name"],
+        date=metadata["date"],
+        region=metadata["region"],
+        epoch=metadata["epoch"],
+        minimum_movement_firing_rate_hz=parameters[
+            "minimum_movement_firing_rate_hz"
+        ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
+    )
     if movement_status in {"no_units", "no_valid_position", "no_movement"}:
         return _terminal_result(
             metadata=metadata,
             parameters=parameters,
-            identity=identity,
-            rates=movement_rates,
-            movement_status=movement_status,
+            eligibility=eligibility,
             analysis_status=movement_status,
             primary_position_source=primary_position_source,
             orientation_reference_position_source=(
@@ -1128,17 +1294,12 @@ def compute_motor_encoding_comparison(
             ),
         )
     motor = _motor_module()
-    full_refit_unit_mask = motor.get_unit_mask(
-        movement_rates,
-        parameters["minimum_movement_firing_rate_hz"],
-    )
+    full_refit_unit_mask = eligibility["eligible"].to_numpy(dtype=bool)
     if not np.any(full_refit_unit_mask):
         return _terminal_result(
             metadata=metadata,
             parameters=parameters,
-            identity=identity,
-            rates=movement_rates,
-            movement_status=movement_status,
+            eligibility=eligibility,
             analysis_status="no_eligible_units",
             primary_position_source=primary_position_source,
             orientation_reference_position_source=(
@@ -1154,9 +1315,7 @@ def compute_motor_encoding_comparison(
         return _terminal_result(
             metadata=metadata,
             parameters=parameters,
-            identity=identity,
-            rates=movement_rates,
-            movement_status=movement_status,
+            eligibility=eligibility,
             analysis_status="no_trials",
             primary_position_source=primary_position_source,
             orientation_reference_position_source=(
@@ -1212,6 +1371,7 @@ def compute_motor_encoding_comparison(
         motor_zscore_eps=parameters["motor_zscore_eps"],
         motor_spline_k=parameters["motor_spline_n_basis"],
         motor_spline_order=parameters["motor_spline_order"],
+        allowed_unit_mask=full_refit_unit_mask,
         isolate_unit_failures=True,
     )
     sources = {
@@ -1290,11 +1450,7 @@ def compute_motor_encoding_comparison(
         fit_parameters=fit_parameters,
     )
     selected_units = _build_selected_units_table(
-        identity=identity,
-        movement_firing_rates_hz=movement_rates,
-        minimum_movement_firing_rate_hz=parameters[
-            "minimum_movement_firing_rate_hz"
-        ],
+        eligibility=eligibility,
         nested_cv=nested_cv,
         full_refit=full_refit,
     )
@@ -1339,7 +1495,7 @@ def compute_motor_encoding_comparison(
         "full_refit": full_refit,
         "n_units_input": len(selected_units),
         "n_units_eligible": int(
-            selected_units["passes_movement_firing_rate"].sum()
+            selected_units["eligible"].sum()
         ),
         "n_units_valid": int(selected_units["valid_nested_cv"].sum()),
         "n_outer_folds_expected": parameters["outer_n_folds"],
@@ -1439,6 +1595,7 @@ def validate_motor_encoding_result(result: Mapping[str, Any]) -> dict[str, Any]:
             name: parameter_values[name]
             for name in (
                 "minimum_movement_firing_rate_hz",
+                "minimum_stability_correlation",
                 "evaluation_bin_size_s",
                 "outer_n_folds",
                 "inner_n_folds",
@@ -1476,6 +1633,22 @@ def validate_motor_encoding_result(result: Mapping[str, Any]) -> dict[str, Any]:
     for field in IDENTITY_COLUMNS:
         if selected_units[field].map(str).str.len().eq(0).any():
             raise ValueError(f"selected_units {field} must be non-empty.")
+    bool_columns = (
+        "passes_movement_firing_rate",
+        "passes_stability",
+        "eligible",
+        "valid_nested_cv",
+    )
+    if any(selected_units[name].isna().any() for name in bool_columns):
+        raise ValueError("selected_units eligibility fields cannot be null.")
+    if not np.array_equal(
+        selected_units["eligible"].to_numpy(dtype=bool),
+        selected_units["passes_movement_firing_rate"].to_numpy(dtype=bool)
+        & selected_units["passes_stability"].to_numpy(dtype=bool),
+    ):
+        raise ValueError(
+            "selected_units eligible must be movement-rate AND stability."
+        )
     status = str(copied["analysis_status"])
     if status not in ANALYSIS_STATUSES:
         raise ValueError("Unsupported analysis_status.")
@@ -1502,7 +1675,7 @@ def validate_motor_encoding_result(result: Mapping[str, Any]) -> dict[str, Any]:
     expected_counts = {
         "n_units_input": len(selected_units),
         "n_units_eligible": int(
-            selected_units["passes_movement_firing_rate"].sum()
+            selected_units["eligible"].sum()
         ),
         "n_units_valid": int(selected_units["valid_nested_cv"].sum()),
         "n_outer_folds_expected": parameters["outer_n_folds"],
@@ -1536,7 +1709,7 @@ def validate_motor_encoding_result(result: Mapping[str, Any]) -> dict[str, Any]:
     full_ids = {str(value) for value in np.asarray(copied["full_refit"].unit)}
     eligible_ids = set(
         selected_units.loc[
-            selected_units["passes_movement_firing_rate"], "stable_unit_id"
+            selected_units["eligible"], "stable_unit_id"
         ].astype(str)
     )
     if status in {"valid", "partial_valid", "no_valid_units"} and (
@@ -1616,7 +1789,7 @@ def write_motor_encoding_artifact(
     """Atomically write and reload one motor-encoding artifact bundle."""
     result = validate_motor_encoding_result(result)
     destination = Path(path)
-    result_id = result["metadata"]["motor_encoding_comparison_id"]
+    result_id = result["metadata"]["motor_encoding_id"]
     if destination.name != result_id:
         raise ValueError("Artifact directory name must equal the result UUID.")
     if destination.exists() and not overwrite:
@@ -1689,7 +1862,7 @@ def write_motor_encoding_artifact(
         date=result["metadata"]["date"],
         epoch=result["metadata"]["epoch"],
         region=result["metadata"]["region"],
-        motor_encoding_comparison_id=result_id,
+        motor_encoding_id=result_id,
         artifact_root=destination.parents[5],
     )
 
@@ -1731,7 +1904,7 @@ def load_motor_encoding_artifact(
     metadata = {
         name: str(first[name])
         for name in (
-            "motor_encoding_comparison_id",
+            "motor_encoding_id",
             "animal_name",
             "date",
             "region",
@@ -1739,7 +1912,7 @@ def load_motor_encoding_artifact(
         )
     }
     if not _allow_temporary_name and directory.name != metadata[
-        "motor_encoding_comparison_id"
+        "motor_encoding_id"
     ]:
         raise ValueError("Artifact directory name does not match its result UUID.")
     import xarray as xr
@@ -2063,8 +2236,9 @@ def register_existing_motor_encoding_artifact(
     date: str,
     region: str,
     epoch: str,
-    motor_encoding_comparison_id: Any,
+    motor_encoding_id: Any,
     movement_firing_rate_table: pd.DataFrame,
+    stability_tables_by_trajectory: Mapping[str, pd.DataFrame],
     graph_inputs_by_configuration: Mapping[str, Mapping[str, Any]],
     unit_identity_resolver: (
         Mapping[Any, Mapping[str, Any]] | Callable[[Any], Mapping[str, Any]]
@@ -2072,6 +2246,7 @@ def register_existing_motor_encoding_artifact(
     primary_position_source: str,
     orientation_reference_position_source: str,
     minimum_movement_firing_rate_hz: float,
+    minimum_stability_correlation: float,
     parameter_name: str,
     parameter_sha256: str | None = None,
     model_spec_sha256: str | None = None,
@@ -2110,7 +2285,7 @@ def register_existing_motor_encoding_artifact(
     with xr.open_dataset(source_full_refit_path) as opened:
         full_refit = opened.load()
     metadata = _common_metadata(
-        motor_encoding_comparison_id=motor_encoding_comparison_id,
+        motor_encoding_id=motor_encoding_id,
         animal_name=animal_name,
         date=date,
         region=region,
@@ -2118,6 +2293,7 @@ def register_existing_motor_encoding_artifact(
     )
     effective = validate_motor_encoding_parameters(
         minimum_movement_firing_rate_hz=minimum_movement_firing_rate_hz,
+        minimum_stability_correlation=minimum_stability_correlation,
         evaluation_bin_size_s=evaluation_bin_size_s,
         outer_n_folds=outer_n_folds,
         inner_n_folds=inner_n_folds,
@@ -2155,14 +2331,36 @@ def register_existing_motor_encoding_artifact(
         identity=identity,
         metadata=metadata,
     )
-    nested_cv = _replace_legacy_units_with_group_ids(nested_cv, identity)
-    full_refit = _replace_legacy_units_with_group_ids(full_refit, identity)
-    selected_units = _build_selected_units_table(
+    eligibility = _build_unit_eligibility_table(
         identity=identity.loc[:, list(IDENTITY_COLUMNS)],
         movement_firing_rates_hz=rates,
+        stability_tables_by_trajectory=stability_tables_by_trajectory,
+        animal_name=metadata["animal_name"],
+        date=metadata["date"],
+        region=metadata["region"],
+        epoch=metadata["epoch"],
         minimum_movement_firing_rate_hz=parameters[
             "minimum_movement_firing_rate_hz"
         ],
+        minimum_stability_correlation=parameters[
+            "minimum_stability_correlation"
+        ],
+    )
+    nested_cv = _replace_legacy_units_with_group_ids(nested_cv, identity)
+    full_refit = _replace_legacy_units_with_group_ids(full_refit, identity)
+    eligible_group_ids = eligibility.loc[
+        eligibility["eligible"], "group_unit_id"
+    ].astype(str).tolist()
+    full_group_ids = [str(value) for value in np.asarray(full_refit.unit)]
+    missing_eligible = sorted(set(eligible_group_ids) - set(full_group_ids))
+    if missing_eligible:
+        raise ValueError(
+            "Legacy full-refit output is missing stability-eligible units: "
+            f"{missing_eligible!r}."
+        )
+    full_refit = full_refit.sel(unit=eligible_group_ids)
+    selected_units = _build_selected_units_table(
+        eligibility=eligibility,
         nested_cv=nested_cv,
         full_refit=full_refit,
     )
@@ -2217,7 +2415,7 @@ def register_existing_motor_encoding_artifact(
         "full_refit": full_refit,
         "n_units_input": len(selected_units),
         "n_units_eligible": int(
-            selected_units["passes_movement_firing_rate"].sum()
+            selected_units["eligible"].sum()
         ),
         "n_units_valid": int(selected_units["valid_nested_cv"].sum()),
         "n_outer_folds_expected": parameters["outer_n_folds"],
@@ -2248,7 +2446,7 @@ __all__ = [
     "OUTPUT_RULE_SHA256",
     "build_graph_derived_position_basis_configs",
     "build_motor_model_features",
-    "compute_motor_encoding_comparison",
+    "compute_motor_encoding",
     "get_motor_encoding_artifact_paths",
     "load_motor_encoding_artifact",
     "register_existing_motor_encoding_artifact",

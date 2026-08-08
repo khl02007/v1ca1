@@ -1,4 +1,4 @@
-"""Tests for database-free ripple-only CrossRegionXCorr artifacts."""
+"""Tests for database-free ripple-only RippleCrossRegionXCorr artifacts."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from v1ca1.spyglass import cross_region_xcorr as module
+from v1ca1.spyglass import ripple_cross_region_xcorr as module
 
 
 RESULT_ID = uuid.UUID("aeaa376a-b5c2-5d61-a449-2e046cf9abf0")
@@ -62,7 +62,7 @@ def _ripples() -> pd.DataFrame:
 
 
 def _provenance() -> dict[str, object]:
-    """Return selected-Ripples provenance with the required detector policy."""
+    """Return selected-RippleInterval provenance with the required detector policy."""
     return {
         "ripple_interval_list_name": "02_r1_ripples",
         "detector_zscore_threshold": 2.0,
@@ -97,7 +97,7 @@ def _patch_science(
         ca1_ids = list(kwargs["ca1_spikes"])
         v1_ids = list(kwargs["v1_spikes"])
         lags = module._expected_lag_times(
-            module.validate_cross_region_xcorr_parameters()
+            module.validate_ripple_cross_region_xcorr_parameters()
         )
         values = (
             np.linspace(0.5, 2.5, len(lags))
@@ -124,8 +124,8 @@ def _compute(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     _patch_science(monkeypatch)
     ca1_spikes, v1_spikes = _spikes()
     ca1_ids, v1_ids = _identities()
-    return module.compute_cross_region_xcorr(
-        cross_region_xcorr_id=RESULT_ID,
+    return module.compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=RESULT_ID,
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
@@ -139,7 +139,7 @@ def _compute(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 
 
 def test_parameters_paths_and_legacy_paths_are_fixed(tmp_path: Path) -> None:
-    parameters = module.validate_cross_region_xcorr_parameters()
+    parameters = module.validate_ripple_cross_region_xcorr_parameters()
     assert parameters == {
         "bin_size_s": 0.005,
         "max_lag_s": 0.5,
@@ -150,32 +150,32 @@ def test_parameters_paths_and_legacy_paths_are_fixed(tmp_path: Path) -> None:
         "require_speed_gated": True,
     }
     with pytest.raises(ValueError, match="fixed value"):
-        module.validate_cross_region_xcorr_parameters(bin_size_s=0.01)
+        module.validate_ripple_cross_region_xcorr_parameters(bin_size_s=0.01)
     with pytest.raises(ValueError, match="norm=True"):
-        module.validate_cross_region_xcorr_parameters(norm=False)
+        module.validate_ripple_cross_region_xcorr_parameters(norm=False)
     with pytest.raises(ValueError, match="speed-gated"):
-        module.validate_cross_region_xcorr_parameters(require_speed_gated=False)
-    assert module.validate_cross_region_xcorr_parameters(
+        module.validate_ripple_cross_region_xcorr_parameters(require_speed_gated=False)
+    assert module.validate_ripple_cross_region_xcorr_parameters(
         norm=np.int64(1), require_speed_gated=np.bool_(True)
     )["require_speed_gated"] is True
     with pytest.raises(TypeError, match="database integer 0/1"):
-        module.validate_cross_region_xcorr_parameters(norm="yes")
-    paths = module.get_cross_region_xcorr_artifact_paths(
+        module.validate_ripple_cross_region_xcorr_parameters(norm="yes")
+    paths = module.get_ripple_cross_region_xcorr_artifact_paths(
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
-        cross_region_xcorr_id=RESULT_ID,
+        ripple_cross_region_xcorr_id=RESULT_ID,
         artifact_root=tmp_path,
     )
     assert paths["artifact_dir"] == (
         tmp_path
         / "L14"
         / "20240611"
-        / "cross_region_xcorr"
+        / "ripple_cross_region_xcorr"
         / "02_r1"
         / str(RESULT_ID)
     )
-    legacy = module.get_legacy_cross_region_xcorr_paths(
+    legacy = module.get_legacy_ripple_cross_region_xcorr_paths(
         tmp_path / "L14" / "20240611", epoch="02_r1"
     )
     assert legacy["result_path"] == (
@@ -191,7 +191,7 @@ def test_parameters_paths_and_legacy_paths_are_fixed(tmp_path: Path) -> None:
 
 
 def test_event_selection_helper_freezes_one_exact_epoch() -> None:
-    selection = module.prepare_cross_region_xcorr_event_selection(
+    selection = module.prepare_ripple_cross_region_xcorr_event_selection(
         epoch="02_r1", ripple_table=_ripples().iloc[::-1]
     )
     assert tuple(selection) == (
@@ -217,11 +217,11 @@ def test_compute_uses_exact_ripples_stable_units_and_ca1_to_v1(
     calls = _patch_science(monkeypatch)
     ca1_spikes, v1_spikes = _spikes()
     ca1_ids, v1_ids = _identities()
-    selection = module.prepare_cross_region_xcorr_event_selection(
+    selection = module.prepare_ripple_cross_region_xcorr_event_selection(
         epoch="02_r1", ripple_table=_ripples()
     )
-    result = module.compute_cross_region_xcorr(
-        cross_region_xcorr_id=RESULT_ID,
+    result = module.compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=RESULT_ID,
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
@@ -274,7 +274,7 @@ def test_compute_rejects_wrong_ripple_provenance_and_overlaps(
     ca1_spikes, v1_spikes = _spikes()
     ca1_ids, v1_ids = _identities()
     kwargs = {
-        "cross_region_xcorr_id": RESULT_ID,
+        "ripple_cross_region_xcorr_id": RESULT_ID,
         "animal_name": "L14",
         "date": "20240611",
         "epoch": "02_r1",
@@ -286,7 +286,7 @@ def test_compute_rejects_wrong_ripple_provenance_and_overlaps(
         "upstream_provenance": _provenance(),
     }
     with pytest.raises(ValueError, match="threshold"):
-        module.compute_cross_region_xcorr(
+        module.compute_ripple_cross_region_xcorr(
             **{
                 **kwargs,
                 "upstream_provenance": {
@@ -296,20 +296,20 @@ def test_compute_rejects_wrong_ripple_provenance_and_overlaps(
             }
         )
     with pytest.raises(ValueError, match="speed_gated=True"):
-        module.compute_cross_region_xcorr(
+        module.compute_ripple_cross_region_xcorr(
             **{
                 **kwargs,
                 "upstream_provenance": {**_provenance(), "speed_gated": False},
             }
         )
     with pytest.raises(TypeError, match="database integer 0/1"):
-        module.compute_cross_region_xcorr(
+        module.compute_ripple_cross_region_xcorr(
             **{
                 **kwargs,
                 "upstream_provenance": {**_provenance(), "speed_gated": "yes"},
             }
         )
-    normalized = module.compute_cross_region_xcorr(
+    normalized = module.compute_ripple_cross_region_xcorr(
         **{
             **kwargs,
             "upstream_provenance": {
@@ -321,7 +321,7 @@ def test_compute_rejects_wrong_ripple_provenance_and_overlaps(
     )
     assert normalized["upstream_provenance"]["speed_gated"] is True
     with pytest.raises(ValueError, match="expected SHA-256 digest"):
-        module.compute_cross_region_xcorr(
+        module.compute_ripple_cross_region_xcorr(
             **kwargs,
             expected_selected_ripple_intervals_sha256="0" * 64,
         )
@@ -333,7 +333,7 @@ def test_compute_rejects_wrong_ripple_provenance_and_overlaps(
         }
     )
     with pytest.raises(ValueError, match="must not overlap"):
-        module.compute_cross_region_xcorr(**{**kwargs, "ripple_table": overlaps})
+        module.compute_ripple_cross_region_xcorr(**{**kwargs, "ripple_table": overlaps})
 
 
 def test_terminal_no_ripples_writes_explicit_empty_result(
@@ -342,8 +342,8 @@ def test_terminal_no_ripples_writes_explicit_empty_result(
     calls = _patch_science(monkeypatch)
     ca1_spikes, v1_spikes = _spikes()
     ca1_ids, v1_ids = _identities()
-    result = module.compute_cross_region_xcorr(
-        cross_region_xcorr_id=RESULT_ID,
+    result = module.compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=RESULT_ID,
         animal_name="L14",
         date="20240611",
         epoch="missing_epoch",
@@ -366,7 +366,7 @@ def test_terminal_no_ripples_writes_explicit_empty_result(
     tampered_units = result["ca1_units"].copy()
     tampered_units.loc[0, "included_in_xcorr"] = True
     with pytest.raises(ValueError, match="excluded units cannot be included"):
-        module.validate_cross_region_xcorr_result(
+        module.validate_ripple_cross_region_xcorr_result(
             {**result, "ca1_units": tampered_units}
         )
 
@@ -377,8 +377,8 @@ def test_terminal_missing_region_preserves_other_region_audit(
     calls = _patch_science(monkeypatch)
     _, v1_spikes = _spikes()
     _, v1_ids = _identities()
-    result = module.compute_cross_region_xcorr(
-        cross_region_xcorr_id=RESULT_ID,
+    result = module.compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=RESULT_ID,
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
@@ -406,13 +406,13 @@ def test_validation_rejects_tensor_summary_and_qc_corruption(
     broken_dataset = result["dataset"].copy(deep=True)
     broken_dataset["xcorr"].values[0, 0, 0] = 1e6
     with pytest.raises(ValueError, match="summary differs"):
-        module.validate_cross_region_xcorr_result(
+        module.validate_ripple_cross_region_xcorr_result(
             {**result, "dataset": broken_dataset}
         )
     broken_units = result["ca1_units"].copy()
     broken_units.loc[0, "ripple_spike_count"] = 1
     with pytest.raises(ValueError, match="threshold flags"):
-        module.validate_cross_region_xcorr_result(
+        module.validate_ripple_cross_region_xcorr_result(
             {**result, "ca1_units": broken_units}
         )
     broken_boolean = result["ca1_units"].copy()
@@ -421,13 +421,13 @@ def test_validation_rejects_tensor_summary_and_qc_corruption(
     ].astype(object)
     broken_boolean.loc[0, "included_in_xcorr"] = "yes"
     with pytest.raises(TypeError, match="database integer 0/1"):
-        module.validate_cross_region_xcorr_result(
+        module.validate_ripple_cross_region_xcorr_result(
             {**result, "ca1_units": broken_boolean}
         )
     broken_attrs = result["dataset"].copy(deep=True)
     broken_attrs.attrs["interval_scope"] = "pooled_state"
     with pytest.raises(ValueError, match="interval_scope"):
-        module.validate_cross_region_xcorr_result(
+        module.validate_ripple_cross_region_xcorr_result(
             {**result, "dataset": broken_attrs}
         )
 
@@ -437,26 +437,26 @@ def test_atomic_roundtrip_checksums_and_refuses_overwrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _compute(monkeypatch)
-    paths = module.get_cross_region_xcorr_artifact_paths(
+    paths = module.get_ripple_cross_region_xcorr_artifact_paths(
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
-        cross_region_xcorr_id=RESULT_ID,
+        ripple_cross_region_xcorr_id=RESULT_ID,
         artifact_root=tmp_path,
     )
-    written = module.write_cross_region_xcorr_artifact(
+    written = module.write_ripple_cross_region_xcorr_artifact(
         result, paths["artifact_dir"]
     )
     assert all(path.is_file() for name, path in written.items() if name != "artifact_dir")
-    loaded = module.load_cross_region_xcorr_artifact(paths["artifact_dir"])
+    loaded = module.load_ripple_cross_region_xcorr_artifact(paths["artifact_dir"])
     assert loaded["analysis_status"] == "valid"
     assert loaded["n_valid_pairs"] == 1
     with pytest.raises(FileExistsError):
-        module.write_cross_region_xcorr_artifact(result, paths["artifact_dir"])
+        module.write_ripple_cross_region_xcorr_artifact(result, paths["artifact_dir"])
     with written["summary_path"].open("ab") as stream:
         stream.write(b"tamper")
     with pytest.raises(ValueError, match="checksum mismatch"):
-        module.load_cross_region_xcorr_artifact(paths["artifact_dir"])
+        module.load_ripple_cross_region_xcorr_artifact(paths["artifact_dir"])
 
 
 def _write_legacy_artifacts(
@@ -551,10 +551,10 @@ def test_legacy_registration_resolves_sorting_ids_and_compares_all_four(
     destination = (
         tmp_path / "registered" / str(RESULT_ID)
     )
-    registered = module.register_existing_cross_region_xcorr_artifact(
+    registered = module.register_existing_ripple_cross_region_xcorr_artifact(
         **legacy_paths,
         destination_path=destination,
-        cross_region_xcorr_id=RESULT_ID,
+        ripple_cross_region_xcorr_id=RESULT_ID,
         animal_name="L14",
         date="20240611",
         epoch="02_r1",
@@ -587,7 +587,7 @@ def test_legacy_registration_resolves_sorting_ids_and_compares_all_four(
     assert provenance["ca1_sorting_type"] == "ImportedSpikeSorting"
     assert provenance["v1_sorting_type"] == "ImportedSpikeSorting"
     assert destination.is_dir()
-    loaded = module.load_cross_region_xcorr_artifact(destination)
+    loaded = module.load_ripple_cross_region_xcorr_artifact(destination)
     assert loaded["legacy_artifact_provenance"] == provenance
 
 
@@ -604,7 +604,7 @@ def test_legacy_registration_rejects_any_scientific_mismatch(
     common = {
         **legacy_paths,
         "destination_path": tmp_path / "registered" / str(RESULT_ID),
-        "cross_region_xcorr_id": RESULT_ID,
+        "ripple_cross_region_xcorr_id": RESULT_ID,
         "animal_name": "L14",
         "date": "20240611",
         "epoch": "02_r1",
@@ -620,11 +620,11 @@ def test_legacy_registration_rejects_any_scientific_mismatch(
         "v1_sorting_type": "ImportedSpikeSorting",
     }
     with pytest.raises(ValueError, match="ImportedSpikeSorting"):
-        module.register_existing_cross_region_xcorr_artifact(
+        module.register_existing_ripple_cross_region_xcorr_artifact(
             **{**common, "ca1_sorting_type": "CurationV1"}
         )
     with pytest.raises(ValueError, match="expected SHA-256 digest"):
-        module.register_existing_cross_region_xcorr_artifact(
+        module.register_existing_ripple_cross_region_xcorr_artifact(
             **common,
             expected_selected_ripple_intervals_sha256="0" * 64,
         )
@@ -638,7 +638,7 @@ def test_legacy_registration_rejects_any_scientific_mismatch(
     )
     fixed_window_dataset.to_netcdf(legacy_paths["source_result_path"])
     with pytest.raises(ValueError, match="exact detected ripple intervals"):
-        module.register_existing_cross_region_xcorr_artifact(**common)
+        module.register_existing_ripple_cross_region_xcorr_artifact(**common)
     fixed_window_dataset.attrs["state_interval_source"] = "parquet"
     fixed_window_dataset.to_netcdf(legacy_paths["source_result_path"])
 
@@ -646,6 +646,6 @@ def test_legacy_registration_rejects_any_scientific_mismatch(
     summary.loc[0, "peak_norm_xcorr"] += 0.1
     summary.to_parquet(legacy_paths["source_summary_path"], index=False)
     with pytest.raises(ValueError, match="pair summary"):
-        module.register_existing_cross_region_xcorr_artifact(
+        module.register_existing_ripple_cross_region_xcorr_artifact(
             **common,
         )

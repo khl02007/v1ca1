@@ -420,7 +420,7 @@ def _validate_upstream_provenance(
     except KeyError as exc:
         raise ValueError(
             "upstream_provenance must contain detector_zscore_threshold and "
-            "speed_gated from the selected Ripples row."
+            "speed_gated from the selected RippleInterval row."
         ) from exc
     if isinstance(detector_threshold, bool) or not isinstance(
         detector_threshold, Real
@@ -435,11 +435,11 @@ def _validate_upstream_provenance(
         rtol=0.0,
         atol=1e-12,
     ):
-        raise ValueError("Selected Ripples detector threshold must equal 2.0.")
+        raise ValueError("Selected RippleInterval detector threshold must equal 2.0.")
     if not _database_bool(
         speed_gated, name="upstream_provenance speed_gated"
     ):
-        raise ValueError("Selected Ripples provenance must have speed_gated=True.")
+        raise ValueError("Selected RippleInterval provenance must have speed_gated=True.")
     return normalized, encoded
 
 
