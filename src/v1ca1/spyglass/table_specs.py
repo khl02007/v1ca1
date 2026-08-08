@@ -79,6 +79,75 @@ source_object_id = NULL: varchar(64)
 """
 
 
+RIPPLE_BAND_LFP_PARAMETERS_DEFINITION = """
+# Named parameters for the legacy-compatible ripple-band LFP transform.
+ripple_band_lfp_param_name: varchar(64)
+---
+lowcut_hz: double
+highcut_hz: double
+filter_order: smallint unsigned
+target_sampling_frequency_hz: double
+enable_notch_filter: bool
+notch_base_freq_hz: double
+notch_harmonics: smallint unsigned
+notch_quality: double
+"""
+
+
+RIPPLE_BAND_LFP_SELECTION_DEFINITION = """
+# One immutable raw-NWB epoch/channel snapshot selected by ripple provenance.
+ripple_band_lfp_id: uuid
+---
+-> Ripples
+-> RippleBandLFPParameters
+source_nwb_file_name: varchar(255)
+registered_source_contents_hash: char(36)
+registered_source_size_bytes: bigint unsigned
+source_electrical_series_path: varchar(1024)
+ordered_electrode_ids: longblob
+ordered_electrode_ids_sha256: char(64)
+ordered_gain_to_uv: longblob
+ordered_offset_to_uv: longblob
+trace_scaling_sha256: char(64)
+sampling_frequency_provenance: longblob
+sampling_frequency_provenance_sha256: char(64)
+source_slice_provenance: longblob
+source_slice_provenance_sha256: char(64)
+ripple_catalog_row_sha256: char(64)
+epoch_intervals_catalog_row_sha256: char(64)
+source_sampling_frequency_hz: double
+input_sample_count: bigint unsigned
+decimation_factor: int unsigned
+actual_sampling_frequency_hz: double
+ripple_band_lfp_parameters_sha256: char(64)
+ripple_band_lfp_output_rule_sha256: char(64)
+"""
+
+
+RIPPLE_BAND_LFP_DEFINITION = """
+# One immutable raw-NWB-derived ripple-band LFP artifact bundle.
+-> RippleBandLFPSelection
+---
+artifact_manifest_path: filepath@analysis
+channel_qc_path: filepath@analysis
+ripple_band_lfp_path: filepath@analysis
+bundle_schema_version: varchar(8)
+n_channels: int unsigned
+input_sample_count: bigint unsigned
+output_sample_count: bigint unsigned
+source_sampling_frequency_hz: double
+actual_sampling_frequency_hz: double
+decimation_factor: int unsigned
+raw_timestamps_sha256: char(64)
+raw_traces_sha256: char(64)
+analysis_status: enum('valid', 'empty_input')
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 POSITION_DEFINITION = """
 # One half-open augmented-NWB position slice.
 -> EpochIntervals
@@ -1312,6 +1381,58 @@ DEFAULT_RIPPLE_MODULATION_PARAMETERS = MappingProxyType(
 )
 
 
+MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS = MappingProxyType(
+    {
+        "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
+        "lowcut_hz": 150.0,
+        "highcut_hz": 250.0,
+        "filter_order": 4,
+        "target_sampling_frequency_hz": 1000.0,
+        "enable_notch_filter": False,
+        "notch_base_freq_hz": 60.0,
+        "notch_harmonics": 10,
+        "notch_quality": 50.0,
+    }
+)
+
+
+RIPPLE_BAND_LFP_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "row_granularity": "one_session_epoch",
+        "source": "raw_nwb_acquisition_electrical_series_int16",
+        "time_source": "explicit_nwb_ephys_timestamps_seconds",
+        "channel_identity": "ordered_nwb_electrodes_table_id",
+        "electrode_membership_validation": "upstream_selected_nwb_loader",
+        "channel_order_policy": (
+            "preserve_exactly_first_channel_is_figure_channel"
+        ),
+        "notch_policy": "optional_legacy_iirnotch_stack_before_bandpass",
+        "bandpass_implementation": (
+            "detect_ripples.butter_filter_and_decimate"
+        ),
+        "default_band_hz": (150.0, 250.0),
+        "default_filter_order": 4,
+        "default_target_sampling_frequency_hz": 1000.0,
+        "decimation": "integer_stride_round_source_fs_over_target_fs",
+        "actual_sampling_frequency": "source_fs_divided_by_stride",
+        "voltage_scaling": (
+            "spikeinterface_0_103_2_float32_scaling_then_float64_filter_input"
+        ),
+        "registered_raw_identity": (
+            "datajoint_filepath_contents_hash_and_size"
+        ),
+        "in_place_mutation_outside_datajoint": "unsupported",
+        "sampling_frequency_estimation": (
+            "spikeinterface_nwb_first_timestamp_differences_median"
+        ),
+        "standard_spyglass_lfp_interchangeable": False,
+        "source_nwb_mutation": False,
+        "time_unit": "s",
+    }
+)
+
+
 DEFAULT_MOVEMENT_PARAMETERS = MappingProxyType(
     {
         "movement_param_name": "default",
@@ -2203,6 +2324,11 @@ TABLE_DEFINITIONS = MappingProxyType(
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
         "trajectory_intervals": TRAJECTORY_INTERVALS_DEFINITION,
         "ripples": RIPPLES_DEFINITION,
+        "ripple_band_lfp_parameters": (
+            RIPPLE_BAND_LFP_PARAMETERS_DEFINITION
+        ),
+        "ripple_band_lfp_selection": RIPPLE_BAND_LFP_SELECTION_DEFINITION,
+        "ripple_band_lfp": RIPPLE_BAND_LFP_DEFINITION,
         "position": POSITION_DEFINITION,
         "wtrack_graph": WTRACK_GRAPH_DEFINITION,
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,
@@ -2371,7 +2497,12 @@ __all__ = [
     "MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
     "MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
     "MANUSCRIPT_MEAN_ACTIVITY_RIPPLE_GLM_PARAMETERS",
+    "MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS",
     "MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS",
+    "RIPPLE_BAND_LFP_DEFINITION",
+    "RIPPLE_BAND_LFP_OUTPUT_RULE",
+    "RIPPLE_BAND_LFP_PARAMETERS_DEFINITION",
+    "RIPPLE_BAND_LFP_SELECTION_DEFINITION",
     "RIPPLE_GLM_DEFINITION",
     "RIPPLE_GLM_OUTPUT_RULE",
     "RIPPLE_GLM_PARAMETERS_DEFINITION",

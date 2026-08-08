@@ -24,6 +24,7 @@ register artifacts, or write to NWB.
 - `selection.py` builds deterministic table-specific UUIDv5 identifiers and
   provenance digests.
 - `movement.py`, `epoch_motor_behavior.py`, `ripple_modulation.py`,
+  `ripple_band_lfp.py`,
   `cv_pca.py`, `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
   `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
@@ -109,6 +110,39 @@ detector. The default parameters require the source detector threshold to be
 2.0 and require `speed_gated=True`. `RippleModulation` uses every event in that
 selected source row; it has no downstream ripple-mean-z-score threshold. A
 selected row with `ripple_count=0` remains an explicit `no_ripples` result.
+
+Ripple-band LFP extraction uses:
+
+```text
+Ripples + RippleBandLFPParameters
+    -> RippleBandLFPSelection (ripple_band_lfp_id)
+    -> RippleBandLFP
+    -> manifest.parquet + channel_qc.parquet + ripple_band_lfp.nc
+```
+
+Each row covers one selected ripple epoch, even when `ripple_count=0`.
+Ordered, unique, non-negative NWB electrode-table IDs come only from
+`Ripples.detection_parameters['ripple_channels']`; the pipeline never consults
+the repeated `channel_id` column or a session channel lookup and never sorts
+the order. Selection performs a metadata-only HDF5 inspection and freezes the
+ElectricalSeries and interval-table object IDs, exact epoch sample slice,
+electrode-region mapping, selected data columns and table rows, per-channel
+gain/offset, and the first-1,000-timestamp SpikeInterface sampling-rate
+estimate. Computation re-inspects and compares all of that metadata before it
+loads only the selected epoch and columns.
+
+The selection also freezes the `filepath@raw` registry's full-file
+`contents_hash` and byte size and rechecks the registry plus current file size
+before loading. This follows Spyglass/DataJoint's managed-raw-file immutability
+contract: in-place changes outside DataJoint are unsupported. It deliberately
+does not hash a multi-gigabyte epoch slice at selection time; the completed
+result records exact SHA-256 digests of the selected raw timestamps and int16
+traces. Raw counts are scaled exactly as SpikeInterface 0.103.2 did—float32
+raw values times float32 gain plus float32 offset in microvolts—and that
+scaled array is then cast to float64 exactly as `detect_ripples.py` does before
+the optional legacy notch stack, fourth-order 150–250 Hz Butterworth filter,
+and integer-stride decimation toward 1 kHz. This transform is not
+interchangeable with the standard Spyglass LFP pipeline.
 
 Ripple population encoding uses:
 
@@ -387,12 +421,13 @@ held-out log likelihoods in nats, information relative to the null model in
 bits per spike, DPP-minus-alternative contrasts, and model/unit QC. It does
 not create one DataJoint row per unit.
 
-The computed table names are `RippleModulation`, `MovementFiringRate`,
+The computed table names are `RippleModulation`, `RippleBandLFP`,
+`MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `CVPCA`, `PathProgressionDecodingComparison`,
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`,
+`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
 `CrossRegionXCorr`, and `RippleDecodingComparison`—there is no
 `Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
@@ -630,6 +665,11 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     progression_summary.parquet
     trajectory_qc.parquet
 
+<root>/<animal>/<date>/ripple_band_lfp/<epoch>/<uuid>/
+    manifest.parquet
+    channel_qc.parquet
+    ripple_band_lfp.nc
+
 <root>/<animal>/<date>/cv_pca/<light>_vs_<dark>/<region>/<uuid>/
     manifest.parquet
     cv_pca.nc
@@ -731,9 +771,9 @@ written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `CVPCA`, `PathSpecificPlaceDecoding`, `MotorEncodingComparison`,
-`DarkLightGLM`, and
-`SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`, and
-`CrossRegionXCorr`, `RippleDecodingComparison`, and `EpochMotorBehavior`
+`DarkLightGLM`, `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
+`CrossRegionXCorr`, `RippleDecodingComparison`, `EpochMotorBehavior`, and
+`RippleBandLFP`
 additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
@@ -765,6 +805,14 @@ rows before writing the canonical bundle. An optional original run log is
 validated and retained as provenance. The trajectory-QC table is always
 generated from the current frozen NWB recomputation rather than trusted from
 legacy files.
+Ripple-band-LFP registration requires the exact detector cache NetCDF and can
+optionally pair it with its original run log. It requires the detector's fixed
+bandpass/stride and notch settings, recomputes the selected raw NWB slice, and
+compares every timestamp, channel ID, sampling-rate value, and filtered value
+exactly. A supplied run log must match the session, epoch, ordered ripple
+channels, notch settings, cache directory, and epoch cache path. Stable
+pre/post file fingerprints bind validation and recorded provenance to the same
+legacy bytes.
 cvPCA registration requires the complete legacy seed-specific NetCDF and
 summary pair. It recomputes the exact selected NWB inputs, compares all
 retained scientific coordinates and variables, and then writes a compact

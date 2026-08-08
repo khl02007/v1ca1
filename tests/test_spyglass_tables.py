@@ -38,6 +38,7 @@ from v1ca1.spyglass.tables import (
     _legacy_swap_glm_unit_identity_resolver,
     _legacy_swap_tuning_curve_comparison_unit_identity_resolver,
     _load_tuning_similarity_inputs,
+    _load_ripple_band_lfp_context,
     _make_dpp_encoding_comparison_row,
     _make_dpp_tuning_curve_row,
     _make_movement_firing_rate_row,
@@ -45,6 +46,7 @@ from v1ca1.spyglass.tables import (
     _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
+    _make_ripple_band_lfp_row,
     _make_ripple_glm_row,
     _make_cross_region_xcorr_row,
     _make_cv_pca_row,
@@ -56,10 +58,14 @@ from v1ca1.spyglass.tables import (
     _path_specific_place_decoding_selection_row,
     _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
+    _ripple_band_lfp_selection_row,
+    _ordered_ripple_band_lfp_electrode_ids,
     _ripple_glm_selection_row,
     _register_existing_ripple_glm_row,
     _register_existing_cross_region_xcorr_row,
     _register_existing_cv_pca_row,
+    _register_existing_ripple_band_lfp_row,
+    _registered_nwb_source_identity,
     _register_existing_dpp_encoding_comparison_row,
     _register_existing_dark_light_glm_row,
     _register_existing_swap_glm_row,
@@ -78,6 +84,7 @@ from v1ca1.spyglass.tables import (
     _validate_path_progression_decoding_artifact_link,
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
+    _validate_ripple_band_lfp_artifact_link,
     _validate_ripple_glm_parameter_row,
     _validate_cross_region_xcorr_parameter_row,
     _validate_cv_pca_artifact_link,
@@ -1496,6 +1503,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "epoch_motor_behavior_parameters",
         "epoch_motor_behavior_selection",
         "epoch_motor_behavior",
+        "ripple_band_lfp_parameters",
+        "ripple_band_lfp_selection",
+        "ripple_band_lfp",
         "movement_firing_rate_selection",
         "movement_firing_rate",
         "cv_pca_parameters",
@@ -1565,6 +1575,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "CVPCAParameters" in schemas[0].context
     assert "CVPCASelection" in schemas[0].context
     assert "CVPCA" in schemas[0].context
+    assert "RippleBandLFPParameters" in schemas[0].context
+    assert "RippleBandLFPSelection" in schemas[0].context
+    assert "RippleBandLFP" in schemas[0].context
     assert "DPPEncodingComparisonParameters" in schemas[0].context
     assert "DPPEncodingComparisonSelection" in schemas[0].context
     assert "DPPEncodingComparison" in schemas[0].context
@@ -1638,6 +1651,28 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "analysis_status:" in ripple_result
     assert "selected_units_sha256: char(64)" in ripple_result
     assert "RippleModulationComputed" not in ripple_result
+
+    ripple_band_selection = bundle["ripple_band_lfp_selection"].definition
+    assert "ripple_band_lfp_id: uuid" in ripple_band_selection
+    assert "-> Ripples" in ripple_band_selection
+    assert "-> RippleBandLFPParameters" in ripple_band_selection
+    assert "-> EpochIntervals" not in ripple_band_selection
+    assert "ordered_electrode_ids: longblob" in ripple_band_selection
+    assert "registered_source_contents_hash: char(36)" in (
+        ripple_band_selection
+    )
+    assert "registered_source_size_bytes: bigint unsigned" in (
+        ripple_band_selection
+    )
+    assert "source_slice_provenance: longblob" in ripple_band_selection
+
+    ripple_band_result = bundle["ripple_band_lfp"].definition
+    assert "-> RippleBandLFPSelection" in ripple_band_result
+    assert "ripple_band_lfp_path: filepath@analysis" in ripple_band_result
+    assert "artifact_origin: enum('computed', 'registered_existing')" in (
+        ripple_band_result
+    )
+    assert hasattr(bundle["ripple_band_lfp"], "register_existing")
 
     movement_selection = bundle["movement_firing_rate_selection"].definition
     assert "movement_firing_rate_id: uuid" in movement_selection
@@ -2192,6 +2227,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     bundle, _, _ = _fake_bundle()
     movement_parameters = bundle["movement_parameters"]
     ripple_parameters = bundle["ripple_modulation_parameters"]
+    ripple_band_parameters = bundle["ripple_band_lfp_parameters"]
     tuning_parameters = bundle["tuning_curve_parameters"]
     similarity_parameters = bundle["tuning_similarity_parameters"]
     encoding_parameters = bundle["dpp_encoding_comparison_parameters"]
@@ -2209,6 +2245,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
+    ripple_band_row = ripple_band_parameters.insert_default()
     tuning_rows = tuning_parameters.insert_presets()
     similarity_rows = similarity_parameters.insert_presets()
     encoding_row = encoding_parameters.insert_default()
@@ -2229,6 +2266,17 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert movement_parameters._insert_calls == [
         (movement_row, {"skip_duplicates": True})
     ]
+    assert ripple_band_row == dict(
+        table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS
+    )
+    assert ripple_band_parameters._insert_calls == [
+        (ripple_band_row, {"skip_duplicates": True})
+    ]
+    for field_name in ("filter_order", "notch_harmonics"):
+        with pytest.raises(ValueError, match="smallint unsigned"):
+            ripple_band_parameters.insert_parameters(
+                {**ripple_band_row, field_name: 65_536}
+            )
     assert cv_pca_rows == [
         dict(row) for row in table_specs.CV_PCA_PARAMETER_PRESETS
     ]
@@ -9318,3 +9366,1024 @@ def test_cv_pca_failed_insert_removes_only_new_uuid_bundle(
         result().make({"cv_pca_id": result_id})
     assert not artifact_dir.exists()
     assert retained.read_bytes() == b"keep"
+
+
+class _FakeNwbfileRegistry:
+    """Inject one filepath@raw identity without importing DataJoint."""
+
+    def __init__(self, path: Path, *, contents_hash: uuid.UUID | None = None):
+        self.path = Path(path)
+        self.contents_hash = contents_hash or uuid.UUID(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        self.registered_size = self.path.stat().st_size
+
+    def get_abs_path(self, _name: str) -> str:
+        return str(self.path)
+
+    def get_registered_source_identity(self, _name: str) -> dict[str, Any]:
+        return {
+            "contents_hash": self.contents_hash,
+            "size": self.registered_size,
+        }
+
+
+class _FakeRawExternalStore:
+    """Minimal DataJoint external-store relation for fallback-path tests."""
+
+    def __init__(
+        self,
+        *,
+        stage: Path,
+        contents_hash: uuid.UUID | None,
+        size: int,
+        fetch_error: Exception | None = None,
+    ):
+        self.spec = {"stage": str(stage)}
+        self.contents_hash = contents_hash
+        self.size = size
+        self.fetch_error = fetch_error
+        self.restrictions = []
+
+    def __and__(self, restriction):
+        self.restrictions.append(dict(restriction))
+        return self
+
+    def fetch1(self, *fields):
+        assert fields == ("contents_hash", "size")
+        if self.fetch_error is not None:
+            raise self.fetch_error
+        return self.contents_hash, self.size
+
+
+class _FakeFallbackNwbfileTable:
+    """Expose the real heading/connection path used by Nwbfile filepath@raw."""
+
+    def __init__(self, path: Path, external: _FakeRawExternalStore):
+        self.path = Path(path)
+        attribute = SimpleNamespace(database="common_nwbfile", store="raw")
+        self.heading = SimpleNamespace(
+            attributes={"nwb_file_abs_path": attribute}
+        )
+        schema = SimpleNamespace(external={"raw": external})
+        self.connection = SimpleNamespace(
+            schemas={"common_nwbfile": schema}
+        )
+
+    def get_abs_path(self, _name: str) -> str:
+        return str(self.path)
+
+
+def test_registered_nwb_identity_real_fallback_and_failures(
+    tmp_path: Path,
+) -> None:
+    """The dependency-free fake exercises the production external-store path."""
+    stage = tmp_path / "raw"
+    nested = stage / "nested"
+    nested.mkdir(parents=True)
+    path = nested / "session.nwb"
+    path.write_bytes(b"registered-raw-bytes")
+    contents_hash = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    external = _FakeRawExternalStore(
+        stage=stage,
+        contents_hash=contents_hash,
+        size=path.stat().st_size,
+    )
+    table = _FakeFallbackNwbfileTable(path, external)
+
+    identity = _registered_nwb_source_identity(
+        nwbfile_table=table,
+        nwb_file_name=path.name,
+    )
+
+    assert identity == {
+        "nwb_path": path,
+        "registered_source_contents_hash": str(contents_hash),
+        "registered_source_size_bytes": path.stat().st_size,
+    }
+    assert external.restrictions == [{"filepath": "nested/session.nwb"}]
+
+    null_hash = _FakeRawExternalStore(
+        stage=stage,
+        contents_hash=None,
+        size=path.stat().st_size,
+    )
+    with pytest.raises(ValueError, match="registered contents_hash"):
+        _registered_nwb_source_identity(
+            nwbfile_table=_FakeFallbackNwbfileTable(path, null_hash),
+            nwb_file_name=path.name,
+        )
+
+    missing_row = _FakeRawExternalStore(
+        stage=stage,
+        contents_hash=contents_hash,
+        size=path.stat().st_size,
+        fetch_error=LookupError("missing external row"),
+    )
+    with pytest.raises(ValueError, match="Could not resolve"):
+        _registered_nwb_source_identity(
+            nwbfile_table=_FakeFallbackNwbfileTable(path, missing_row),
+            nwb_file_name=path.name,
+        )
+
+    wrong_stage = _FakeRawExternalStore(
+        stage=tmp_path / "different-stage",
+        contents_hash=contents_hash,
+        size=path.stat().st_size,
+    )
+    with pytest.raises(ValueError, match="Could not resolve"):
+        _registered_nwb_source_identity(
+            nwbfile_table=_FakeFallbackNwbfileTable(path, wrong_stage),
+            nwb_file_name=path.name,
+        )
+
+    wrong_size = _FakeRawExternalStore(
+        stage=stage,
+        contents_hash=contents_hash,
+        size=path.stat().st_size + 1,
+    )
+    with pytest.raises(ValueError, match="byte size differs"):
+        _registered_nwb_source_identity(
+            nwbfile_table=_FakeFallbackNwbfileTable(path, wrong_size),
+            nwb_file_name=path.name,
+        )
+
+
+def _ripple_band_source_snapshot(
+    path: Path,
+    *,
+    electrode_ids: tuple[int, ...] = (201, 17),
+) -> dict[str, Any]:
+    """Return one complete metadata-only raw-NWB inspection snapshot."""
+    n_electrodes = len(electrode_ids)
+    return {
+        "source_nwb_file_name": path.name,
+        "source_electrical_series_path": "/acquisition/e-series",
+        "electrode_ids": list(electrode_ids),
+        "gain_to_uv": [2.0 + index for index in range(n_electrodes)],
+        "offset_to_uv": [-0.5 * index for index in range(n_electrodes)],
+        "source_sampling_frequency_hz": 4096.0,
+        "sampling_frequency_provenance": {
+            "method": (
+                "spikeinterface_nwb_first_timestamp_differences_median"
+            ),
+            "samples_for_rate_estimation": 1000,
+            "reference_start_index": 0,
+            "reference_stop_index_exclusive": 1000,
+            "reference_timestamps_sha256": "a" * 64,
+            "estimated_sampling_frequency_hz": 4096.0,
+        },
+        "source_slice_provenance": {
+            "epoch": "08_r4",
+            "data_path": "/acquisition/e-series/data",
+            "timestamps_path": "/acquisition/e-series/timestamps",
+            "electrodes_path": "/acquisition/e-series/electrodes",
+            "interval_table_path": "/intervals/ephys_recording_intervals",
+            "electrodes_table_path": (
+                "/general/extracellular_ephys/electrodes"
+            ),
+            "interval_table_row_index": 7,
+            "source_start_index": 100,
+            "source_stop_index_exclusive": 4196,
+            "epoch_start_time_s": 10.0,
+            "epoch_stop_time_s": 10.999755859375,
+            "electrical_series_object_id": "electrical-series-object",
+            "electrodes_region_object_id": "electrode-region-object",
+            "electrodes_table_object_id": "electrode-table-object",
+            "interval_table_object_id": "interval-table-object",
+            "electrodes_region_sha256": "b" * 64,
+            "electrodes_table_ids_sha256": "c" * 64,
+            "selected_data_column_indices": list(range(n_electrodes)),
+            "selected_electrode_table_rows": list(range(n_electrodes)),
+        },
+    }
+
+
+def _ripple_band_selection_inputs(tmp_path: Path) -> dict[str, Any]:
+    """Return fake catalog rows and raw-file registry for one LFP selection."""
+    path = tmp_path / "L14_20240102_augmented.nwb"
+    path.write_bytes(b"small-managed-nwb-fixture")
+    ripple_row = {
+        "nwb_file_name": path.name,
+        "epoch": "08_r4",
+        "ripple_count": 0,
+        "detector_zscore_threshold": 2.0,
+        "speed_gated": True,
+        "detection_parameters": {
+            "ripple_channels": [201, 17],
+            "notch_filter_enabled": False,
+            "notch_base_freq_hz": 60.0,
+            "notch_harmonics": 10,
+            "notch_quality": 50.0,
+        },
+        "source_object_id": "ripples-object",
+    }
+    return {
+        "key": {
+            "nwb_file_name": path.name,
+            "epoch": "08_r4",
+            "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
+        },
+        "path": path,
+        "nwbfile_table": _FakeNwbfileRegistry(path),
+        "ripple_row": ripple_row,
+        "epoch_row": {
+            "nwb_file_name": path.name,
+            "epoch": "08_r4",
+            "start_time": 10.0,
+            "stop_time": 11.0,
+            "source_object_id": "epoch-object",
+        },
+        "parameters": dict(
+            table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS
+        ),
+        "source_snapshot": _ripple_band_source_snapshot(path),
+    }
+
+
+def _build_ripple_band_selection(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Build one RippleBandLFP selection from dependency-free fake rows."""
+    return _ripple_band_lfp_selection_row(
+        key=inputs["key"],
+        ripples_table=_FakeRelation(inputs["ripple_row"]),
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        nwbfile_table=inputs["nwbfile_table"],
+        source_snapshot=inputs["source_snapshot"],
+    )
+
+
+def test_ripple_band_selection_freezes_order_registry_and_uuid(
+    tmp_path: Path,
+) -> None:
+    """Channel order and the managed raw-file identity participate in UUIDv5."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    first = _build_ripple_band_selection(inputs)
+
+    assert first == _build_ripple_band_selection(inputs)
+    assert first["ripple_band_lfp_id"].version == 5
+    assert first["ordered_electrode_ids"] == [201, 17]
+    assert first["registered_source_contents_hash"] == str(
+        inputs["nwbfile_table"].contents_hash
+    )
+    assert first["registered_source_size_bytes"] == inputs["path"].stat().st_size
+    assert first["input_sample_count"] == 4096
+    assert first["decimation_factor"] == 4
+    assert first["actual_sampling_frequency_hz"] == 1024.0
+    assert first["ripple_band_lfp_output_rule_sha256"] == (
+        ripple_band_lfp.OUTPUT_RULE_SHA256
+    )
+    assert dict(table_specs.RIPPLE_BAND_LFP_OUTPUT_RULE) == dict(
+        ripple_band_lfp.OUTPUT_RULE
+    )
+    assert {
+        "ripple_band_lfp_parameters",
+        "ripple_band_lfp_selection",
+        "ripple_band_lfp",
+    }.issubset(table_specs.TABLE_DEFINITIONS)
+
+    reordered = copy.deepcopy(inputs)
+    reordered["ripple_row"]["detection_parameters"]["ripple_channels"] = [
+        17,
+        201,
+    ]
+    reordered["source_snapshot"]["electrode_ids"] = [17, 201]
+    reordered["source_snapshot"]["gain_to_uv"].reverse()
+    reordered["source_snapshot"]["offset_to_uv"].reverse()
+    reordered["source_snapshot"]["source_slice_provenance"][
+        "selected_data_column_indices"
+    ].reverse()
+    reordered["source_snapshot"]["source_slice_provenance"][
+        "selected_electrode_table_rows"
+    ].reverse()
+    assert _build_ripple_band_selection(reordered)[
+        "ripple_band_lfp_id"
+    ] != first["ripple_band_lfp_id"]
+
+    changed_hash = copy.deepcopy(inputs)
+    changed_hash["nwbfile_table"].contents_hash = uuid.UUID(
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    )
+    assert _build_ripple_band_selection(changed_hash)[
+        "ripple_band_lfp_id"
+    ] != first["ripple_band_lfp_id"]
+
+
+@pytest.mark.parametrize(
+    ("channels", "error_type", "message"),
+    [
+        (None, TypeError, "ordered integer sequence"),
+        ([1, 1], ValueError, "unique"),
+        ([1, -2], ValueError, "non-negative"),
+        ([1, 2.5], TypeError, "only integer"),
+    ],
+)
+def test_ripple_band_channels_reject_malformed_ids(
+    channels: object,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    """No channel_id fallback, sorting, coercion, or duplication is accepted."""
+    row = {"detection_parameters": {"ripple_channels": channels}}
+    with pytest.raises(error_type, match=message):
+        _ordered_ripple_band_lfp_electrode_ids(row)
+
+
+def test_ripple_band_context_rejects_registry_drift_before_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw filepath registry drift fails before any HDF5 metadata or data read."""
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    inputs["nwbfile_table"].contents_hash = uuid.UUID(
+        "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    )
+    inspected = []
+    monkeypatch.setitem(
+        _load_ripple_band_lfp_context.__globals__,
+        "_inspect_ripple_band_lfp_source",
+        lambda **kwargs: inspected.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="raw NWB identity changed"):
+        _load_ripple_band_lfp_context(
+            key=selection,
+            ripples_table=_FakeRelation(inputs["ripple_row"]),
+            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+            parameters_table=_FakeRelation(inputs["parameters"]),
+            session_table=_FakeRelation(
+                {
+                    "subject_id": "L14",
+                    "session_start_time": datetime(2024, 1, 2),
+                }
+            ),
+            nwbfile_table=inputs["nwbfile_table"],
+        )
+    assert inspected == []
+
+    inputs["nwbfile_table"].contents_hash = uuid.UUID(
+        selection["registered_source_contents_hash"]
+    )
+    inputs["nwbfile_table"].registered_size += 1
+    with pytest.raises(ValueError, match="byte size differs"):
+        _load_ripple_band_lfp_context(
+            key=selection,
+            ripples_table=_FakeRelation(inputs["ripple_row"]),
+            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+            parameters_table=_FakeRelation(inputs["parameters"]),
+            session_table=_FakeRelation(
+                {
+                    "subject_id": "L14",
+                    "session_start_time": datetime(2024, 1, 2),
+                }
+            ),
+            nwbfile_table=inputs["nwbfile_table"],
+        )
+    assert inspected == []
+
+
+def test_ripple_band_context_rejects_metadata_drift_before_epoch_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed HDF5 object snapshot fails before selected arrays are read."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    changed = copy.deepcopy(inputs["source_snapshot"])
+    changed["source_slice_provenance"]["electrical_series_object_id"] = (
+        "changed-object"
+    )
+    monkeypatch.setitem(
+        _load_ripple_band_lfp_context.__globals__,
+        "_inspect_ripple_band_lfp_source",
+        lambda **_kwargs: changed,
+    )
+    loads = []
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "load_selected_ripple_band_lfp_nwb_inputs",
+        lambda **kwargs: loads.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="selection changed after insertion"):
+        _load_ripple_band_lfp_context(
+            key=selection,
+            ripples_table=_FakeRelation(inputs["ripple_row"]),
+            epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+            parameters_table=_FakeRelation(inputs["parameters"]),
+            session_table=_FakeRelation(
+                {
+                    "subject_id": "L14",
+                    "session_start_time": datetime(2024, 1, 2),
+                }
+            ),
+            nwbfile_table=inputs["nwbfile_table"],
+        )
+    assert loads == []
+
+
+def test_ripple_band_make_passes_exact_selected_epoch_and_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table adapter forwards only the frozen epoch and ordered columns."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    raw_timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
+    raw_traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "animal_name": "L14",
+        "date": "20240102",
+        "ripple_row": inputs["ripple_row"],
+        "nwb_inputs": {
+            **inputs["source_snapshot"],
+            "raw_timestamps": raw_timestamps,
+            "raw_traces": raw_traces,
+        },
+    }
+    monkeypatch.setitem(
+        _make_ripple_band_lfp_row.__globals__,
+        "_load_ripple_band_lfp_context",
+        lambda **_kwargs: context,
+    )
+    captured = []
+    sentinel = {"computed": True}
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "compute_selected_ripple_band_lfp",
+        lambda **kwargs: captured.append(kwargs) or sentinel,
+    )
+    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "get_ripple_band_lfp_artifact_paths",
+        lambda **_kwargs: paths,
+    )
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "write_ripple_band_lfp_artifact",
+        lambda result, path: paths,
+    )
+    monkeypatch.setitem(
+        _make_ripple_band_lfp_row.__globals__,
+        "_ripple_band_lfp_result_row",
+        lambda result, written, created_artifact_paths: {
+            "sentinel": result,
+            "_created_artifact_paths": list(created_artifact_paths),
+        },
+    )
+
+    row = _make_ripple_band_lfp_row(
+        key=selection,
+        parameters_table=object(),
+        ripples_table=object(),
+        epoch_intervals_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        artifact_root=tmp_path / "analysis",
+    )
+
+    call = captured[0]
+    assert call["epoch"] == "08_r4"
+    assert call["electrode_ids"] == [201, 17]
+    assert call["raw_timestamps"] is raw_timestamps
+    assert call["raw_traces"] is raw_traces
+    assert call["upstream_provenance"][
+        "registered_source_contents_hash"
+    ] == selection["registered_source_contents_hash"]
+    assert call["artifact_origin"] == "computed"
+    assert row["sentinel"] is sentinel
+    assert row["_created_artifact_paths"] == [str(paths["artifact_dir"])]
+
+
+def test_ripple_band_make_cleans_new_bundle_after_adapter_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-write validation failure removes only the new UUID bundle."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "animal_name": "L14",
+        "date": "20240102",
+        "ripple_row": inputs["ripple_row"],
+        "nwb_inputs": {
+            **inputs["source_snapshot"],
+            "raw_timestamps": np.arange(4096, dtype=float) / 4096.0,
+            "raw_traces": np.zeros((4096, 2), dtype=np.int16),
+        },
+    }
+    monkeypatch.setitem(
+        _make_ripple_band_lfp_row.__globals__,
+        "_load_ripple_band_lfp_context",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "compute_selected_ripple_band_lfp",
+        lambda **_kwargs: {"computed": True},
+    )
+    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    artifact_dir.parent.mkdir(parents=True)
+    retained = artifact_dir.parent / "retained.txt"
+    retained.write_bytes(b"keep")
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "get_ripple_band_lfp_artifact_paths",
+        lambda **_kwargs: paths,
+    )
+
+    def write_bundle(_result, path):
+        assert Path(path) == artifact_dir
+        artifact_dir.mkdir()
+        (artifact_dir / "lfp.nc").write_bytes(b"new")
+        return paths
+
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "write_ripple_band_lfp_artifact",
+        write_bundle,
+    )
+
+    def fail_adapter(*_args, **_kwargs):
+        raise ValueError("adapter validation failed")
+
+    monkeypatch.setitem(
+        _make_ripple_band_lfp_row.__globals__,
+        "_ripple_band_lfp_result_row",
+        fail_adapter,
+    )
+
+    with pytest.raises(ValueError, match="adapter validation failed"):
+        _make_ripple_band_lfp_row(
+            key=selection,
+            parameters_table=object(),
+            ripples_table=object(),
+            epoch_intervals_table=object(),
+            session_table=object(),
+            nwbfile_table=object(),
+            artifact_root=tmp_path / "analysis",
+        )
+    assert not artifact_dir.exists()
+    assert retained.read_bytes() == b"keep"
+
+
+def test_ripple_band_table_terminal_insert_and_failed_insert_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero-ripple epochs still insert LFP; failed inserts remove only new UUID."""
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+
+    def compute(**_kwargs):
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("manifest.parquet", "channel_qc.parquet", "lfp.nc"):
+            (artifact_dir / filename).write_bytes(b"new")
+        return {
+            "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+            "channel_qc_path": str(artifact_dir / "channel_qc.parquet"),
+            "ripple_band_lfp_path": str(artifact_dir / "lfp.nc"),
+            "bundle_schema_version": "1",
+            "n_channels": 2,
+            "input_sample_count": 0,
+            "output_sample_count": 0,
+            "source_sampling_frequency_hz": 4096.0,
+            "actual_sampling_frequency_hz": 1024.0,
+            "decimation_factor": 4,
+            "raw_timestamps_sha256": "a" * 64,
+            "raw_traces_sha256": "b" * 64,
+            "analysis_status": "empty_input",
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_dir)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"ripple_band_lfp_id": result_id},
+    )
+    bundle, _schemas, _params = _fake_bundle(
+        runtime_hooks={"ripple_band_lfp_compute": compute}
+    )
+    result = bundle["ripple_band_lfp"]
+    result().make({"ripple_band_lfp_id": result_id})
+    inserted, insert_kwargs = result._insert_calls[0]
+    assert insert_kwargs == {}
+    assert inserted["analysis_status"] == "empty_input"
+    assert inserted["artifact_origin"] == "computed"
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"ripple_band_lfp_id": result_id})
+    assert not artifact_dir.exists()
+
+
+def test_ripple_band_registration_recomputes_exact_selected_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy registration receives the same frozen raw slice as computation."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    raw_timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
+    raw_traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "animal_name": "L14",
+        "date": "20240102",
+        "ripple_row": inputs["ripple_row"],
+        "nwb_inputs": {
+            **inputs["source_snapshot"],
+            "raw_timestamps": raw_timestamps,
+            "raw_traces": raw_traces,
+        },
+    }
+    monkeypatch.setitem(
+        _register_existing_ripple_band_lfp_row.__globals__,
+        "_load_ripple_band_lfp_context",
+        lambda **_kwargs: context,
+    )
+    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "get_ripple_band_lfp_artifact_paths",
+        lambda **_kwargs: paths,
+    )
+    captured = []
+    sentinel = {"registered": True}
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "register_existing_ripple_band_lfp_artifact",
+        lambda **kwargs: captured.append(kwargs) or sentinel,
+    )
+    monkeypatch.setitem(
+        _register_existing_ripple_band_lfp_row.__globals__,
+        "_ripple_band_lfp_result_row",
+        lambda result, written, created_artifact_paths: {
+            "sentinel": result,
+            "_created_artifact_paths": list(created_artifact_paths),
+        },
+    )
+    legacy_result = tmp_path / "08_r4_ripple_channels_lfp.nc"
+    legacy_log = tmp_path / "run_log.json"
+
+    row = _register_existing_ripple_band_lfp_row(
+        key=selection,
+        legacy_result_path=legacy_result,
+        legacy_run_log_path=legacy_log,
+        parameters_table=object(),
+        ripples_table=object(),
+        epoch_intervals_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        artifact_root=tmp_path / "analysis",
+    )
+
+    call = captured[0]
+    assert call["source_result_path"] == legacy_result
+    assert call["source_run_log_path"] == legacy_log
+    assert call["destination_path"] == paths["artifact_dir"]
+    assert call["overwrite"] is False
+    assert call["electrode_ids"] == [201, 17]
+    assert call["raw_timestamps"] is raw_timestamps
+    assert call["raw_traces"] is raw_traces
+    assert call["upstream_provenance"][
+        "registered_source_contents_hash"
+    ] == selection["registered_source_contents_hash"]
+    assert row["sentinel"] is sentinel
+
+
+def test_ripple_band_registration_cleans_new_bundle_after_adapter_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration adapter failure removes only its new UUID bundle."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "animal_name": "L14",
+        "date": "20240102",
+        "ripple_row": inputs["ripple_row"],
+        "nwb_inputs": {
+            **inputs["source_snapshot"],
+            "raw_timestamps": np.arange(4096, dtype=float) / 4096.0,
+            "raw_traces": np.zeros((4096, 2), dtype=np.int16),
+        },
+    }
+    monkeypatch.setitem(
+        _register_existing_ripple_band_lfp_row.__globals__,
+        "_load_ripple_band_lfp_context",
+        lambda **_kwargs: context,
+    )
+    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    artifact_dir.parent.mkdir(parents=True)
+    retained = artifact_dir.parent / "retained.txt"
+    retained.write_bytes(b"keep")
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "get_ripple_band_lfp_artifact_paths",
+        lambda **_kwargs: paths,
+    )
+
+    def register_bundle(**kwargs):
+        assert Path(kwargs["destination_path"]) == artifact_dir
+        artifact_dir.mkdir()
+        (artifact_dir / "lfp.nc").write_bytes(b"new")
+        return {"registered": True}
+
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "register_existing_ripple_band_lfp_artifact",
+        register_bundle,
+    )
+
+    def fail_adapter(*_args, **_kwargs):
+        raise ValueError("adapter validation failed")
+
+    monkeypatch.setitem(
+        _register_existing_ripple_band_lfp_row.__globals__,
+        "_ripple_band_lfp_result_row",
+        fail_adapter,
+    )
+
+    with pytest.raises(ValueError, match="adapter validation failed"):
+        _register_existing_ripple_band_lfp_row(
+            key=selection,
+            legacy_result_path=tmp_path / "legacy.nc",
+            legacy_run_log_path=tmp_path / "run_log.json",
+            parameters_table=object(),
+            ripples_table=object(),
+            epoch_intervals_table=object(),
+            session_table=object(),
+            nwbfile_table=object(),
+            artifact_root=tmp_path / "analysis",
+        )
+    assert not artifact_dir.exists()
+    assert retained.read_bytes() == b"keep"
+
+
+def test_ripple_band_table_registration_is_immutable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration preflights immutability and direct-inserts audited rows."""
+    result_id = uuid.uuid4()
+    calls = []
+
+    def register(**kwargs):
+        calls.append(kwargs)
+        return {
+            "artifact_manifest_path": str(tmp_path / "manifest.parquet"),
+            "channel_qc_path": str(tmp_path / "channel_qc.parquet"),
+            "ripple_band_lfp_path": str(tmp_path / "ripple_band_lfp.nc"),
+            "bundle_schema_version": "1",
+            "n_channels": 2,
+            "input_sample_count": 4096,
+            "output_sample_count": 1024,
+            "source_sampling_frequency_hz": 4096.0,
+            "actual_sampling_frequency_hz": 1024.0,
+            "decimation_factor": 4,
+            "raw_timestamps_sha256": "a" * 64,
+            "raw_traces_sha256": "b" * 64,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": {"verification": "exact"},
+            "_created_artifact_paths": [],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"ripple_band_lfp_id": result_id},
+    )
+    bundle, _schemas, _params = _fake_bundle(
+        runtime_hooks={"ripple_band_lfp_register_existing": register}
+    )
+    result = bundle["ripple_band_lfp"]
+    with pytest.raises(ValueError, match="immutable"):
+        result.register_existing(
+            {"ripple_band_lfp_id": result_id},
+            legacy_result_path=tmp_path / "legacy.nc",
+            overwrite=True,
+        )
+    assert calls == []
+
+    row = result.register_existing(
+        {"ripple_band_lfp_id": result_id},
+        legacy_result_path=tmp_path / "legacy.nc",
+        legacy_run_log_path=tmp_path / "run_log.json",
+    )
+    inserted, kwargs = result._insert_calls[0]
+    assert row == inserted
+    assert kwargs == {"skip_duplicates": False, "allow_direct_insert": True}
+    assert inserted["artifact_origin"] == "registered_existing"
+    assert inserted["legacy_artifact_provenance"] == {
+        "verification": "exact"
+    }
+    assert calls[0]["legacy_result_path"] == tmp_path / "legacy.nc"
+    assert calls[0]["legacy_run_log_path"] == tmp_path / "run_log.json"
+
+
+def test_ripple_band_result_loader_validates_datajoint_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table loader delegates checksums and complete link validation."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+    result_row = {
+        "ripple_band_lfp_id": result_id,
+        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+    }
+    selection = {
+        "ripple_band_lfp_id": result_id,
+        "ripple_band_lfp_param_name": "manuscript_150_250hz_1khz",
+        "nwb_file_name": "L14_20240102_augmented.nwb",
+        "epoch": "08_r4",
+    }
+    parameters = dict(table_specs.MANUSCRIPT_RIPPLE_BAND_LFP_PARAMETERS)
+    loaded_bundle = {"loaded": True}
+    bundle, _schemas, _params = _fake_bundle()
+    result = bundle["ripple_band_lfp"]
+
+    def fetch(table, key):
+        if table is result:
+            return result_row
+        if table is bundle["ripple_band_lfp_selection"]:
+            return selection
+        if table is bundle["ripple_band_lfp_parameters"]:
+            return parameters
+        raise AssertionError(f"Unexpected table {table!r}")
+
+    monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
+    monkeypatch.setattr(
+        ripple_band_lfp,
+        "load_ripple_band_lfp_artifact",
+        lambda path: loaded_bundle,
+    )
+    validations = []
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_validate_ripple_band_lfp_artifact_link",
+        lambda **kwargs: validations.append(kwargs),
+    )
+
+    loaded = result.load_ripple_band_lfp_bundle(
+        {"ripple_band_lfp_id": result_id}
+    )
+    assert loaded is loaded_bundle
+    assert validations[0]["bundle"] is loaded_bundle
+    assert validations[0]["result_row"] == result_row
+    assert validations[0]["selection_row"] == selection
+    assert validations[0]["parameters_row"] == parameters
+
+
+def test_ripple_band_artifact_link_rejects_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    """Canonical result metadata and embedded selection provenance are linked."""
+    from v1ca1.spyglass import ripple_band_lfp
+
+    inputs = _ripple_band_selection_inputs(tmp_path)
+    selection = _build_ripple_band_selection(inputs)
+    timestamps = np.arange(4096, dtype=float) / 4096.0 + 10.0
+    traces = np.arange(4096 * 2, dtype=np.int16).reshape(4096, 2)
+    result = ripple_band_lfp.compute_selected_ripple_band_lfp(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        source_nwb_file_name=inputs["path"].name,
+        source_electrical_series_path="/acquisition/e-series",
+        raw_timestamps=timestamps,
+        raw_traces=traces,
+        electrode_ids=selection["ordered_electrode_ids"],
+        gain_to_uv=selection["ordered_gain_to_uv"],
+        offset_to_uv=selection["ordered_offset_to_uv"],
+        source_sampling_frequency_hz=4096.0,
+        sampling_frequency_provenance=selection[
+            "sampling_frequency_provenance"
+        ],
+        source_slice_provenance=selection["source_slice_provenance"],
+        parameter_name=selection["ripple_band_lfp_param_name"],
+        parameter_sha256=selection[
+            "ripple_band_lfp_parameters_sha256"
+        ],
+        output_rule_sha256=selection[
+            "ripple_band_lfp_output_rule_sha256"
+        ],
+        upstream_provenance=(
+            tables_module._ripple_band_lfp_upstream_provenance(selection)
+        ),
+        **{
+            field_name: inputs["parameters"][field_name]
+            for field_name in (
+                "lowcut_hz",
+                "highcut_hz",
+                "filter_order",
+                "target_sampling_frequency_hz",
+                "enable_notch_filter",
+                "notch_base_freq_hz",
+                "notch_harmonics",
+                "notch_quality",
+            )
+        },
+    )
+    paths = ripple_band_lfp.get_ripple_band_lfp_artifact_paths(
+        animal_name="L14",
+        date="20240102",
+        epoch="08_r4",
+        ripple_band_lfp_id=selection["ripple_band_lfp_id"],
+        artifact_root=tmp_path / "analysis",
+    )
+    result_row = {
+        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
+        "channel_qc_path": str(paths["channel_qc_path"]),
+        "ripple_band_lfp_path": str(paths["result_path"]),
+        "bundle_schema_version": ripple_band_lfp.BUNDLE_SCHEMA_VERSION,
+        "n_channels": 2,
+        "input_sample_count": result["input_sample_count"],
+        "output_sample_count": result["output_sample_count"],
+        "source_sampling_frequency_hz": 4096.0,
+        "actual_sampling_frequency_hz": 1024.0,
+        "decimation_factor": 4,
+        "raw_timestamps_sha256": result["raw_timestamps_sha256"],
+        "raw_traces_sha256": result["raw_traces_sha256"],
+        "analysis_status": "valid",
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+    }
+    _validate_ripple_band_lfp_artifact_link(
+        bundle=result,
+        result_row=result_row,
+        selection_row=selection,
+        parameters_row=inputs["parameters"],
+        animal_name="L14",
+        date="20240102",
+    )
+
+    changed = copy.deepcopy(result)
+    changed["upstream_provenance"] = dict(changed["upstream_provenance"])
+    changed["upstream_provenance"][
+        "registered_source_contents_hash"
+    ] = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    with pytest.raises(ValueError, match="upstream provenance"):
+        _validate_ripple_band_lfp_artifact_link(
+            bundle=changed,
+            result_row=result_row,
+            selection_row=selection,
+            parameters_row=inputs["parameters"],
+            animal_name="L14",
+            date="20240102",
+        )
