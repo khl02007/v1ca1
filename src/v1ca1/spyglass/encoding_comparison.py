@@ -959,6 +959,20 @@ def _raw_training_curves(
     return curves
 
 
+def _count_spikes_in_support(unit_spikes: Any, support: Any) -> int:
+    """Count spikes in intervals without restricting an empty Pynapple array."""
+    from v1ca1.spyglass.path_specific_place import _extract_interval_bounds
+
+    timestamps = np.asarray(unit_spikes.t, dtype=float).reshape(-1)
+    starts, ends = _extract_interval_bounds(support)
+    if timestamps.size == 0 or starts.size == 0:
+        return 0
+    selected = np.zeros(timestamps.shape, dtype=bool)
+    for start, end in zip(starts, ends, strict=True):
+        selected |= (timestamps >= float(start)) & (timestamps <= float(end))
+    return int(np.sum(selected))
+
+
 def _model_rates_for_bins(
     *,
     tuning_curve: Any,
@@ -1006,7 +1020,21 @@ def _evaluate_encoding_models(
         }
         for unit_id in unit_ids
     }
-    reference_unit = unit_ids[0]
+    if not unit_ids:
+        return stores
+    nonempty_unit_ids = [
+        unit_id
+        for unit_id in unit_ids
+        if np.asarray(spikes[unit_id].t).size > 0
+    ]
+    if not nonempty_unit_ids:
+        for store in stores.values():
+            store["zero_training_spikes"] = True
+            store["model_failed"] = {
+                model_name: True for model_name in MODEL_NAMES
+            }
+        return stores
+    reference_unit = nonempty_unit_ids[0]
     for fold in range(int(n_folds)):
         train_fold = train_folds[fold]
         test_fold = test_folds[fold]
@@ -1020,30 +1048,51 @@ def _evaluate_encoding_models(
             features=features,
             test_fold=test_fold,
         )
-        curves = _raw_training_curves(
-            spikes=spikes,
-            features=features,
-            bins=bins,
-            smoothing_boundaries_by_model=smoothing_boundaries_by_model,
-            train_fold=train_fold,
-            sigma_bins=gaussian_smoothing_sigma_bins,
+        train_spike_counts = {
+            unit_id: _count_spikes_in_support(spikes[unit_id], train_fold)
+            for unit_id in unit_ids
+        }
+        active_unit_ids = [
+            unit_id
+            for unit_id in unit_ids
+            if train_spike_counts[unit_id] > 0
+        ]
+        curves = (
+            _raw_training_curves(
+                spikes=spikes[active_unit_ids],
+                features=features,
+                bins=bins,
+                smoothing_boundaries_by_model=smoothing_boundaries_by_model,
+                train_fold=train_fold,
+                sigma_bins=gaussian_smoothing_sigma_bins,
+            )
+            if active_unit_ids
+            else {}
         )
         reference_times = np.asarray(reference_counts.t, dtype=float).reshape(-1)
         for unit_id in unit_ids:
             unit_spikes = spikes[unit_id]
-            n_train_spikes = int(len(unit_spikes.restrict(train_fold).t))
+            n_train_spikes = train_spike_counts[unit_id]
             if n_train_spikes <= 0:
                 stores[unit_id]["zero_training_spikes"] = True
             train_rate_hz = max(n_train_spikes / train_duration_s, 1e-10)
-            binned = unit_spikes.count(evaluation_bin_size_s, test_fold)
-            binned_times = np.asarray(binned.t, dtype=float).reshape(-1)
-            counts = np.asarray(binned.d, dtype=np.int64).reshape(-1)
-            if not np.array_equal(binned_times, reference_times):
-                raise ValueError(
-                    "All eligible units must use identical held-out time bins."
-                )
+            if np.asarray(unit_spikes.t).size == 0:
+                counts = np.zeros(reference_times.shape, dtype=np.int64)
+            else:
+                binned = unit_spikes.count(evaluation_bin_size_s, test_fold)
+                binned_times = np.asarray(binned.t, dtype=float).reshape(-1)
+                counts = np.asarray(binned.d, dtype=np.int64).reshape(-1)
+                if not np.array_equal(binned_times, reference_times):
+                    raise ValueError(
+                        "All eligible units must use identical held-out time bins."
+                    )
             counts = counts[common_mask]
             stores[unit_id]["heldout_spike_count"] += int(counts.sum())
+            if n_train_spikes <= 0:
+                stores[unit_id]["model_failed"] = {
+                    model_name: True for model_name in MODEL_NAMES
+                }
+                continue
             null_rates = np.full(counts.shape, train_rate_hz, dtype=float)
             null_ll = _poisson_log_likelihood_nats(
                 counts,

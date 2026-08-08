@@ -590,11 +590,7 @@ def compute_selected_dpp_tuning_curve(
         for trajectory, intervals in support_by_trajectory.items()
     }
     pooled_support = _pool_interval_sets(support_by_trajectory)
-    spike_counts = place._subset_spike_counts(
-        spikes,
-        pooled_support,
-        n_units=len(identities),
-    )
+    spike_counts = np.zeros(len(identities), dtype=np.int64)
     empty_feature_counts = {trajectory: 0 for trajectory in get_dpp_trajectory_pair(turn)}
 
     def terminal(
@@ -638,6 +634,12 @@ def compute_selected_dpp_tuning_curve(
         return terminal("no_trials")
     if sum(support_duration_by_trajectory.values()) <= 0.0:
         return terminal("no_movement")
+
+    spike_counts = place._subset_spike_counts(
+        spikes,
+        pooled_support,
+        n_units=len(identities),
+    )
 
     progression, feature_counts, valid_counts = _build_pooled_progression(
         position=position,

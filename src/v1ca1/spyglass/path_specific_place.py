@@ -647,11 +647,7 @@ def compute_selected_path_specific_place_tuning_curve(
     )
     support = _intersect_intervals(selected_trials, movement_intervals)
     _support_count, support_duration_s = _interval_summary(support)
-    spike_counts = _subset_spike_counts(
-        spikes,
-        support,
-        n_units=len(identities),
-    )
+    spike_counts = np.zeros(len(identities), dtype=np.int64)
 
     def terminal(
         status: str,
@@ -701,6 +697,12 @@ def compute_selected_path_specific_place_tuning_curve(
         return terminal("no_trials")
     if support_duration_s <= 0.0:
         return terminal("no_movement")
+
+    spike_counts = _subset_spike_counts(
+        spikes,
+        support,
+        n_units=len(identities),
+    )
 
     linear_position, computed_graph_length = build_path_specific_linear_position(
         position=position,
