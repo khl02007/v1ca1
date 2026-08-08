@@ -769,6 +769,78 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION = """
+# Named empirical swapped-light tuning-comparison parameters.
+swap_tuning_curve_comparison_param_name: varchar(64)
+---
+evaluation_bin_size_s: double
+gaussian_smoothing_sigma_bins: double
+min_dark_firing_rate_hz: double
+min_light_firing_rate_hz: double
+"""
+
+
+SWAP_TUNING_CURVE_COMPARISON_SELECTION_DEFINITION = """
+# One immutable three-epoch empirical swapped-light tuning selection.
+swap_tuning_curve_comparison_id: uuid
+---
+-> RegionSortedSpikesGroup
+-> MovementFiringRate.proj(dark_movement_firing_rate_id='movement_firing_rate_id')
+-> MovementFiringRate.proj(light_train_movement_firing_rate_id='movement_firing_rate_id')
+-> MovementFiringRate.proj(light_test_movement_firing_rate_id='movement_firing_rate_id')
+-> PathSpecificPlaceTuningCurve.proj(dark_center_to_left_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(dark_center_to_right_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(dark_left_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(dark_right_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_train_center_to_left_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_train_center_to_right_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_train_left_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_train_right_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_test_center_to_left_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_test_center_to_right_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_test_left_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> PathSpecificPlaceTuningCurve.proj(light_test_right_to_center_tuning_curve_id='path_specific_place_tuning_curve_id')
+-> EpochIntervals.proj(dark_epoch='epoch')
+-> EpochIntervals.proj(light_train_epoch='epoch')
+-> EpochIntervals.proj(light_test_epoch='epoch')
+-> SwapTuningCurveComparisonParameters
+dark_condition: enum('dark')
+light_train_condition: enum('AB', 'gray', 'BA', 'bright')
+light_test_condition: enum('AB', 'gray', 'BA', 'bright')
+selected_units_sha256: char(64)
+position_offset_samples: bigint unsigned
+speed_threshold_cm_s: double
+source_tuning_curve_sha256_by_role_trajectory: longblob
+source_tuning_parameters_sha256_by_role_trajectory: longblob
+movement_firing_rate_table_sha256_by_role: longblob
+movement_intervals_sha256_by_role: longblob
+swap_tuning_curve_comparison_parameters_sha256: char(64)
+swap_tuning_curve_comparison_output_rule_sha256: char(64)
+"""
+
+
+SWAP_TUNING_CURVE_COMPARISON_DEFINITION = """
+# One empirical swapped-light summary and model-score artifact bundle.
+-> SwapTuningCurveComparisonSelection
+---
+artifact_manifest_path: filepath@analysis
+selected_units_path: filepath@analysis
+summary_path: filepath@analysis
+swap_tuning_curve_comparison_path: filepath@analysis
+schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_source_units: int unsigned
+n_units: int unsigned
+n_valid_units: int unsigned
+analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'upstream_terminal', 'no_valid_position', 'no_movement', 'no_trajectory_samples', 'no_valid_units')
+selected_units_sha256: char(64)
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -1258,6 +1330,124 @@ DEFAULT_SWAP_GLM_PARAMETERS = MappingProxyType(
 SWAP_GLM_PARAMETER_PRESETS = (DEFAULT_SWAP_GLM_PARAMETERS,)
 
 
+SWAP_TUNING_CURVE_COMPARISON_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "models": (
+            "empirical_visual",
+            "empirical_dark",
+            "empirical_pointwise_multiplicative_ratio",
+            "empirical_segment_multiplicative_ratio",
+            "empirical_pointwise_additive_delta",
+            "empirical_segment_additive_delta",
+        ),
+        "swap_configuration": {
+            "center_to_left": {
+                "source_trajectory": "center_to_right",
+                "segment_index": 2,
+            },
+            "center_to_right": {
+                "source_trajectory": "center_to_left",
+                "segment_index": 2,
+            },
+            "left_to_center": {
+                "source_trajectory": "right_to_center",
+                "segment_index": 0,
+            },
+            "right_to_center": {
+                "source_trajectory": "left_to_center",
+                "segment_index": 0,
+            },
+        },
+        "empirical_model_formulas": {
+            "empirical_visual": "other_light",
+            "empirical_dark": "same_dark",
+            "empirical_pointwise_multiplicative_ratio": (
+                "same_dark * other_light / max(other_dark, epsilon)"
+            ),
+            "empirical_segment_multiplicative_ratio": (
+                "same_dark * sum(other_light_in_swap_segment) / "
+                "max(sum(other_dark_in_swap_segment), epsilon)"
+            ),
+            "empirical_pointwise_additive_delta": (
+                "same_dark + other_light - other_dark"
+            ),
+            "empirical_segment_additive_delta": (
+                "same_dark + mean(other_light_in_swap_segment - "
+                "other_dark_in_swap_segment)"
+            ),
+        },
+        "training_tuning_source": (
+            "twelve_all_trial_path_specific_place_tuning_curves"
+        ),
+        "training_tuning_input_policy": (
+            "four_cm_unsmoothed_curves_interpolate_nans_then_gaussian_smooth"
+        ),
+        "all_nan_tuning_fallback": (
+            "trajectory_spike_count_divided_by_movement_support_duration"
+        ),
+        "evaluation_scope": "heldout_light_swapped_segment_movement_laps",
+        "evaluation_bin_size_unit": "s",
+        "eligibility_policy": (
+            "strict_dark_and_light_train_epoch_wide_movement_firing_rate_thresholds"
+        ),
+        "movement_interval_provenance_policy": (
+            "exact_artifact_sha256_frozen_for_dark_light_train_and_light_test"
+        ),
+        "heldout_firing_rate_filter": False,
+        "trajectory_support_policy": (
+            "all_or_none_terminal_if_any_heldout_path_has_no_scoring_bins"
+        ),
+        "unit_failure_policy": (
+            "retain_and_isolate_nonfinite_scores_per_unit"
+        ),
+        "unit_audit_policy": (
+            "retain_all_upstream_units_with_explicit_eligibility"
+        ),
+        "runtime_unit_key_policy": (
+            "persistent_identity_aligned_native_tsgroup_keys_with_stable_output_ids"
+        ),
+        "legacy_registration_policy": (
+            "imported_spike_sorting_only_exact_nwb_reconstruction_and_rescore"
+        ),
+        "legacy_preprocessing_policy": (
+            "position_offset_10_and_speed_threshold_4_cm_s_required"
+        ),
+        "legacy_comparison_policy": "all_scientific_values_tight_equal",
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "position_unit": "cm",
+    }
+)
+
+
+MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS = MappingProxyType(
+    {
+        "swap_tuning_curve_comparison_param_name": "manuscript_v1",
+        "evaluation_bin_size_s": 0.05,
+        "gaussian_smoothing_sigma_bins": 1.0,
+        "min_dark_firing_rate_hz": 0.5,
+        "min_light_firing_rate_hz": 0.5,
+    }
+)
+
+
+MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS = MappingProxyType(
+    {
+        **MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS,
+        "swap_tuning_curve_comparison_param_name": "manuscript_ca1",
+        "min_dark_firing_rate_hz": 0.0,
+        "min_light_firing_rate_hz": 0.0,
+    }
+)
+
+
+SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS = (
+    MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS,
+    MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -1333,6 +1523,15 @@ TABLE_DEFINITIONS = MappingProxyType(
         "swap_glm_parameters": SWAP_GLM_PARAMETERS_DEFINITION,
         "swap_glm_selection": SWAP_GLM_SELECTION_DEFINITION,
         "swap_glm": SWAP_GLM_DEFINITION,
+        "swap_tuning_curve_comparison_parameters": (
+            SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION
+        ),
+        "swap_tuning_curve_comparison_selection": (
+            SWAP_TUNING_CURVE_COMPARISON_SELECTION_DEFINITION
+        ),
+        "swap_tuning_curve_comparison": (
+            SWAP_TUNING_CURVE_COMPARISON_DEFINITION
+        ),
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -1379,6 +1578,13 @@ __all__ = [
     "SWAP_GLM_PARAMETERS_DEFINITION",
     "SWAP_GLM_PARAMETER_PRESETS",
     "SWAP_GLM_SELECTION_DEFINITION",
+    "MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
+    "SWAP_TUNING_CURVE_COMPARISON_DEFINITION",
+    "SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION",
+    "SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS",
+    "SWAP_TUNING_CURVE_COMPARISON_OUTPUT_RULE",
+    "SWAP_TUNING_CURVE_COMPARISON_SELECTION_DEFINITION",
     "TABLE_DEFINITIONS",
     "TUNING_CURVE_PARAMETER_PRESETS",
     "TUNING_SIMILARITY_PARAMETER_PRESETS",

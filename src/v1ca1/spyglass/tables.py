@@ -40,6 +40,7 @@ _DPP_TRAJECTORY_TYPES = (
     "right_to_center",
 )
 _DPP_FULL_GRAPH_CONFIGURATION_NAME = "full_w"
+_SWAP_TUNING_EPOCH_ROLES = ("dark", "light_train", "light_test")
 
 
 def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -639,6 +640,67 @@ def _validate_swap_glm_parameter_row(
         ],
     )
     return {"swap_glm_param_name": name, **validated}
+
+
+def _validate_swap_tuning_curve_comparison_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one empirical held-out swap-tuning parameter row."""
+    from v1ca1.spyglass.swap_tuning import (
+        validate_swap_tuning_curve_comparison_parameters,
+    )
+
+    expected = set(
+        table_specs.MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "SwapTuningCurveComparison parameters must have exactly the "
+            f"declared fields; missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["swap_tuning_curve_comparison_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "swap_tuning_curve_comparison_param_name must be a non-empty "
+            "string of at most 64 characters."
+        )
+    for field_name in (
+        "evaluation_bin_size_s",
+        "gaussian_smoothing_sigma_bins",
+        "min_dark_firing_rate_hz",
+        "min_light_firing_rate_hz",
+    ):
+        value = values[field_name]
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{field_name} must be one numeric scalar.")
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} must be finite.")
+        values[field_name] = value
+    if values["evaluation_bin_size_s"] <= 0.0:
+        raise ValueError("evaluation_bin_size_s must be positive.")
+    for field_name in (
+        "gaussian_smoothing_sigma_bins",
+        "min_dark_firing_rate_hz",
+        "min_light_firing_rate_hz",
+    ):
+        if values[field_name] < 0.0:
+            raise ValueError(f"{field_name} must be non-negative.")
+    validated = validate_swap_tuning_curve_comparison_parameters(
+        evaluation_bin_size_s=values["evaluation_bin_size_s"],
+        gaussian_smoothing_sigma_bins=values[
+            "gaussian_smoothing_sigma_bins"
+        ],
+        min_dark_firing_rate_hz=values["min_dark_firing_rate_hz"],
+        min_light_firing_rate_hz=values["min_light_firing_rate_hz"],
+    )
+    return {
+        "swap_tuning_curve_comparison_param_name": name,
+        **validated,
+    }
 
 
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -3213,6 +3275,449 @@ def _swap_glm_selection_row(
     }
     return {
         "swap_glm_id": selection_uuid("SwapGLM", natural_key),
+        **natural_key,
+    }
+
+
+def _load_swap_tuning_curve_snapshot(
+    *,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_id: Any,
+) -> dict[str, Any]:
+    """Load, validate, and hash one upstream all-trial tuning curve."""
+    from v1ca1.spyglass.path_specific_place import (
+        load_path_specific_place_artifact,
+    )
+
+    curve_key = {"path_specific_place_tuning_curve_id": tuning_curve_id}
+    result_row = _fetch1_dict(tuning_curve_table, curve_key)
+    selection_row = _fetch1_dict(tuning_curve_selection_table, curve_key)
+    artifact_path = Path(result_row["tuning_curve_path"]).resolve(strict=True)
+    curve = load_path_specific_place_artifact(artifact_path)
+    try:
+        _validate_tuning_curve_artifact_link(
+            curve=curve,
+            result_row=result_row,
+            selection_row=selection_row,
+        )
+    finally:
+        close = getattr(curve, "close", None)
+        if callable(close):
+            close()
+    return {
+        "selection": selection_row,
+        "result": result_row,
+        "artifact_path": artifact_path,
+        "artifact_sha256": _file_sha256(artifact_path),
+    }
+
+
+def _swap_tuning_curve_comparison_selection_row(
+    *,
+    key: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_parameters_table: Any,
+    epoch_intervals_table: Any,
+    parameters_table: Any,
+    curve_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+    movement_artifact_sha256_by_role: Mapping[
+        str, Mapping[str, str]
+    ] | None = None,
+) -> dict[str, Any]:
+    """Validate and identify one immutable empirical swap-tuning bundle."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+    from v1ca1.spyglass.swap_tuning import OUTPUT_RULE_SHA256
+
+    parameters = _validate_swap_tuning_curve_comparison_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {
+                "swap_tuning_curve_comparison_param_name": key[
+                    "swap_tuning_curve_comparison_param_name"
+                ]
+            },
+        )
+    )
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": key[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    nwb_file_name = str(region_row["nwb_file_name"])
+    region = str(region_row["region_name"])
+    selected_units_sha256 = str(region_row["selected_units_sha256"])
+    n_units = int(region_row["n_units"])
+
+    movement_ids = {
+        epoch_role: key[f"{epoch_role}_movement_firing_rate_id"]
+        for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+    }
+    movement_results: dict[str, dict[str, Any]] = {}
+    movement_selections: dict[str, dict[str, Any]] = {}
+    for epoch_role, movement_id in movement_ids.items():
+        movement_key = {"movement_firing_rate_id": movement_id}
+        movement_results[epoch_role] = _fetch1_dict(
+            movement_firing_rate_table,
+            movement_key,
+        )
+        movement_selections[epoch_role] = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+    supplied_movement_hashes = dict(movement_artifact_sha256_by_role or {})
+    movement_firing_rate_sha256: dict[str, str] = {}
+    movement_intervals_sha256: dict[str, str] = {}
+    for epoch_role, movement_result in movement_results.items():
+        if epoch_role in supplied_movement_hashes:
+            artifact_hashes = dict(supplied_movement_hashes[epoch_role])
+            movement_firing_rate_sha256[epoch_role] = str(
+                artifact_hashes["firing_rate"]
+            )
+            movement_intervals_sha256[epoch_role] = str(
+                artifact_hashes["movement_intervals"]
+            )
+        else:
+            movement_firing_rate_sha256[epoch_role] = _file_sha256(
+                Path(
+                    movement_result["movement_firing_rate_path"]
+                ).resolve(strict=True)
+            )
+            movement_intervals_sha256[epoch_role] = _file_sha256(
+                Path(
+                    movement_result["movement_intervals_path"]
+                ).resolve(strict=True)
+            )
+
+    movement_reference = movement_selections["dark"]
+    shared_movement_fields = (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+        "region",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+        "movement_param_name",
+        "movement_parameters_sha256",
+        "position_series_name",
+    )
+    for epoch_role, movement_selection in movement_selections.items():
+        for field_name in shared_movement_fields:
+            if str(movement_selection.get(field_name)) != str(
+                movement_reference.get(field_name)
+            ):
+                raise ValueError(
+                    "SwapTuningCurveComparison movement rows must share the "
+                    f"same frozen source definition: {field_name}."
+                )
+        expected_epoch = str(movement_selection["epoch"])
+        supplied_epoch = str(key.get(f"{epoch_role}_epoch", expected_epoch))
+        if supplied_epoch != expected_epoch:
+            raise ValueError(
+                f"SwapTuningCurveComparison {epoch_role}_epoch does not "
+                "match its MovementFiringRate row."
+            )
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+    ):
+        if str(region_row.get(field_name)) != str(
+            movement_reference.get(field_name)
+        ):
+            raise ValueError(
+                "SwapTuningCurveComparison regional spikes and movement "
+                f"rows must share {field_name}."
+            )
+    if region != str(movement_reference.get("region")):
+        raise ValueError(
+            "SwapTuningCurveComparison regional spikes and movement rows "
+            "must select the same region."
+        )
+    for epoch_role, movement_result in movement_results.items():
+        if str(movement_result.get("selected_units_sha256")) != (
+            selected_units_sha256
+        ) or int(movement_result.get("n_units", -1)) != n_units:
+            raise ValueError(
+                "SwapTuningCurveComparison movement rows must contain "
+                f"identical persistent units: {epoch_role}."
+            )
+        allowed_statuses = (
+            {"no_units"}
+            if n_units == 0
+            else {"valid", "no_valid_position", "no_movement"}
+        )
+        if str(movement_result.get("analysis_status")) not in allowed_statuses:
+            raise ValueError(
+                "SwapTuningCurveComparison movement status is incompatible "
+                f"with its regional unit count: {epoch_role}."
+            )
+
+    selected_movement_parameters: dict[str, dict[str, Any]] = {}
+    position_rows: dict[str, dict[str, Any]] = {}
+    for epoch_role, movement_selection in movement_selections.items():
+        selected_movement_parameters[epoch_role] = (
+            _validate_movement_parameter_row(
+                _fetch1_dict(movement_parameters_table, movement_selection)
+            )
+        )
+        _validate_frozen_parameters(
+            movement_selection,
+            selected_movement_parameters[epoch_role],
+            field_name="movement_parameters_sha256",
+        )
+        position_rows[epoch_role] = _fetch1_dict(
+            position_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": movement_selection["epoch"],
+                "position_series_name": movement_selection[
+                    "position_series_name"
+                ],
+            },
+        )
+        if str(position_rows[epoch_role].get("spatial_unit")) != "cm":
+            raise ValueError(
+                "SwapTuningCurveComparison positions must use centimeters."
+            )
+    movement_parameter_reference = selected_movement_parameters["dark"]
+    if any(
+        parameter_row != movement_parameter_reference
+        for parameter_row in selected_movement_parameters.values()
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison movement rows must share exact "
+            "movement parameter values."
+        )
+    position_offsets = {
+        int(row["analysis_start_offset_samples"])
+        for row in position_rows.values()
+    }
+    if len(position_offsets) != 1:
+        raise ValueError(
+            "SwapTuningCurveComparison positions must share one analysis "
+            "start offset."
+        )
+    position_offset_samples = position_offsets.pop()
+
+    epochs = {
+        epoch_role: str(movement_selections[epoch_role]["epoch"])
+        for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+    }
+    if len(set(epochs.values())) != 3:
+        raise ValueError(
+            "SwapTuningCurveComparison requires three distinct epochs."
+        )
+    epoch_rows = {
+        epoch_role: _fetch1_dict(
+            epoch_intervals_table,
+            {"nwb_file_name": nwb_file_name, "epoch": epoch},
+        )
+        for epoch_role, epoch in epochs.items()
+    }
+    if any(str(row.get("epoch_type")) != "run" for row in epoch_rows.values()):
+        raise ValueError(
+            "SwapTuningCurveComparison requires three explicit run epochs."
+        )
+    dark_is_light = epoch_rows["dark"].get("is_light")
+    if (
+        str(epoch_rows["dark"].get("condition")) != "dark"
+        or dark_is_light is None
+        or bool(dark_is_light)
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison dark epoch must have condition='dark' "
+            "and is_light=False."
+        )
+    allowed_light_conditions = {"AB", "BA", "gray", "bright"}
+    light_conditions = {
+        epoch_role: str(epoch_rows[epoch_role].get("condition"))
+        for epoch_role in ("light_train", "light_test")
+    }
+    if any(
+        condition not in allowed_light_conditions
+        or not bool(epoch_rows[epoch_role].get("is_light"))
+        for epoch_role, condition in light_conditions.items()
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison light epochs require explicit light "
+            "conditions and is_light=True."
+        )
+    if len(set(light_conditions.values())) != 2:
+        raise ValueError(
+            "SwapTuningCurveComparison light-train and light-test conditions "
+            "must differ."
+        )
+    conditions = {
+        "dark_condition": "dark",
+        "light_train_condition": light_conditions["light_train"],
+        "light_test_condition": light_conditions["light_test"],
+    }
+    for field_name, expected_value in conditions.items():
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                f"SwapTuningCurveComparison {field_name} does not match "
+                "EpochIntervals."
+            )
+
+    curve_ids: dict[str, Any] = {}
+    curve_sha256: dict[str, dict[str, str]] = {}
+    tuning_parameter_sha256: dict[str, dict[str, str]] = {}
+    common_tuning_parameter_name: str | None = None
+    common_tuning_parameter_sha256: str | None = None
+    supplied_snapshots = dict(curve_snapshots or {})
+    for epoch_role in _SWAP_TUNING_EPOCH_ROLES:
+        curve_sha256[epoch_role] = {}
+        tuning_parameter_sha256[epoch_role] = {}
+        for trajectory_type in _DPP_TRAJECTORY_TYPES:
+            source_name = f"{epoch_role}:{trajectory_type}"
+            field_name = f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+            curve_id = key[field_name]
+            snapshot = dict(
+                supplied_snapshots[source_name]
+                if source_name in supplied_snapshots
+                else _load_swap_tuning_curve_snapshot(
+                    tuning_curve_table=tuning_curve_table,
+                    tuning_curve_selection_table=(
+                        tuning_curve_selection_table
+                    ),
+                    tuning_curve_id=curve_id,
+                )
+            )
+            curve_selection = dict(snapshot["selection"])
+            curve_result = dict(snapshot["result"])
+            expected_curve_fields = {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs[epoch_role],
+                "trajectory_type": trajectory_type,
+                "configuration_name": trajectory_type,
+                "movement_firing_rate_id": movement_ids[epoch_role],
+                "trial_subset": "all",
+            }
+            for curve_field, expected_value in expected_curve_fields.items():
+                if str(curve_selection.get(curve_field)) != str(expected_value):
+                    raise ValueError(
+                        "SwapTuningCurveComparison requires matching all-trial "
+                        f"source curves; {source_name} has stale {curve_field}."
+                    )
+            if str(curve_result.get("selected_units_sha256")) != (
+                selected_units_sha256
+            ) or int(curve_result.get("n_units", -1)) != n_units:
+                raise ValueError(
+                    "SwapTuningCurveComparison source curves and regional "
+                    f"spikes must contain identical units: {source_name}."
+                )
+            tuning_parameters = _validate_tuning_curve_parameter_row(
+                _fetch1_dict(tuning_curve_parameters_table, curve_selection)
+            )
+            _validate_frozen_parameters(
+                curve_selection,
+                tuning_parameters,
+                field_name="tuning_curve_parameters_sha256",
+            )
+            if (
+                tuning_parameters["binning_mode"] != "bin_size_cm"
+                or not math.isclose(
+                    float(tuning_parameters["place_bin_size_cm"]),
+                    4.0,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                or float(
+                    tuning_parameters["gaussian_smoothing_sigma_bins"]
+                )
+                != 0.0
+            ):
+                raise ValueError(
+                    "SwapTuningCurveComparison requires all-trial, unsmoothed "
+                    "4-cm PathSpecificPlaceTuningCurve inputs."
+                )
+            parameter_name = str(
+                curve_selection["tuning_curve_param_name"]
+            )
+            parameter_sha256 = str(
+                curve_selection["tuning_curve_parameters_sha256"]
+            )
+            if common_tuning_parameter_name is None:
+                common_tuning_parameter_name = parameter_name
+                common_tuning_parameter_sha256 = parameter_sha256
+            elif (
+                parameter_name != common_tuning_parameter_name
+                or parameter_sha256 != common_tuning_parameter_sha256
+            ):
+                raise ValueError(
+                    "SwapTuningCurveComparison source curves must share one "
+                    "frozen tuning-curve parameter definition."
+                )
+            curve_ids[field_name] = curve_id
+            curve_sha256[epoch_role][trajectory_type] = str(
+                snapshot["artifact_sha256"]
+            )
+            tuning_parameter_sha256[epoch_role][trajectory_type] = (
+                parameter_sha256
+            )
+
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.SWAP_TUNING_CURVE_COMPARISON_OUTPUT_RULE)
+    )
+    if output_rule_sha256 != OUTPUT_RULE_SHA256:
+        raise ValueError(
+            "SwapTuningCurveComparison table and artifact output rules have "
+            "diverged."
+        )
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="swap_tuning_curve_comparison_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "region_sorted_spikes_group_id": key[
+            "region_sorted_spikes_group_id"
+        ],
+        **{
+            f"{epoch_role}_movement_firing_rate_id": movement_id
+            for epoch_role, movement_id in movement_ids.items()
+        },
+        **curve_ids,
+        **{f"{epoch_role}_epoch": epoch for epoch_role, epoch in epochs.items()},
+        "swap_tuning_curve_comparison_param_name": parameters[
+            "swap_tuning_curve_comparison_param_name"
+        ],
+        **conditions,
+        "selected_units_sha256": selected_units_sha256,
+        "position_offset_samples": position_offset_samples,
+        "speed_threshold_cm_s": float(
+            movement_parameter_reference["speed_threshold_cm_s"]
+        ),
+        "source_tuning_curve_sha256_by_role_trajectory": curve_sha256,
+        "source_tuning_parameters_sha256_by_role_trajectory": (
+            tuning_parameter_sha256
+        ),
+        "movement_firing_rate_table_sha256_by_role": (
+            movement_firing_rate_sha256
+        ),
+        "movement_intervals_sha256_by_role": movement_intervals_sha256,
+        **parameter_snapshot,
+        "swap_tuning_curve_comparison_output_rule_sha256": (
+            output_rule_sha256
+        ),
+    }
+    return {
+        "swap_tuning_curve_comparison_id": selection_uuid(
+            "SwapTuningCurveComparison",
+            natural_key,
+        ),
         **natural_key,
     }
 
@@ -7884,6 +8389,365 @@ def _load_swap_glm_spikes(
     return loaded
 
 
+def _load_swap_tuning_curve_comparison_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_parameters_table: Any,
+    epoch_intervals_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Reload and revalidate one three-epoch swap-tuning selection."""
+    from v1ca1.spyglass.selection import provenance_sha256
+    from v1ca1.spyglass.swap_tuning import OUTPUT_RULE_SHA256
+
+    curve_snapshots = {
+        f"{epoch_role}:{trajectory_type}": (
+            _load_swap_tuning_curve_snapshot(
+                tuning_curve_table=tuning_curve_table,
+                tuning_curve_selection_table=tuning_curve_selection_table,
+                tuning_curve_id=key[
+                    f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+                ],
+            )
+        )
+        for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    selection = _swap_tuning_curve_comparison_selection_row(
+        key=key,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        tuning_curve_parameters_table=tuning_curve_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        parameters_table=parameters_table,
+        curve_snapshots=curve_snapshots,
+    )
+    if str(selection["swap_tuning_curve_comparison_id"]) != str(
+        key["swap_tuning_curve_comparison_id"]
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison selection UUID is stale."
+        )
+    parameters = _validate_swap_tuning_curve_comparison_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    _validate_frozen_parameters(
+        selection,
+        parameters,
+        field_name="swap_tuning_curve_comparison_parameters_sha256",
+    )
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.SWAP_TUNING_CURVE_COMPARISON_OUTPUT_RULE)
+    )
+    if output_rule_sha256 != OUTPUT_RULE_SHA256 or str(
+        selection.get("swap_tuning_curve_comparison_output_rule_sha256", "")
+    ) != output_rule_sha256:
+        raise ValueError(
+            "SwapTuningCurveComparison fixed output rule changed after "
+            "selection insertion. Create a new selection."
+        )
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": selection[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    animal_name, session_date = _session_identity(session_table, selection)
+    movement_results: dict[str, dict[str, Any]] = {}
+    movement_selections: dict[str, dict[str, Any]] = {}
+    movement_parameters: dict[str, dict[str, Any]] = {}
+    movement: dict[str, dict[str, Any]] = {}
+    epoch_rows: dict[str, dict[str, Any]] = {}
+    for epoch_role in _SWAP_TUNING_EPOCH_ROLES:
+        movement_key = {
+            "movement_firing_rate_id": selection[
+                f"{epoch_role}_movement_firing_rate_id"
+            ]
+        }
+        movement_results[epoch_role] = _fetch1_dict(
+            movement_firing_rate_table,
+            movement_key,
+        )
+        movement_selections[epoch_role] = _fetch1_dict(
+            movement_firing_rate_selection_table,
+            movement_key,
+        )
+        movement_parameters[epoch_role] = _validate_movement_parameter_row(
+            _fetch1_dict(
+                movement_parameters_table,
+                movement_selections[epoch_role],
+            )
+        )
+        _validate_frozen_parameters(
+            movement_selections[epoch_role],
+            movement_parameters[epoch_role],
+            field_name="movement_parameters_sha256",
+        )
+        movement[epoch_role] = _load_movement_result_artifacts(
+            result_row=movement_results[epoch_role],
+            parameters=movement_parameters[epoch_role],
+            expected_metadata={
+                "animal_name": animal_name,
+                "date": session_date,
+                "region": region_row["region_name"],
+                "epoch": selection[f"{epoch_role}_epoch"],
+            },
+        )
+        epoch_rows[epoch_role] = _fetch1_dict(
+            epoch_intervals_table,
+            {
+                "nwb_file_name": selection["nwb_file_name"],
+                "epoch": selection[f"{epoch_role}_epoch"],
+            },
+        )
+        start_time = float(epoch_rows[epoch_role]["start_time"])
+        stop_time = float(epoch_rows[epoch_role]["stop_time"])
+        if (
+            not math.isfinite(start_time)
+            or not math.isfinite(stop_time)
+            or stop_time <= start_time
+        ):
+            raise ValueError(
+                "EpochIntervals must contain finite start_time < stop_time."
+            )
+
+    reference_movement_parameters = movement_parameters["dark"]
+    if any(
+        parameters_row != reference_movement_parameters
+        for parameters_row in movement_parameters.values()
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison movement parameter values changed "
+            "after selection."
+        )
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "region_row": region_row,
+        "movement_results": movement_results,
+        "movement_selections": movement_selections,
+        "movement_parameters": reference_movement_parameters,
+        "movement": movement,
+        "epoch_rows": epoch_rows,
+        "curve_snapshots": curve_snapshots,
+        "tuning_curve_artifact_paths": {
+            epoch_role: {
+                trajectory_type: curve_snapshots[
+                    f"{epoch_role}:{trajectory_type}"
+                ]["artifact_path"]
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            }
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "movement_firing_rate_tables": {
+            epoch_role: movement[epoch_role]["table"]
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": str(region_row["region_name"]),
+        "light_test_time_support": (
+            float(epoch_rows["light_test"]["start_time"]),
+            float(epoch_rows["light_test"]["stop_time"]),
+        ),
+    }
+
+
+def _load_swap_tuning_curve_comparison_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load exact held-out NWB position, paths, and graph definitions."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    selection = context["selection"]
+    nwb_file_name = str(selection["nwb_file_name"])
+    light_test_epoch = str(selection["light_test_epoch"])
+    light_test_movement = context["movement_selections"]["light_test"]
+    position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": light_test_epoch,
+            "position_series_name": light_test_movement[
+                "position_series_name"
+            ],
+        },
+    )
+    if str(position_row.get("spatial_unit")) != "cm":
+        raise ValueError(
+            "SwapTuningCurveComparison held-out position must use centimeters."
+        )
+    trajectory_rows: dict[str, dict[str, Any]] = {}
+    graph_rows: dict[str, dict[str, Any]] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        source_selection = context["curve_snapshots"][
+            f"light_test:{trajectory_type}"
+        ]["selection"]
+        trajectory_rows[trajectory_type] = _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": light_test_epoch,
+                "trajectory_type": source_selection["trajectory_type"],
+            },
+        )
+        graph_rows[trajectory_type] = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": source_selection[
+                    "configuration_name"
+                ],
+            },
+        )
+        if str(graph_rows[trajectory_type].get("coordinate_unit")) != "cm":
+            raise ValueError(
+                "SwapTuningCurveComparison graphs must use centimeters."
+            )
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile,
+            position_row,
+            apply_analysis_offset=True,
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "position_row": position_row,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+    }
+
+
+def _load_swap_tuning_curve_comparison_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all regional units for held-out empirical scoring."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["selection"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["light_test_time_support"],
+    )
+    digest = unit_identity_sha256(loaded["unit_ids"])
+    expected_digests = {
+        str(context["selection"]["selected_units_sha256"]),
+        str(context["region_row"]["selected_units_sha256"]),
+        *(
+            str(row["selected_units_sha256"])
+            for row in context["movement_results"].values()
+        ),
+    }
+    if expected_digests != {digest}:
+        raise ValueError(
+            "SwapTuningCurveComparison regional units changed after selection."
+        )
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "SwapTuningCurveComparison regional unit count changed after "
+            "selection."
+        )
+    return loaded
+
+
+def _legacy_swap_tuning_curve_comparison_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Map legacy imported-sorting IDs to persistent regional identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy SwapTuningCurveComparison registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            "Regional spike metadata must contain one row per selected unit."
+        )
+    for group_unit_id, metadata in zip(
+        loaded_spikes["ts_group"].keys(),
+        metadata_rows,
+        strict=True,
+    ):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                "Every selected unit requires a unique sorting_unit_id for "
+                "legacy SwapTuningCurveComparison registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+            "stable_unit_id": (
+                f"{metadata['spikesorting_merge_id']}:{metadata['unit_id']}"
+            ),
+            "group_unit_id": str(group_unit_id),
+        }
+    return resolver
+
+
 def _legacy_swap_glm_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -8880,6 +9744,224 @@ def _validate_swap_glm_artifact_link(
             raise ValueError(
                 "SwapGLM result paths do not describe one canonical bundle: "
                 f"{field_name}."
+            )
+
+
+def _validate_swap_tuning_curve_comparison_upstream_link(
+    upstream: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> None:
+    """Require exact frozen upstream provenance for one empirical swap."""
+    expected = {
+        "selected_units_sha256": selection["selected_units_sha256"],
+        "source_tuning_curve_sha256_by_role_trajectory": selection[
+            "source_tuning_curve_sha256_by_role_trajectory"
+        ],
+        "source_tuning_parameters_sha256_by_role_trajectory": selection[
+            "source_tuning_parameters_sha256_by_role_trajectory"
+        ],
+        "source_tuning_curve_ids_by_role_trajectory": {
+            epoch_role: {
+                trajectory_type: str(
+                    selection[
+                        f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+                    ]
+                )
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            }
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "movement_firing_rate_table_sha256_by_role": selection[
+            "movement_firing_rate_table_sha256_by_role"
+        ],
+        "movement_firing_rate_ids_by_role": {
+            epoch_role: str(
+                selection[f"{epoch_role}_movement_firing_rate_id"]
+            )
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "movement_intervals_sha256_by_role": selection[
+            "movement_intervals_sha256_by_role"
+        ],
+        "position_offset_samples": int(selection["position_offset_samples"]),
+        "speed_threshold_cm_s": float(selection["speed_threshold_cm_s"]),
+    }
+    for field_name, expected_value in expected.items():
+        observed = upstream.get(field_name)
+        if isinstance(expected_value, Mapping):
+            matches = dict(observed or {}) == dict(expected_value)
+        elif isinstance(expected_value, float):
+            try:
+                matches = math.isclose(
+                    float(observed),
+                    expected_value,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = str(observed) == str(expected_value)
+        if not matches:
+            raise ValueError(
+                "SwapTuningCurveComparison upstream provenance changed after "
+                f"selection: {field_name}. Create a new selection."
+            )
+
+
+def _validate_swap_tuning_curve_comparison_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one empirical swap bundle to match immutable table rows."""
+    from v1ca1.spyglass.selection import provenance_sha256, unit_identity_sha256
+    from v1ca1.spyglass.swap_tuning import (
+        ARTIFACT_DIRNAME,
+        BUNDLE_SCHEMA_VERSION,
+        MANIFEST_FILENAME,
+        RESULT_FILENAME,
+        RESULT_SCHEMA_VERSION,
+        SELECTED_UNITS_FILENAME,
+        SUMMARY_FILENAME,
+        validate_swap_tuning_curve_comparison_result,
+    )
+
+    validated = validate_swap_tuning_curve_comparison_result(bundle)
+    expected_metadata = {
+        "swap_tuning_curve_comparison_id": selection_row[
+            "swap_tuning_curve_comparison_id"
+        ],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "dark_epoch": selection_row["dark_epoch"],
+        "light_train_epoch": selection_row["light_train_epoch"],
+        "light_test_epoch": selection_row["light_test_epoch"],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated["metadata"].get(field_name)) != str(expected_value):
+            raise ValueError(
+                "SwapTuningCurveComparison artifact does not match its "
+                f"selection: {field_name}."
+            )
+    parameters = _validate_swap_tuning_curve_comparison_parameter_row(
+        parameters_row
+    )
+    expected_parameters = {
+        "parameter_name": parameters[
+            "swap_tuning_curve_comparison_param_name"
+        ],
+        "parameter_sha256": selection_row[
+            "swap_tuning_curve_comparison_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "swap_tuning_curve_comparison_output_rule_sha256"
+        ],
+        **{
+            field_name: value
+            for field_name, value in parameters.items()
+            if field_name != "swap_tuning_curve_comparison_param_name"
+        },
+    }
+    if provenance_sha256(dict(validated["parameters"])) != provenance_sha256(
+        expected_parameters
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison artifact parameters disagree with "
+            "selection."
+        )
+    _validate_swap_tuning_curve_comparison_upstream_link(
+        validated["upstream_provenance"],
+        selection_row,
+    )
+    expected_scalars = {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_source_units": int(validated["n_source_units"]),
+        "n_units": int(validated["n_units"]),
+        "n_valid_units": int(validated["n_valid_units"]),
+        "analysis_status": str(validated["analysis_status"]),
+        "selected_units_sha256": str(validated["selected_units_sha256"]),
+        "artifact_origin": str(validated["artifact_origin"]),
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "SwapTuningCurveComparison result row disagrees with its "
+                f"artifact: {field_name}."
+            )
+    if result_row.get("legacy_artifact_provenance") != validated.get(
+        "legacy_artifact_provenance"
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison result-row legacy provenance differs "
+            "from its artifact."
+        )
+    if int(result_row["n_source_units"]) != int(region_row["n_units"]):
+        raise ValueError(
+            "SwapTuningCurveComparison source count disagrees with "
+            "RegionSortedSpikesGroup."
+        )
+    if str(result_row["selected_units_sha256"]) != str(
+        selection_row["selected_units_sha256"]
+    ) or str(result_row["selected_units_sha256"]) != str(
+        region_row["selected_units_sha256"]
+    ):
+        raise ValueError(
+            "SwapTuningCurveComparison source unit digest disagrees with "
+            "its selection."
+        )
+    selected_units = validated["selected_units"]
+    selected_digest = unit_identity_sha256(
+        selected_units.loc[:, ["spikesorting_merge_id", "unit_id"]].to_dict(
+            "records"
+        )
+    )
+    if selected_digest != str(result_row["selected_units_sha256"]):
+        raise ValueError(
+            "SwapTuningCurveComparison selected-unit identities disagree "
+            "with their digest."
+        )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    result_id = str(selection_row["swap_tuning_curve_comparison_id"])
+    light_pair = (
+        f"{selection_row['light_train_epoch']}_train_to_"
+        f"{selection_row['light_test_epoch']}_test"
+    )
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        light_pair,
+        f"dark_{selection_row['dark_epoch']}",
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "SwapTuningCurveComparison manifest path does not match its "
+            "canonical session/epoch-triplet/region/UUID layout."
+        )
+    expected_paths = {
+        "selected_units_path": manifest_path.parent / SELECTED_UNITS_FILENAME,
+        "summary_path": manifest_path.parent / SUMMARY_FILENAME,
+        "swap_tuning_curve_comparison_path": (
+            manifest_path.parent / RESULT_FILENAME
+        ),
+    }
+    for field_name, expected_path in expected_paths.items():
+        if Path(result_row[field_name]) != expected_path:
+            raise ValueError(
+                "SwapTuningCurveComparison result paths do not describe one "
+                f"canonical bundle: {field_name}."
             )
 
 
@@ -10484,6 +11566,433 @@ def _register_existing_swap_glm_row(
     }
 
 
+def _swap_tuning_curve_comparison_sources(
+    *,
+    context: Mapping[str, Any],
+    selection: Mapping[str, Any],
+    source_spyglass_git_commit: str | None = None,
+) -> dict[str, Any]:
+    """Return the shared informative source payload for one swap bundle."""
+    sources = {
+        "position_series_name": context["movement_selections"][
+            "light_test"
+        ]["position_series_name"],
+        "position_offset_samples": int(selection["position_offset_samples"]),
+        "speed_threshold_cm_s": float(selection["speed_threshold_cm_s"]),
+        "movement_firing_rate_ids_by_epoch": {
+            selection[f"{epoch_role}_epoch"]: str(
+                selection[f"{epoch_role}_movement_firing_rate_id"]
+            )
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "tuning_curve_ids_by_epoch_trajectory": {
+            selection[f"{epoch_role}_epoch"]: {
+                trajectory_type: str(
+                    selection[
+                        f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+                    ]
+                )
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            }
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        "source_conditions": {
+            selection[f"{epoch_role}_epoch"]: selection[
+                f"{epoch_role}_condition"
+            ]
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+    }
+    if source_spyglass_git_commit is not None:
+        sources["source_spyglass_git_commit"] = str(
+            source_spyglass_git_commit
+        )
+    return sources
+
+
+def _make_swap_tuning_curve_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one empirical held-out swap-tuning bundle."""
+    from v1ca1.spyglass.swap_tuning import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        compute_swap_tuning_curve_comparison,
+        get_swap_tuning_curve_comparison_artifact_paths,
+        write_swap_tuning_curve_comparison_artifact,
+    )
+
+    context = _load_swap_tuning_curve_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        tuning_curve_parameters_table=tuning_curve_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_swap_tuning_curve_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_swap_tuning_curve_comparison_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    light_test_movement = context["movement"]["light_test"]
+    result = compute_swap_tuning_curve_comparison(
+        swap_tuning_curve_comparison_id=selection[
+            "swap_tuning_curve_comparison_id"
+        ],
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        tuning_curve_artifact_paths=context[
+            "tuning_curve_artifact_paths"
+        ],
+        movement_firing_rate_tables_by_role=context[
+            "movement_firing_rate_tables"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        position=nwb_inputs["position"],
+        position_offset_samples=int(
+            nwb_inputs["position_row"]["analysis_start_offset_samples"]
+        ),
+        movement_interval=light_test_movement["movement_intervals"],
+        movement_analysis_status=light_test_movement["analysis_status"],
+        trajectory_intervals=nwb_inputs["trajectory_intervals"],
+        graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+        parameter_name=parameters[
+            "swap_tuning_curve_comparison_param_name"
+        ],
+        parameter_sha256=selection[
+            "swap_tuning_curve_comparison_parameters_sha256"
+        ],
+        output_rule_sha256=selection[
+            "swap_tuning_curve_comparison_output_rule_sha256"
+        ],
+        evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+        gaussian_smoothing_sigma_bins=parameters[
+            "gaussian_smoothing_sigma_bins"
+        ],
+        min_dark_firing_rate_hz=parameters[
+            "min_dark_firing_rate_hz"
+        ],
+        min_light_firing_rate_hz=parameters[
+            "min_light_firing_rate_hz"
+        ],
+        source_tuning_curve_ids_by_role_trajectory={
+            epoch_role: {
+                trajectory_type: selection[
+                    f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+                ]
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            }
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        source_tuning_parameters_sha256_by_role_trajectory=selection[
+            "source_tuning_parameters_sha256_by_role_trajectory"
+        ],
+        movement_firing_rate_ids_by_role={
+            epoch_role: selection[
+                f"{epoch_role}_movement_firing_rate_id"
+            ]
+            for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+        },
+        movement_firing_rate_table_sha256_by_role=selection[
+            "movement_firing_rate_table_sha256_by_role"
+        ],
+        movement_intervals_sha256_by_role=selection[
+            "movement_intervals_sha256_by_role"
+        ],
+        sources=_swap_tuning_curve_comparison_sources(
+            context=context,
+            selection=selection,
+        ),
+    )
+    _validate_swap_tuning_curve_comparison_upstream_link(
+        result["upstream_provenance"],
+        selection,
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_swap_tuning_curve_comparison_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        swap_tuning_curve_comparison_id=selection[
+            "swap_tuning_curve_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_swap_tuning_curve_comparison_artifact(
+        result,
+        artifact_dir,
+        overwrite=False,
+    )
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "summary_path": str(written["summary_path"]),
+        "swap_tuning_curve_comparison_path": str(written["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_source_units": int(result["n_source_units"]),
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": str(result["selected_units_sha256"]),
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_swap_tuning_curve_comparison_row(
+    *,
+    key: Mapping[str, Any],
+    source_result_path: Path,
+    source_summary_path: Path,
+    parameters_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    tuning_curve_table: Any,
+    tuning_curve_selection_table: Any,
+    tuning_curve_parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Rebuild and verify one legacy imported-sorting empirical swap."""
+    from v1ca1.spyglass.swap_tuning import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_swap_tuning_curve_comparison_artifact_paths,
+        register_existing_swap_tuning_curve_comparison_artifact,
+    )
+
+    context = _load_swap_tuning_curve_comparison_context(
+        key=key,
+        parameters_table=parameters_table,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        position_table=position_table,
+        tuning_curve_table=tuning_curve_table,
+        tuning_curve_selection_table=tuning_curve_selection_table,
+        tuning_curve_parameters_table=tuning_curve_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_swap_tuning_curve_comparison_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    unit_identity_resolver = (
+        _legacy_swap_tuning_curve_comparison_unit_identity_resolver(
+            loaded_spikes
+        )
+    )
+    nwb_inputs = _load_swap_tuning_curve_comparison_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    _validate_legacy_tuning_curve_inputs(
+        position_row=nwb_inputs["position_row"],
+        movement_parameters=context["movement_parameters"],
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_swap_tuning_curve_comparison_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        swap_tuning_curve_comparison_id=selection[
+            "swap_tuning_curve_comparison_id"
+        ],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    light_test_movement = context["movement"]["light_test"]
+    try:
+        registered = register_existing_swap_tuning_curve_comparison_artifact(
+            source_result_path=Path(source_result_path),
+            source_summary_path=Path(source_summary_path),
+            destination_path=artifact_dir,
+            swap_tuning_curve_comparison_id=selection[
+                "swap_tuning_curve_comparison_id"
+            ],
+            animal_name=context["animal_name"],
+            date=context["date"],
+            region=context["region"],
+            dark_epoch=selection["dark_epoch"],
+            light_train_epoch=selection["light_train_epoch"],
+            light_test_epoch=selection["light_test_epoch"],
+            tuning_curve_artifact_paths=context[
+                "tuning_curve_artifact_paths"
+            ],
+            movement_firing_rate_tables_by_role=context[
+                "movement_firing_rate_tables"
+            ],
+            spikes=loaded_spikes["ts_group"],
+            stable_unit_ids=loaded_spikes["unit_ids"],
+            position=nwb_inputs["position"],
+            position_offset_samples=int(
+                nwb_inputs["position_row"][
+                    "analysis_start_offset_samples"
+                ]
+            ),
+            movement_interval=light_test_movement["movement_intervals"],
+            movement_analysis_status=light_test_movement[
+                "analysis_status"
+            ],
+            trajectory_intervals=nwb_inputs["trajectory_intervals"],
+            graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+            parameter_name=parameters[
+                "swap_tuning_curve_comparison_param_name"
+            ],
+            parameter_sha256=selection[
+                "swap_tuning_curve_comparison_parameters_sha256"
+            ],
+            output_rule_sha256=selection[
+                "swap_tuning_curve_comparison_output_rule_sha256"
+            ],
+            evaluation_bin_size_s=parameters["evaluation_bin_size_s"],
+            gaussian_smoothing_sigma_bins=parameters[
+                "gaussian_smoothing_sigma_bins"
+            ],
+            min_dark_firing_rate_hz=parameters[
+                "min_dark_firing_rate_hz"
+            ],
+            min_light_firing_rate_hz=parameters[
+                "min_light_firing_rate_hz"
+            ],
+            source_tuning_curve_ids_by_role_trajectory={
+                epoch_role: {
+                    trajectory_type: selection[
+                        f"{epoch_role}_{trajectory_type}_tuning_curve_id"
+                    ]
+                    for trajectory_type in _DPP_TRAJECTORY_TYPES
+                }
+                for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+            },
+            source_tuning_parameters_sha256_by_role_trajectory=selection[
+                "source_tuning_parameters_sha256_by_role_trajectory"
+            ],
+            movement_firing_rate_ids_by_role={
+                epoch_role: selection[
+                    f"{epoch_role}_movement_firing_rate_id"
+                ]
+                for epoch_role in _SWAP_TUNING_EPOCH_ROLES
+            },
+            movement_firing_rate_table_sha256_by_role=selection[
+                "movement_firing_rate_table_sha256_by_role"
+            ],
+            movement_intervals_sha256_by_role=selection[
+                "movement_intervals_sha256_by_role"
+            ],
+            sources=_swap_tuning_curve_comparison_sources(
+                context=context,
+                selection=selection,
+                source_spyglass_git_commit=(
+                    source_spyglass_git_commit
+                ),
+            ),
+            unit_identity_resolver=unit_identity_resolver,
+            source_sorting_type="ImportedSpikeSorting",
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            source_spyglass_git_commit=source_spyglass_git_commit,
+            overwrite=False,
+        )
+        _validate_swap_tuning_curve_comparison_upstream_link(
+            registered["upstream_provenance"],
+            selection,
+        )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    provenance = dict(registered["legacy_artifact_provenance"] or {})
+    return {
+        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
+        "selected_units_path": str(paths["selected_units_path"]),
+        "summary_path": str(paths["summary_path"]),
+        "swap_tuning_curve_comparison_path": str(paths["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_source_units": int(registered["n_source_units"]),
+        "n_units": int(registered["n_units"]),
+        "n_valid_units": int(registered["n_valid_units"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": str(
+            registered["selected_units_sha256"]
+        ),
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
 def _new_schema(schema_factory: Callable[..., Any], context: dict[str, Any]) -> Any:
     """Construct one schema while supporting minimal injectable factories."""
     try:
@@ -10631,6 +12140,14 @@ def _construct_tables(
         "swap_glm_register_existing",
         _register_existing_swap_glm_row,
     )
+    swap_tuning_curve_comparison_compute_hook = runtime_hooks.get(
+        "swap_tuning_curve_comparison_compute",
+        _make_swap_tuning_curve_comparison_row,
+    )
+    swap_tuning_curve_comparison_register_hook = runtime_hooks.get(
+        "swap_tuning_curve_comparison_register_existing",
+        _register_existing_swap_tuning_curve_comparison_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -10656,6 +12173,8 @@ def _construct_tables(
             dark_light_glm_register_hook,
             swap_glm_compute_hook,
             swap_glm_register_hook,
+            swap_tuning_curve_comparison_compute_hook,
+            swap_tuning_curve_comparison_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -13535,6 +15054,300 @@ def _construct_tables(
     SwapGLM = main_schema(SwapGLM)
     main_context["SwapGLM"] = SwapGLM
 
+    class SwapTuningCurveComparisonParameters(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION
+        )
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one empirical swap-tuning parameter row."""
+            validated = (
+                _validate_swap_tuning_curve_comparison_parameter_row(row)
+            )
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the manuscript V1 and CA1 presets."""
+            rows = [
+                _validate_swap_tuning_curve_comparison_parameter_row(
+                    parameters
+                )
+                for parameters in (
+                    table_specs.SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS
+                )
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    SwapTuningCurveComparisonParameters = main_schema(
+        SwapTuningCurveComparisonParameters
+    )
+    main_context["SwapTuningCurveComparisonParameters"] = (
+        SwapTuningCurveComparisonParameters
+    )
+
+    class SwapTuningCurveComparisonSelection(
+        spyglass_mixin,
+        dj_module.Manual,
+    ):
+        definition = (
+            table_specs.SWAP_TUNING_CURVE_COMPARISON_SELECTION_DEFINITION
+        )
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one empirical swap."""
+            row = _swap_tuning_curve_comparison_selection_row(
+                key=key,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                movement_parameters_table=MovementParameters,
+                position_table=Position,
+                tuning_curve_table=PathSpecificPlaceTuningCurve,
+                tuning_curve_selection_table=(
+                    PathSpecificPlaceTuningCurveSelection
+                ),
+                tuning_curve_parameters_table=TuningCurveParameters,
+                epoch_intervals_table=EpochIntervals,
+                parameters_table=SwapTuningCurveComparisonParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    SwapTuningCurveComparisonSelection = main_schema(
+        SwapTuningCurveComparisonSelection
+    )
+    main_context["SwapTuningCurveComparisonSelection"] = (
+        SwapTuningCurveComparisonSelection
+    )
+
+    class SwapTuningCurveComparison(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.SWAP_TUNING_CURVE_COMPARISON_DEFINITION
+        _compute_hook = staticmethod(
+            swap_tuning_curve_comparison_compute_hook
+        )
+        _register_existing_hook = staticmethod(
+            swap_tuning_curve_comparison_register_hook
+        )
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one empirical swap-tuning bundle."""
+            selection = _fetch1_dict(
+                SwapTuningCurveComparisonSelection,
+                key,
+            )
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=SwapTuningCurveComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    tuning_curve_parameters_table=TuningCurveParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "swap_tuning_curve_comparison_id": selection[
+                            "swap_tuning_curve_comparison_id"
+                        ],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": (
+                            _spyglass_git_commit()
+                        ),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_swap_tuning_curve_comparison_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical empirical swap bundle."""
+            from v1ca1.spyglass.swap_tuning import (
+                load_swap_tuning_curve_comparison_artifact,
+            )
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                SwapTuningCurveComparisonSelection,
+                {
+                    "swap_tuning_curve_comparison_id": row[
+                        "swap_tuning_curve_comparison_id"
+                    ]
+                },
+            )
+            parameters = _fetch1_dict(
+                SwapTuningCurveComparisonParameters,
+                selection,
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_swap_tuning_curve_comparison_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_swap_tuning_curve_comparison_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_result_path: Path | str,
+            source_summary_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Rebuild, verify, copy, and insert one exact legacy bundle."""
+            if overwrite:
+                raise ValueError(
+                    "Registered SwapTuningCurveComparison results are "
+                    "immutable; create a new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(
+                SwapTuningCurveComparisonSelection,
+                key,
+            )
+            result_key = {
+                "swap_tuning_curve_comparison_id": selection[
+                    "swap_tuning_curve_comparison_id"
+                ]
+            }
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "SwapTuningCurveComparison already contains this "
+                    "immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_result_path=Path(source_result_path),
+                    source_summary_path=Path(source_summary_path),
+                    parameters_table=SwapTuningCurveComparisonParameters,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    tuning_curve_table=PathSpecificPlaceTuningCurve,
+                    tuning_curve_selection_table=(
+                        PathSpecificPlaceTuningCurveSelection
+                    ),
+                    tuning_curve_parameters_table=TuningCurveParameters,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "swap_tuning_curve_comparison_id": selection[
+                    "swap_tuning_curve_comparison_id"
+                ],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    SwapTuningCurveComparison = main_schema(SwapTuningCurveComparison)
+    main_context["SwapTuningCurveComparison"] = SwapTuningCurveComparison
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -13628,6 +15441,13 @@ def _construct_tables(
         "swap_glm_parameters": SwapGLMParameters,
         "swap_glm_selection": SwapGLMSelection,
         "swap_glm": SwapGLM,
+        "swap_tuning_curve_comparison_parameters": (
+            SwapTuningCurveComparisonParameters
+        ),
+        "swap_tuning_curve_comparison_selection": (
+            SwapTuningCurveComparisonSelection
+        ),
+        "swap_tuning_curve_comparison": SwapTuningCurveComparison,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

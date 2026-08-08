@@ -26,7 +26,7 @@ register artifacts, or write to NWB.
 - `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
   `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
-  `dark_light_glm.py`, and `swap_glm.py` provide
+  `dark_light_glm.py`, `swap_glm.py`, and `swap_tuning.py` provide
   database-free computation and atomic
   artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
@@ -251,9 +251,9 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`—there is no `Computed` suffix. Empty but valid
-selections are recorded through explicit terminal statuses rather than being
-silently omitted.
+`SwapGLM`, and `SwapTuningCurveComparison`—there is no `Computed` suffix.
+Empty but valid selections are recorded through explicit terminal statuses
+rather than being silently omitted.
 Its explicit selection and parameter rows do not populate it automatically.
 
 Cross-path path-progression decoding uses:
@@ -427,6 +427,46 @@ inputs without refitting. A four-source-model schema-4 artifact is compared on
 all values it contains; the canonical `dark` score is then evaluated from the
 verified task-segment-bump source rather than copied from a missing value.
 
+The empirical swapped-light tuning comparison uses:
+
+```text
+RegionSortedSpikesGroup
+    + dark/train-light/test-light MovementFiringRate rows
+    + twelve all-trial, unsmoothed 4-cm PathSpecificPlaceTuningCurve rows
+    + three EpochIntervals + SwapTuningCurveComparisonParameters
+    -> SwapTuningCurveComparisonSelection
+    -> SwapTuningCurveComparison
+    -> manifest.parquet + selected_units.parquet
+       + summary.parquet + swap_tuning.nc
+```
+
+One result row covers one dark-training epoch, one light-training epoch, one
+distinct light-test epoch, one region, and one parameter preset. It does not
+create DataJoint rows per unit, trajectory, or model. The twelve source curves
+are the four paths in each epoch; their unsmoothed, all-trial 4-cm values are
+frozen by checksum. The analysis applies the legacy NaN interpolation and
+Gaussian smoothing itself, builds the six fixed visual, dark, pointwise and
+segment multiplicative-ratio, and pointwise and segment additive-delta models,
+and scores only the configured swapped segment of each held-out trajectory.
+Outbound paths use the opposite arm's final segment; inbound paths use the
+opposite arm's first segment. Training curves use the full movement-supported
+trajectory.
+
+The V1 and CA1 manuscript presets both use 50-ms evaluation bins and one-bin
+Gaussian smoothing. V1 requires epoch-wide movement firing rates strictly
+greater than 0.5 Hz in both training epochs; CA1 requires rates strictly
+greater than 0 Hz. The held-out epoch is not a firing-rate filter. Every source
+unit remains in `selected_units.parquet`, while the NetCDF and long-form
+summary contain the eligible population; the summary has one row per eligible
+persistent unit, trajectory, and empirical model. The parameter columns are
+`evaluation_bin_size_s`, `gaussian_smoothing_sigma_bins`,
+`min_dark_firing_rate_hz`, and `min_light_firing_rate_hz`. The standalone
+`task_progression.swap_tuning_curve_comparison` default remains 20 ms; the
+manuscript presets deliberately select 50 ms. Result statuses are `valid`,
+`partial_valid`, `no_units`, `no_eligible_units`, `upstream_terminal`,
+`no_valid_position`, `no_movement`, `no_trajectory_samples`, and
+`no_valid_units`.
+
 ## Artifacts and provenance
 
 New results are written under the configured `filepath@analysis` store,
@@ -488,6 +528,12 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     manifest.parquet
     selected_units.parquet
     swap_glm.nc
+
+<root>/<animal>/<date>/swap_tuning_curve_comparison/<light-train>_train_to_<light-test>_test/dark_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    summary.parquet
+    swap_tuning.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -504,7 +550,7 @@ written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM` additionally provide
+`SwapGLM`, and `SwapTuningCurveComparison` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
@@ -541,6 +587,12 @@ historical preprocessing choices, then performs an exact NWB re-score without
 refitting. Every available legacy scientific coordinate and variable must
 match before the recomputed canonical NetCDF is written with persistent
 group-unit identities.
+Swap-tuning registration is limited to the available V1 legacy artifacts and
+matching imported sorting. It requires the historical 10-sample position
+offset and 4.0 cm/s movement threshold, reconstructs and re-scores the selected
+NWB inputs, and compares every scientific coordinate and variable before
+writing the canonical bundle. The legacy file's temporary integer unit
+coordinate and summary alone are not treated as proof of equivalence.
 Legacy registration is restricted to matching `ImportedSpikeSorting`
 selections. Registration requires complete canonical schemas; ripple
 peri-event data must also contain one complete, common time grid for every

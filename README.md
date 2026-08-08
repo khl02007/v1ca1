@@ -278,6 +278,13 @@ DarkLightGLM + RegionSortedSpikesGroup
     + four shared WTrackGraph rows + SwapGLMParameters
     -> SwapGLMSelection
     -> SwapGLM
+
+RegionSortedSpikesGroup
+    + dark/train-light/test-light MovementFiringRate rows
+    + twelve all-trial, unsmoothed 4-cm PathSpecificPlaceTuningCurve rows
+    + three EpochIntervals + SwapTuningCurveComparisonParameters
+    -> SwapTuningCurveComparisonSelection
+    -> SwapTuningCurveComparison
 ```
 
 `SwapGLM` reuses one exact selected `DarkLightGLM` fit and scores it without
@@ -286,6 +293,18 @@ model-file checksums, the same regional sorting and movement definition, all
 four held-out lap sources, and the shared centimeter graphs. Its unit audit
 keeps the upstream selected order and marks a score valid only when the
 upstream fit and all expected model-by-trajectory scores are valid.
+
+`SwapTuningCurveComparison` is the empirical counterpart to `SwapGLM`. One
+result row covers one dark-training run, one light-training run, one distinct
+light-test run, one region, and one parameter preset; unit, trajectory, and
+model results remain inside its artifacts. It builds six fixed empirical
+predictions from full-trajectory training curves and scores only the configured
+swapped segment of each held-out trajectory. The V1 and CA1 manuscript presets
+both use 50-ms evaluation bins and one-bin Gaussian smoothing. Their strict
+dark/light training-rate thresholds are respectively `> 0.5`/`> 0.5` Hz and
+`> 0.0`/`> 0.0` Hz; held-out firing rate is not a filter.
+The standalone `task_progression.swap_tuning_curve_comparison` default remains
+20 ms, so the manuscript-compatible 50-ms choice is explicit in these presets.
 
 `DPPEncodingComparison`'s manuscript preset is five lap-wise folds, 50-ms
 evaluation bins, 4-cm spatial bins, one-bin Gaussian smoothing, random seed 47,
@@ -301,8 +320,8 @@ The computed tables are named `RippleModulation`, `MovementFiringRate`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, without a `Computed` suffix. Each explicit
-selection freezes its upstream membership, filters, and parameter values. That
+`SwapGLM`, and `SwapTuningCurveComparison`, without a `Computed` suffix. Each
+explicit selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
 to those Manual parameter values and requires a new selection. Results use
 session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
@@ -352,6 +371,11 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
     manifest.parquet
     selected_units.parquet
     swap_glm.nc
+<animal>/<date>/swap_tuning_curve_comparison/<light-train>_train_to_<light-test>_test/dark_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    summary.parquet
+    swap_tuning.nc
 ```
 
 Any explicit `artifact_root` must remain within the stage configured for the
@@ -429,7 +453,7 @@ sorting group. Calling
 `PathSpecificPlaceTuningSimilarity`, `DPPTuningCurve`,
 `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, or
-`SwapGLM` validates a
+`SwapGLM`, or `SwapTuningCurveComparison` validates a
 compatible legacy artifact, copies
 the selected content into the canonical output layout, and inserts the result
 without rerunning the analysis. Legacy tuning-curve
@@ -454,6 +478,11 @@ legacy schema, verifies the historical position offset and movement-speed
 threshold, and re-scores the selected NWB inputs without refitting. Every
 available scientific value must match before the recomputed canonical result
 is written with persistent group-unit IDs.
+`SwapTuningCurveComparison.register_existing()` is limited to the available
+V1 legacy artifacts and matching imported sorting. It requires the historical
+10-sample position offset and 4.0 cm/s movement threshold, reconstructs and
+re-scores the selected NWB inputs, and compares the complete scientific
+content rather than trusting the legacy file's coordinates or summary alone.
 It does not register legacy cross-epoch joins or cross-trajectory-transfer
 outputs.
 `MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle
