@@ -104,7 +104,6 @@ RIPPLE_EVENT_RELATIVE_PATH = Path("ripple") / "ripple_times.parquet"
 RIPPLE_LFP_RELATIVE_DIR = Path("ripple") / "ripple_channels_lfp"
 RIPPLE_MODULATION_RELATIVE_DIR = Path("ripple") / "ripple_modulation"
 RIPPLE_GLM_RELATIVE_DIR = Path("ripple_glm")
-RIPPLE_DECODING_COMPARISON_RELATIVE_DIR = Path("ripple_decoding_comparison")
 TUNING_ANALYSIS_RELATIVE_DIR = Path("task_progression") / "tuning_analysis"
 COMPUTE_TUNING_CURVES_RELATIVE_DIR = (
     Path("task_progression") / "compute_tuning_curves"
@@ -158,19 +157,6 @@ DEFAULT_PANEL_D_REGION = "v1"
 DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC = "absolute_overlap"
 DEFAULT_PANEL_D_TUNING_COMPARISON_LABEL = "pooled_same_turn"
 NEURON_SCALE_BAR_COUNT = 100
-PANEL_E_CATEGORICAL_METRICS = (
-    ("place", "turn_group"),
-    ("place", "arm_identity"),
-)
-PANEL_E_EPOCH_ORDER = ("light", "dark")
-PANEL_E_METRIC_LABELS = {
-    ("place", "turn_group"): "Turn group",
-    ("place", "arm_identity"): "Arm",
-}
-PANEL_E_CHANCE_LEVELS = {
-    "turn_group": 0.5,
-    "arm_identity": 1.0 / 3.0,
-}
 PANEL_E_GLM_TARGET_WINDOW_OFFSETS_S = (-0.4, -0.2, 0.0, 0.2)
 PANEL_E_GLM_TARGET_WINDOW_S = DEFAULT_RIPPLE_WINDOW_S
 PANEL_E_GLM_SOURCE_WINDOW_OFFSET_S = 0.0
@@ -511,24 +497,6 @@ def get_place_tuning_curve_path(
         get_dataset_analysis_path(data_root, animal_name, date)
         / COMPUTE_TUNING_CURVES_RELATIVE_DIR
         / f"{region}_{epoch}_place_{trajectory}_tuning_curves.nc"
-    )
-
-
-def get_ripple_decoding_comparison_summary_path(
-    data_root: Path,
-    *,
-    animal_name: str,
-    date: str,
-    representation: str,
-    train_epoch: str,
-    decode_epoch: str,
-) -> Path:
-    """Return the ripple CA1-V1 Bayesian decoding comparison summary path."""
-    filename = f"{representation}_train-{train_epoch}_decode-{decode_epoch}_epoch_summary.parquet"
-    return (
-        get_dataset_analysis_path(data_root, animal_name, date)
-        / RIPPLE_DECODING_COMPARISON_RELATIVE_DIR
-        / filename
     )
 
 
@@ -3217,153 +3185,6 @@ def load_glm_dark_activity_devexp_tables(
     }
 
 
-def load_ripple_decoding_comparison_panel_tables(
-    data_root: Path,
-    datasets: Sequence[DatasetId],
-    *,
-    light_epoch: str | None = None,
-    dark_epoch: str | None = None,
-    categorical_metrics: Sequence[tuple[str, str]] = PANEL_E_CATEGORICAL_METRICS,
-) -> dict[str, Any]:
-    """Load CA1-V1 Bayesian ripple decoding categorical agreement summaries."""
-    import pandas as pd
-
-    summary_rows: list[dict[str, Any]] = []
-    missing_artifacts: list[dict[str, str]] = []
-    metrics = tuple((str(representation), str(label_scheme)) for representation, label_scheme in categorical_metrics)
-    base_required_columns = {
-        "representation",
-        "train_epoch",
-        "decode_epoch",
-        "n_ripples",
-        "n_ripple_bins",
-        "n_effective_shuffles",
-    }
-
-    for dataset_id in datasets:
-        animal_name, date, dataset_dark_epoch = normalize_dataset_id(dataset_id)
-        epoch_ids = make_figure_3_epoch_ids(
-            animal_name=animal_name,
-            date=date,
-            light_epoch=light_epoch,
-            dark_epoch=dataset_dark_epoch if dark_epoch is None else dark_epoch,
-        )
-        for epoch_type in PANEL_E_EPOCH_ORDER:
-            _epoch_animal, _epoch_date, epoch = normalize_dataset_id(epoch_ids[epoch_type])
-            for representation, label_scheme in metrics:
-                summary_path = get_ripple_decoding_comparison_summary_path(
-                    data_root,
-                    animal_name=animal_name,
-                    date=date,
-                    representation=representation,
-                    train_epoch=epoch,
-                    decode_epoch=epoch,
-                )
-                if not summary_path.exists():
-                    missing_artifacts.append(
-                        {
-                            "artifact": "ripple_decoding_comparison",
-                            "animal_name": animal_name,
-                            "date": date,
-                            "epoch": epoch,
-                            "representation": str(representation),
-                            "label_scheme": str(label_scheme),
-                            "path": str(summary_path),
-                        }
-                    )
-                    continue
-
-                table = pd.read_parquet(summary_path)
-                metric_columns = {
-                    f"{label_scheme}_scheme_applicable",
-                    f"{label_scheme}_scheme_reason",
-                    f"{label_scheme}_n_valid_ripples",
-                    f"{label_scheme}_match_rate",
-                    f"{label_scheme}_match_rate_shuffle_mean",
-                    f"{label_scheme}_match_rate_shuffle_sd",
-                    f"{label_scheme}_match_rate_p_value",
-                }
-                required_columns = base_required_columns | metric_columns
-                missing_columns = sorted(required_columns.difference(table.columns))
-                if missing_columns:
-                    raise ValueError(
-                        f"Ripple decoding comparison summary {summary_path} is missing "
-                        f"columns {missing_columns!r}."
-                    )
-                table = table[
-                    (table["representation"].astype(str) == representation)
-                    & (table["train_epoch"].astype(str) == epoch)
-                    & (table["decode_epoch"].astype(str) == epoch)
-                ].copy()
-                if table.empty:
-                    raise ValueError(
-                        "Ripple decoding comparison summary did not contain the requested "
-                        f"row: {summary_path}"
-                    )
-                row = table.iloc[0]
-                if not bool(row[f"{label_scheme}_scheme_applicable"]):
-                    missing_artifacts.append(
-                        {
-                            "artifact": "ripple_decoding_comparison_scheme",
-                            "animal_name": animal_name,
-                            "date": date,
-                            "epoch": epoch,
-                            "representation": str(representation),
-                            "label_scheme": str(label_scheme),
-                            "reason": str(row[f"{label_scheme}_scheme_reason"]),
-                            "path": str(summary_path),
-                        }
-                    )
-                    continue
-
-                chance_level = PANEL_E_CHANCE_LEVELS.get(str(label_scheme), np.nan)
-                summary_rows.append(
-                    {
-                        "animal_name": animal_name,
-                        "date": date,
-                        "representation": representation,
-                        "train_epoch": epoch,
-                        "decode_epoch": epoch,
-                        "epoch_type": epoch_type,
-                        "epoch_label": HEATMAP_EPOCH_LABELS[epoch_type],
-                        "label_scheme": label_scheme,
-                        "metric_label": PANEL_E_METRIC_LABELS.get(
-                            (representation, label_scheme),
-                            str(label_scheme).replace("_", " ").title(),
-                        ),
-                        "n_ripples": int(row["n_ripples"]),
-                        "n_ripple_bins": int(row["n_ripple_bins"]),
-                        "n_effective_shuffles": int(row["n_effective_shuffles"]),
-                        "categorical_n_valid_ripples": int(
-                            row[f"{label_scheme}_n_valid_ripples"]
-                        ),
-                        "categorical_match_rate": float(row[f"{label_scheme}_match_rate"]),
-                        "categorical_match_rate_shuffle_mean": float(
-                            row[f"{label_scheme}_match_rate_shuffle_mean"]
-                        ),
-                        "categorical_match_rate_shuffle_sd": float(
-                            row[f"{label_scheme}_match_rate_shuffle_sd"]
-                        ),
-                        "categorical_match_rate_p_value": float(
-                            row[f"{label_scheme}_match_rate_p_value"]
-                        ),
-                        "chance_level": float(chance_level),
-                        "source_path": str(summary_path),
-                    }
-                )
-
-    summary_table = (
-        pd.DataFrame(summary_rows)
-        if summary_rows
-        else pd.DataFrame()
-    )
-    return {
-        "summary_table": summary_table,
-        "missing_artifacts": missing_artifacts,
-        "categorical_metrics": metrics,
-    }
-
-
 def _format_panel_e_target_window_label(
     target_window_offset_s: float,
     target_window_s: float,
@@ -5234,137 +5055,6 @@ def compute_significance_distribution_comparison(
         "median_difference": observed_difference,
         "p_value": (exceed_count + 1.0) / (float(n_permutations) + 1.0),
     }
-
-
-def plot_ripple_decoding_comparison_panel(
-    ax: "Axes",
-    payload: Mapping[str, Any],
-) -> None:
-    """Plot CA1-V1 Bayesian categorical ripple decoding agreement."""
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.axis("off")
-
-    table = payload.get("summary_table")
-    if table is None or len(table) == 0:
-        ax.text(
-            0.5,
-            0.5,
-            "No decoding\ncomparison data",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=ax.transAxes,
-        )
-        return
-
-    categorical_metrics = tuple(
-        payload.get("categorical_metrics", PANEL_E_CATEGORICAL_METRICS)
-    )
-    axis_height = 0.34
-    axis_gap = 0.09
-    top = 0.84
-    rng = np.random.default_rng(19)
-    x_by_epoch = {"light": 1.0, "dark": 2.0}
-    for metric_index, (representation, label_scheme) in enumerate(categorical_metrics):
-        bottom = top - axis_height - metric_index * (axis_height + axis_gap)
-        metric_ax = ax.inset_axes([0.18, bottom, 0.76, axis_height])
-        metric_rows = table[
-            (table["representation"].astype(str) == str(representation))
-            & (table["label_scheme"].astype(str) == str(label_scheme))
-        ].copy()
-        if not metric_rows.empty:
-            metric_rows["match_rate_over_shuffle"] = (
-                metric_rows["categorical_match_rate"].astype(float)
-                - metric_rows["categorical_match_rate_shuffle_mean"].astype(float)
-            )
-
-        metric_ax.axhline(
-            0.0,
-            color="0.35",
-            linestyle="--",
-            linewidth=0.65,
-            zorder=0,
-        )
-        metric_ax.text(
-            2.43,
-            0.002,
-            "shuffle",
-            ha="right",
-            va="bottom",
-            fontsize=6,
-            color="0.35",
-        )
-
-        for (_animal_name, _date), session_rows in metric_rows.groupby(["animal_name", "date"]):
-            delta_by_epoch: dict[str, float] = {}
-            for epoch_type in PANEL_E_EPOCH_ORDER:
-                epoch_rows = session_rows[session_rows["epoch_type"].astype(str) == epoch_type]
-                if epoch_rows.empty:
-                    continue
-                value = float(epoch_rows["match_rate_over_shuffle"].iloc[0])
-                if np.isfinite(value):
-                    delta_by_epoch[epoch_type] = value
-            if all(epoch_type in delta_by_epoch for epoch_type in PANEL_E_EPOCH_ORDER):
-                metric_ax.plot(
-                    [x_by_epoch[epoch_type] for epoch_type in PANEL_E_EPOCH_ORDER],
-                    [delta_by_epoch[epoch_type] for epoch_type in PANEL_E_EPOCH_ORDER],
-                    color="0.80",
-                    linewidth=0.55,
-                    zorder=1,
-                )
-
-        for epoch_type in PANEL_E_EPOCH_ORDER:
-            epoch_rows = metric_rows[metric_rows["epoch_type"].astype(str) == epoch_type]
-            delta = np.asarray(epoch_rows["match_rate_over_shuffle"], dtype=float)
-            valid_delta = np.isfinite(delta)
-            if not np.any(valid_delta):
-                continue
-
-            x_position = x_by_epoch[epoch_type]
-            jitter = rng.uniform(-0.055, 0.055, size=int(np.sum(valid_delta)))
-            color = GLM_EPOCH_COLORS.get(epoch_type, MODEL_COLOR)
-            metric_ax.scatter(
-                np.full(int(np.sum(valid_delta)), x_position) + jitter,
-                delta[valid_delta],
-                s=11,
-                color=color,
-                alpha=0.78,
-                edgecolors="white",
-                linewidths=0.25,
-                zorder=4,
-            )
-        delta_values = (
-            np.asarray(metric_rows.get("match_rate_over_shuffle", []), dtype=float)
-            if not metric_rows.empty
-            else np.array([], dtype=float)
-        )
-        finite_delta = np.abs(delta_values[np.isfinite(delta_values)])
-        y_extent = 0.02
-        if finite_delta.size:
-            y_extent = max(y_extent, float(np.nanmax(finite_delta)) * 1.35)
-        y_extent = float(np.ceil(y_extent / 0.01) * 0.01)
-        metric_ax.set_xlim(0.55, 2.45)
-        metric_ax.set_ylim(-y_extent, y_extent)
-        metric_ax.set_title(
-            PANEL_E_METRIC_LABELS.get(
-                (str(representation), str(label_scheme)),
-                str(label_scheme).replace("_", " ").title(),
-            ),
-            fontsize=6.0,
-            pad=1.2,
-        )
-        metric_ax.set_xticks([1.0, 2.0])
-        if metric_index == len(categorical_metrics) - 1:
-            metric_ax.set_xticklabels(["Light", "Dark"], fontsize=6)
-            metric_ax.set_xlabel("Decode epoch", fontsize=6, labelpad=0.5)
-        else:
-            metric_ax.set_xticklabels([])
-        metric_ax.set_ylabel("Above\nshuffle", fontsize=6, labelpad=1.2)
-        metric_ax.spines["top"].set_visible(False)
-        metric_ax.spines["right"].set_visible(False)
-        metric_ax.tick_params(axis="x", length=0, pad=1)
-        metric_ax.tick_params(axis="y", labelsize=6, length=1.5, pad=1)
 
 
 def plot_glm_offset_panel(

@@ -33,9 +33,6 @@ register artifacts, or write to NWB.
   artifact writing.
 - `cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
   cross-correlation computation and strict four-artifact legacy registration.
-- `ripple_decoding_comparison.py` independently decodes CA1 and V1 activity
-  during exact ripple intervals, compares categorical decoded states, and
-  strictly verifies complete five-file legacy result sets.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
@@ -92,6 +89,118 @@ same ID, while changing membership, filters, or parameter values produces a
 new one. Computation revalidates both snapshots before loading data, so editing
 a Manual parameter row after selection is rejected rather than silently
 changing an existing UUID's meaning.
+
+## Dependency overview
+
+Arrows point from an upstream table to a downstream table. To keep the maps
+readable, an analysis family is collapsed from
+`sources + XParameters -> XSelection -> X` to its result-table name. The
+per-analysis flows below describe the full scientific inputs, parameter rows,
+and artifact outputs. `table_specs.py` is authoritative for the exact direct
+foreign-key projections.
+
+### Catalog and shared inputs
+
+```mermaid
+flowchart LR
+    Session["Spyglass Session"] --> EpochIntervals
+    Session --> WTrackGraph
+    Session --> SpikeSortingFigurl
+    EpochIntervals --> Position
+    EpochIntervals --> TrajectoryIntervals
+    EpochIntervals --> Ripples
+    SortedSpikesGroup["Spyglass SortedSpikesGroup"] --> RegionSortedSpikesGroup
+    Position --> MovementFiringRate
+    MovementParameters --> MovementFiringRate
+    SortedSpikesGroup --> MovementFiringRate
+    Nwbfile["Spyglass Nwbfile"] --> AnalysisNwbfile
+```
+
+`WTrackGraph` and `SpikeSortingFigurl` are session-level catalog tables;
+`Position`, `TrajectoryIntervals`, and `Ripples` are epoch-level children.
+`MovementFiringRate` directly selects standard `SortedSpikesGroup`, whereas
+analyses that need an explicit regional view select
+`RegionSortedSpikesGroup`. `AnalysisNwbfile` currently has no analysis-table
+children, and `SpikeSortingFigurl` is provenance/display metadata rather than
+an analysis input.
+
+### Behavioral, tuning, and model result dependencies
+
+This map shows only dependencies in which one reusable or computed result is
+an input to another computed result. Every result also has the catalog,
+sorting, and parameter inputs listed in its detailed flow below.
+
+```mermaid
+flowchart TD
+    MFR[MovementFiringRate] --> TC[PathSpecificPlaceTuningCurve]
+    MFR --> DPP[DPPTuningCurve]
+    TC --> ST[PathSpecificPlaceStability]
+    TC --> SIM[PathSpecificPlaceTuningSimilarity]
+    TC --> STC[SwapTuningCurveComparison]
+    MFR --> STC
+    MFR --> CVPCA
+    MFR --> ENC[DPPEncodingComparison]
+    ST --> ENC
+    MFR --> DEC[PathProgressionDecodingComparison]
+    ST --> DEC
+    MFR --> PSD[PathSpecificPlaceDecoding]
+    MFR --> MOTOR[MotorEncodingComparison]
+    MFR --> DLG[DarkLightGLM]
+    DLG --> SGLM[SwapGLM]
+    MFR --> SGLM
+```
+
+The important multiplicities and exceptions are:
+
+- `PathSpecificPlaceStability` pairs two tuning rows for one path: `odd` and
+  `even`. It is the one current computed family without a separate numerical
+  parameter table.
+- `PathSpecificPlaceTuningSimilarity` consumes four matching `all`-trial
+  tuning rows. `SwapTuningCurveComparison` consumes twelve: four paths in
+  each of three epochs.
+- `DPPEncodingComparison` consumes four path-specific stability rows. It does
+  not consume `DPPTuningCurve`; it refits fold-specific model inputs from the
+  underlying movement, trajectory, graph, and spike sources.
+- `PathProgressionDecodingComparison` consumes two `MovementFiringRate` rows
+  and eight stability rows: four each for the target and cohort epochs.
+- `SwapGLM` is the only result directly downstream of `DarkLightGLM`; it adds
+  a held-out light epoch without refitting the upstream models.
+- `DPPTuningCurve`, `PathSpecificPlaceTuningSimilarity`, `CVPCA`,
+  `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
+  `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `SwapGLM`, and
+  `SwapTuningCurveComparison` are currently leaves in the custom table DAG.
+  `EpochMotorBehavior` is also a leaf and depends only on catalog and
+  parameter rows, so it has no edge in this result-to-result map.
+
+### Ripple result dependencies
+
+```mermaid
+flowchart LR
+    Ripples --> RippleBandLFP
+    Ripples --> RippleModulation
+    Ripples --> RippleGLM
+    Ripples --> CrossRegionXCorr
+    SortedSpikesGroup["Spyglass SortedSpikesGroup"] --> RippleModulation
+    RegionSortedSpikesGroup --> RippleGLM
+    RegionSortedSpikesGroup --> CrossRegionXCorr
+```
+
+`RippleGLM` and `CrossRegionXCorr` each select two regional spike groups.
+`RippleBandLFP` is an independent raw-LFP result keyed by the persisted
+`Ripples` row and its ordered detector-channel provenance. It filters the
+selected full-epoch raw trace; its values are not derived from the
+ripple-event intervals, and it is not upstream of ripple detection,
+`RippleModulation`, `RippleGLM`, or `CrossRegionXCorr`. All four ripple result
+tables are currently leaves.
+
+The diagrams show declared dependencies after collapsing each Parameters,
+Selection, and result-table chain. At runtime, NWB-backed loaders also resolve
+the registered `Nwbfile`, and the shared spike adapter resolves
+`UnitSelectionParams` and each group member through
+`SpikeSortingOutput`. Selection builders additionally enforce same-session,
+same-epoch, region, unit-order, graph/trajectory, and parameter-snapshot
+compatibility. Those loading and validation relationships are deliberately
+not drawn as extra foreign-key edges.
 
 ## Analysis flows
 
@@ -190,35 +299,6 @@ belong to the same NWB, and events must be speed-gated threshold-2.0
 detections. The UUID freezes the raw interval digest, actual detector/NWB
 provenance, both unit snapshots, and parameter/output-rule hashes. Unit and
 pair results remain in artifacts, including explicit empty/partial statuses.
-
-Ripple decoding-state comparison uses:
-
-```text
-Ripples at decode_epoch + EpochIntervals
-    + Position at train_epoch + four TrajectoryIntervals
-    + four directional WTrackGraph rows
-    + CA1/V1 RegionSortedSpikesGroup
-    + matching CA1/V1 MovementFiringRate rows
-    + RippleDecodingComparisonParameters + representation
-    -> RippleDecodingComparisonSelection
-    -> RippleDecodingComparison
-    -> manifest.parquet + selected_units.parquet + ripple_qc.parquet
-       + ripple_metrics.parquet + epoch_summary.parquet
-       + ripple_decoding_comparison.nc
-       + ca1_decoded.npz + v1_decoded.npz
-```
-
-Each result is one session, training epoch, decoding epoch, and either
-`path_specific_place` or `dpp` representation. Training uses the exact shared
-movement support saved upstream; decoding uses the exact speed-gated,
-threshold-2.0 ripple bounds. Path-specific place concatenates four directional
-path coordinates. DPP pools the two same-turn paths into fixed left and right
-blocks. The selection freezes both regional unit snapshots and movement-rate
-artifacts, the named position row, all four lap and graph rows, exact ripple
-bounds and detector provenance, and parameter/output-rule hashes. Units remain
-an all-unit audit in Parquet and NetCDF rather than becoming DataJoint rows.
-Empty movement support, missing eligible units, missing ripples, and other
-expected scientific terminals produce explicit immutable artifacts.
 
 Epoch motor behavior uses:
 
@@ -428,8 +508,7 @@ The computed table names are `RippleModulation`, `RippleBandLFP`,
 `DPPEncodingComparison`, `CVPCA`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`,
 `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
-`CrossRegionXCorr`, and `RippleDecodingComparison`—there is no
-`Computed` suffix.
+and `CrossRegionXCorr`—there is no `Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
 rather than being silently omitted.
 Its explicit selection and parameter rows do not populate it automatically.
@@ -746,15 +825,6 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     summary.parquet
     cross_region_xcorr.nc
 
-<root>/<animal>/<date>/ripple_decoding_comparison/<train>_train_to_<decode>_decode/<representation>/<uuid>/
-    manifest.parquet
-    selected_units.parquet
-    ripple_qc.parquet
-    ripple_metrics.parquet
-    epoch_summary.parquet
-    ripple_decoding_comparison.nc
-    ca1_decoded.npz
-    v1_decoded.npz
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -772,8 +842,7 @@ written and validated together. `RippleModulation`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `CVPCA`, `PathSpecificPlaceDecoding`, `MotorEncodingComparison`,
 `DarkLightGLM`, `SwapGLM`, `SwapTuningCurveComparison`, `RippleGLM`,
-`CrossRegionXCorr`, `RippleDecodingComparison`, `EpochMotorBehavior`, and
-`RippleBandLFP`
+`CrossRegionXCorr`, `EpochMotorBehavior`, and `RippleBandLFP`
 additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
@@ -791,13 +860,6 @@ Cross-region-xcorr registration requires separate CA1 and V1
 V1 unit audit, pair summary, and NetCDF. It recomputes the selected NWB result
 and compares all four scientific artifacts before writing the canonical
 bundle; terminal results are computed directly rather than legacy-registered.
-Ripple-decoding registration requires both regional views to resolve uniquely
-to `ImportedSpikeSorting` unit IDs and requires the complete legacy CA1 and V1
-decoded NPZ, ripple-metrics Parquet, epoch-summary Parquet, and NetCDF set. It
-redecodes the selected NWB inputs, applies the current graph-derived physical-
-arm labels, and compares every supplied scientific artifact before writing the
-canonical bundle. Stale inbound-arm outputs labeled by turn group are rejected;
-terminal results are computed directly rather than legacy-registered.
 Epoch-motor registration accepts the legacy session-wide distribution and
 progression Parquets, selects exactly one epoch, recomputes that epoch from
 the frozen NWB position/interval/graph sources, and compares all scientific

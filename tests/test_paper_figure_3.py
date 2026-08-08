@@ -61,7 +61,6 @@ from v1ca1.paper_figures.figure_3 import (
     get_ripple_lfp_path,
     get_ripple_modulation_paths,
     get_place_tuning_curve_path,
-    get_ripple_decoding_comparison_summary_path,
     get_screen_xcorr_paths,
     get_tuning_similarity_path,
     load_glm_behavior_association_tables,
@@ -78,7 +77,6 @@ from v1ca1.paper_figures.figure_3 import (
     load_glm_epoch_summary_tables,
     load_modulation_summary_table,
     load_pooled_ripple_heatmap_epoch_tables,
-    load_ripple_decoding_comparison_panel_tables,
     load_ripple_heatmap_epoch_tables,
     load_ripple_count_table,
     load_ripple_glm_summary_table,
@@ -101,7 +99,6 @@ from v1ca1.paper_figures.figure_3 import (
     plot_modulation_index_panel,
     plot_observed_predicted_panel,
     plot_peri_ripple_heatmap_panel,
-    plot_ripple_decoding_comparison_panel,
     plot_ripple_lfp_panel,
     plot_top_ca1_xcorr_panel,
     _align_axes_xaxis_baselines,
@@ -1709,90 +1706,6 @@ def test_source_predictor_paired_sign_test_is_exact_and_handles_no_testable_pair
     assert _format_significance_stars(float(tied["p_value"])) == ""
 
 
-def _write_decoding_comparison_summary_table(
-    tmp_path: Path,
-    *,
-    animal_name: str = "L14",
-    date: str = "20240611",
-    train_epoch: str = "08_r4",
-    decode_epoch: str = "08_r4",
-    representation: str = "place",
-    turn_group_match_rate: float = 0.6,
-    arm_identity_match_rate: float = 0.4,
-) -> Path:
-    pytest.importorskip("pyarrow")
-    path = get_ripple_decoding_comparison_summary_path(
-        tmp_path,
-        animal_name=animal_name,
-        date=date,
-        representation=representation,
-        train_epoch=train_epoch,
-        decode_epoch=decode_epoch,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "representation": [representation],
-            "train_epoch": [train_epoch],
-            "decode_epoch": [decode_epoch],
-            "n_ripples": [10],
-            "n_ripple_bins": [100],
-            "n_effective_shuffles": [100],
-            "turn_group_scheme_applicable": [True],
-            "turn_group_scheme_reason": ["ok"],
-            "turn_group_n_valid_ripples": [10],
-            "turn_group_match_rate": [turn_group_match_rate],
-            "turn_group_match_rate_shuffle_mean": [0.5],
-            "turn_group_match_rate_shuffle_sd": [0.03],
-            "turn_group_match_rate_p_value": [0.03],
-            "arm_identity_scheme_applicable": [True],
-            "arm_identity_scheme_reason": ["ok"],
-            "arm_identity_n_valid_ripples": [10],
-            "arm_identity_match_rate": [arm_identity_match_rate],
-            "arm_identity_match_rate_shuffle_mean": [1.0 / 3.0],
-            "arm_identity_match_rate_shuffle_sd": [0.02],
-            "arm_identity_match_rate_p_value": [0.04],
-        }
-    ).to_parquet(path, index=False)
-    return path
-
-
-def test_load_ripple_decoding_comparison_panel_tables_reads_light_dark_metrics(
-    tmp_path: Path,
-) -> None:
-    _write_decoding_comparison_summary_table(
-        tmp_path,
-        train_epoch="02_r1",
-        decode_epoch="02_r1",
-        turn_group_match_rate=0.4,
-        arm_identity_match_rate=0.5,
-    )
-    _write_decoding_comparison_summary_table(
-        tmp_path,
-        train_epoch="08_r4",
-        decode_epoch="08_r4",
-        turn_group_match_rate=0.7,
-        arm_identity_match_rate=0.8,
-    )
-
-    payload = load_ripple_decoding_comparison_panel_tables(
-        tmp_path,
-        [("L14", "20240611", "08_r4")],
-    )
-
-    summary_table = payload["summary_table"]
-    assert payload["missing_artifacts"] == []
-    assert len(summary_table) == 4
-    assert set(summary_table["epoch_type"]) == {"light", "dark"}
-    assert set(summary_table["label_scheme"]) == {"turn_group", "arm_identity"}
-    assert sorted(summary_table["categorical_match_rate"].unique().tolist()) == [
-        0.4,
-        0.5,
-        0.7,
-        0.8,
-    ]
-
-
 def test_compute_significance_distribution_comparison_uses_session_strata() -> None:
     table = pd.DataFrame(
         {
@@ -2275,29 +2188,6 @@ def test_plot_helpers_draw_expected_axes() -> None:
         ),
         "missing_artifacts": [],
         "ripple_selection": "single",
-    }
-    decoding_payload = {
-        "summary_table": pd.DataFrame(
-            {
-                "animal_name": ["L14", "L14", "L14", "L14"],
-                "date": ["20240611", "20240611", "20240611", "20240611"],
-                "representation": ["place", "place", "place", "place"],
-                "decode_epoch": ["02_r1", "08_r4", "02_r1", "08_r4"],
-                "epoch_type": ["light", "dark", "light", "dark"],
-                "label_scheme": [
-                    "turn_group",
-                    "turn_group",
-                    "arm_identity",
-                    "arm_identity",
-                ],
-                "categorical_match_rate": [0.6, 0.7, 0.4, 0.8],
-                "categorical_match_rate_shuffle_mean": [0.5, 0.52, 0.35, 0.36],
-                "categorical_match_rate_p_value": [0.04, 0.2, 0.03, 0.01],
-                "chance_level": [0.5, 0.5, 1.0 / 3.0, 1.0 / 3.0],
-            }
-        ),
-        "categorical_metrics": (("place", "turn_group"), ("place", "arm_identity")),
-        "missing_artifacts": [],
     }
     offset_payload = {
         "summary_table": pd.DataFrame(
@@ -2854,16 +2744,6 @@ def test_plot_helpers_draw_expected_axes() -> None:
     assert compact_summary_text.get_position() == pytest.approx((0.97, 0.05))
     assert compact_summary_text.get_ha() == "right"
     assert compact_summary_text.get_va() == "bottom"
-    plt.close(fig)
-
-    fig, ax = plt.subplots()
-    plot_ripple_decoding_comparison_panel(ax, decoding_payload)
-    assert len(ax.child_axes) == 2
-    assert [child_axis.get_title() for child_axis in ax.child_axes] == [
-        "Turn group",
-        "Arm",
-    ]
-    assert ax.child_axes[1].get_xlabel() == "Decode epoch"
     plt.close(fig)
 
     fig, ax = plt.subplots()

@@ -1241,115 +1241,6 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
-RIPPLE_DECODING_COMPARISON_PARAMETERS_DEFINITION = """
-# Named fixed parameters for CA1/V1 ripple decoding-state comparison.
-ripple_decoding_comparison_param_name: varchar(64)
----
-decode_bin_size_s: double
-spatial_bin_size_cm: double
-tuning_smoothing_sigma_bins: double
-ca1_min_movement_rate_hz: double
-v1_min_movement_rate_hz: double
-n_shuffles: int unsigned
-shuffle_seed: int
-expected_detector_zscore_threshold: double
-require_speed_gated: bool
-"""
-
-
-RIPPLE_DECODING_COMPARISON_SELECTION_DEFINITION = """
-# One immutable session/train/decode/representation ripple-decoding selection.
-ripple_decoding_comparison_id: uuid
----
--> Ripples.proj(decode_epoch='epoch')
--> Position.proj(train_epoch='epoch', train_position_series_name='position_series_name')
--> RegionSortedSpikesGroup.proj(ca1_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
--> RegionSortedSpikesGroup.proj(v1_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
--> MovementFiringRate.proj(ca1_movement_firing_rate_id='movement_firing_rate_id')
--> MovementFiringRate.proj(v1_movement_firing_rate_id='movement_firing_rate_id')
--> TrajectoryIntervals.proj(train_epoch='epoch', center_to_left_trajectory_type='trajectory_type')
--> TrajectoryIntervals.proj(train_epoch='epoch', center_to_right_trajectory_type='trajectory_type')
--> TrajectoryIntervals.proj(train_epoch='epoch', left_to_center_trajectory_type='trajectory_type')
--> TrajectoryIntervals.proj(train_epoch='epoch', right_to_center_trajectory_type='trajectory_type')
--> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
--> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
--> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
--> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
--> RippleDecodingComparisonParameters
-representation: enum('path_specific_place', 'dpp')
-source_region: enum('ca1')
-target_region: enum('v1')
-source_ripple_count: int unsigned
-detector_zscore_threshold: double
-speed_gated: bool
-selected_ripple_intervals_sha256: char(64)
-ripple_provenance_sha256: char(64)
-ca1_sorting_group_members_sha256: char(64)
-ca1_unit_filter_params_sha256: char(64)
-ca1_selected_units_sha256: char(64)
-ca1_n_units: int unsigned
-v1_sorting_group_members_sha256: char(64)
-v1_unit_filter_params_sha256: char(64)
-v1_selected_units_sha256: char(64)
-v1_n_units: int unsigned
-movement_param_name: varchar(64)
-movement_parameters_sha256: char(64)
-movement_speed_threshold_cm_s: double
-movement_speed_sigma_s: double
-ca1_movement_firing_rate_sha256: char(64)
-ca1_movement_intervals_sha256: char(64)
-ca1_movement_rates_sha256: char(64)
-ca1_movement_support_sha256: char(64)
-ca1_movement_analysis_status: enum('valid', 'no_movement', 'no_valid_position')
-v1_movement_firing_rate_sha256: char(64)
-v1_movement_intervals_sha256: char(64)
-v1_movement_rates_sha256: char(64)
-v1_movement_support_sha256: char(64)
-v1_movement_analysis_status: enum('valid', 'no_movement', 'no_valid_position')
-position_snapshot_sha256: char(64)
-trajectory_intervals_sha256_by_type: longblob
-graph_rows_sha256_by_trajectory: longblob
-graph_policy_sha256: char(64)
-ripple_decoding_comparison_parameters_sha256: char(64)
-ripple_decoding_comparison_output_rule_sha256: char(64)
-"""
-
-
-RIPPLE_DECODING_COMPARISON_DEFINITION = """
-# One categorical CA1/V1 ripple decoding comparison artifact bundle.
--> RippleDecodingComparisonSelection
----
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-ripple_qc_path: filepath@analysis
-ripple_metrics_path: filepath@analysis
-epoch_summary_path: filepath@analysis
-ripple_decoding_comparison_path: filepath@analysis
-ca1_decoded_path: filepath@analysis
-v1_decoded_path: filepath@analysis
-schema_version: varchar(8)
-bundle_schema_version: varchar(8)
-n_ripple_events_input: int unsigned
-n_ripples: int unsigned
-n_ripple_bins: bigint unsigned
-n_ca1_units: int unsigned
-n_v1_units: int unsigned
-n_ca1_units_in_decoder: int unsigned
-n_v1_units_in_decoder: int unsigned
-selected_ripple_intervals_sha256: char(64)
-graph_policy_sha256: char(64)
-selected_units_sha256: char(64)
-ripple_qc_sha256: char(64)
-ripple_metrics_sha256: char(64)
-epoch_summary_sha256: char(64)
-analysis_status: enum('valid', 'partial_valid', 'no_ripples', 'no_ca1_units', 'no_v1_units', 'no_eligible_ca1_units', 'no_eligible_v1_units', 'no_train_movement', 'no_train_trajectory_samples', 'no_common_decoded_bins', 'no_valid_metrics')
-artifact_origin: enum('computed', 'registered_existing')
-runtime_v1ca1_git_commit = NULL: varchar(64)
-runtime_spyglass_git_commit = NULL: varchar(64)
-legacy_artifact_provenance = NULL: longblob
-"""
-
-
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -2217,108 +2108,6 @@ CROSS_REGION_XCORR_PARAMETER_PRESETS = (
 )
 
 
-RIPPLE_DECODING_COMPARISON_OUTPUT_RULE = MappingProxyType(
-    {
-        "version": 1,
-        "comparison_direction": "ca1_vs_v1_decoded_state",
-        "result_granularity": (
-            "session_x_train_epoch_x_decode_epoch_x_representation"
-        ),
-        "representations": ("path_specific_place", "dpp"),
-        "path_specific_place_coordinate": (
-            "four_concatenated_trajectory_specific_center_to_arm_blocks_cm"
-        ),
-        "dpp_coordinate": (
-            "two_same_turn_blocks_left_then_right_natural_direction_progression"
-        ),
-        "trajectory_order": (
-            "center_to_left",
-            "left_to_center",
-            "center_to_right",
-            "right_to_center",
-        ),
-        "turn_group_by_trajectory": {
-            "center_to_left": "left",
-            "right_to_center": "left",
-            "center_to_right": "right",
-            "left_to_center": "right",
-        },
-        "physical_arm_by_trajectory": {
-            "center_to_left": "left",
-            "left_to_center": "left",
-            "center_to_right": "right",
-            "right_to_center": "right",
-        },
-        "arm_boundary_policy": (
-            "graph_derived_midpoint_of_penultimate_center_to_arm_edge"
-        ),
-        "categorical_scoring_schemes": (
-            "trajectory",
-            "turn_group",
-            "arm_identity",
-        ),
-        "path_specific_place_schemes": (
-            "trajectory",
-            "turn_group",
-            "arm_identity",
-        ),
-        "dpp_schemes": ("turn_group",),
-        "continuous_scoring": False,
-        "unit_filter_policy": (
-            "inclusive_train_epoch_movement_firing_rate_threshold_by_region"
-        ),
-        "training_policy": "movement_supported_train_epoch_tuning_curves",
-        "decoding_policy": (
-            "independent_ca1_and_v1_bayesian_decoders_per_exact_detected_ripple"
-        ),
-        "alignment_policy": (
-            "common_ripple_source_index_and_rounded_bin_time"
-        ),
-        "shuffle_policy": (
-            "deranged_v1_ripple_blocks_within_equal_bin_count_groups"
-        ),
-        "ripple_input_policy": (
-            "one_decode_epoch_detector_zscore_threshold_2_speed_gated_exact_intervals"
-        ),
-        "graph_policy": (
-            "four_directional_path_wtrack_graphs_in_centimeters"
-        ),
-        "terminal_policy": "explicit_expected_terminal_and_partial_artifacts",
-        "unexpected_error_policy": "raise",
-        "legacy_registration_policy": (
-            "imported_sorting_identity_resolution_exact_nwb_redecode_rescore_and_"
-            "complete_five_file_comparison_under_corrected_graph_scoring"
-        ),
-        "legacy_arm_bug_policy": (
-            "reject_turn_group_labeled_inbound_arm_outputs"
-        ),
-        "time_unit": "s",
-        "time_reference": "augmented_nwb_ephys_timestamps",
-    }
-)
-
-
-MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS = MappingProxyType(
-    {
-        "ripple_decoding_comparison_param_name": "manuscript_categorical",
-        "decode_bin_size_s": 0.002,
-        "spatial_bin_size_cm": 4.0,
-        "tuning_smoothing_sigma_bins": 0.0,
-        "ca1_min_movement_rate_hz": 0.0,
-        "v1_min_movement_rate_hz": 0.5,
-        "n_shuffles": 100,
-        "shuffle_seed": 45,
-        "expected_detector_zscore_threshold": 2.0,
-        "require_speed_gated": True,
-    }
-)
-
-
-RIPPLE_DECODING_COMPARISON_PARAMETER_PRESETS = (
-    MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS,
-)
-
-
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -2428,15 +2217,6 @@ TABLE_DEFINITIONS = MappingProxyType(
             CROSS_REGION_XCORR_SELECTION_DEFINITION
         ),
         "cross_region_xcorr": CROSS_REGION_XCORR_DEFINITION,
-        "ripple_decoding_comparison_parameters": (
-            RIPPLE_DECODING_COMPARISON_PARAMETERS_DEFINITION
-        ),
-        "ripple_decoding_comparison_selection": (
-            RIPPLE_DECODING_COMPARISON_SELECTION_DEFINITION
-        ),
-        "ripple_decoding_comparison": (
-            RIPPLE_DECODING_COMPARISON_DEFINITION
-        ),
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -2514,12 +2294,6 @@ __all__ = [
     "CROSS_REGION_XCORR_PARAMETER_PRESETS",
     "CROSS_REGION_XCORR_SELECTION_DEFINITION",
     "MANUSCRIPT_CROSS_REGION_XCORR_PARAMETERS",
-    "MANUSCRIPT_RIPPLE_DECODING_COMPARISON_PARAMETERS",
-    "RIPPLE_DECODING_COMPARISON_DEFINITION",
-    "RIPPLE_DECODING_COMPARISON_OUTPUT_RULE",
-    "RIPPLE_DECODING_COMPARISON_PARAMETERS_DEFINITION",
-    "RIPPLE_DECODING_COMPARISON_PARAMETER_PRESETS",
-    "RIPPLE_DECODING_COMPARISON_SELECTION_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS",
