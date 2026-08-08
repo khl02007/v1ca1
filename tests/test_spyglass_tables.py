@@ -29,6 +29,7 @@ from v1ca1.spyglass.tables import (
     _intervals_to_frame,
     _legacy_dpp_unit_identity_resolver,
     _legacy_dark_light_unit_identity_resolver,
+    _legacy_ripple_glm_unit_identity_resolver,
     _legacy_swap_glm_unit_identity_resolver,
     _legacy_swap_tuning_curve_comparison_unit_identity_resolver,
     _load_tuning_similarity_inputs,
@@ -39,6 +40,7 @@ from v1ca1.spyglass.tables import (
     _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
+    _make_ripple_glm_row,
     _make_swap_glm_row,
     _make_swap_tuning_curve_comparison_row,
     _motor_encoding_comparison_selection_row,
@@ -47,6 +49,8 @@ from v1ca1.spyglass.tables import (
     _path_specific_place_decoding_selection_row,
     _path_specific_place_tuning_curve_selection_row,
     _ripple_modulation_selection_row,
+    _ripple_glm_selection_row,
+    _register_existing_ripple_glm_row,
     _register_existing_dpp_encoding_comparison_row,
     _register_existing_dark_light_glm_row,
     _register_existing_swap_glm_row,
@@ -65,6 +69,7 @@ from v1ca1.spyglass.tables import (
     _validate_path_progression_decoding_artifact_link,
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
+    _validate_ripple_glm_parameter_row,
     _validate_swap_glm_artifact_link,
     _validate_swap_glm_parameter_row,
     _validate_swap_tuning_curve_comparison_artifact_link,
@@ -1512,6 +1517,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "swap_tuning_curve_comparison_parameters",
         "swap_tuning_curve_comparison_selection",
         "swap_tuning_curve_comparison",
+        "ripple_glm_parameters",
+        "ripple_glm_selection",
+        "ripple_glm",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -1548,6 +1556,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "SwapTuningCurveComparisonParameters" in schemas[0].context
     assert "SwapTuningCurveComparisonSelection" in schemas[0].context
     assert "SwapTuningCurveComparison" in schemas[0].context
+    assert "RippleGLMParameters" in schemas[0].context
+    assert "RippleGLMSelection" in schemas[0].context
+    assert "RippleGLM" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -1974,6 +1985,23 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "register_existing",
     )
 
+    ripple_glm_parameters = bundle["ripple_glm_parameters"].definition
+    assert "ripple_selection_mode:" in ripple_glm_parameters
+    assert "source_predictor_mode:" in ripple_glm_parameters
+    ripple_glm_selection = bundle["ripple_glm_selection"].definition
+    assert "ripple_glm_id: uuid" in ripple_glm_selection
+    assert "-> Ripples" in ripple_glm_selection
+    assert "source_region_sorted_spikes_group_id=" in ripple_glm_selection
+    assert "target_region_sorted_spikes_group_id=" in ripple_glm_selection
+    assert "source_ripple_intervals_sha256" in ripple_glm_selection
+    assert "ripple_provenance_sha256" in ripple_glm_selection
+    ripple_glm_result = bundle["ripple_glm"].definition
+    assert "-> RippleGLMSelection" in ripple_glm_result
+    assert "artifact_manifest_path: filepath@analysis" in ripple_glm_result
+    assert "ripple_glm_path: filepath@analysis" in ripple_glm_result
+    assert "n_valid_target_units: int unsigned" in ripple_glm_result
+    assert hasattr(bundle["ripple_glm"], "register_existing")
+
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
     monkeypatch,
@@ -2065,6 +2093,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     swap_tuning_parameters = bundle[
         "swap_tuning_curve_comparison_parameters"
     ]
+    ripple_glm_parameters = bundle["ripple_glm_parameters"]
 
     movement_row = movement_parameters.insert_default()
     ripple_row = ripple_parameters.insert_default()
@@ -2074,6 +2103,7 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     decoding_row = decoding_parameters.insert_default()
     motor_rows = motor_parameters.insert_presets()
     swap_tuning_rows = swap_tuning_parameters.insert_defaults()
+    ripple_glm_rows = ripple_glm_parameters.insert_defaults()
 
     assert movement_row == dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     assert movement_row == {
@@ -2203,6 +2233,23 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert swap_tuning_parameters._insert_many_calls == [
         (swap_tuning_rows, {"skip_duplicates": True})
     ]
+    assert ripple_glm_rows == [
+        dict(row) for row in table_specs.RIPPLE_GLM_PARAMETER_PRESETS
+    ]
+    assert [row["source_predictor_mode"] for row in ripple_glm_rows] == [
+        "unit_vector",
+        "mean_activity",
+    ]
+    assert all(row["ripple_selection_mode"] == "single" for row in ripple_glm_rows)
+    assert all(row["n_shuffles_ripple"] == 100 for row in ripple_glm_rows)
+    assert all(
+        row["expected_detector_zscore_threshold"] == pytest.approx(2.0)
+        and row["require_speed_gated"] is True
+        for row in ripple_glm_rows
+    )
+    assert ripple_glm_parameters._insert_many_calls == [
+        (ripple_glm_rows, {"skip_duplicates": True})
+    ]
 
     with pytest.raises(TypeError, match="numeric scalar"):
         ripple_parameters.insert_parameters({**ripple_row, "bin_size_s": [0.02]})
@@ -2290,6 +2337,17 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         swap_tuning_parameters.insert_parameters(
             {**swap_tuning_rows[0], "min_dark_firing_rate_hz": -0.1}
+        )
+    with pytest.raises(ValueError, match="threshold 2.0"):
+        ripple_glm_parameters.insert_parameters(
+            {
+                **ripple_glm_rows[0],
+                "expected_detector_zscore_threshold": 3.0,
+            }
+        )
+    with pytest.raises(ValueError, match="speed-gated"):
+        ripple_glm_parameters.insert_parameters(
+            {**ripple_glm_rows[0], "require_speed_gated": False}
         )
 
     assert _analysis_region("ca1") == "ca1"
@@ -4466,6 +4524,317 @@ def test_dark_light_registration_uses_canonical_selected_paths(
     assert Path(row["visual_model_path"]) == (
         artifact_dir / "selected" / "visual.nc"
     )
+
+
+def _ripple_glm_selection_inputs() -> dict[str, Any]:
+    """Return one complete RippleGLM selection with database-free intervals."""
+    source_id = uuid.UUID("92222222-2222-5222-8222-222222222222")
+    target_id = uuid.UUID("93333333-3333-5333-8333-333333333333")
+    nwb_file_name = "L1420240102_.nwb"
+    epoch = "04_s2"
+    parameters = dict(
+        table_specs.MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS
+    )
+    group_rows = {
+        source_id: {
+            "region_sorted_spikes_group_id": source_id,
+            "nwb_file_name": nwb_file_name,
+            "region_name": "ca1",
+            "sorting_group_members_sha256": "a" * 64,
+            "unit_filter_params_sha256": "b" * 64,
+            "selected_units_sha256": "c" * 64,
+            "n_units": 3,
+        },
+        target_id: {
+            "region_sorted_spikes_group_id": target_id,
+            "nwb_file_name": nwb_file_name,
+            "region_name": "v1",
+            "sorting_group_members_sha256": "d" * 64,
+            "unit_filter_params_sha256": "e" * 64,
+            "selected_units_sha256": "f" * 64,
+            "n_units": 4,
+        },
+    }
+    ripple_row = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "ripple_count": 5,
+        "detector_zscore_threshold": 2.0,
+        "speed_gated": True,
+        "detection_parameters": {"speed_threshold": 4.0},
+        "provenance_path": "scratch/ripple_detection_provenance",
+        "provenance_object_id": "prov-id",
+        "source_table_path": "intervals/ripples",
+        "source_table_object_id": "table-id",
+        "source_object_path": "intervals/ripples",
+        "source_object_id": "object-id",
+    }
+    epoch_row = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "start_time": 0.0,
+        "stop_time": 10.0,
+    }
+    ripple_table = pd.DataFrame(
+        {
+            "start_time": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "end_time": [1.05, 2.05, 3.05, 4.05, 5.05],
+            "epoch": [epoch] * 5,
+        }
+    )
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "source_region_sorted_spikes_group_id": source_id,
+        "target_region_sorted_spikes_group_id": target_id,
+        "ripple_glm_param_name": parameters["ripple_glm_param_name"],
+    }
+    return {
+        "key": key,
+        "parameters": parameters,
+        "group_rows": group_rows,
+        "ripple_row": ripple_row,
+        "epoch_row": epoch_row,
+        "ripple_table": ripple_table,
+        "epoch_interval": SimpleNamespace(start=[0.0], end=[10.0]),
+    }
+
+
+def _build_ripple_glm_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one RippleGLM selection from mutable fake inputs."""
+    return _ripple_glm_selection_row(
+        key=inputs["key"],
+        ripples_table=_FakeRelation(inputs["ripple_row"]),
+        epoch_intervals_table=_FakeRelation(inputs["epoch_row"]),
+        region_sorted_spikes_group_table=_FakeKeyedRelation(
+            "region_sorted_spikes_group_id",
+            inputs["group_rows"],
+        ),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        ripple_table=inputs["ripple_table"],
+        epoch_interval=inputs["epoch_interval"],
+    )
+
+
+def test_ripple_glm_selection_freezes_events_groups_and_parameters() -> None:
+    inputs = _ripple_glm_selection_inputs()
+    first = _build_ripple_glm_selection(inputs)
+    second = _build_ripple_glm_selection(_ripple_glm_selection_inputs())
+
+    assert first == second
+    assert first["ripple_glm_id"].version == 5
+    assert first["source_region"] == "ca1"
+    assert first["target_region"] == "v1"
+    assert first["source_ripple_count"] == 5
+    assert first["n_selected_ripples"] == 5
+    assert len(first["source_ripple_intervals_sha256"]) == 64
+    assert len(first["ripple_provenance_sha256"]) == 64
+    assert len(first["selected_ripple_events_sha256"]) == 64
+    assert first["ripple_glm_parameters_sha256"] == provenance_sha256(
+        inputs["parameters"]
+    )
+    from v1ca1.spyglass.ripple_glm import OUTPUT_RULE_SHA256
+
+    assert first["ripple_glm_output_rule_sha256"] == OUTPUT_RULE_SHA256
+
+    changed_end = _ripple_glm_selection_inputs()
+    changed_end["ripple_table"].loc[0, "end_time"] = 1.075
+    assert _build_ripple_glm_selection(changed_end)["ripple_glm_id"] != first[
+        "ripple_glm_id"
+    ]
+
+    changed_provenance = _ripple_glm_selection_inputs()
+    changed_provenance["ripple_row"]["detection_parameters"] = {
+        "speed_threshold": 3.0
+    }
+    assert _build_ripple_glm_selection(changed_provenance)[
+        "ripple_glm_id"
+    ] != first["ripple_glm_id"]
+
+
+def test_ripple_glm_selection_rejects_wrong_region_or_nwb() -> None:
+    inputs = _ripple_glm_selection_inputs()
+    source_id = inputs["key"]["source_region_sorted_spikes_group_id"]
+    inputs["group_rows"][source_id]["region_name"] = "v1"
+    with pytest.raises(ValueError, match="source group.*ca1"):
+        _build_ripple_glm_selection(inputs)
+
+    inputs = _ripple_glm_selection_inputs()
+    target_id = inputs["key"]["target_region_sorted_spikes_group_id"]
+    inputs["group_rows"][target_id]["nwb_file_name"] = "other.nwb"
+    with pytest.raises(ValueError, match="same NWB"):
+        _build_ripple_glm_selection(inputs)
+
+
+def test_ripple_glm_legacy_resolver_requires_imported_unique_units() -> None:
+    loaded = {
+        "ts_group": {0: object(), 1: object()},
+        "unit_ids": [
+            {"spikesorting_merge_id": "merge-a", "unit_id": 10},
+            {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+        ],
+        "unit_metadata": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 10,
+                "sorting_unit_id": 101,
+            },
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 11,
+                "sorting_unit_id": 102,
+            },
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "merge_parent": "ImportedSpikeSorting",
+                "n_selected_units": 2,
+            }
+        ],
+    }
+    resolver = _legacy_ripple_glm_unit_identity_resolver(
+        loaded,
+        role="source",
+    )
+    assert resolver["101"]["group_unit_id"] == "0"
+    assert resolver["102"]["stable_unit_id"] == "merge-a:11"
+
+    loaded["member_provenance"][0]["merge_parent"] = "CurationV1"
+    with pytest.raises(ValueError, match="ImportedSpikeSorting"):
+        _legacy_ripple_glm_unit_identity_resolver(loaded, role="target")
+
+
+def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = _ripple_glm_selection_inputs()
+    selection = _build_ripple_glm_selection(inputs)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "ripple_table": inputs["ripple_table"],
+        "epoch_interval": inputs["epoch_interval"],
+        "animal_name": "L14",
+        "date": "20240102",
+    }
+    loaded = {
+        "source": {
+            "ts_group": {0: object()},
+            "unit_ids": [
+                {"spikesorting_merge_id": "ca1-merge", "unit_id": 10}
+            ],
+            "unit_metadata": [
+                {
+                    "spikesorting_merge_id": "ca1-merge",
+                    "unit_id": 10,
+                    "sorting_unit_id": 101,
+                }
+            ],
+            "member_provenance": [
+                {
+                    "spikesorting_merge_id": "ca1-merge",
+                    "merge_parent": "ImportedSpikeSorting",
+                    "n_selected_units": 1,
+                }
+            ],
+        },
+        "target": {
+            "ts_group": {0: object()},
+            "unit_ids": [
+                {"spikesorting_merge_id": "v1-merge", "unit_id": 20}
+            ],
+            "unit_metadata": [
+                {
+                    "spikesorting_merge_id": "v1-merge",
+                    "unit_id": 20,
+                    "sorting_unit_id": 201,
+                }
+            ],
+            "member_provenance": [
+                {
+                    "spikesorting_merge_id": "v1-merge",
+                    "merge_parent": "ImportedSpikeSorting",
+                    "n_selected_units": 1,
+                }
+            ],
+        },
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_ripple_glm_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_ripple_glm_spikes",
+        lambda **kwargs: loaded,
+    )
+    from v1ca1.spyglass import ripple_glm
+
+    calls = []
+
+    def register_existing(**kwargs):
+        calls.append(kwargs)
+        artifact_dir = Path(kwargs["destination_path"])
+        return {
+            "upstream_provenance": tables_module._ripple_glm_upstream_provenance(
+                selection
+            ),
+            "selected_ripple_events_sha256": selection[
+                "selected_ripple_events_sha256"
+            ],
+            "n_source_units": 1,
+            "n_target_units": 1,
+            "n_source_units_in_fit": 1,
+            "n_target_units_in_fit": 1,
+            "n_valid_target_units": 1,
+            "n_ripples": selection["n_selected_ripples"],
+            "selected_units_sha256": "a" * 64,
+            "analysis_status": "valid",
+            "legacy_artifact_provenance": {"source": "legacy"},
+            "artifact_paths": {
+                "artifact_manifest_path": artifact_dir / "manifest.parquet",
+                "selected_units_path": artifact_dir / "selected_units.parquet",
+                "summary_path": artifact_dir / "summary.parquet",
+                "result_path": artifact_dir / "ripple_glm.nc",
+            },
+        }
+
+    monkeypatch.setattr(
+        ripple_glm,
+        "register_existing_ripple_glm_artifact",
+        register_existing,
+    )
+    row = _register_existing_ripple_glm_row(
+        key=selection,
+        source_result_path=tmp_path / "legacy.nc",
+        parameters_table=object(),
+        ripples_table=object(),
+        epoch_intervals_table=object(),
+        region_sorted_spikes_group_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        source_v1ca1_git_commit="v1",
+        source_spyglass_git_commit="sg",
+        artifact_root=tmp_path,
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["expected_selected_ripple_events_sha256"] == selection[
+        "selected_ripple_events_sha256"
+    ]
+    assert call["source_sorting_type"] == "ImportedSpikeSorting"
+    assert call["target_sorting_type"] == "ImportedSpikeSorting"
+    assert call["source_legacy_unit_identity_resolver"]["101"][
+        "group_unit_id"
+    ] == "0"
+    assert call["target_legacy_unit_identity_resolver"]["201"][
+        "stable_unit_id"
+    ] == "v1-merge:20"
+    assert row["legacy_artifact_provenance"] == {"source": "legacy"}
 
 
 def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:

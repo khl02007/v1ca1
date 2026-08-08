@@ -841,6 +841,86 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+RIPPLE_GLM_PARAMETERS_DEFINITION = """
+# Named CA1-to-V1 ripple population-GLM parameters.
+ripple_glm_param_name: varchar(64)
+---
+ripple_window_s: double
+ripple_window_offset_s: double
+source_window_s: double
+source_window_offset_s: double
+target_window_s: double
+target_window_offset_s: double
+source_target_windows_differ: bool
+ripple_selection_mode: enum('allripples', 'deduped', 'single')
+source_predictor_mode: enum('unit_vector', 'mean_activity')
+min_spikes_per_ripple: double
+min_ca1_spikes_per_ripple: double
+n_splits: smallint unsigned
+n_shuffles_ripple: int unsigned
+ridge_strength: double
+shuffle_seed: int
+maxiter: int unsigned
+tol: double
+expected_detector_zscore_threshold: double
+require_speed_gated: bool
+"""
+
+
+RIPPLE_GLM_SELECTION_DEFINITION = """
+# One immutable epoch-level CA1-to-V1 ripple population-GLM selection.
+ripple_glm_id: uuid
+---
+-> Ripples
+-> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
+-> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
+-> RippleGLMParameters
+source_region: enum('ca1')
+target_region: enum('v1')
+source_ripple_count: int unsigned
+source_ripple_intervals_sha256: char(64)
+ripple_provenance_sha256: char(64)
+n_selected_ripples: int unsigned
+selected_ripple_events_sha256: char(64)
+source_sorting_group_members_sha256: char(64)
+source_unit_filter_params_sha256: char(64)
+source_selected_units_sha256: char(64)
+source_n_units: int unsigned
+target_sorting_group_members_sha256: char(64)
+target_unit_filter_params_sha256: char(64)
+target_selected_units_sha256: char(64)
+target_n_units: int unsigned
+ripple_glm_parameters_sha256: char(64)
+ripple_glm_output_rule_sha256: char(64)
+"""
+
+
+RIPPLE_GLM_DEFINITION = """
+# One CA1-to-V1 ripple population-GLM audit, summary, and NetCDF bundle.
+-> RippleGLMSelection
+---
+artifact_manifest_path: filepath@analysis
+selected_units_path: filepath@analysis
+summary_path: filepath@analysis
+ripple_glm_path: filepath@analysis
+schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_source_units: int unsigned
+n_target_units: int unsigned
+n_source_units_in_fit: int unsigned
+n_target_units_in_fit: int unsigned
+n_valid_target_units: int unsigned
+n_ripples: int unsigned
+selected_ripple_events_sha256: char(64)
+selected_units_sha256: char(64)
+analysis_status: enum('valid', 'partial_valid', 'no_source_units', 'no_target_units', 'no_ripples', 'insufficient_ripples', 'no_eligible_source_units', 'no_eligible_target_units', 'no_valid_target_units')
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -1448,6 +1528,84 @@ SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS = (
 )
 
 
+RIPPLE_GLM_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 1,
+        "model_direction": "ca1_to_v1",
+        "model_family": "ridge_regularized_poisson_population_glm",
+        "cv_policy": "contiguous_unshuffled_kfold_over_selected_ripples",
+        "shuffle_policy": (
+            "independently_permute_each_target_unit_training_response_and_refit"
+        ),
+        "ripple_selection_modes": ("allripples", "deduped", "single"),
+        "source_predictor_modes": ("unit_vector", "mean_activity"),
+        "ripple_input_policy": (
+            "detector_zscore_threshold_2_and_speed_gated_events_required"
+        ),
+        "source_preprocessing": (
+            "drop_near_constant_train_features_then_zscore_divide_by_sqrt_n_and_clip_10"
+        ),
+        "source_coefficient_space": "full_data_preprocessed_predictor",
+        "unit_filter_policy": (
+            "inclusive_mean_spike_count_per_selected_ripple_threshold"
+        ),
+        "unit_audit_policy": "retain_all_source_and_target_input_units",
+        "unit_failure_policy": (
+            "shared_population_fit_preserved_and_nonfinite_target_metrics_isolated_in_audit"
+        ),
+        "terminal_artifact_policy": (
+            "explicit_for_no_units_no_or_insufficient_ripples_and_no_eligible_units"
+        ),
+        "legacy_registration_policy": (
+            "imported_sorting_identity_resolved_then_reconstruct_events_windows_counts_folds_and_metrics"
+        ),
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+    }
+)
+
+
+MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS = MappingProxyType(
+    {
+        "ripple_glm_param_name": "manuscript_single_unit_vector",
+        "ripple_window_s": 0.2,
+        "ripple_window_offset_s": 0.0,
+        "source_window_s": 0.2,
+        "source_window_offset_s": 0.0,
+        "target_window_s": 0.2,
+        "target_window_offset_s": 0.0,
+        "source_target_windows_differ": False,
+        "ripple_selection_mode": "single",
+        "source_predictor_mode": "unit_vector",
+        "min_spikes_per_ripple": 0.1,
+        "min_ca1_spikes_per_ripple": 0.0,
+        "n_splits": 5,
+        "n_shuffles_ripple": 100,
+        "ridge_strength": 0.1,
+        "shuffle_seed": 45,
+        "maxiter": 6000,
+        "tol": 1e-7,
+        "expected_detector_zscore_threshold": 2.0,
+        "require_speed_gated": True,
+    }
+)
+
+
+MANUSCRIPT_MEAN_ACTIVITY_RIPPLE_GLM_PARAMETERS = MappingProxyType(
+    {
+        **MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS,
+        "ripple_glm_param_name": "manuscript_single_mean_activity",
+        "source_predictor_mode": "mean_activity",
+    }
+)
+
+
+RIPPLE_GLM_PARAMETER_PRESETS = (
+    MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS,
+    MANUSCRIPT_MEAN_ACTIVITY_RIPPLE_GLM_PARAMETERS,
+)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -1532,6 +1690,9 @@ TABLE_DEFINITIONS = MappingProxyType(
         "swap_tuning_curve_comparison": (
             SWAP_TUNING_CURVE_COMPARISON_DEFINITION
         ),
+        "ripple_glm_parameters": RIPPLE_GLM_PARAMETERS_DEFINITION,
+        "ripple_glm_selection": RIPPLE_GLM_SELECTION_DEFINITION,
+        "ripple_glm": RIPPLE_GLM_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -1580,6 +1741,13 @@ __all__ = [
     "SWAP_GLM_SELECTION_DEFINITION",
     "MANUSCRIPT_CA1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
     "MANUSCRIPT_V1_SWAP_TUNING_CURVE_COMPARISON_PARAMETERS",
+    "MANUSCRIPT_MEAN_ACTIVITY_RIPPLE_GLM_PARAMETERS",
+    "MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS",
+    "RIPPLE_GLM_DEFINITION",
+    "RIPPLE_GLM_OUTPUT_RULE",
+    "RIPPLE_GLM_PARAMETERS_DEFINITION",
+    "RIPPLE_GLM_PARAMETER_PRESETS",
+    "RIPPLE_GLM_SELECTION_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETERS_DEFINITION",
     "SWAP_TUNING_CURVE_COMPARISON_PARAMETER_PRESETS",

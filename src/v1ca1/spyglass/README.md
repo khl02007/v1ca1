@@ -104,6 +104,30 @@ detector. The default parameters require the source detector threshold to be
 selected source row; it has no downstream ripple-mean-z-score threshold. A
 selected row with `ripple_count=0` remains an explicit `no_ripples` result.
 
+Ripple population encoding uses:
+
+```text
+Ripples + EpochIntervals
+    + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
+    + RippleGLMParameters
+    -> RippleGLMSelection (ripple_glm_id)
+    -> RippleGLM
+    -> manifest.parquet + selected_units.parquet
+       + summary.parquet + ripple_glm.nc
+```
+
+Each row models one epoch in the fixed CA1-to-V1 direction. CA1 and V1 may
+come from different standard sorted-spikes groups, but both regional views
+must belong to the selected ripple NWB. The selection freezes every raw ripple
+start/end pair, detector and NWB-object provenance, the exact events retained
+by single-ripple selection and source/target window clipping, both unit
+snapshots, and all parameter/output hashes. The manuscript presets share
+0.2-s zero-offset source and target windows, five folds, 100 shuffle refits,
+ridge 0.1, seed 45, `maxiter=6000`, and `tol=1e-7`; they differ only between
+CA1 `unit_vector` and `mean_activity` predictors. Both require the speed-gated
+events detected at z-score threshold 2.0. Units remain inside the audit and
+NetCDF artifacts rather than becoming one DataJoint row per unit.
+
 Movement firing rate uses:
 
 ```text
@@ -251,7 +275,8 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, and `SwapTuningCurveComparison`—there is no `Computed` suffix.
+`SwapGLM`, `SwapTuningCurveComparison`, and `RippleGLM`—there is no
+`Computed` suffix.
 Empty but valid selections are recorded through explicit terminal statuses
 rather than being silently omitted.
 Its explicit selection and parameter rows do not populate it automatically.
@@ -534,6 +559,12 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     selected_units.parquet
     summary.parquet
     swap_tuning.nc
+
+<root>/<animal>/<date>/ripple_glm/<epoch>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    summary.parquet
+    ripple_glm.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -550,10 +581,14 @@ written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
 `PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
-`SwapGLM`, and `SwapTuningCurveComparison` additionally provide
+`SwapGLM`, `SwapTuningCurveComparison`, and `RippleGLM` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
+Ripple-GLM registration requires both regional views to resolve uniquely to
+`ImportedSpikeSorting` IDs. It reconstructs NWB-backed ripple windows,
+source/target counts, folds, metrics, and coefficients before accepting and
+normalizing the legacy NetCDF.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

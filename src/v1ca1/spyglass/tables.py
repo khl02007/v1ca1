@@ -703,6 +703,56 @@ def _validate_swap_tuning_curve_comparison_parameter_row(
     }
 
 
+def _ripple_glm_parameter_kwargs(
+    parameters: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the model fields accepted by the database-free RippleGLM API."""
+    excluded = {
+        "ripple_glm_param_name",
+        "source_target_windows_differ",
+    }
+    return {
+        field_name: value
+        for field_name, value in parameters.items()
+        if field_name not in excluded
+    }
+
+
+def _validate_ripple_glm_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one exact CA1-to-V1 ripple population-GLM parameter row."""
+    from v1ca1.spyglass.ripple_glm import validate_ripple_glm_parameters
+
+    expected = set(
+        table_specs.MANUSCRIPT_UNIT_VECTOR_RIPPLE_GLM_PARAMETERS
+    )
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "RippleGLM parameters must have exactly the declared fields; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["ripple_glm_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "ripple_glm_param_name must be a non-empty string of at most "
+            "64 characters."
+        )
+    validated = validate_ripple_glm_parameters(
+        **_ripple_glm_parameter_kwargs(values)
+    )
+    expected_derived = bool(values["source_target_windows_differ"])
+    if bool(validated["source_target_windows_differ"]) != expected_derived:
+        raise ValueError(
+            "source_target_windows_differ does not match the effective "
+            "source and target windows."
+        )
+    return {"ripple_glm_param_name": name, **validated}
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1108,6 +1158,234 @@ def _ripple_modulation_selection_row(
         **natural_key,
         **snapshot,
         **parameter_snapshot,
+    }
+
+
+def _ripple_glm_group_snapshot(
+    row: Mapping[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """Return immutable regional sorting fields for one RippleGLM role."""
+    return {
+        f"{role}_sorting_group_members_sha256": str(
+            row["sorting_group_members_sha256"]
+        ),
+        f"{role}_unit_filter_params_sha256": str(
+            row["unit_filter_params_sha256"]
+        ),
+        f"{role}_selected_units_sha256": str(
+            row["selected_units_sha256"]
+        ),
+        f"{role}_n_units": int(row["n_units"]),
+    }
+
+
+def _ripple_glm_source_intervals_sha256(
+    ripple_table: Any,
+    *,
+    epoch: str,
+) -> str:
+    """Digest every raw source ripple start/end pair before GLM selection."""
+    import pandas as pd
+
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    as_dataframe = getattr(ripple_table, "as_dataframe", None)
+    if callable(as_dataframe):
+        table = as_dataframe().copy()
+    elif isinstance(ripple_table, pd.DataFrame):
+        table = ripple_table.copy()
+    else:
+        table = pd.DataFrame(ripple_table)
+    table = table.rename(
+        columns={"start": "start_time", "stop": "end_time", "end": "end_time"}
+    )
+    if "epoch" in table:
+        table = table.loc[table["epoch"].astype(str) == str(epoch)]
+    missing = [
+        field_name
+        for field_name in ("start_time", "end_time")
+        if field_name not in table
+    ]
+    if missing:
+        raise ValueError(
+            f"RippleGLM source intervals are missing columns {missing!r}."
+        )
+    bounds = table[["start_time", "end_time"]].to_numpy(dtype=float)
+    if not np.all(np.isfinite(bounds)) or np.any(bounds[:, 1] <= bounds[:, 0]):
+        raise ValueError(
+            "RippleGLM source intervals must contain finite positive bounds."
+        )
+    ordered = bounds[np.argsort(bounds[:, 0], kind="stable")]
+    return provenance_sha256(
+        [
+            {"start_time": float(start), "end_time": float(end)}
+            for start, end in ordered
+        ]
+    )
+
+
+def _ripple_glm_provenance_sha256(
+    ripple_row: Mapping[str, Any],
+) -> str:
+    """Digest detector settings and NWB object pointers for one ripple row."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    fields = (
+        "detector_zscore_threshold",
+        "speed_gated",
+        "detection_parameters",
+        "provenance_path",
+        "provenance_object_id",
+        "source_table_path",
+        "source_table_object_id",
+        "source_object_path",
+        "source_object_id",
+    )
+    return provenance_sha256(
+        {field_name: ripple_row.get(field_name) for field_name in fields}
+    )
+
+
+def _ripple_glm_selection_row(
+    *,
+    key: Mapping[str, Any],
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    parameters_table: Any,
+    nwbfile_table: Any | None = None,
+    ripple_table: Any | None = None,
+    epoch_interval: Any | None = None,
+) -> dict[str, Any]:
+    """Validate, freeze, and identify one epoch-level RippleGLM selection."""
+    from v1ca1.spyglass.ripple_glm import (
+        OUTPUT_RULE,
+        OUTPUT_RULE_SHA256,
+        prepare_ripple_glm_event_selection,
+    )
+    from v1ca1.spyglass.selection import selection_uuid
+
+    nwb_file_name = str(key["nwb_file_name"])
+    epoch = str(key["epoch"])
+    ripple_row = _fetch1_dict(
+        ripples_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    _fetch1_dict(
+        epoch_intervals_table,
+        {"nwb_file_name": nwb_file_name, "epoch": epoch},
+    )
+    parameters = _validate_ripple_glm_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {"ripple_glm_param_name": key["ripple_glm_param_name"]},
+        )
+    )
+    _validate_ripple_provenance(ripple_row, parameters)
+
+    group_rows = {
+        role: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": key[
+                    f"{role}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for role in ("source", "target")
+    }
+    expected_regions = {"source": "ca1", "target": "v1"}
+    for role, expected_region in expected_regions.items():
+        row = group_rows[role]
+        if str(row.get("region_name")) != expected_region:
+            raise ValueError(
+                f"RippleGLM {role} group must select region "
+                f"{expected_region!r}."
+            )
+        if str(row.get("nwb_file_name")) != nwb_file_name:
+            raise ValueError(
+                "RippleGLM ripple and regional sorting inputs must belong "
+                "to the same NWB file."
+            )
+
+    if ripple_table is None or epoch_interval is None:
+        if nwbfile_table is None:
+            raise ValueError(
+                "nwbfile_table is required when ripple and epoch intervals "
+                "are not supplied."
+            )
+        loaded_ripples, loaded_epoch = _load_ripple_glm_interval_inputs(
+            nwb_file_name=nwb_file_name,
+            ripple_row=ripple_row,
+            epoch_row=_fetch1_dict(
+                epoch_intervals_table,
+                {"nwb_file_name": nwb_file_name, "epoch": epoch},
+            ),
+            nwbfile_table=nwbfile_table,
+        )
+        if ripple_table is None:
+            ripple_table = loaded_ripples
+        if epoch_interval is None:
+            epoch_interval = loaded_epoch
+    event_selection = prepare_ripple_glm_event_selection(
+        epoch=epoch,
+        ripple_table=ripple_table,
+        epoch_interval=epoch_interval,
+        **_ripple_glm_parameter_kwargs(parameters),
+    )
+    if int(event_selection["n_ripples_before_selection"]) != int(
+        ripple_row["ripple_count"]
+    ):
+        raise ValueError(
+            "Ripples.ripple_count disagrees with its NWB interval data."
+        )
+    if dict(OUTPUT_RULE) != dict(table_specs.RIPPLE_GLM_OUTPUT_RULE):
+        raise RuntimeError(
+            "RippleGLM table and database-free output rules have diverged."
+        )
+
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="ripple_glm_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "epoch": epoch,
+        "source_region_sorted_spikes_group_id": key[
+            "source_region_sorted_spikes_group_id"
+        ],
+        "target_region_sorted_spikes_group_id": key[
+            "target_region_sorted_spikes_group_id"
+        ],
+        "ripple_glm_param_name": parameters["ripple_glm_param_name"],
+        "source_region": "ca1",
+        "target_region": "v1",
+        "source_ripple_count": int(ripple_row["ripple_count"]),
+        "source_ripple_intervals_sha256": (
+            _ripple_glm_source_intervals_sha256(
+                ripple_table,
+                epoch=epoch,
+            )
+        ),
+        "ripple_provenance_sha256": _ripple_glm_provenance_sha256(
+            ripple_row
+        ),
+        "n_selected_ripples": int(
+            event_selection["n_ripples_after_window_bounds"]
+        ),
+        "selected_ripple_events_sha256": str(
+            event_selection["selected_ripple_events_sha256"]
+        ),
+        **_ripple_glm_group_snapshot(group_rows["source"], role="source"),
+        **_ripple_glm_group_snapshot(group_rows["target"], role="target"),
+        **parameter_snapshot,
+        "ripple_glm_output_rule_sha256": OUTPUT_RULE_SHA256,
+    }
+    return {
+        "ripple_glm_id": selection_uuid("RippleGLM", natural_key),
+        **natural_key,
     }
 
 
@@ -3955,6 +4233,660 @@ def _load_group_spikes(
         time_support=time_support,
         allow_empty=True,
     )
+
+
+def _load_ripple_glm_interval_inputs(
+    *,
+    nwb_file_name: str,
+    ripple_row: Mapping[str, Any],
+    epoch_row: Mapping[str, Any],
+    nwbfile_table: Any,
+) -> tuple[Any, Any]:
+    """Load RippleGLM ripple and epoch intervals from one NWB read-only."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import load_interval_set
+
+    nwb_path = Path(nwbfile_table.get_abs_path(str(nwb_file_name)))
+    with pynwb.NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=True) as io:
+        nwbfile = io.read()
+        ripple_intervals = load_interval_set(nwbfile, ripple_row)
+        epoch_interval = load_interval_set(nwbfile, epoch_row)
+    return (
+        _intervals_to_frame(
+            ripple_intervals,
+            epoch=str(epoch_row["epoch"]),
+        ),
+        epoch_interval,
+    )
+
+
+def _validate_ripple_glm_group_snapshot(
+    selection: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    role: str,
+) -> None:
+    """Require one current regional row to match its frozen role snapshot."""
+    expected = _ripple_glm_group_snapshot(row, role=role)
+    for field_name, current_value in expected.items():
+        if str(selection.get(field_name)) != str(current_value):
+            raise ValueError(
+                f"RippleGLM {role} regional sorting snapshot changed after "
+                f"selection insertion: {field_name}."
+            )
+
+
+def _load_ripple_glm_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all lightweight inputs for one RippleGLM row."""
+    from v1ca1.spyglass.ripple_glm import (
+        OUTPUT_RULE_SHA256,
+        prepare_ripple_glm_event_selection,
+    )
+
+    selection = dict(key)
+    parameters = _validate_ripple_glm_parameter_row(
+        _fetch1_dict(parameters_table, selection)
+    )
+    _validate_frozen_parameters(
+        selection,
+        parameters,
+        field_name="ripple_glm_parameters_sha256",
+    )
+    if str(selection.get("ripple_glm_output_rule_sha256")) != (
+        OUTPUT_RULE_SHA256
+    ):
+        raise ValueError(
+            "RippleGLM fixed output rule changed after selection insertion. "
+            "Create a new selection."
+        )
+    ripple_row = _fetch1_dict(ripples_table, selection)
+    epoch_row = _fetch1_dict(epoch_intervals_table, selection)
+    _validate_ripple_provenance(ripple_row, parameters)
+    if int(ripple_row["ripple_count"]) != int(
+        selection["source_ripple_count"]
+    ):
+        raise ValueError(
+            "RippleGLM selected Ripples row changed after selection insertion."
+        )
+    region_rows = {
+        role: _fetch1_dict(
+            region_sorted_spikes_group_table,
+            {
+                "region_sorted_spikes_group_id": selection[
+                    f"{role}_region_sorted_spikes_group_id"
+                ]
+            },
+        )
+        for role in ("source", "target")
+    }
+    for role, expected_region in (("source", "ca1"), ("target", "v1")):
+        row = region_rows[role]
+        if str(row.get("nwb_file_name")) != str(selection["nwb_file_name"]):
+            raise ValueError(
+                "RippleGLM regional sorting rows must remain in the "
+                "selected NWB file."
+            )
+        if str(row.get("region_name")) != expected_region:
+            raise ValueError(
+                f"RippleGLM {role} region must remain {expected_region!r}."
+            )
+        _validate_ripple_glm_group_snapshot(selection, row, role=role)
+    ripple_table, epoch_interval = _load_ripple_glm_interval_inputs(
+        nwb_file_name=str(selection["nwb_file_name"]),
+        ripple_row=ripple_row,
+        epoch_row=epoch_row,
+        nwbfile_table=nwbfile_table,
+    )
+    prepared = prepare_ripple_glm_event_selection(
+        epoch=str(selection["epoch"]),
+        ripple_table=ripple_table,
+        epoch_interval=epoch_interval,
+        **_ripple_glm_parameter_kwargs(parameters),
+    )
+    if int(prepared["n_ripples_before_selection"]) != int(
+        selection["source_ripple_count"]
+    ) or int(prepared["n_ripples_after_window_bounds"]) != int(
+        selection["n_selected_ripples"]
+    ):
+        raise ValueError(
+            "RippleGLM selected ripple counts changed after selection insertion."
+        )
+    if str(prepared["selected_ripple_events_sha256"]) != str(
+        selection["selected_ripple_events_sha256"]
+    ):
+        raise ValueError(
+            "RippleGLM selected ripple intervals changed after selection "
+            "insertion."
+        )
+    if _ripple_glm_source_intervals_sha256(
+        ripple_table,
+        epoch=str(selection["epoch"]),
+    ) != str(selection["source_ripple_intervals_sha256"]):
+        raise ValueError(
+            "RippleGLM raw source ripple intervals changed after selection "
+            "insertion."
+        )
+    if _ripple_glm_provenance_sha256(ripple_row) != str(
+        selection["ripple_provenance_sha256"]
+    ):
+        raise ValueError(
+            "RippleGLM ripple detector provenance changed after selection "
+            "insertion."
+        )
+    animal_name, session_date = _session_identity(session_table, selection)
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "ripple_row": ripple_row,
+        "epoch_row": epoch_row,
+        "region_rows": region_rows,
+        "ripple_table": ripple_table,
+        "epoch_interval": epoch_interval,
+        "animal_name": animal_name,
+        "date": session_date,
+    }
+
+
+def _load_ripple_glm_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, dict[str, Any]]:
+    """Load the selected CA1 and V1 regional groups over the epoch support."""
+    epoch_row = context["epoch_row"]
+    time_support = (
+        float(epoch_row["start_time"]),
+        float(epoch_row["stop_time"]),
+    )
+    if (
+        not all(math.isfinite(value) for value in time_support)
+        or time_support[1] <= time_support[0]
+    ):
+        raise ValueError(
+            "RippleGLM EpochIntervals must contain finite start_time < stop_time."
+        )
+    loaded = {
+        role: region_sorted_spikes_group_table.load_spikes(
+            {
+                "region_sorted_spikes_group_id": context["selection"][
+                    f"{role}_region_sorted_spikes_group_id"
+                ]
+            },
+            time_support=time_support,
+        )
+        for role in ("source", "target")
+    }
+    for role, group in loaded.items():
+        expected_count = int(context["selection"][f"{role}_n_units"])
+        expected_sha256 = str(
+            context["selection"][f"{role}_selected_units_sha256"]
+        )
+        if int(group["n_units"]) != expected_count:
+            raise ValueError(
+                f"RippleGLM {role} unit count changed after selection insertion."
+            )
+        from v1ca1.spyglass.selection import unit_identity_sha256
+
+        if unit_identity_sha256(group["unit_ids"]) != expected_sha256:
+            raise ValueError(
+                f"RippleGLM {role} unit identities changed after selection "
+                "insertion."
+            )
+    return loaded
+
+
+def _ripple_glm_upstream_provenance(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact selection snapshot embedded in RippleGLM bundles."""
+    fields = (
+        "nwb_file_name",
+        "epoch",
+        "source_region",
+        "target_region",
+        "source_ripple_count",
+        "source_ripple_intervals_sha256",
+        "ripple_provenance_sha256",
+        "n_selected_ripples",
+        "selected_ripple_events_sha256",
+        "source_sorting_group_members_sha256",
+        "source_unit_filter_params_sha256",
+        "source_selected_units_sha256",
+        "source_n_units",
+        "target_sorting_group_members_sha256",
+        "target_unit_filter_params_sha256",
+        "target_selected_units_sha256",
+        "target_n_units",
+        "ripple_glm_parameters_sha256",
+        "ripple_glm_output_rule_sha256",
+    )
+    return {
+        "ripple_glm_id": str(selection["ripple_glm_id"]),
+        "source_region_sorted_spikes_group_id": str(
+            selection["source_region_sorted_spikes_group_id"]
+        ),
+        "target_region_sorted_spikes_group_id": str(
+            selection["target_region_sorted_spikes_group_id"]
+        ),
+        **{field_name: selection[field_name] for field_name in fields},
+    }
+
+
+def _validate_ripple_glm_upstream_link(
+    upstream: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> None:
+    """Require a RippleGLM bundle to embed its exact selection snapshot."""
+    expected = _ripple_glm_upstream_provenance(selection)
+    if dict(upstream) != expected:
+        raise ValueError(
+            "RippleGLM upstream provenance does not match its immutable "
+            "selection."
+        )
+
+
+def _make_ripple_glm_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and write one immutable RippleGLM artifact bundle."""
+    from v1ca1.spyglass.ripple_glm import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        compute_ripple_glm,
+        get_ripple_glm_artifact_paths,
+        write_ripple_glm_artifact,
+    )
+
+    context = _load_ripple_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded = _load_ripple_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    result = compute_ripple_glm(
+        ripple_glm_id=selection["ripple_glm_id"],
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        ripple_table=context["ripple_table"],
+        epoch_interval=context["epoch_interval"],
+        source_spikes=loaded["source"]["ts_group"],
+        source_stable_unit_ids=loaded["source"]["unit_ids"],
+        target_spikes=loaded["target"]["ts_group"],
+        target_stable_unit_ids=loaded["target"]["unit_ids"],
+        upstream_provenance=_ripple_glm_upstream_provenance(selection),
+        expected_selected_ripple_events_sha256=selection[
+            "selected_ripple_events_sha256"
+        ],
+        parameter_name=parameters["ripple_glm_param_name"],
+        parameter_sha256=selection["ripple_glm_parameters_sha256"],
+        output_rule_sha256=selection["ripple_glm_output_rule_sha256"],
+        **_ripple_glm_parameter_kwargs(parameters),
+    )
+    _validate_ripple_glm_upstream_link(
+        result["upstream_provenance"], selection
+    )
+    if str(result["selected_ripple_events_sha256"]) != str(
+        selection["selected_ripple_events_sha256"]
+    ):
+        raise ValueError(
+            "RippleGLM computation changed its selected ripple intervals."
+        )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_ripple_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        ripple_glm_id=selection["ripple_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_ripple_glm_artifact(result, artifact_dir)
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "summary_path": str(written["summary_path"]),
+        "ripple_glm_path": str(written["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: result[field_name]
+            for field_name in (
+                "n_source_units",
+                "n_target_units",
+                "n_source_units_in_fit",
+                "n_target_units_in_fit",
+                "n_valid_target_units",
+                "n_ripples",
+                "selected_ripple_events_sha256",
+                "selected_units_sha256",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _validate_ripple_glm_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one loaded RippleGLM bundle to match its DataJoint rows."""
+    from v1ca1.spyglass.ripple_glm import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_ripple_glm_artifact_paths,
+        validate_ripple_glm_result,
+    )
+
+    validated = validate_ripple_glm_result(bundle)
+    expected_metadata = {
+        "ripple_glm_id": str(selection_row["ripple_glm_id"]),
+        "animal_name": str(animal_name),
+        "date": str(date),
+        "epoch": str(selection_row["epoch"]),
+        "source_region": "ca1",
+        "target_region": "v1",
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated.get(field_name)) != expected_value:
+            raise ValueError(
+                "RippleGLM artifact does not match its selection: "
+                f"{field_name}."
+            )
+    parameters = _validate_ripple_glm_parameter_row(parameters_row)
+    expected_parameters = {
+        "parameter_name": parameters["ripple_glm_param_name"],
+        "parameter_sha256": selection_row[
+            "ripple_glm_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "ripple_glm_output_rule_sha256"
+        ],
+        **{
+            key: value
+            for key, value in parameters.items()
+            if key != "ripple_glm_param_name"
+        },
+    }
+    if validated["parameters"] != expected_parameters:
+        raise ValueError(
+            "RippleGLM artifact parameters do not match its selection."
+        )
+    _validate_ripple_glm_upstream_link(
+        validated["upstream_provenance"], selection_row
+    )
+
+    artifact_dir = Path(result_row["artifact_manifest_path"]).parent
+    try:
+        artifact_root = artifact_dir.parents[4]
+    except IndexError as exc:
+        raise ValueError(
+            "RippleGLM artifact does not use the canonical bundle layout."
+        ) from exc
+    expected_paths = get_ripple_glm_artifact_paths(
+        animal_name=animal_name,
+        date=date,
+        epoch=str(selection_row["epoch"]),
+        ripple_glm_id=selection_row["ripple_glm_id"],
+        artifact_root=artifact_root,
+    )
+    path_fields = {
+        "artifact_manifest_path": "artifact_manifest_path",
+        "selected_units_path": "selected_units_path",
+        "summary_path": "summary_path",
+        "ripple_glm_path": "result_path",
+    }
+    for row_field, path_key in path_fields.items():
+        if Path(result_row[row_field]) != Path(expected_paths[path_key]):
+            raise ValueError(
+                "RippleGLM result paths do not use the canonical bundle "
+                f"layout: {row_field}."
+            )
+    expected_scalars = {
+        field_name: validated[field_name]
+        for field_name in (
+            "n_source_units",
+            "n_target_units",
+            "n_source_units_in_fit",
+            "n_target_units_in_fit",
+            "n_valid_target_units",
+            "n_ripples",
+            "selected_ripple_events_sha256",
+            "selected_units_sha256",
+            "analysis_status",
+            "artifact_origin",
+        )
+    }
+    expected_scalars.update(
+        {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        }
+    )
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "RippleGLM result metadata disagrees with its artifact: "
+                f"{field_name}."
+            )
+    if result_row.get("legacy_artifact_provenance") != validated.get(
+        "legacy_artifact_provenance"
+    ):
+        raise ValueError(
+            "RippleGLM result-row legacy provenance differs from its artifact."
+        )
+
+
+def _legacy_ripple_glm_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+    *,
+    role: str,
+) -> dict[str, dict[str, str]]:
+    """Map legacy imported-sorting IDs to persistent regional identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            f"Legacy RippleGLM {role} registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            f"RippleGLM {role} metadata must contain one row per selected unit."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    for group_unit_id, metadata in zip(
+        loaded_spikes["ts_group"].keys(),
+        metadata_rows,
+        strict=True,
+    ):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                f"Every RippleGLM {role} unit requires a unique "
+                "sorting_unit_id for legacy registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+            "stable_unit_id": (
+                f"{metadata['spikesorting_merge_id']}:{metadata['unit_id']}"
+            ),
+            "group_unit_id": str(group_unit_id),
+        }
+    return resolver
+
+
+def _register_existing_ripple_glm_row(
+    *,
+    key: Mapping[str, Any],
+    source_result_path: Path,
+    parameters_table: Any,
+    ripples_table: Any,
+    epoch_intervals_table: Any,
+    region_sorted_spikes_group_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Strictly reconstruct and register one existing RippleGLM NetCDF."""
+    from v1ca1.spyglass.ripple_glm import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_ripple_glm_artifact_paths,
+        register_existing_ripple_glm_artifact,
+    )
+
+    context = _load_ripple_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        ripples_table=ripples_table,
+        epoch_intervals_table=epoch_intervals_table,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+        session_table=session_table,
+        nwbfile_table=nwbfile_table,
+    )
+    loaded = _load_ripple_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    legacy_resolvers = {
+        role: _legacy_ripple_glm_unit_identity_resolver(
+            loaded[role],
+            role=role,
+        )
+        for role in ("source", "target")
+    }
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_ripple_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        epoch=str(selection["epoch"]),
+        ripple_glm_id=selection["ripple_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_ripple_glm_artifact(
+            source_result_path=Path(source_result_path),
+            destination_path=artifact_dir,
+            ripple_glm_id=selection["ripple_glm_id"],
+            animal_name=context["animal_name"],
+            date=context["date"],
+            epoch=str(selection["epoch"]),
+            ripple_table=context["ripple_table"],
+            epoch_interval=context["epoch_interval"],
+            source_spikes=loaded["source"]["ts_group"],
+            source_stable_unit_ids=loaded["source"]["unit_ids"],
+            target_spikes=loaded["target"]["ts_group"],
+            target_stable_unit_ids=loaded["target"]["unit_ids"],
+            upstream_provenance=_ripple_glm_upstream_provenance(selection),
+            expected_selected_ripple_events_sha256=selection[
+                "selected_ripple_events_sha256"
+            ],
+            parameter_name=parameters["ripple_glm_param_name"],
+            parameter_sha256=selection["ripple_glm_parameters_sha256"],
+            output_rule_sha256=selection["ripple_glm_output_rule_sha256"],
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            source_spyglass_git_commit=source_spyglass_git_commit,
+            source_sorting_type="ImportedSpikeSorting",
+            target_sorting_type="ImportedSpikeSorting",
+            source_legacy_unit_identity_resolver=legacy_resolvers["source"],
+            target_legacy_unit_identity_resolver=legacy_resolvers["target"],
+            overwrite=False,
+            **_ripple_glm_parameter_kwargs(parameters),
+        )
+        _validate_ripple_glm_upstream_link(
+            registered["upstream_provenance"], selection
+        )
+        if str(registered["selected_ripple_events_sha256"]) != str(
+            selection["selected_ripple_events_sha256"]
+        ):
+            raise ValueError(
+                "Registered RippleGLM selected ripple intervals disagree "
+                "with its selection."
+            )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    written = registered["artifact_paths"]
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "summary_path": str(written["summary_path"]),
+        "ripple_glm_path": str(written["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        **{
+            field_name: registered[field_name]
+            for field_name in (
+                "n_source_units",
+                "n_target_units",
+                "n_source_units_in_fit",
+                "n_target_units_in_fit",
+                "n_valid_target_units",
+                "n_ripples",
+                "selected_ripple_events_sha256",
+                "selected_units_sha256",
+                "analysis_status",
+            )
+        },
+        "legacy_artifact_provenance": dict(
+            registered["legacy_artifact_provenance"]
+        ),
+        "_created_artifact_paths": created_artifact_paths,
+    }
 
 
 def _make_ripple_modulation_row(
@@ -12148,6 +13080,14 @@ def _construct_tables(
         "swap_tuning_curve_comparison_register_existing",
         _register_existing_swap_tuning_curve_comparison_row,
     )
+    ripple_glm_compute_hook = runtime_hooks.get(
+        "ripple_glm_compute",
+        _make_ripple_glm_row,
+    )
+    ripple_glm_register_hook = runtime_hooks.get(
+        "ripple_glm_register_existing",
+        _register_existing_ripple_glm_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -12175,6 +13115,8 @@ def _construct_tables(
             swap_glm_register_hook,
             swap_tuning_curve_comparison_compute_hook,
             swap_tuning_curve_comparison_register_hook,
+            ripple_glm_compute_hook,
+            ripple_glm_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -15348,6 +16290,199 @@ def _construct_tables(
     SwapTuningCurveComparison = main_schema(SwapTuningCurveComparison)
     main_context["SwapTuningCurveComparison"] = SwapTuningCurveComparison
 
+    class RippleGLMParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_GLM_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one ripple population-GLM parameter row."""
+            validated = _validate_ripple_glm_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the two manuscript predictor presets."""
+            rows = [
+                _validate_ripple_glm_parameter_row(parameters)
+                for parameters in table_specs.RIPPLE_GLM_PARAMETER_PRESETS
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    RippleGLMParameters = main_schema(RippleGLMParameters)
+    main_context["RippleGLMParameters"] = RippleGLMParameters
+
+    class RippleGLMSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_GLM_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one RippleGLM row."""
+            row = _ripple_glm_selection_row(
+                key=key,
+                ripples_table=Ripples,
+                epoch_intervals_table=EpochIntervals,
+                region_sorted_spikes_group_table=RegionSortedSpikesGroup,
+                parameters_table=RippleGLMParameters,
+                nwbfile_table=nwbfile_table,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    RippleGLMSelection = main_schema(RippleGLMSelection)
+    main_context["RippleGLMSelection"] = RippleGLMSelection
+
+    class RippleGLM(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.RIPPLE_GLM_DEFINITION
+        _compute_hook = staticmethod(ripple_glm_compute_hook)
+        _register_existing_hook = staticmethod(ripple_glm_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one RippleGLM bundle."""
+            selection = _fetch1_dict(RippleGLMSelection, key)
+            artifact_row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=RippleGLMParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "ripple_glm_id": selection["ripple_glm_id"],
+                        **artifact_row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_ripple_glm_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical RippleGLM artifact bundle."""
+            from v1ca1.spyglass.ripple_glm import load_ripple_glm_artifact
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                RippleGLMSelection,
+                {"ripple_glm_id": row["ripple_glm_id"]},
+            )
+            parameters = _fetch1_dict(RippleGLMParameters, selection)
+            animal_name, session_date = _session_identity(
+                session_table, selection
+            )
+            bundle = load_ripple_glm_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_ripple_glm_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_result_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Verify, normalize, copy, and insert one legacy RippleGLM."""
+            if overwrite:
+                raise ValueError(
+                    "Registered RippleGLM results are immutable; create a "
+                    "new selection instead of overwriting."
+                )
+            selection = _fetch1_dict(RippleGLMSelection, key)
+            result_key = {"ripple_glm_id": selection["ripple_glm_id"]}
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "RippleGLM already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_result_path=Path(source_result_path),
+                    parameters_table=RippleGLMParameters,
+                    ripples_table=Ripples,
+                    epoch_intervals_table=EpochIntervals,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "ripple_glm_id": selection["ripple_glm_id"],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    RippleGLM = main_schema(RippleGLM)
+    main_context["RippleGLM"] = RippleGLM
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -15448,6 +16583,9 @@ def _construct_tables(
             SwapTuningCurveComparisonSelection
         ),
         "swap_tuning_curve_comparison": SwapTuningCurveComparison,
+        "ripple_glm_parameters": RippleGLMParameters,
+        "ripple_glm_selection": RippleGLMSelection,
+        "ripple_glm": RippleGLM,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 
