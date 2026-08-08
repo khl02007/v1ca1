@@ -62,7 +62,7 @@ def _ripples() -> pd.DataFrame:
 
 
 def _provenance() -> dict[str, object]:
-    """Return selected-RippleInterval provenance with the required detector policy."""
+    """Return selected-RippleIntervals provenance with the required detector policy."""
     return {
         "ripple_interval_list_name": "02_r1_ripples",
         "detector_zscore_threshold": 2.0,

@@ -1629,7 +1629,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert analysis_nwbfile._registry_calls == 1
 
     position_definition = bundle["position"].definition
-    for source_name in ("trajectory_intervals", "ripple_interval", "position"):
+    for source_name in ("trajectory_intervals", "ripple_intervals", "position"):
         source_definition = bundle[source_name].definition
         assert "-> EpochIntervals" in source_definition
         assert "-> Session" not in source_definition
@@ -1642,7 +1642,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     ripple_selection = bundle["ripple_modulation_selection"].definition
     assert "ripple_modulation_id: uuid" in ripple_selection
-    assert "-> RippleInterval" in ripple_selection
+    assert "-> RippleIntervals" in ripple_selection
     assert "-> RippleModulationParameters" in ripple_selection
     assert "-> RegionSortedSpikesGroup" in ripple_selection
     assert "-> SortedSpikesGroup" not in ripple_selection
@@ -2071,7 +2071,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "source_predictor_mode:" in ripple_glm_parameters
     ripple_glm_selection = bundle["ripple_glm_selection"].definition
     assert "ripple_glm_id: uuid" in ripple_glm_selection
-    assert "-> RippleInterval" in ripple_glm_selection
+    assert "-> RippleIntervals" in ripple_glm_selection
     assert "source_region_sorted_spikes_group_id=" in ripple_glm_selection
     assert "target_region_sorted_spikes_group_id=" in ripple_glm_selection
     assert "detector_zscore_threshold: double" in ripple_glm_selection
@@ -2090,7 +2090,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "min_ripple_spikes: int unsigned" in xcorr_parameters
     xcorr_selection = bundle["ripple_cross_region_xcorr_selection"].definition
     assert "ripple_cross_region_xcorr_id: uuid" in xcorr_selection
-    assert "-> RippleInterval" in xcorr_selection
+    assert "-> RippleIntervals" in xcorr_selection
     assert "source_region_sorted_spikes_group_id=" in xcorr_selection
     assert "target_region_sorted_spikes_group_id=" in xcorr_selection
     assert "selected_ripple_intervals_sha256: char(64)" in xcorr_selection

@@ -380,7 +380,7 @@ def _validate_upstream_provenance(
     *,
     parameters: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    """Require the selected RippleInterval row to carry fixed detector provenance."""
+    """Require the selected RippleIntervals row to carry fixed detector provenance."""
     if not isinstance(upstream_provenance, Mapping):
         raise TypeError("upstream_provenance must be a mapping.")
     raw = dict(upstream_provenance)
@@ -392,7 +392,7 @@ def _validate_upstream_provenance(
     if missing:
         raise ValueError(
             "upstream_provenance must contain detector_zscore_threshold and "
-            "speed_gated from the selected RippleInterval row."
+            "speed_gated from the selected RippleIntervals row."
         )
     detector_value = raw["detector_zscore_threshold"]
     if isinstance(detector_value, bool) or not isinstance(detector_value, Real):
@@ -417,9 +417,13 @@ def _validate_upstream_provenance(
         rtol=0.0,
         atol=1e-12,
     ):
-        raise ValueError("Selected RippleInterval detector threshold does not equal 2.0.")
+        raise ValueError(
+            "Selected RippleIntervals detector threshold does not equal 2.0."
+        )
     if not speed_gated:
-        raise ValueError("Selected RippleInterval provenance must have speed_gated=True.")
+        raise ValueError(
+            "Selected RippleIntervals provenance must have speed_gated=True."
+        )
     return normalized, encoded
 
 

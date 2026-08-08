@@ -62,8 +62,8 @@ def test_ingest_dry_run_never_activates_tables(monkeypatch) -> None:
     )
 
     assert result["inserted"] is False
-    assert result["counts"]["ripple_interval"] == 1
-    assert result["rows"]["ripple_interval"] == catalog["ripples"]
+    assert result["counts"]["ripple_intervals"] == 1
+    assert result["rows"]["ripple_intervals"] == catalog["ripples"]
 
 
 def test_non_dry_ingestion_rejects_unverifiable_open_nwb_object() -> None:

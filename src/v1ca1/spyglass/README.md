@@ -40,16 +40,17 @@ register artifacts, or write to NWB.
 
 ## NWB source catalog
 
-The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleInterval`,
+The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleIntervals`,
 `Position`, `WTrackGraph`, and `SpikeSortingFigurl`. They store object paths,
 object IDs, row selectors, and small metadata rather than duplicating NWB
 arrays. Source loaders reopen the registered NWB read-only.
-`TrajectoryIntervals`, `RippleInterval`, and `Position` depend directly on
+`TrajectoryIntervals`, `RippleIntervals`, and `Position` depend directly on
 `EpochIntervals`, which enforces an audited parent for every epoch-specific
 source row. A provenance-selected ripple epoch is inserted even when its NWB
 interval table has no events; that row has `ripple_count=0`.
-`RippleInterval` indexes the existing NWB `/intervals/ripples` source; the
-project table name does not rename or rewrite that NWB object.
+Each `RippleIntervals` row catalogs all ripple start/stop intervals for one
+epoch. It indexes the existing NWB `/intervals/ripples` source; the project
+table name does not rename or rewrite that NWB object.
 
 `Position` is keyed by `epoch` and the actual `position_series_name`, with a
 descriptive `position_role`. The current augmented files catalog both
@@ -112,7 +113,7 @@ flowchart LR
     Session --> SpikeSortingFigurl
     EpochIntervals --> Position
     EpochIntervals --> TrajectoryIntervals
-    EpochIntervals --> RippleInterval
+    EpochIntervals --> RippleIntervals
     SortedSpikesGroup["Spyglass SortedSpikesGroup"] --> RegionSortedSpikesGroup
     RegionSortedSpikesGroup --> MovementFiringRate
     Position --> MovementFiringRate
@@ -121,7 +122,7 @@ flowchart LR
 ```
 
 `WTrackGraph` and `SpikeSortingFigurl` are session-level catalog tables;
-`Position`, `TrajectoryIntervals`, and `RippleInterval` are epoch-level children.
+`Position`, `TrajectoryIntervals`, and `RippleIntervals` are epoch-level children.
 `RegionSortedSpikesGroup` is the only project table that directly selects
 standard `SortedSpikesGroup`; every spike-using analysis, including
 `MovementFiringRate`, selects the regional view. `AnalysisNwbfile` currently
@@ -183,9 +184,9 @@ The important multiplicities and exceptions are:
 
 ```mermaid
 flowchart LR
-    RippleInterval --> RippleModulation
-    RippleInterval --> RippleGLM
-    RippleInterval --> RippleCrossRegionXCorr
+    RippleIntervals --> RippleModulation
+    RippleIntervals --> RippleGLM
+    RippleIntervals --> RippleCrossRegionXCorr
     RegionSortedSpikesGroup --> RippleModulation
     RegionSortedSpikesGroup --> RippleGLM
     RegionSortedSpikesGroup --> RippleCrossRegionXCorr
@@ -193,7 +194,7 @@ flowchart LR
 
 `RippleModulation` selects one regional spike group. `RippleGLM` and
 `RippleCrossRegionXCorr` each select separate CA1 and V1 regional groups. All
-three select the persisted `RippleInterval` row and are currently leaves.
+three select the persisted `RippleIntervals` row and are currently leaves.
 
 The diagrams show declared dependencies after collapsing each Parameters,
 Selection, and result-table chain. At runtime, NWB-backed loaders also resolve
@@ -209,14 +210,14 @@ not drawn as extra foreign-key edges.
 Ripple modulation uses:
 
 ```text
-RippleInterval + EpochIntervals + RippleModulationParameters
+RippleIntervals + EpochIntervals + RippleModulationParameters
     + RegionSortedSpikesGroup
     -> RippleModulationSelection (ripple_modulation_id)
     -> RippleModulation
     -> summary.parquet + peri_ripple_firing_rate.parquet
 ```
 
-The canonical `RippleInterval` rows contain the speed-gated events that passed the
+The canonical `RippleIntervals` rows contain the speed-gated events that passed the
 detector. The default parameters require the source detector threshold to be
 2.0 and require `speed_gated=True`. `RippleModulation` uses every event in that
 selected source row; it has no downstream ripple-mean-z-score threshold. A
@@ -225,7 +226,7 @@ selected row with `ripple_count=0` remains an explicit `no_ripples` result.
 Ripple population encoding uses:
 
 ```text
-RippleInterval + EpochIntervals
+RippleIntervals + EpochIntervals
     + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
     + RippleGLMParameters
     -> RippleGLMSelection (ripple_glm_id)
@@ -250,7 +251,7 @@ NetCDF artifacts rather than becoming one DataJoint row per unit.
 Ripple-restricted cross-region correlation uses:
 
 ```text
-RippleInterval + EpochIntervals
+RippleIntervals + EpochIntervals
     + CA1 RegionSortedSpikesGroup + V1 RegionSortedSpikesGroup
     + RippleCrossRegionXCorrParameters
     -> RippleCrossRegionXCorrSelection (ripple_cross_region_xcorr_id)
@@ -260,7 +261,7 @@ RippleInterval + EpochIntervals
 ```
 
 Each result covers one epoch and only the exact start/end intervals in its
-selected `RippleInterval` row; it does not pool epochs, substitute generic intervals,
+selected `RippleIntervals` row; it does not pool epochs, substitute generic intervals,
 or construct fixed event windows. The fixed manuscript rule uses CA1 as the
 reference and V1 as the target, 5-ms bins, lags through 0.5 s, normalized
 correlation, and at least 30 ripple spikes per included unit. Both groups must

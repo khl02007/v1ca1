@@ -62,7 +62,7 @@ source_object_id = NULL: varchar(64)
 """
 
 
-RIPPLE_INTERVAL_DEFINITION = """
+RIPPLE_INTERVALS_DEFINITION = """
 # One augmented-NWB ripple selector; individual events remain in NWB.
 -> EpochIntervals
 ---
@@ -388,7 +388,7 @@ RIPPLE_MODULATION_SELECTION_DEFINITION = """
 # One immutable ripple epoch and regional spike-group selection.
 ripple_modulation_id: uuid
 ---
--> RippleInterval
+-> RippleIntervals
 -> RippleModulationParameters
 -> RegionSortedSpikesGroup
 ripple_modulation_parameters_sha256: char(64)
@@ -1040,7 +1040,7 @@ RIPPLE_GLM_SELECTION_DEFINITION = """
 # One immutable epoch-level CA1-to-V1 ripple population-GLM selection.
 ripple_glm_id: uuid
 ---
--> RippleInterval
+-> RippleIntervals
 -> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RippleGLMParameters
@@ -1110,7 +1110,7 @@ RIPPLE_CROSS_REGION_XCORR_SELECTION_DEFINITION = """
 # One immutable epoch-level exact-ripple CA1-to-V1 xcorr selection.
 ripple_cross_region_xcorr_id: uuid
 ---
--> RippleInterval
+-> RippleIntervals
 -> RegionSortedSpikesGroup.proj(source_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RegionSortedSpikesGroup.proj(target_region_sorted_spikes_group_id='region_sorted_spikes_group_id')
 -> RippleCrossRegionXCorrParameters
@@ -1985,7 +1985,7 @@ TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
         "trajectory_intervals": TRAJECTORY_INTERVALS_DEFINITION,
-        "ripple_interval": RIPPLE_INTERVAL_DEFINITION,
+        "ripple_intervals": RIPPLE_INTERVALS_DEFINITION,
         "position": POSITION_DEFINITION,
         "wtrack_graph": WTRACK_GRAPH_DEFINITION,
         "spike_sorting_figurl": SPIKE_SORTING_FIGURL_DEFINITION,

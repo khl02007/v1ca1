@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 SOURCE_TABLE_KEYS = (
     "epoch_intervals",
     "trajectory_intervals",
-    "ripple_interval",
+    "ripple_intervals",
     "position",
     "wtrack_graph",
     "spike_sorting_figurl",
@@ -22,7 +22,7 @@ SOURCE_TABLE_KEYS = (
 NWB_CATALOG_KEY_BY_TABLE = {
     "epoch_intervals": "epoch_intervals",
     "trajectory_intervals": "trajectory_intervals",
-    "ripple_interval": "ripples",
+    "ripple_intervals": "ripples",
     "position": "position",
     "wtrack_graph": "wtrack_graph",
     "spike_sorting_figurl": "spike_sorting_figurl",

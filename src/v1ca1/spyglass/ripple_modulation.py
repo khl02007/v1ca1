@@ -267,7 +267,7 @@ def compute_epoch_region_ripple_modulation(
 
     ``ripple_table`` is expected to contain detector-qualified, speed-gated
     events loaded from the NWB/ingestion layer. All its events for ``epoch``
-    are used; event detection criteria belong to the selected ``RippleInterval``
+    are used; event detection criteria belong to the selected ``RippleIntervals``
     source row rather than this downstream computation.
     """
     timestamps = np.asarray(epoch_timestamps, dtype=float)

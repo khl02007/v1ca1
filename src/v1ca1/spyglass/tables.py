@@ -24,7 +24,7 @@ from v1ca1.spyglass import table_specs
 SOURCE_TABLE_KEYS = (
     "epoch_intervals",
     "trajectory_intervals",
-    "ripple_interval",
+    "ripple_intervals",
     "position",
     "wtrack_graph",
     "spike_sorting_figurl",
@@ -1128,14 +1128,14 @@ def _ripple_detector_values(
         actual_threshold, Real
     ):
         raise TypeError(
-            "RippleInterval.detector_zscore_threshold must be one numeric scalar."
+            "RippleIntervals.detector_zscore_threshold must be one numeric scalar."
         )
     threshold = float(actual_threshold)
     if not math.isfinite(threshold):
-        raise ValueError("RippleInterval.detector_zscore_threshold must be finite.")
+        raise ValueError("RippleIntervals.detector_zscore_threshold must be finite.")
     speed_gated = _database_bool(
         ripple_row.get("speed_gated"),
-        name="RippleInterval.speed_gated",
+        name="RippleIntervals.speed_gated",
     )
     return threshold, speed_gated
 
@@ -1153,11 +1153,13 @@ def _validate_ripple_provenance(
         abs_tol=1e-12,
     ):
         raise ValueError(
-            "RippleInterval.detector_zscore_threshold does not match "
+            "RippleIntervals.detector_zscore_threshold does not match "
             "expected_detector_zscore_threshold."
         )
     if parameters["require_speed_gated"] and not speed_gated:
-        raise ValueError("Selected RippleInterval row must be explicitly speed-gated.")
+        raise ValueError(
+            "Selected RippleIntervals row must be explicitly speed-gated."
+        )
 
 
 def _parameter_kwargs(parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -1447,7 +1449,7 @@ def _ripple_glm_selection_row(
         ripple_row["ripple_count"]
     ):
         raise ValueError(
-            "RippleInterval.ripple_count disagrees with its NWB interval data."
+            "RippleIntervals.ripple_count disagrees with its NWB interval data."
         )
     if dict(OUTPUT_RULE) != dict(table_specs.RIPPLE_GLM_OUTPUT_RULE):
         raise RuntimeError(
@@ -1581,7 +1583,7 @@ def _ripple_cross_region_xcorr_selection_row(
     normalized_ripples = event_selection["selected_ripple_table"]
     if int(event_selection["n_ripples"]) != int(ripple_row["ripple_count"]):
         raise ValueError(
-            "RippleInterval.ripple_count disagrees with its NWB interval data."
+            "RippleIntervals.ripple_count disagrees with its NWB interval data."
         )
     if dict(ripple_cross_region_xcorr.OUTPUT_RULE) != dict(
         table_specs.RIPPLE_CROSS_REGION_XCORR_OUTPUT_RULE
@@ -5419,7 +5421,7 @@ def _load_ripple_glm_context(
         selection["source_ripple_count"]
     ):
         raise ValueError(
-            "RippleGLM selected RippleInterval row changed after selection insertion."
+            "RippleGLM selected RippleIntervals row changed after selection insertion."
         )
     region_rows = {
         role: _fetch1_dict(
@@ -6128,7 +6130,7 @@ def _load_ripple_cross_region_xcorr_context(
         selection["source_ripple_count"]
     ):
         raise ValueError(
-            "RippleCrossRegionXCorr selected RippleInterval row changed after selection "
+            "RippleCrossRegionXCorr selected RippleIntervals row changed after selection "
             "insertion."
         )
     region_rows = {
@@ -6706,7 +6708,7 @@ def _make_ripple_modulation_row(
     if int(result["n_ripples"]) != int(ripple_row["ripple_count"]):
         raise ValueError(
             "RippleModulation ripple count does not match the selected "
-            "RippleInterval catalog row."
+            "RippleIntervals catalog row."
         )
     path_kwargs: dict[str, Any] = {}
     if artifact_root is not None:
@@ -7082,7 +7084,7 @@ def _register_existing_ripple_modulation_row(
     ):
         raise ValueError(
             "Existing artifact n_ripples does not match the selected "
-            "RippleInterval catalog row."
+            "RippleIntervals catalog row."
         )
     created_artifact_paths = [
         str(copy["destination"])
@@ -15973,8 +15975,8 @@ def _construct_tables(
     TrajectoryIntervals = main_schema(TrajectoryIntervals)
     main_context["TrajectoryIntervals"] = TrajectoryIntervals
 
-    class RippleInterval(spyglass_mixin, dj_module.Manual):
-        definition = table_specs.RIPPLE_INTERVAL_DEFINITION
+    class RippleIntervals(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.RIPPLE_INTERVALS_DEFINITION
 
         @classmethod
         def load_intervals(cls, key: Mapping[str, Any]) -> Any:
@@ -15988,8 +15990,8 @@ def _construct_tables(
                 loader=load_interval_set,
             )
 
-    RippleInterval = main_schema(RippleInterval)
-    main_context["RippleInterval"] = RippleInterval
+    RippleIntervals = main_schema(RippleIntervals)
+    main_context["RippleIntervals"] = RippleIntervals
 
     class Position(spyglass_mixin, dj_module.Manual):
         definition = table_specs.POSITION_DEFINITION
@@ -16691,7 +16693,7 @@ def _construct_tables(
             """Validate, freeze, identify, and insert one selection."""
             row = _ripple_modulation_selection_row(
                 key=key,
-                ripples_table=RippleInterval,
+                ripples_table=RippleIntervals,
                 epoch_intervals_table=EpochIntervals,
                 parameters_table=RippleModulationParameters,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
@@ -16714,7 +16716,7 @@ def _construct_tables(
                 self._compute_hook(
                     key=selection,
                     parameters_table=RippleModulationParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     epoch_intervals_table=EpochIntervals,
                     session_table=session_table,
                     region_sorted_spikes_group_table=(
@@ -16781,7 +16783,7 @@ def _construct_tables(
                     ),
                     overwrite=False,
                     parameters_table=RippleModulationParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     session_table=session_table,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -19593,7 +19595,7 @@ def _construct_tables(
             """Validate, freeze, identify, and insert one RippleGLM row."""
             row = _ripple_glm_selection_row(
                 key=key,
-                ripples_table=RippleInterval,
+                ripples_table=RippleIntervals,
                 epoch_intervals_table=EpochIntervals,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
                 parameters_table=RippleGLMParameters,
@@ -19617,7 +19619,7 @@ def _construct_tables(
                 self._compute_hook(
                     key=selection,
                     parameters_table=RippleGLMParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -19705,7 +19707,7 @@ def _construct_tables(
                     key=selection,
                     source_result_path=Path(source_result_path),
                     parameters_table=RippleGLMParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -19788,7 +19790,7 @@ def _construct_tables(
             """Validate, freeze, identify, and insert one exact-ripple xcorr."""
             row = _ripple_cross_region_xcorr_selection_row(
                 key=key,
-                ripples_table=RippleInterval,
+                ripples_table=RippleIntervals,
                 epoch_intervals_table=EpochIntervals,
                 region_sorted_spikes_group_table=RegionSortedSpikesGroup,
                 parameters_table=RippleCrossRegionXCorrParameters,
@@ -19814,7 +19816,7 @@ def _construct_tables(
                 self._compute_hook(
                     key=selection,
                     parameters_table=RippleCrossRegionXCorrParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -19922,7 +19924,7 @@ def _construct_tables(
                     source_summary_path=Path(source_summary_path),
                     source_result_path=Path(source_result_path),
                     parameters_table=RippleCrossRegionXCorrParameters,
-                    ripples_table=RippleInterval,
+                    ripples_table=RippleIntervals,
                     epoch_intervals_table=EpochIntervals,
                     region_sorted_spikes_group_table=(
                         RegionSortedSpikesGroup
@@ -19990,7 +19992,7 @@ def _construct_tables(
     return {
         "epoch_intervals": EpochIntervals,
         "trajectory_intervals": TrajectoryIntervals,
-        "ripple_interval": RippleInterval,
+        "ripple_intervals": RippleIntervals,
         "position": Position,
         "wtrack_graph": WTrackGraph,
         "spike_sorting_figurl": SpikeSortingFigurl,
