@@ -314,7 +314,8 @@ The standalone `task_progression.swap_tuning_curve_comparison` default remains
 `RippleGLM` fits the fixed CA1-to-V1 ripple population model once per epoch.
 Its selection may use different standard sorted-spikes groups for CA1 and V1,
 but both groups and the ripple row must belong to the same NWB file. It freezes
-the raw ripple start/end digest, detector/NWB-object provenance, the exact
+the actual detector threshold and speed-gated flag, raw ripple start/end
+digest, detector/NWB-object provenance, the exact
 single-ripple windows retained after epoch clipping, both regional unit
 snapshots, and the parameter/output hashes. The two manuscript presets use a
 0.2-s zero-offset window, five folds, 100 shuffles, ridge 0.1, seed 45, and
@@ -508,9 +509,10 @@ It does not register legacy cross-epoch joins or cross-trajectory-transfer
 outputs.
 `RippleGLM.register_existing()` accepts one legacy NetCDF only when both
 regional views resolve uniquely to `ImportedSpikeSorting` unit IDs. It
-reconstructs the selected ripple windows, source/target counts, folds,
-metrics, and coefficients from the selected NWB-backed inputs before writing
-the canonical UUID bundle.
+verifies the NWB-derived event/window coordinates, resolved unit axes, target
+count matrices, fold layout, metric arithmetic, and coefficient axes, shape,
+and finiteness before writing the canonical UUID bundle. It does not refit the
+model or compare coefficient values against an independent refit.
 `MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle
 atomically. `PathProgressionDecodingComparison` is also compute-only: legacy
 decoding NPZs omit selected-unit identities, sorting and graph snapshots,

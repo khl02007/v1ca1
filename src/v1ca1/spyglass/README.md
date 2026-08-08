@@ -118,8 +118,9 @@ Ripples + EpochIntervals
 
 Each row models one epoch in the fixed CA1-to-V1 direction. CA1 and V1 may
 come from different standard sorted-spikes groups, but both regional views
-must belong to the selected ripple NWB. The selection freezes every raw ripple
-start/end pair, detector and NWB-object provenance, the exact events retained
+must belong to the selected ripple NWB. The selection freezes the actual
+detector threshold and speed-gated flag, every raw ripple start/end pair,
+detector and NWB-object provenance, the exact events retained
 by single-ripple selection and source/target window clipping, both unit
 snapshots, and all parameter/output hashes. The manuscript presets share
 0.2-s zero-offset source and target windows, five folds, 100 shuffle refits,
@@ -586,9 +587,11 @@ written and validated together. `RippleModulation`,
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
 Ripple-GLM registration requires both regional views to resolve uniquely to
-`ImportedSpikeSorting` IDs. It reconstructs NWB-backed ripple windows,
-source/target counts, folds, metrics, and coefficients before accepting and
-normalizing the legacy NetCDF.
+`ImportedSpikeSorting` IDs. It verifies NWB-backed event/window coordinates,
+resolved unit axes, target count matrices, fold layout, metric arithmetic, and
+coefficient axes, shape, and finiteness before accepting and normalizing the
+legacy NetCDF. It does not refit the model or compare coefficient values
+against an independent refit.
 Tuning-curve registration accepts only the legacy-compatible all-trial preset;
 odd/even rows are recomputed from NWB. It also requires the legacy cleaned-DLC
 `head_position` source, its 10-sample analysis offset, and the 4.0 cm/s,

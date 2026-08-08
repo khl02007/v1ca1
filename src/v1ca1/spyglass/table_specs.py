@@ -878,6 +878,8 @@ ripple_glm_id: uuid
 source_region: enum('ca1')
 target_region: enum('v1')
 source_ripple_count: int unsigned
+detector_zscore_threshold: double
+speed_gated: bool
 source_ripple_intervals_sha256: char(64)
 ripple_provenance_sha256: char(64)
 n_selected_ripples: int unsigned
@@ -1557,7 +1559,7 @@ RIPPLE_GLM_OUTPUT_RULE = MappingProxyType(
             "explicit_for_no_units_no_or_insufficient_ripples_and_no_eligible_units"
         ),
         "legacy_registration_policy": (
-            "imported_sorting_identity_resolved_then_reconstruct_events_windows_counts_folds_and_metrics"
+            "imported_sorting_identity_resolved_then_verify_nwb_event_windows_target_counts_fold_layout_metric_self_consistency_and_coefficient_axes_shape_finiteness"
         ),
         "time_unit": "s",
         "time_reference": "augmented_nwb_ephys_timestamps",

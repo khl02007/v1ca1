@@ -220,6 +220,18 @@ def test_parameters_freeze_manuscript_ripple_input_policy() -> None:
         validate_ripple_glm_parameters(expected_detector_zscore_threshold=2.5)
     with pytest.raises(ValueError, match="speed-gated"):
         validate_ripple_glm_parameters(require_speed_gated=False)
+    assert validate_ripple_glm_parameters(
+        require_speed_gated=np.bool_(True)
+    )["require_speed_gated"] is True
+    assert validate_ripple_glm_parameters(
+        require_speed_gated=np.int64(1)
+    )["require_speed_gated"] is True
+    with pytest.raises(ValueError, match="speed-gated"):
+        validate_ripple_glm_parameters(require_speed_gated=np.int64(0))
+    with pytest.raises(TypeError, match="bool or database integer"):
+        validate_ripple_glm_parameters(require_speed_gated="true")
+    with pytest.raises(TypeError, match="bool or database integer"):
+        validate_ripple_glm_parameters(require_speed_gated=2)
 
 
 def test_parameters_preserve_asymmetric_windows_and_modes() -> None:
@@ -309,6 +321,37 @@ def test_compute_delegates_fit_and_audits_all_input_units(
 
 
 @pytest.mark.parametrize(
+    ("provenance_update", "expected_error"),
+    (
+        ({"detector_zscore_threshold": 2.5}, "threshold must equal 2.0"),
+        ({"speed_gated": False}, "speed_gated=True"),
+        ({"speed_gated": "true"}, "bool or database integer"),
+    ),
+)
+def test_compute_requires_fixed_ripple_input_provenance(
+    inputs: dict[str, object],
+    provenance_update: dict[str, object],
+    expected_error: str,
+) -> None:
+    kwargs = dict(inputs)
+    kwargs["upstream_provenance"] = {
+        **dict(inputs["upstream_provenance"]),
+        **provenance_update,
+    }
+    with pytest.raises((TypeError, ValueError), match=expected_error):
+        compute_ripple_glm(**kwargs)
+
+
+def test_compute_requires_detector_fields_in_upstream_provenance(
+    inputs: dict[str, object],
+) -> None:
+    kwargs = dict(inputs)
+    kwargs["upstream_provenance"] = {"ripples_id": "ripples"}
+    with pytest.raises(ValueError, match="must contain detector_zscore_threshold"):
+        compute_ripple_glm(**kwargs)
+
+
+@pytest.mark.parametrize(
     ("mutation", "expected_status"),
     (
         ("no_source", "no_source_units"),
@@ -394,6 +437,18 @@ def test_validation_rejects_false_unit_inclusion(
         "included_in_fit",
     ] = True
     with pytest.raises(ValueError, match="threshold-passing"):
+        validate_ripple_glm_result(tampered)
+
+
+def test_validation_rejects_wrong_ripple_input_provenance(
+    computed: dict[str, object],
+) -> None:
+    tampered = dict(computed)
+    tampered["upstream_provenance"] = {
+        **dict(computed["upstream_provenance"]),
+        "detector_zscore_threshold": 2.5,
+    }
+    with pytest.raises(ValueError, match="threshold must equal 2.0"):
         validate_ripple_glm_result(tampered)
 
 
@@ -492,6 +547,14 @@ def test_register_existing_reconstructs_nwb_inputs_and_roundtrips(
     assert registered["legacy_artifact_provenance"]["source_spyglass_git_commit"] == (
         "sg-commit"
     )
+    expected_policy = (
+        "imported_sorting_identity_resolved_then_verify_nwb_event_windows_target_counts_"
+        "fold_layout_metric_self_consistency_and_coefficient_axes_shape_finiteness"
+    )
+    assert artifact_module.OUTPUT_RULE["legacy_registration_policy"] == expected_policy
+    assert registered["legacy_artifact_provenance"]["registration_validation"] == (
+        expected_policy
+    )
     loaded = load_ripple_glm_artifact(destination)
     assert loaded["selected_ripple_events_sha256"] == computed[
         "selected_ripple_events_sha256"
@@ -513,6 +576,27 @@ def test_register_existing_rejects_spike_count_tamper(
             destination_path=tmp_path / str(inputs["ripple_glm_id"]),
             **_registration_identity_kwargs(inputs),
             **inputs,
+        )
+
+
+def test_register_existing_requires_fixed_ripple_input_provenance(
+    tmp_path: Path,
+    inputs: dict[str, object],
+    computed: dict[str, object],
+) -> None:
+    source = tmp_path / "legacy.nc"
+    _legacy_dataset_from_computed(computed).to_netcdf(source)
+    kwargs = dict(inputs)
+    kwargs["upstream_provenance"] = {
+        **dict(inputs["upstream_provenance"]),
+        "speed_gated": False,
+    }
+    with pytest.raises(ValueError, match="speed_gated=True"):
+        register_existing_ripple_glm_artifact(
+            source_result_path=source,
+            destination_path=tmp_path / str(inputs["ripple_glm_id"]),
+            **_registration_identity_kwargs(inputs),
+            **kwargs,
         )
 
 

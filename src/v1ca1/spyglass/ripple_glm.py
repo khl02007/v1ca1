@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
+from numbers import Integral, Real
 import os
 from pathlib import Path
 import shutil
@@ -77,7 +78,8 @@ OUTPUT_RULE = {
         "explicit_for_no_units_no_or_insufficient_ripples_and_no_eligible_units"
     ),
     "legacy_registration_policy": (
-        "imported_sorting_identity_resolved_then_reconstruct_events_windows_counts_folds_and_metrics"
+        "imported_sorting_identity_resolved_then_verify_nwb_event_windows_target_counts_"
+        "fold_layout_metric_self_consistency_and_coefficient_axes_shape_finiteness"
     ),
     "time_unit": "s",
     "time_reference": "augmented_nwb_ephys_timestamps",
@@ -217,6 +219,15 @@ def _table_sha256(table: pd.DataFrame) -> str:
     return hashlib.sha256(hashed.tobytes()).hexdigest()
 
 
+def _database_bool(value: Any, *, name: str) -> bool:
+    """Normalize one bool or database integer 0/1 without accepting truthy junk."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, Integral) and int(value) in (0, 1):
+        return bool(int(value))
+    raise TypeError(f"{name} must be a bool or database integer 0/1.")
+
+
 def get_ripple_glm_artifact_paths(
     *,
     animal_name: str,
@@ -310,7 +321,7 @@ def validate_ripple_glm_parameters(
         raise ValueError(
             "RippleGLM requires detector events selected at z-score threshold 2.0."
         )
-    if require_speed_gated is not True:
+    if not _database_bool(require_speed_gated, name="require_speed_gated"):
         raise ValueError("RippleGLM requires speed-gated ripple events.")
     integers: dict[str, int] = {}
     for name, raw, minimum in (
@@ -391,6 +402,44 @@ def _canonical_json_mapping(value: Mapping[str, Any], *, name: str) -> tuple[dic
         normalized = json.loads(encoded)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"{name} must be JSON serializable.") from exc
+    return normalized, encoded
+
+
+def _validate_upstream_provenance(
+    upstream_provenance: Mapping[str, Any],
+    *,
+    parameters: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Require provenance for the fixed threshold-2 speed-gated ripple input."""
+    normalized, encoded = _canonical_json_mapping(
+        upstream_provenance, name="upstream_provenance"
+    )
+    try:
+        detector_threshold = normalized["detector_zscore_threshold"]
+        speed_gated = normalized["speed_gated"]
+    except KeyError as exc:
+        raise ValueError(
+            "upstream_provenance must contain detector_zscore_threshold and "
+            "speed_gated from the selected Ripples row."
+        ) from exc
+    if isinstance(detector_threshold, bool) or not isinstance(
+        detector_threshold, Real
+    ):
+        raise TypeError(
+            "upstream_provenance detector_zscore_threshold must be numeric."
+        )
+    detector_threshold = float(detector_threshold)
+    if not np.isfinite(detector_threshold) or not np.isclose(
+        detector_threshold,
+        float(parameters["expected_detector_zscore_threshold"]),
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise ValueError("Selected Ripples detector threshold must equal 2.0.")
+    if not _database_bool(
+        speed_gated, name="upstream_provenance speed_gated"
+    ):
+        raise ValueError("Selected Ripples provenance must have speed_gated=True.")
     return normalized, encoded
 
 
@@ -1066,8 +1115,8 @@ def compute_ripple_glm(
         output_rule_sha256=output_rule_sha256,
         **parameter_values,
     )
-    normalized_provenance, provenance_json = _canonical_json_mapping(
-        upstream_provenance, name="upstream_provenance"
+    normalized_provenance, provenance_json = _validate_upstream_provenance(
+        upstream_provenance, parameters=parameters
     )
     source_identity = _identity_table(
         source_spikes, source_stable_unit_ids, role=SOURCE_ROLE, region=SOURCE_REGION
@@ -1682,8 +1731,8 @@ def validate_ripple_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
         output_rule_sha256=raw_parameters.get("output_rule_sha256"),
         **{key: raw_parameters[key] for key in parameter_keys},
     )
-    normalized_provenance, provenance_json = _canonical_json_mapping(
-        result.get("upstream_provenance"), name="upstream_provenance"
+    normalized_provenance, provenance_json = _validate_upstream_provenance(
+        result.get("upstream_provenance"), parameters=parameters
     )
     selected_event_hash = str(result.get("selected_ripple_events_sha256", ""))
     if len(selected_event_hash) != 64:
@@ -2232,7 +2281,7 @@ def _validate_legacy_against_inputs(
     target_legacy_unit_identity_resolver: Mapping[Any, Mapping[str, Any]]
     | Callable[[Any], Mapping[str, Any]],
 ) -> Any:
-    """Match legacy events, units, counts, folds, and scientific arithmetic."""
+    """Verify legacy input alignment, metric arithmetic, and coefficient shape."""
     expected_attrs = {
         "animal_name": metadata["animal_name"],
         "date": metadata["date"],
@@ -2419,8 +2468,8 @@ def register_existing_ripple_glm_artifact(
         output_rule_sha256=output_rule_sha256,
         **parameter_values,
     )
-    normalized_provenance, provenance_json = _canonical_json_mapping(
-        upstream_provenance, name="upstream_provenance"
+    normalized_provenance, provenance_json = _validate_upstream_provenance(
+        upstream_provenance, parameters=parameters
     )
     source_identity = _identity_table(
         source_spikes, source_stable_unit_ids, role=SOURCE_ROLE, region=SOURCE_REGION
@@ -2481,9 +2530,7 @@ def register_existing_ripple_glm_artifact(
         "source_spyglass_git_commit": (
             "unknown" if source_spyglass_git_commit is None else str(source_spyglass_git_commit)
         ),
-        "registration_validation": (
-            "imported_identity_resolved_exact_nwb_events_windows_counts_folds_metrics_and_coefficients"
-        ),
+        "registration_validation": OUTPUT_RULE["legacy_registration_policy"],
     }
     dataset, quality = _canonicalize_dataset(
         legacy_dataset,

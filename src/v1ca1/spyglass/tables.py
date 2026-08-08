@@ -43,6 +43,15 @@ _DPP_FULL_GRAPH_CONFIGURATION_NAME = "full_w"
 _SWAP_TUNING_EPOCH_ROLES = ("dark", "light_train", "light_test")
 
 
+def _database_bool(value: Any, *, name: str) -> bool:
+    """Normalize one DataJoint-compatible bool without accepting truthy junk."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, Integral) and int(value) in (0, 1):
+        return bool(int(value))
+    raise TypeError(f"{name} must be a bool or database integer 0/1.")
+
+
 def _validate_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one all-scalar RippleModulation parameter row."""
     expected = set(table_specs.DEFAULT_RIPPLE_MODULATION_PARAMETERS)
@@ -741,10 +750,18 @@ def _validate_ripple_glm_parameter_row(
             "ripple_glm_param_name must be a non-empty string of at most "
             "64 characters."
         )
+    values["require_speed_gated"] = _database_bool(
+        values["require_speed_gated"],
+        name="require_speed_gated",
+    )
+    values["source_target_windows_differ"] = _database_bool(
+        values["source_target_windows_differ"],
+        name="source_target_windows_differ",
+    )
     validated = validate_ripple_glm_parameters(
         **_ripple_glm_parameter_kwargs(values)
     )
-    expected_derived = bool(values["source_target_windows_differ"])
+    expected_derived = values["source_target_windows_differ"]
     if bool(validated["source_target_windows_differ"]) != expected_derived:
         raise ValueError(
             "source_target_windows_differ does not match the effective "
@@ -988,14 +1005,35 @@ def _intervals_to_frame(intervals: Any, *, epoch: str) -> Any:
     return frame
 
 
+def _ripple_detector_values(
+    ripple_row: Mapping[str, Any],
+) -> tuple[float, bool]:
+    """Return validated detector threshold and database-safe speed gate."""
+    actual_threshold = ripple_row.get("detector_zscore_threshold")
+    if isinstance(actual_threshold, bool) or not isinstance(
+        actual_threshold, Real
+    ):
+        raise TypeError(
+            "Ripples.detector_zscore_threshold must be one numeric scalar."
+        )
+    threshold = float(actual_threshold)
+    if not math.isfinite(threshold):
+        raise ValueError("Ripples.detector_zscore_threshold must be finite.")
+    speed_gated = _database_bool(
+        ripple_row.get("speed_gated"),
+        name="Ripples.speed_gated",
+    )
+    return threshold, speed_gated
+
+
 def _validate_ripple_provenance(
     ripple_row: Mapping[str, Any],
     parameters: Mapping[str, Any],
 ) -> None:
     """Match selected detector metadata to explicit upstream expectations."""
-    actual_threshold = ripple_row.get("detector_zscore_threshold")
-    if actual_threshold is None or not math.isclose(
-        float(actual_threshold),
+    actual_threshold, speed_gated = _ripple_detector_values(ripple_row)
+    if not math.isclose(
+        actual_threshold,
         float(parameters["expected_detector_zscore_threshold"]),
         rel_tol=1e-9,
         abs_tol=1e-12,
@@ -1004,10 +1042,7 @@ def _validate_ripple_provenance(
             "Ripples.detector_zscore_threshold does not match "
             "expected_detector_zscore_threshold."
         )
-    speed_gated = ripple_row.get("speed_gated")
-    if parameters["require_speed_gated"] and (
-        speed_gated is None or not bool(speed_gated)
-    ):
+    if parameters["require_speed_gated"] and not speed_gated:
         raise ValueError("Selected Ripples row must be explicitly speed-gated.")
 
 
@@ -1284,6 +1319,9 @@ def _ripple_glm_selection_row(
         )
     )
     _validate_ripple_provenance(ripple_row, parameters)
+    detector_zscore_threshold, speed_gated = _ripple_detector_values(
+        ripple_row
+    )
 
     group_rows = {
         role: _fetch1_dict(
@@ -1363,6 +1401,8 @@ def _ripple_glm_selection_row(
         "source_region": "ca1",
         "target_region": "v1",
         "source_ripple_count": int(ripple_row["ripple_count"]),
+        "detector_zscore_threshold": detector_zscore_threshold,
+        "speed_gated": speed_gated,
         "source_ripple_intervals_sha256": (
             _ripple_glm_source_intervals_sha256(
                 ripple_table,
@@ -4312,6 +4352,33 @@ def _load_ripple_glm_context(
     ripple_row = _fetch1_dict(ripples_table, selection)
     epoch_row = _fetch1_dict(epoch_intervals_table, selection)
     _validate_ripple_provenance(ripple_row, parameters)
+    detector_zscore_threshold, speed_gated = _ripple_detector_values(
+        ripple_row
+    )
+    try:
+        selected_detector_threshold = float(
+            selection["detector_zscore_threshold"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "RippleGLM selection lacks a valid detector threshold snapshot."
+        ) from exc
+    selected_speed_gated = _database_bool(
+        selection.get("speed_gated"),
+        name="RippleGLMSelection.speed_gated",
+    )
+    if not math.isclose(
+        selected_detector_threshold,
+        detector_zscore_threshold,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ) or selected_speed_gated != speed_gated:
+        raise ValueError(
+            "RippleGLM ripple detector values changed after selection "
+            "insertion."
+        )
+    selection["detector_zscore_threshold"] = selected_detector_threshold
+    selection["speed_gated"] = selected_speed_gated
     if int(ripple_row["ripple_count"]) != int(
         selection["source_ripple_count"]
     ):
@@ -4455,6 +4522,8 @@ def _ripple_glm_upstream_provenance(
         "source_region",
         "target_region",
         "source_ripple_count",
+        "detector_zscore_threshold",
+        "speed_gated",
         "source_ripple_intervals_sha256",
         "ripple_provenance_sha256",
         "n_selected_ripples",
@@ -4470,7 +4539,7 @@ def _ripple_glm_upstream_provenance(
         "ripple_glm_parameters_sha256",
         "ripple_glm_output_rule_sha256",
     )
-    return {
+    provenance = {
         "ripple_glm_id": str(selection["ripple_glm_id"]),
         "source_region_sorted_spikes_group_id": str(
             selection["source_region_sorted_spikes_group_id"]
@@ -4480,6 +4549,14 @@ def _ripple_glm_upstream_provenance(
         ),
         **{field_name: selection[field_name] for field_name in fields},
     }
+    provenance["detector_zscore_threshold"] = float(
+        provenance["detector_zscore_threshold"]
+    )
+    provenance["speed_gated"] = _database_bool(
+        provenance["speed_gated"],
+        name="RippleGLMSelection.speed_gated",
+    )
+    return provenance
 
 
 def _validate_ripple_glm_upstream_link(

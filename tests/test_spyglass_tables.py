@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 import uuid
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1993,6 +1994,8 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "-> Ripples" in ripple_glm_selection
     assert "source_region_sorted_spikes_group_id=" in ripple_glm_selection
     assert "target_region_sorted_spikes_group_id=" in ripple_glm_selection
+    assert "detector_zscore_threshold: double" in ripple_glm_selection
+    assert "speed_gated: bool" in ripple_glm_selection
     assert "source_ripple_intervals_sha256" in ripple_glm_selection
     assert "ripple_provenance_sha256" in ripple_glm_selection
     ripple_glm_result = bundle["ripple_glm"].definition
@@ -2250,6 +2253,14 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     assert ripple_glm_parameters._insert_many_calls == [
         (ripple_glm_rows, {"skip_duplicates": True})
     ]
+    fetched_ripple_glm_row = {
+        **ripple_glm_rows[0],
+        "source_target_windows_differ": np.int64(0),
+        "require_speed_gated": np.bool_(True),
+    }
+    assert _validate_ripple_glm_parameter_row(
+        fetched_ripple_glm_row
+    ) == ripple_glm_rows[0]
 
     with pytest.raises(TypeError, match="numeric scalar"):
         ripple_parameters.insert_parameters({**ripple_row, "bin_size_s": [0.02]})
@@ -2348,6 +2359,10 @@ def test_parameter_tables_insert_current_scalar_defaults() -> None:
     with pytest.raises(ValueError, match="speed-gated"):
         ripple_glm_parameters.insert_parameters(
             {**ripple_glm_rows[0], "require_speed_gated": False}
+        )
+    with pytest.raises(TypeError, match="database integer 0/1"):
+        _validate_ripple_glm_parameter_row(
+            {**ripple_glm_rows[0], "require_speed_gated": 2}
         )
 
     assert _analysis_region("ca1") == "ca1"
@@ -4626,6 +4641,8 @@ def test_ripple_glm_selection_freezes_events_groups_and_parameters() -> None:
     assert first["source_region"] == "ca1"
     assert first["target_region"] == "v1"
     assert first["source_ripple_count"] == 5
+    assert first["detector_zscore_threshold"] == pytest.approx(2.0)
+    assert first["speed_gated"] is True
     assert first["n_selected_ripples"] == 5
     assert len(first["source_ripple_intervals_sha256"]) == 64
     assert len(first["ripple_provenance_sha256"]) == 64
@@ -4636,6 +4653,9 @@ def test_ripple_glm_selection_freezes_events_groups_and_parameters() -> None:
     from v1ca1.spyglass.ripple_glm import OUTPUT_RULE_SHA256
 
     assert first["ripple_glm_output_rule_sha256"] == OUTPUT_RULE_SHA256
+    upstream = tables_module._ripple_glm_upstream_provenance(first)
+    assert upstream["detector_zscore_threshold"] == pytest.approx(2.0)
+    assert upstream["speed_gated"] is True
 
     changed_end = _ripple_glm_selection_inputs()
     changed_end["ripple_table"].loc[0, "end_time"] = 1.075
