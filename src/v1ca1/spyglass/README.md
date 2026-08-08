@@ -26,7 +26,7 @@ register artifacts, or write to NWB.
 - `movement.py`, `ripple_modulation.py`, `path_specific_place.py`, `dpp.py`,
   `tuning_similarity.py`, `stability.py`, `encoding_comparison.py`,
   `decoding_comparison.py`, `path_specific_decoding.py`, `motor_encoding.py`,
-  and `dark_light_glm.py` provide
+  `dark_light_glm.py`, and `swap_glm.py` provide
   database-free computation and atomic
   artifact writing.
 - `tables.py` lazily constructs the DataJoint tables and connects source
@@ -250,8 +250,8 @@ The computed table names are `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`,
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`—there is no
-`Computed` suffix. Empty but valid
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
+`SwapGLM`—there is no `Computed` suffix. Empty but valid
 selections are recorded through explicit terminal statuses rather than being
 silently omitted.
 Its explicit selection and parameter rows do not populate it automatically.
@@ -392,6 +392,41 @@ independently; the all-unit Parquet records whether each eligible unit has all
 If no unit has a complete selected fit, the same audit is retained with
 `no_valid_units` rather than leaving the selection perpetually unpopulated.
 
+Held-out swapped-light scoring uses:
+
+```text
+DarkLightGLM + RegionSortedSpikesGroup
+    + held-out light MovementFiringRate
+    + four held-out light TrajectoryIntervals
+    + four shared trajectory WTrackGraph rows + SwapGLMParameters
+    -> SwapGLMSelection
+    -> SwapGLM
+    -> manifest.parquet + selected_units.parquet + swap_glm.nc
+```
+
+One result scores an exact selected dark/light fit on a distinct held-out light
+run from the same NWB and regional sorting group. It reuses the four selected
+DarkLightGLM model files without refitting, freezes their checksums and the
+upstream parameter/output-rule digests, and requires the same movement
+definition across all three epochs. The held-out light condition must differ
+from the training light condition.
+
+The selected held-out `MovementFiringRate` terminal status is authoritative:
+`no_valid_position` and `no_movement` propagate directly and must agree with
+an empty saved movement interval.
+
+All upstream-selected units remain in saved order. A unit is a valid swap
+score only when its upstream selected GLM fit is valid and every expected
+model-by-trajectory primary score is finite. If any held-out trajectory has no
+movement-supported samples, the whole result is retained as the explicit
+`no_trajectory_samples` terminal state rather than fabricating a partial-path
+comparison. Legacy registration normalizes the complete schema-4 or schema-6
+artifact, verifies its selected DarkLightGLM sources and historical position
+offset and movement-speed threshold, then exactly re-scores the selected NWB
+inputs without refitting. A four-source-model schema-4 artifact is compared on
+all values it contains; the canonical `dark` score is then evaluated from the
+verified task-segment-bump source rather than copied from a missing value.
+
 ## Artifacts and provenance
 
 New results are written under the configured `filepath@analysis` store,
@@ -448,6 +483,11 @@ defaulting to `/stelmo/nwb/analysis/kyu/v1ca1`, with session-first paths:
     selection_summary.nc
     candidates/*.nc
     selected/{visual,task_segment_bump,task_segment_scalar,task_dense_gain}.nc
+
+<root>/<animal>/<date>/swap_glm/<light-train>_train_to_<light-test>_test/dark_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    swap_glm.nc
 ```
 
 If `activate(artifact_root=...)` is used, that root must remain inside the
@@ -463,8 +503,8 @@ inserts the result row. It never writes results into the source NWB.
 written and validated together. `RippleModulation`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`, `DPPEncodingComparison`,
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`
-additionally provide
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
+`SwapGLM` additionally provide
 `register_existing()`, which
 validates matching legacy artifacts, copies selected content into the
 canonical path, and inserts a result row without rerunning the analysis.
@@ -495,6 +535,12 @@ comparison candidates at the selected visual basis, all four selected-model
 NetCDFs, and their selection summary. It validates v4/v5 basis semantics,
 current graph geometry, movement-rate vectors, and every imported unit before
 copying the coupled bundle.
+Swap registration requires the exact selected DarkLightGLM bundle frozen by
+the selection, verifies the held-out session/epoch/parameter contract and
+historical preprocessing choices, then performs an exact NWB re-score without
+refitting. Every available legacy scientific coordinate and variable must
+match before the recomputed canonical NetCDF is written with persistent
+group-unit identities.
 Legacy registration is restricted to matching `ImportedSpikeSorting`
 selections. Registration requires complete canonical schemas; ripple
 peri-event data must also contain one complete, common time grid for every

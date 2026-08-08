@@ -704,6 +704,71 @@ legacy_artifact_provenance = NULL: longblob
 """
 
 
+SWAP_GLM_PARAMETERS_DEFINITION = """
+# Named held-out swapped-light scoring parameters.
+swap_glm_param_name: varchar(64)
+---
+swap_light_offset: bool
+observed_spatial_bin_size_cm: double
+"""
+
+
+SWAP_GLM_SELECTION_DEFINITION = """
+# One immutable held-out light-epoch swapped-segment GLM selection.
+swap_glm_id: uuid
+---
+-> DarkLightGLM
+-> RegionSortedSpikesGroup
+-> MovementFiringRate.proj(light_test_movement_firing_rate_id='movement_firing_rate_id')
+-> EpochIntervals.proj(dark_epoch='epoch')
+-> EpochIntervals.proj(light_train_epoch='epoch')
+-> TrajectoryIntervals.proj(light_test_epoch='epoch', light_test_center_to_left_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_test_epoch='epoch', light_test_center_to_right_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_test_epoch='epoch', light_test_left_to_center_trajectory_type='trajectory_type')
+-> TrajectoryIntervals.proj(light_test_epoch='epoch', light_test_right_to_center_trajectory_type='trajectory_type')
+-> WTrackGraph.proj(center_to_left_configuration_name='configuration_name')
+-> WTrackGraph.proj(center_to_right_configuration_name='configuration_name')
+-> WTrackGraph.proj(left_to_center_configuration_name='configuration_name')
+-> WTrackGraph.proj(right_to_center_configuration_name='configuration_name')
+-> SwapGLMParameters
+dark_condition: enum('dark')
+light_train_condition: enum('AB', 'gray', 'BA', 'bright')
+light_test_condition: enum('AB', 'gray', 'BA', 'bright')
+dark_light_manifest_sha256: char(64)
+dark_light_selected_sha256_by_model: longblob
+dark_light_parameter_sha256: char(64)
+dark_light_output_rule_sha256: char(64)
+upstream_analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
+swap_glm_parameters_sha256: char(64)
+swap_glm_output_rule_sha256: char(64)
+"""
+
+
+SWAP_GLM_DEFINITION = """
+# One held-out swapped-light unit audit and consolidated model-score bundle.
+-> SwapGLMSelection
+---
+artifact_manifest_path: filepath@analysis
+selected_units_path: filepath@analysis
+swap_glm_path: filepath@analysis
+schema_version: varchar(8)
+bundle_schema_version: varchar(8)
+n_units: int unsigned
+n_valid_units: int unsigned
+analysis_status: enum('valid', 'partial_valid', 'upstream_terminal', 'no_units', 'no_valid_position', 'no_movement', 'no_trajectory_samples', 'no_valid_units')
+selected_units_sha256: char(64)
+dark_light_manifest_sha256: char(64)
+dark_light_selected_sha256_by_model: longblob
+dark_light_parameter_sha256: char(64)
+dark_light_output_rule_sha256: char(64)
+upstream_analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
+artifact_origin: enum('computed', 'registered_existing')
+runtime_v1ca1_git_commit = NULL: varchar(64)
+runtime_spyglass_git_commit = NULL: varchar(64)
+legacy_artifact_provenance = NULL: longblob
+"""
+
+
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
@@ -1105,6 +1170,94 @@ DARK_LIGHT_GLM_PARAMETER_PRESETS = (
 )
 
 
+SWAP_GLM_OUTPUT_RULE = MappingProxyType(
+    {
+        "version": 2,
+        "models": (
+            "visual",
+            "task_segment_bump",
+            "task_segment_scalar",
+            "task_dense_gain",
+            "dark",
+        ),
+        "derived_model_sources": {"dark": "task_segment_bump"},
+        "swap_configuration": {
+            "center_to_left": {
+                "source_trajectory": "center_to_right",
+                "segment_index": 2,
+            },
+            "center_to_right": {
+                "source_trajectory": "center_to_left",
+                "segment_index": 2,
+            },
+            "left_to_center": {
+                "source_trajectory": "right_to_center",
+                "segment_index": 0,
+            },
+            "right_to_center": {
+                "source_trajectory": "left_to_center",
+                "segment_index": 0,
+            },
+        },
+        "fit_source": "exact_selected_dark_light_glm_artifact",
+        "evaluation_epoch": "held_out_light_movement_laps",
+        "primary_metric": (
+            "test_light_swapped_segment_swapped_delta_model_minus_visual_"
+            "raw_ll_bits_per_spike"
+        ),
+        "unit_policy": (
+            "all_upstream_dark_light_selected_units_in_saved_order"
+        ),
+        "unit_failure_policy": (
+            "retain_all_units_and_isolate_nonfinite_scores_by_unit_model_trajectory"
+        ),
+        "unit_validity_policy": (
+            "upstream_valid_glm_fit_and_all_expected_primary_scores_finite"
+        ),
+        "runtime_unit_key_policy": (
+            "persistent_identity_aligned_native_tsgroup_keys_with_canonical_output_ids"
+        ),
+        "trajectory_support_policy": (
+            "all_or_none_terminal_if_any_path_has_no_movement_bins"
+        ),
+        "movement_terminal_status_policy": (
+            "selected_movement_firing_rate_status_precedes_interval_fallback"
+        ),
+        "legacy_registration_policy": (
+            "normalize_verified_schema4_or_schema6_then_exact_nwb_rescore_without_refit"
+        ),
+        "legacy_comparison_policy": (
+            "all_scientific_coordinates_and_variables_tight_equal"
+        ),
+        "legacy_missing_derived_model_policy": (
+            "schema4_four_source_models_compare_all_available_then_rescore_dark_"
+            "from_verified_task_segment_bump"
+        ),
+        "legacy_preprocessing_provenance_policy": (
+            "historical_schema4_or_schema6_position_offset_and_speed_threshold_"
+            "must_match_selected_nwb_inputs"
+        ),
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "position_unit": "cm",
+    }
+)
+
+
+DEFAULT_SWAP_GLM_PARAMETERS = MappingProxyType(
+    {
+        "swap_glm_param_name": "default",
+        "swap_light_offset": False,
+        "observed_spatial_bin_size_cm": 4.0,
+    }
+)
+
+
+# Swap scoring itself has one legacy-compatible rule. Current-v5 versus
+# normalized-legacy-v4 provenance is frozen by the selected DarkLightGLM row.
+SWAP_GLM_PARAMETER_PRESETS = (DEFAULT_SWAP_GLM_PARAMETERS,)
+
+
 TABLE_DEFINITIONS = MappingProxyType(
     {
         "epoch_intervals": EPOCH_INTERVALS_DEFINITION,
@@ -1177,6 +1330,9 @@ TABLE_DEFINITIONS = MappingProxyType(
         "dark_light_glm_parameters": DARK_LIGHT_GLM_PARAMETERS_DEFINITION,
         "dark_light_glm_selection": DARK_LIGHT_GLM_SELECTION_DEFINITION,
         "dark_light_glm": DARK_LIGHT_GLM_DEFINITION,
+        "swap_glm_parameters": SWAP_GLM_PARAMETERS_DEFINITION,
+        "swap_glm_selection": SWAP_GLM_SELECTION_DEFINITION,
+        "swap_glm": SWAP_GLM_DEFINITION,
         "analysis_nwbfile": ANALYSIS_NWBFILE_DEFINITION,
     }
 )
@@ -1192,6 +1348,7 @@ __all__ = [
     "DARK_LIGHT_GLM_PARAMETERS_DEFINITION",
     "DARK_LIGHT_GLM_PARAMETER_PRESETS",
     "DARK_LIGHT_GLM_SELECTION_DEFINITION",
+    "DEFAULT_SWAP_GLM_PARAMETERS",
     "DEFAULT_ANALYSIS_NWBFILE_SCHEMA_NAME",
     "FIGURE_1D_TUNING_CURVE_PARAMETERS",
     "LEGACY_TUNING_CURVE_PARAMETERS",
@@ -1217,6 +1374,11 @@ __all__ = [
     "PATH_PROGRESSION_DECODING_PARAMETER_PRESETS",
     "SPYGLASS_GIT_COMMIT",
     "SHAPE_OVERLAP_TUNING_SIMILARITY_PARAMETERS",
+    "SWAP_GLM_DEFINITION",
+    "SWAP_GLM_OUTPUT_RULE",
+    "SWAP_GLM_PARAMETERS_DEFINITION",
+    "SWAP_GLM_PARAMETER_PRESETS",
+    "SWAP_GLM_SELECTION_DEFINITION",
     "TABLE_DEFINITIONS",
     "TUNING_CURVE_PARAMETER_PRESETS",
     "TUNING_SIMILARITY_PARAMETER_PRESETS",

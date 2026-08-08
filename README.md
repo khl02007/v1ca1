@@ -271,10 +271,25 @@ RegionSortedSpikesGroup
     + four shared WTrackGraph rows + DarkLightGLMParameters
     -> DarkLightGLMSelection
     -> DarkLightGLM
+
+DarkLightGLM + RegionSortedSpikesGroup
+    + held-out light MovementFiringRate
+    + four held-out light TrajectoryIntervals
+    + four shared WTrackGraph rows + SwapGLMParameters
+    -> SwapGLMSelection
+    -> SwapGLM
 ```
 
-Its manuscript preset is five lap-wise folds, 50-ms evaluation bins, 4-cm
-spatial bins, one-bin Gaussian smoothing, random seed 47, movement firing rate
+`SwapGLM` reuses one exact selected `DarkLightGLM` fit and scores it without
+refitting on a distinct held-out light run. The selection freezes the upstream
+model-file checksums, the same regional sorting and movement definition, all
+four held-out lap sources, and the shared centimeter graphs. Its unit audit
+keeps the upstream selected order and marks a score valid only when the
+upstream fit and all expected model-by-trajectory scores are valid.
+
+`DPPEncodingComparison`'s manuscript preset is five lap-wise folds, 50-ms
+evaluation bins, 4-cm spatial bins, one-bin Gaussian smoothing, random seed 47,
+movement firing rate
 at least 0.5 Hz, and stability at least 0.5 on at least one trajectory. The
 standalone `task_progression.encoding_comparison` default remains 20 ms; the
 Spyglass preset makes the manuscript-specific 50-ms choice explicit.
@@ -285,8 +300,8 @@ The computed tables are named `RippleModulation`, `MovementFiringRate`,
 `PathSpecificPlaceTuningCurve`, `PathSpecificPlaceTuningSimilarity`,
 `DPPTuningCurve`, `PathSpecificPlaceStability`,
 `DPPEncodingComparison`, `PathProgressionDecodingComparison`, and
-`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, and `DarkLightGLM`, without a
-`Computed` suffix. Each explicit
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, and
+`SwapGLM`, without a `Computed` suffix. Each explicit
 selection freezes its upstream membership, filters, and parameter values. That
 snapshot determines a table-specific UUIDv5. Computation rejects later edits
 to those Manual parameter values and requires a new selection. Results use
@@ -333,6 +348,10 @@ session-first, UUID-keyed paths rooted at `/stelmo/nwb/analysis/kyu/v1ca1`:
     selection_summary.nc
     candidates/*.nc
     selected/{model}.nc
+<animal>/<date>/swap_glm/<light-train>_train_to_<light-test>_test/dark_<dark>/<region>/<uuid>/
+    manifest.parquet
+    selected_units.parquet
+    swap_glm.nc
 ```
 
 Any explicit `artifact_root` must remain within the stage configured for the
@@ -408,8 +427,9 @@ source-loading stages ultimately derive their data from NWB and the selected
 sorting group. Calling
 `register_existing()` on `RippleModulation`, `PathSpecificPlaceTuningCurve`,
 `PathSpecificPlaceTuningSimilarity`, `DPPTuningCurve`,
-`PathSpecificPlaceStability`, `DPPEncodingComparison`, or
-`PathSpecificPlaceDecoding` validates a
+`PathSpecificPlaceStability`, `DPPEncodingComparison`,
+`PathSpecificPlaceDecoding`, `MotorEncodingComparison`, `DarkLightGLM`, or
+`SwapGLM` validates a
 compatible legacy artifact, copies
 the selected content into the canonical output layout, and inserts the result
 without rerunning the analysis. Legacy tuning-curve
@@ -428,6 +448,12 @@ The legacy filename must verify the fold count and temporal/spatial bins;
 smoothing, random seed, and fold-level QC are not encoded, so registration
 records those limitations explicitly rather than claiming they were
 reconstructed from the file.
+`SwapGLM.register_existing()` additionally requires the exact selected
+DarkLightGLM artifact frozen by the selection. It normalizes the complete
+legacy schema, verifies the historical position offset and movement-speed
+threshold, and re-scores the selected NWB inputs without refitting. Every
+available scientific value must match before the recomputed canonical result
+is written with persistent group-unit IDs.
 It does not register legacy cross-epoch joins or cross-trajectory-transfer
 outputs.
 `MovementFiringRate` is compute-only and writes its Parquet/NPZ bundle

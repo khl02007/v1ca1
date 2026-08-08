@@ -611,6 +611,36 @@ def _validate_dark_light_glm_parameter_row(
     }
 
 
+def _validate_swap_glm_parameter_row(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one held-out swapped-light scoring parameter row exactly."""
+    from v1ca1.spyglass.swap_glm import validate_swap_glm_parameters
+
+    expected = set(table_specs.DEFAULT_SWAP_GLM_PARAMETERS)
+    missing = sorted(expected.difference(row))
+    extra = sorted(set(row).difference(expected))
+    if missing or extra:
+        raise ValueError(
+            "SwapGLM parameters must have exactly the declared fields; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    values = dict(row)
+    name = values["swap_glm_param_name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 64:
+        raise ValueError(
+            "swap_glm_param_name must be a non-empty string of at most "
+            "64 characters."
+        )
+    validated = validate_swap_glm_parameters(
+        swap_light_offset=values["swap_light_offset"],
+        observed_spatial_bin_size_cm=values[
+            "observed_spatial_bin_size_cm"
+        ],
+    )
+    return {"swap_glm_param_name": name, **validated}
+
+
 def _validate_movement_parameter_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy one shared movement parameter row."""
     expected = set(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
@@ -1814,6 +1844,7 @@ def _path_progression_decoding_selection_row(
     for field_name in (
         "movement_param_name",
         "movement_parameters_sha256",
+        "position_series_name",
     ):
         if str(target_selection.get(field_name)) != str(
             cohort_selection.get(field_name)
@@ -2626,6 +2657,7 @@ def _dark_light_glm_selection_row(
         "unit_filter_params_sha256",
         "movement_param_name",
         "movement_parameters_sha256",
+        "position_series_name",
     ):
         if str(reference_selection.get(field_name)) != str(
             movement_selections["light"].get(field_name)
@@ -2761,6 +2793,426 @@ def _dark_light_glm_selection_row(
     }
     return {
         "dark_light_glm_id": selection_uuid("DarkLightGLM", natural_key),
+        **natural_key,
+    }
+
+
+def _load_swap_dark_light_snapshot(
+    *,
+    dark_light_glm_table: Any,
+    dark_light_glm_id: Any,
+) -> dict[str, Any]:
+    """Load one canonical dark/light bundle and freeze its selected files."""
+    from v1ca1.spyglass.dark_light_glm import (
+        MANIFEST_COLUMNS,
+        MANIFEST_FILENAME,
+    )
+    from v1ca1.spyglass.swap_glm import SOURCE_MODEL_NAMES
+    import pandas as pd
+
+    key = {"dark_light_glm_id": dark_light_glm_id}
+    result_row = _fetch1_dict(dark_light_glm_table, key)
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    if manifest_path.name != MANIFEST_FILENAME:
+        raise ValueError(
+            "DarkLightGLM artifact_manifest_path has a noncanonical name."
+        )
+    if manifest_path.parent.name != str(dark_light_glm_id):
+        raise ValueError(
+            "DarkLightGLM artifact directory does not match its result UUID."
+        )
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"DarkLightGLM artifact manifest not found: {manifest_path}"
+        )
+    manifest = pd.read_parquet(manifest_path)
+    if tuple(manifest.columns) != MANIFEST_COLUMNS or manifest.empty:
+        raise ValueError("DarkLightGLM manifest does not have canonical schema.")
+    if manifest["artifact_key"].duplicated().any():
+        raise ValueError("DarkLightGLM manifest artifact keys must be unique.")
+    for _, row in manifest.iterrows():
+        relative_path = Path(str(row["relative_path"]))
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError("DarkLightGLM manifest contains an unsafe path.")
+        artifact_path = manifest_path.parent / relative_path
+        if not artifact_path.is_file():
+            raise FileNotFoundError(
+                f"DarkLightGLM artifact not found: {artifact_path}"
+            )
+        if artifact_path.stat().st_size != int(row["file_size_bytes"]) or (
+            _file_sha256(artifact_path) != str(row["sha256"])
+        ):
+            raise ValueError(
+                f"DarkLightGLM artifact checksum mismatch: {artifact_path}"
+            )
+    first = manifest.iloc[0]
+    for field_name in MANIFEST_COLUMNS[5:]:
+        if not np.all(
+            manifest[field_name].astype(str) == str(first[field_name])
+        ):
+            raise ValueError(
+                "DarkLightGLM manifest has inconsistent common field "
+                f"{field_name!r}."
+            )
+    if str(first["dark_light_glm_id"]) != str(dark_light_glm_id):
+        raise ValueError("DarkLightGLM artifact has a mismatched result UUID.")
+    expected_scalars = {
+        "analysis_status": first["analysis_status"],
+        "selected_units_sha256": first["selected_units_sha256"],
+        "n_units": first["n_units"],
+        "schema_version": first["schema_version"],
+        "artifact_origin": first["artifact_origin"],
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if str(result_row.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "DarkLightGLM result row disagrees with its canonical "
+                f"artifact: {field_name}."
+            )
+    selected_hashes: dict[str, str] = {}
+    for model_name in SOURCE_MODEL_NAMES:
+        rows = manifest.loc[
+            manifest["artifact_key"].astype(str)
+            == f"selected:{model_name}"
+        ]
+        if len(rows) != 1:
+            raise ValueError(
+                "DarkLightGLM manifest must contain exactly one selected "
+                f"artifact for {model_name!r}."
+            )
+        digest = str(rows.iloc[0]["sha256"])
+        if len(digest) != 64:
+            raise ValueError(
+                "DarkLightGLM selected-model checksum is not SHA-256."
+            )
+        selected_hashes[model_name] = digest
+    return {
+        "result_row": result_row,
+        "artifact_dir": manifest_path.parent,
+        "manifest_sha256": _file_sha256(manifest_path),
+        "selected_sha256_by_model": selected_hashes,
+        "parameter_sha256": str(first["parameter_sha256"]),
+        "output_rule_sha256": str(first["output_rule_sha256"]),
+        "analysis_status": str(first["analysis_status"]),
+        "metadata": {
+            field_name: str(first[field_name])
+            for field_name in (
+                "dark_light_glm_id",
+                "animal_name",
+                "date",
+                "region",
+                "light_epoch",
+                "dark_epoch",
+            )
+        },
+    }
+
+
+def _swap_glm_selection_row(
+    *,
+    key: Mapping[str, Any],
+    dark_light_glm_table: Any,
+    dark_light_glm_selection_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    parameters_table: Any,
+    dark_light_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate and identify one immutable held-out swapped-light score."""
+    from v1ca1.spyglass.selection import provenance_sha256, selection_uuid
+    from v1ca1.spyglass.swap_glm import OUTPUT_RULE_SHA256
+
+    dark_light_key = {"dark_light_glm_id": key["dark_light_glm_id"]}
+    dark_light_selection = _fetch1_dict(
+        dark_light_glm_selection_table,
+        dark_light_key,
+    )
+    snapshot = (
+        dict(dark_light_snapshot)
+        if dark_light_snapshot is not None
+        else _load_swap_dark_light_snapshot(
+            dark_light_glm_table=dark_light_glm_table,
+            dark_light_glm_id=key["dark_light_glm_id"],
+        )
+    )
+    parameters = _validate_swap_glm_parameter_row(
+        _fetch1_dict(
+            parameters_table,
+            {"swap_glm_param_name": key["swap_glm_param_name"]},
+        )
+    )
+
+    expected_region_group_id = dark_light_selection[
+        "region_sorted_spikes_group_id"
+    ]
+    if str(key.get("region_sorted_spikes_group_id", expected_region_group_id)) != (
+        str(expected_region_group_id)
+    ):
+        raise ValueError(
+            "SwapGLM must use the RegionSortedSpikesGroup selected by "
+            "DarkLightGLM."
+        )
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {"region_sorted_spikes_group_id": expected_region_group_id},
+    )
+    snapshot_metadata = snapshot["metadata"]
+    expected_snapshot_fields = {
+        "dark_epoch": dark_light_selection["dark_epoch"],
+        "light_epoch": dark_light_selection["light_epoch"],
+        "region": region_row["region_name"],
+    }
+    for field_name, expected_value in expected_snapshot_fields.items():
+        if str(snapshot_metadata.get(field_name)) != str(expected_value):
+            raise ValueError(
+                "DarkLightGLM artifact disagrees with its selection: "
+                f"{field_name}."
+            )
+    if str(snapshot["parameter_sha256"]) != str(
+        dark_light_selection["dark_light_glm_parameters_sha256"]
+    ) or str(snapshot["output_rule_sha256"]) != str(
+        dark_light_selection["dark_light_glm_output_rule_sha256"]
+    ):
+        raise ValueError(
+            "DarkLightGLM artifact parameter/output hashes disagree with "
+            "its selection."
+        )
+
+    light_test_movement_key = {
+        "movement_firing_rate_id": key[
+            "light_test_movement_firing_rate_id"
+        ]
+    }
+    light_test_movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        light_test_movement_key,
+    )
+    light_test_movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        light_test_movement_key,
+    )
+    training_movement_selections = {
+        condition_name: _fetch1_dict(
+            movement_firing_rate_selection_table,
+            {
+                "movement_firing_rate_id": dark_light_selection[
+                    f"{condition_name}_movement_firing_rate_id"
+                ]
+            },
+        )
+        for condition_name in ("dark", "light")
+    }
+    training_reference = training_movement_selections["dark"]
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+        "region",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+        "movement_param_name",
+        "movement_parameters_sha256",
+        "position_series_name",
+    ):
+        expected_value = training_reference.get(field_name)
+        if any(
+            str(selection.get(field_name)) != str(expected_value)
+            for selection in (
+                training_movement_selections["light"],
+                light_test_movement_selection,
+            )
+        ):
+            raise ValueError(
+                "SwapGLM training and held-out movement rows must share the "
+                f"same frozen source snapshot: {field_name}."
+            )
+    for field_name in (
+        "nwb_file_name",
+        "unit_filter_params_name",
+        "sorted_spikes_group_name",
+        "sorting_group_members_sha256",
+        "unit_filter_params_sha256",
+    ):
+        if str(region_row.get(field_name)) != str(
+            light_test_movement_selection.get(field_name)
+        ):
+            raise ValueError(
+                "SwapGLM regional spikes and held-out movement must share "
+                f"{field_name}."
+            )
+    if str(region_row.get("region_name")) != str(
+        light_test_movement_selection.get("region")
+    ):
+        raise ValueError(
+            "SwapGLM regional spikes and held-out movement must select the "
+            "same region."
+        )
+    if str(region_row.get("selected_units_sha256")) != str(
+        light_test_movement_result.get("selected_units_sha256")
+    ) or int(region_row.get("n_units", -1)) != int(
+        light_test_movement_result.get("n_units", -2)
+    ):
+        raise ValueError(
+            "SwapGLM regional spikes and held-out movement must contain "
+            "identical persistent units."
+        )
+    allowed_movement_statuses = (
+        {"no_units"}
+        if int(region_row.get("n_units", -1)) == 0
+        else {"valid", "no_valid_position", "no_movement"}
+    )
+    if str(light_test_movement_result.get("analysis_status")) not in (
+        allowed_movement_statuses
+    ):
+        raise ValueError(
+            "SwapGLM held-out movement status is incompatible with its "
+            "regional unit count."
+        )
+
+    nwb_file_name = str(training_reference["nwb_file_name"])
+    epochs = {
+        "dark": str(dark_light_selection["dark_epoch"]),
+        "light_train": str(dark_light_selection["light_epoch"]),
+        "light_test": str(light_test_movement_selection["epoch"]),
+    }
+    if len(set(epochs.values())) != 3:
+        raise ValueError(
+            "SwapGLM dark, light-train, and light-test epochs must be distinct."
+        )
+    for field_name, expected_value in (
+        ("nwb_file_name", nwb_file_name),
+        ("dark_epoch", epochs["dark"]),
+        ("light_train_epoch", epochs["light_train"]),
+        ("light_test_epoch", epochs["light_test"]),
+    ):
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                f"SwapGLM {field_name} does not match its upstream row."
+            )
+
+    epoch_rows = {
+        condition_name: _fetch1_dict(
+            epoch_intervals_table,
+            {"nwb_file_name": nwb_file_name, "epoch": epoch},
+        )
+        for condition_name, epoch in epochs.items()
+    }
+    if any(str(row.get("epoch_type")) != "run" for row in epoch_rows.values()):
+        raise ValueError("SwapGLM requires three explicit run epochs.")
+    dark_condition = str(epoch_rows["dark"].get("condition"))
+    dark_is_light = epoch_rows["dark"].get("is_light")
+    if dark_condition != "dark" or dark_is_light is None or bool(dark_is_light):
+        raise ValueError(
+            "SwapGLM dark epoch must have condition='dark' and is_light=False."
+        )
+    light_conditions = {
+        condition_name: str(epoch_rows[condition_name].get("condition"))
+        for condition_name in ("light_train", "light_test")
+    }
+    allowed_light_conditions = {"AB", "BA", "gray", "bright"}
+    if any(
+        condition not in allowed_light_conditions
+        or epoch_rows[condition_name].get("is_light") is None
+        or not bool(epoch_rows[condition_name].get("is_light"))
+        for condition_name, condition in light_conditions.items()
+    ):
+        raise ValueError(
+            "SwapGLM train and test light epochs require explicit light "
+            "conditions and is_light=True."
+        )
+    if len(set(light_conditions.values())) != 2:
+        raise ValueError(
+            "SwapGLM light-train and light-test conditions must differ."
+        )
+    expected_conditions = {
+        "dark_condition": dark_condition,
+        "light_train_condition": light_conditions["light_train"],
+        "light_test_condition": light_conditions["light_test"],
+    }
+    for field_name, expected_value in expected_conditions.items():
+        if field_name in key and str(key[field_name]) != expected_value:
+            raise ValueError(
+                f"SwapGLM {field_name} does not match EpochIntervals."
+            )
+
+    source_fields: dict[str, Any] = {}
+    for trajectory_type in _DPP_TRAJECTORY_TYPES:
+        trajectory_field = f"light_test_{trajectory_type}_trajectory_type"
+        if str(key.get(trajectory_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                f"SwapGLM {trajectory_field} must equal {trajectory_type!r}."
+            )
+        trajectory_row = _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": epochs["light_test"],
+                "trajectory_type": trajectory_type,
+            },
+        )
+        if int(trajectory_row.get("interval_count", -1)) < 1:
+            raise ValueError(
+                "SwapGLM requires at least one held-out lap for every "
+                f"trajectory; {trajectory_type!r} has "
+                f"{trajectory_row.get('interval_count')!r}."
+            )
+        configuration_field = f"{trajectory_type}_configuration_name"
+        if str(key.get(configuration_field, trajectory_type)) != trajectory_type:
+            raise ValueError(
+                "SwapGLM graph aliases must match their trajectory types."
+            )
+        graph_row = _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": trajectory_type,
+            },
+        )
+        if str(graph_row.get("coordinate_unit")) != "cm":
+            raise ValueError("SwapGLM graphs must use centimeters.")
+        source_fields[trajectory_field] = trajectory_type
+        source_fields[configuration_field] = trajectory_type
+
+    output_rule_sha256 = provenance_sha256(
+        dict(table_specs.SWAP_GLM_OUTPUT_RULE)
+    )
+    if output_rule_sha256 != OUTPUT_RULE_SHA256:
+        raise ValueError(
+            "SwapGLM table and artifact output rules have diverged."
+        )
+    parameter_snapshot = _parameter_snapshot_field(
+        parameters,
+        field_name="swap_glm_parameters_sha256",
+    )
+    natural_key = {
+        "nwb_file_name": nwb_file_name,
+        "dark_light_glm_id": key["dark_light_glm_id"],
+        "region_sorted_spikes_group_id": expected_region_group_id,
+        "light_test_movement_firing_rate_id": key[
+            "light_test_movement_firing_rate_id"
+        ],
+        "dark_epoch": epochs["dark"],
+        "light_train_epoch": epochs["light_train"],
+        "light_test_epoch": epochs["light_test"],
+        **source_fields,
+        "swap_glm_param_name": parameters["swap_glm_param_name"],
+        **expected_conditions,
+        "dark_light_manifest_sha256": snapshot["manifest_sha256"],
+        "dark_light_selected_sha256_by_model": snapshot[
+            "selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": snapshot["parameter_sha256"],
+        "dark_light_output_rule_sha256": snapshot["output_rule_sha256"],
+        "upstream_analysis_status": snapshot["analysis_status"],
+        **parameter_snapshot,
+        "swap_glm_output_rule_sha256": output_rule_sha256,
+    }
+    return {
+        "swap_glm_id": selection_uuid("SwapGLM", natural_key),
         **natural_key,
     }
 
@@ -7159,6 +7611,324 @@ def _load_dark_light_glm_spikes(
     return loaded
 
 
+def _load_swap_glm_context(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    dark_light_glm_table: Any,
+    dark_light_glm_selection_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+) -> dict[str, Any]:
+    """Load and revalidate one held-out swapped-light selection."""
+    from v1ca1.spyglass.selection import provenance_sha256
+    from v1ca1.spyglass.swap_glm import OUTPUT_RULE_SHA256
+
+    snapshot = _load_swap_dark_light_snapshot(
+        dark_light_glm_table=dark_light_glm_table,
+        dark_light_glm_id=key["dark_light_glm_id"],
+    )
+    selection = _swap_glm_selection_row(
+        key=key,
+        dark_light_glm_table=dark_light_glm_table,
+        dark_light_glm_selection_table=dark_light_glm_selection_table,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        parameters_table=parameters_table,
+        dark_light_snapshot=snapshot,
+    )
+    if str(selection["swap_glm_id"]) != str(key["swap_glm_id"]):
+        raise ValueError("SwapGLM selection UUID is stale.")
+    parameters = _validate_swap_glm_parameter_row(
+        _fetch1_dict(parameters_table, key)
+    )
+    _validate_frozen_parameters(
+        key,
+        parameters,
+        field_name="swap_glm_parameters_sha256",
+    )
+    expected_output_rule_sha256 = provenance_sha256(
+        dict(table_specs.SWAP_GLM_OUTPUT_RULE)
+    )
+    if expected_output_rule_sha256 != OUTPUT_RULE_SHA256 or str(
+        key.get("swap_glm_output_rule_sha256", "")
+    ) != expected_output_rule_sha256:
+        raise ValueError(
+            "SwapGLM fixed output rule changed after selection insertion. "
+            "Create a new selection."
+        )
+    frozen_snapshot = {
+        "dark_light_manifest_sha256": snapshot["manifest_sha256"],
+        "dark_light_selected_sha256_by_model": snapshot[
+            "selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": snapshot["parameter_sha256"],
+        "dark_light_output_rule_sha256": snapshot["output_rule_sha256"],
+        "upstream_analysis_status": snapshot["analysis_status"],
+    }
+    for field_name, expected_value in frozen_snapshot.items():
+        if key.get(field_name) != expected_value:
+            raise ValueError(
+                "DarkLightGLM artifacts changed after SwapGLM selection: "
+                f"{field_name}. Create a new selection."
+            )
+
+    region_row = _fetch1_dict(
+        region_sorted_spikes_group_table,
+        {
+            "region_sorted_spikes_group_id": selection[
+                "region_sorted_spikes_group_id"
+            ]
+        },
+    )
+    movement_key = {
+        "movement_firing_rate_id": selection[
+            "light_test_movement_firing_rate_id"
+        ]
+    }
+    movement_result = _fetch1_dict(
+        movement_firing_rate_table,
+        movement_key,
+    )
+    movement_selection = _fetch1_dict(
+        movement_firing_rate_selection_table,
+        movement_key,
+    )
+    movement_parameters = _validate_movement_parameter_row(
+        _fetch1_dict(movement_parameters_table, movement_selection)
+    )
+    _validate_frozen_parameters(
+        movement_selection,
+        movement_parameters,
+        field_name="movement_parameters_sha256",
+    )
+    animal_name, session_date = _session_identity(session_table, selection)
+    snapshot_metadata = snapshot["metadata"]
+    if str(snapshot_metadata["animal_name"]) != animal_name or str(
+        snapshot_metadata["date"]
+    ) != session_date:
+        raise ValueError(
+            "DarkLightGLM artifact session identity disagrees with Session."
+        )
+    movement = _load_movement_result_artifacts(
+        result_row=movement_result,
+        parameters=movement_parameters,
+        expected_metadata={
+            "animal_name": animal_name,
+            "date": session_date,
+            "region": region_row["region_name"],
+            "epoch": selection["light_test_epoch"],
+        },
+    )
+    epoch_row = _fetch1_dict(
+        epoch_intervals_table,
+        {
+            "nwb_file_name": selection["nwb_file_name"],
+            "epoch": selection["light_test_epoch"],
+        },
+    )
+    epoch_start = float(epoch_row["start_time"])
+    epoch_stop = float(epoch_row["stop_time"])
+    if not math.isfinite(epoch_start) or not math.isfinite(epoch_stop) or (
+        epoch_stop <= epoch_start
+    ):
+        raise ValueError(
+            "EpochIntervals must contain finite start_time < stop_time."
+        )
+    return {
+        "selection": selection,
+        "parameters": parameters,
+        "dark_light_snapshot": snapshot,
+        "region_row": region_row,
+        "movement_result": movement_result,
+        "movement_selection": movement_selection,
+        "movement_parameters": movement_parameters,
+        "movement": movement,
+        "epoch_row": epoch_row,
+        "epoch_time_support": (epoch_start, epoch_stop),
+        "animal_name": animal_name,
+        "date": session_date,
+        "region": str(region_row["region_name"]),
+    }
+
+
+def _load_swap_glm_nwb_inputs(
+    *,
+    context: Mapping[str, Any],
+    position_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    nwbfile_table: Any,
+) -> dict[str, Any]:
+    """Load held-out position, four lap sets, and four path graphs."""
+    import pynwb
+
+    from v1ca1.spyglass.nwb import (
+        load_interval_set,
+        load_position,
+        load_wtrack_graph,
+    )
+
+    selection = context["selection"]
+    nwb_file_name = str(selection["nwb_file_name"])
+    light_test_epoch = str(selection["light_test_epoch"])
+    position_row = _fetch1_dict(
+        position_table,
+        {
+            "nwb_file_name": nwb_file_name,
+            "epoch": light_test_epoch,
+            "position_series_name": context["movement_selection"][
+                "position_series_name"
+            ],
+        },
+    )
+    if str(position_row.get("spatial_unit")) != "cm":
+        raise ValueError("SwapGLM held-out position must use centimeters.")
+    trajectory_rows = {
+        trajectory_type: _fetch1_dict(
+            trajectory_intervals_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": light_test_epoch,
+                "trajectory_type": selection[
+                    f"light_test_{trajectory_type}_trajectory_type"
+                ],
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    graph_rows = {
+        trajectory_type: _fetch1_dict(
+            wtrack_graph_table,
+            {
+                "nwb_file_name": nwb_file_name,
+                "configuration_name": selection[
+                    f"{trajectory_type}_configuration_name"
+                ],
+            },
+        )
+        for trajectory_type in _DPP_TRAJECTORY_TYPES
+    }
+    nwb_path = Path(nwbfile_table.get_abs_path(nwb_file_name))
+    with pynwb.NWBHDF5IO(
+        str(nwb_path),
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        nwbfile = io.read()
+        position = load_position(
+            nwbfile,
+            position_row,
+            apply_analysis_offset=True,
+        )
+        trajectory_intervals = {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in trajectory_rows.items()
+        }
+        graph_inputs = {
+            trajectory_type: load_wtrack_graph(nwbfile, row)
+            for trajectory_type, row in graph_rows.items()
+        }
+    return {
+        "position": position,
+        "trajectory_intervals": trajectory_intervals,
+        "graph_inputs": graph_inputs,
+        "position_row": position_row,
+    }
+
+
+def _load_swap_glm_spikes(
+    *,
+    context: Mapping[str, Any],
+    region_sorted_spikes_group_table: Any,
+) -> dict[str, Any]:
+    """Reload and verify all regional units for held-out light scoring."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    loaded = region_sorted_spikes_group_table.load_spikes(
+        {
+            "region_sorted_spikes_group_id": context["region_row"][
+                "region_sorted_spikes_group_id"
+            ]
+        },
+        time_support=context["epoch_time_support"],
+    )
+    unit_digest = unit_identity_sha256(loaded["unit_ids"])
+    expected_digests = {
+        str(context["region_row"]["selected_units_sha256"]),
+        str(context["movement_result"]["selected_units_sha256"]),
+    }
+    if expected_digests != {unit_digest}:
+        raise ValueError("SwapGLM regional units changed after selection.")
+    expected_count = int(context["region_row"]["n_units"])
+    if int(loaded["n_units"]) != expected_count or len(
+        loaded["unit_ids"]
+    ) != expected_count:
+        raise ValueError(
+            "SwapGLM regional unit count changed after selection."
+        )
+    return loaded
+
+
+def _legacy_swap_glm_unit_identity_resolver(
+    loaded_spikes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Map imported-sorting IDs to persistent held-out unit identities."""
+    non_imported = [
+        str(member["spikesorting_merge_id"])
+        for member in loaded_spikes["member_provenance"]
+        if int(member["n_selected_units"]) > 0
+        and str(member["merge_parent"]) != "ImportedSpikeSorting"
+    ]
+    if non_imported:
+        raise ValueError(
+            "Legacy SwapGLM registration requires matching "
+            "ImportedSpikeSorting units; found non-imported outputs "
+            f"{non_imported!r}."
+        )
+    resolver: dict[str, dict[str, str]] = {}
+    metadata_rows = list(loaded_spikes["unit_metadata"])
+    if len(metadata_rows) != len(loaded_spikes["unit_ids"]):
+        raise ValueError(
+            "Regional spike metadata must contain one row per selected unit."
+        )
+    for group_unit_id, metadata in zip(
+        loaded_spikes["ts_group"].keys(),
+        metadata_rows,
+        strict=True,
+    ):
+        sorting_unit_id = metadata.get("sorting_unit_id")
+        resolver_key = "" if sorting_unit_id is None else str(sorting_unit_id)
+        if not resolver_key or resolver_key in resolver:
+            raise ValueError(
+                "Every selected unit requires a unique sorting_unit_id for "
+                "legacy SwapGLM registration."
+            )
+        resolver[resolver_key] = {
+            "spikesorting_merge_id": str(metadata["spikesorting_merge_id"]),
+            "unit_id": str(metadata["unit_id"]),
+            "stable_unit_id": (
+                f"{metadata['spikesorting_merge_id']}:{metadata['unit_id']}"
+            ),
+            "group_unit_id": str(group_unit_id),
+        }
+    return resolver
+
+
 def _legacy_dark_light_unit_identity_resolver(
     loaded_spikes: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -7935,6 +8705,181 @@ def _validate_dark_light_glm_artifact_link(
             raise ValueError(
                 "DarkLightGLM result paths do not describe one canonical "
                 f"bundle: {field_name}."
+            )
+
+
+def _validate_swap_glm_upstream_link(
+    upstream: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> None:
+    """Require exact frozen DarkLight provenance for one swap result."""
+    expected = {
+        "dark_light_glm_id": selection["dark_light_glm_id"],
+        "dark_light_manifest_sha256": selection[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": selection[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": selection[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": selection[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": selection["upstream_analysis_status"],
+    }
+    for field_name, expected_value in expected.items():
+        observed = upstream.get(field_name)
+        if isinstance(expected_value, Mapping):
+            matches = dict(observed or {}) == dict(expected_value)
+        else:
+            matches = str(observed) == str(expected_value)
+        if not matches:
+            raise ValueError(
+                "SwapGLM DarkLight provenance changed after selection: "
+                f"{field_name}. Create a new selection."
+            )
+
+
+def _validate_swap_glm_artifact_link(
+    *,
+    bundle: Mapping[str, Any],
+    result_row: Mapping[str, Any],
+    selection_row: Mapping[str, Any],
+    parameters_row: Mapping[str, Any],
+    region_row: Mapping[str, Any],
+    animal_name: str,
+    date: str,
+) -> None:
+    """Require one held-out swap bundle to match its immutable rows."""
+    from v1ca1.spyglass.selection import provenance_sha256
+    from v1ca1.spyglass.swap_glm import (
+        ARTIFACT_DIRNAME,
+        BUNDLE_SCHEMA_VERSION,
+        MANIFEST_FILENAME,
+        RESULT_FILENAME,
+        RESULT_SCHEMA_VERSION,
+        SELECTED_UNITS_FILENAME,
+        validate_swap_glm_result,
+    )
+
+    validated = validate_swap_glm_result(bundle)
+    expected_metadata = {
+        "swap_glm_id": selection_row["swap_glm_id"],
+        "animal_name": animal_name,
+        "date": date,
+        "region": region_row["region_name"],
+        "dark_epoch": selection_row["dark_epoch"],
+        "light_train_epoch": selection_row["light_train_epoch"],
+        "light_test_epoch": selection_row["light_test_epoch"],
+    }
+    for field_name, expected_value in expected_metadata.items():
+        if str(validated["metadata"].get(field_name)) != str(expected_value):
+            raise ValueError(
+                "SwapGLM artifact does not match its selection: "
+                f"{field_name}."
+            )
+    parameters = _validate_swap_glm_parameter_row(parameters_row)
+    expected_parameters = {
+        "parameter_name": parameters["swap_glm_param_name"],
+        "parameter_sha256": selection_row[
+            "swap_glm_parameters_sha256"
+        ],
+        "output_rule_sha256": selection_row[
+            "swap_glm_output_rule_sha256"
+        ],
+        "swap_light_offset": parameters["swap_light_offset"],
+        "observed_spatial_bin_size_cm": parameters[
+            "observed_spatial_bin_size_cm"
+        ],
+    }
+    if provenance_sha256(dict(validated["parameters"])) != provenance_sha256(
+        expected_parameters
+    ):
+        raise ValueError("SwapGLM artifact parameters disagree with selection.")
+    _validate_swap_glm_upstream_link(
+        validated["upstream_provenance"],
+        selection_row,
+    )
+    expected_upstream = {
+        field_name: validated["upstream_provenance"][field_name]
+        for field_name in (
+            "dark_light_glm_id",
+            "dark_light_manifest_sha256",
+            "dark_light_selected_sha256_by_model",
+            "dark_light_parameter_sha256",
+            "dark_light_output_rule_sha256",
+            "upstream_analysis_status",
+        )
+    }
+    expected_scalars = {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_units": validated["n_units"],
+        "n_valid_units": validated["n_valid_units"],
+        "analysis_status": validated["analysis_status"],
+        "selected_units_sha256": validated["selected_units_sha256"],
+        "dark_light_manifest_sha256": expected_upstream[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": expected_upstream[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": expected_upstream[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": expected_upstream[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": expected_upstream[
+            "upstream_analysis_status"
+        ],
+        "artifact_origin": validated["artifact_origin"],
+    }
+    for field_name, expected_value in expected_scalars.items():
+        if result_row.get(field_name) != expected_value and str(
+            result_row.get(field_name)
+        ) != str(expected_value):
+            raise ValueError(
+                "SwapGLM result row disagrees with its artifact: "
+                f"{field_name}."
+            )
+    if int(result_row["n_units"]) > int(region_row["n_units"]):
+        raise ValueError(
+            "SwapGLM selected unit count exceeds RegionSortedSpikesGroup."
+        )
+
+    manifest_path = Path(result_row["artifact_manifest_path"])
+    result_id = str(selection_row["swap_glm_id"])
+    light_pair = (
+        f"{selection_row['light_train_epoch']}_train_to_"
+        f"{selection_row['light_test_epoch']}_test"
+    )
+    expected_tail = (
+        str(animal_name),
+        str(date),
+        ARTIFACT_DIRNAME,
+        light_pair,
+        f"dark_{selection_row['dark_epoch']}",
+        str(region_row["region_name"]),
+        result_id,
+        MANIFEST_FILENAME,
+    )
+    if tuple(manifest_path.parts[-len(expected_tail) :]) != expected_tail:
+        raise ValueError(
+            "SwapGLM manifest path does not match its canonical "
+            "session/epoch-pair/region/UUID layout."
+        )
+    expected_paths = {
+        "selected_units_path": manifest_path.parent / SELECTED_UNITS_FILENAME,
+        "swap_glm_path": manifest_path.parent / RESULT_FILENAME,
+    }
+    for field_name, expected_path in expected_paths.items():
+        if Path(result_row[field_name]) != expected_path:
+            raise ValueError(
+                "SwapGLM result paths do not describe one canonical bundle: "
+                f"{field_name}."
             )
 
 
@@ -9229,6 +10174,316 @@ def _register_existing_dark_light_glm_row(
     }
 
 
+def _make_swap_glm_row(
+    *,
+    key: Mapping[str, Any],
+    parameters_table: Any,
+    dark_light_glm_table: Any,
+    dark_light_glm_selection_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Compute and persist one held-out swapped-light score bundle."""
+    from v1ca1.spyglass.swap_glm import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        compute_swap_glm,
+        get_swap_glm_artifact_paths,
+        write_swap_glm_artifact,
+    )
+
+    context = _load_swap_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        dark_light_glm_table=dark_light_glm_table,
+        dark_light_glm_selection_table=dark_light_glm_selection_table,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_swap_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    nwb_inputs = _load_swap_glm_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    result = compute_swap_glm(
+        swap_glm_id=selection["swap_glm_id"],
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        dark_light_glm_artifact_path=context["dark_light_snapshot"][
+            "artifact_dir"
+        ],
+        spikes=loaded_spikes["ts_group"],
+        stable_unit_ids=loaded_spikes["unit_ids"],
+        movement_interval=context["movement"]["movement_intervals"],
+        movement_analysis_status=context["movement"]["analysis_status"],
+        trajectory_intervals=nwb_inputs["trajectory_intervals"],
+        graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+        position=nwb_inputs["position"],
+        parameter_name=parameters["swap_glm_param_name"],
+        parameter_sha256=selection["swap_glm_parameters_sha256"],
+        output_rule_sha256=selection["swap_glm_output_rule_sha256"],
+        swap_light_offset=parameters["swap_light_offset"],
+        observed_spatial_bin_size_cm=parameters[
+            "observed_spatial_bin_size_cm"
+        ],
+        sources={
+            "light_test_position_series_name": context[
+                "movement_selection"
+            ]["position_series_name"],
+            "light_test_movement_firing_rate_id": str(
+                selection["light_test_movement_firing_rate_id"]
+            ),
+            **{
+                f"{trajectory_type}_configuration_name": selection[
+                    f"{trajectory_type}_configuration_name"
+                ]
+                for trajectory_type in _DPP_TRAJECTORY_TYPES
+            },
+        },
+    )
+    _validate_swap_glm_upstream_link(
+        result["upstream_provenance"],
+        selection,
+    )
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_swap_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        swap_glm_id=selection["swap_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    written = write_swap_glm_artifact(
+        result,
+        artifact_dir,
+        overwrite=False,
+    )
+    upstream = result["upstream_provenance"]
+    return {
+        "artifact_manifest_path": str(written["artifact_manifest_path"]),
+        "selected_units_path": str(written["selected_units_path"]),
+        "swap_glm_path": str(written["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_units": int(result["n_units"]),
+        "n_valid_units": int(result["n_valid_units"]),
+        "analysis_status": str(result["analysis_status"]),
+        "selected_units_sha256": str(result["selected_units_sha256"]),
+        "dark_light_manifest_sha256": str(
+            upstream["dark_light_manifest_sha256"]
+        ),
+        "dark_light_selected_sha256_by_model": dict(
+            upstream["dark_light_selected_sha256_by_model"]
+        ),
+        "dark_light_parameter_sha256": str(
+            upstream["dark_light_parameter_sha256"]
+        ),
+        "dark_light_output_rule_sha256": str(
+            upstream["dark_light_output_rule_sha256"]
+        ),
+        "upstream_analysis_status": str(
+            upstream["upstream_analysis_status"]
+        ),
+        "legacy_artifact_provenance": None,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
+def _register_existing_swap_glm_row(
+    *,
+    key: Mapping[str, Any],
+    source_result_path: Path,
+    parameters_table: Any,
+    dark_light_glm_table: Any,
+    dark_light_glm_selection_table: Any,
+    region_sorted_spikes_group_table: Any,
+    movement_firing_rate_table: Any,
+    movement_firing_rate_selection_table: Any,
+    movement_parameters_table: Any,
+    position_table: Any,
+    epoch_intervals_table: Any,
+    trajectory_intervals_table: Any,
+    wtrack_graph_table: Any,
+    session_table: Any,
+    nwbfile_table: Any,
+    source_v1ca1_git_commit: str | None,
+    source_spyglass_git_commit: str | None,
+    artifact_root: Path | None,
+) -> dict[str, Any]:
+    """Strictly validate and copy one imported-sorting swap artifact."""
+    from v1ca1.spyglass.swap_glm import (
+        BUNDLE_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+        get_swap_glm_artifact_paths,
+        register_existing_swap_glm_artifact,
+    )
+
+    context = _load_swap_glm_context(
+        key=key,
+        parameters_table=parameters_table,
+        dark_light_glm_table=dark_light_glm_table,
+        dark_light_glm_selection_table=dark_light_glm_selection_table,
+        region_sorted_spikes_group_table=(
+            region_sorted_spikes_group_table
+        ),
+        movement_firing_rate_table=movement_firing_rate_table,
+        movement_firing_rate_selection_table=(
+            movement_firing_rate_selection_table
+        ),
+        movement_parameters_table=movement_parameters_table,
+        epoch_intervals_table=epoch_intervals_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        session_table=session_table,
+    )
+    loaded_spikes = _load_swap_glm_spikes(
+        context=context,
+        region_sorted_spikes_group_table=region_sorted_spikes_group_table,
+    )
+    _legacy_swap_glm_unit_identity_resolver(loaded_spikes)
+    nwb_inputs = _load_swap_glm_nwb_inputs(
+        context=context,
+        position_table=position_table,
+        trajectory_intervals_table=trajectory_intervals_table,
+        wtrack_graph_table=wtrack_graph_table,
+        nwbfile_table=nwbfile_table,
+    )
+    selection = context["selection"]
+    parameters = context["parameters"]
+    path_kwargs: dict[str, Any] = {}
+    if artifact_root is not None:
+        path_kwargs["artifact_root"] = artifact_root
+    paths = get_swap_glm_artifact_paths(
+        animal_name=context["animal_name"],
+        date=context["date"],
+        region=context["region"],
+        dark_epoch=selection["dark_epoch"],
+        light_train_epoch=selection["light_train_epoch"],
+        light_test_epoch=selection["light_test_epoch"],
+        swap_glm_id=selection["swap_glm_id"],
+        **path_kwargs,
+    )
+    artifact_dir = Path(paths["artifact_dir"])
+    created_artifact_paths = [] if artifact_dir.exists() else [str(artifact_dir)]
+    try:
+        registered = register_existing_swap_glm_artifact(
+            source_result_path=Path(source_result_path),
+            destination_path=artifact_dir,
+            swap_glm_id=selection["swap_glm_id"],
+            animal_name=context["animal_name"],
+            date=context["date"],
+            region=context["region"],
+            dark_epoch=selection["dark_epoch"],
+            light_train_epoch=selection["light_train_epoch"],
+            light_test_epoch=selection["light_test_epoch"],
+            dark_light_glm_artifact_path=context["dark_light_snapshot"][
+                "artifact_dir"
+            ],
+            spikes=loaded_spikes["ts_group"],
+            stable_unit_ids=loaded_spikes["unit_ids"],
+            movement_interval=context["movement"]["movement_intervals"],
+            movement_analysis_status=context["movement"]["analysis_status"],
+            trajectory_intervals=nwb_inputs["trajectory_intervals"],
+            graph_inputs_by_trajectory=nwb_inputs["graph_inputs"],
+            position=nwb_inputs["position"],
+            position_offset_samples=int(
+                nwb_inputs["position_row"][
+                    "analysis_start_offset_samples"
+                ]
+            ),
+            speed_threshold_cm_s=float(
+                context["movement_parameters"]["speed_threshold_cm_s"]
+            ),
+            parameter_name=parameters["swap_glm_param_name"],
+            parameter_sha256=selection["swap_glm_parameters_sha256"],
+            output_rule_sha256=selection["swap_glm_output_rule_sha256"],
+            swap_light_offset=parameters["swap_light_offset"],
+            observed_spatial_bin_size_cm=parameters[
+                "observed_spatial_bin_size_cm"
+            ],
+            source_v1ca1_git_commit=source_v1ca1_git_commit,
+            overwrite=False,
+        )
+        _validate_swap_glm_upstream_link(
+            registered["upstream_provenance"],
+            selection,
+        )
+    except Exception:
+        _remove_created_artifacts(created_artifact_paths)
+        raise
+    provenance = dict(registered["legacy_artifact_provenance"] or {})
+    provenance["source_spyglass_git_commit"] = source_spyglass_git_commit
+    upstream = registered["upstream_provenance"]
+    return {
+        "artifact_manifest_path": str(paths["artifact_manifest_path"]),
+        "selected_units_path": str(paths["selected_units_path"]),
+        "swap_glm_path": str(paths["result_path"]),
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
+        "n_units": int(registered["n_units"]),
+        "n_valid_units": int(registered["n_valid_units"]),
+        "analysis_status": str(registered["analysis_status"]),
+        "selected_units_sha256": str(
+            registered["selected_units_sha256"]
+        ),
+        "dark_light_manifest_sha256": str(
+            upstream["dark_light_manifest_sha256"]
+        ),
+        "dark_light_selected_sha256_by_model": dict(
+            upstream["dark_light_selected_sha256_by_model"]
+        ),
+        "dark_light_parameter_sha256": str(
+            upstream["dark_light_parameter_sha256"]
+        ),
+        "dark_light_output_rule_sha256": str(
+            upstream["dark_light_output_rule_sha256"]
+        ),
+        "upstream_analysis_status": str(
+            upstream["upstream_analysis_status"]
+        ),
+        "legacy_artifact_provenance": provenance,
+        "_created_artifact_paths": created_artifact_paths,
+    }
+
+
 def _new_schema(schema_factory: Callable[..., Any], context: dict[str, Any]) -> Any:
     """Construct one schema while supporting minimal injectable factories."""
     try:
@@ -9368,6 +10623,14 @@ def _construct_tables(
         "dark_light_glm_register_existing",
         _register_existing_dark_light_glm_row,
     )
+    swap_glm_compute_hook = runtime_hooks.get(
+        "swap_glm_compute",
+        _make_swap_glm_row,
+    )
+    swap_glm_register_hook = runtime_hooks.get(
+        "swap_glm_register_existing",
+        _register_existing_swap_glm_row,
+    )
     if not all(
         callable(hook)
         for hook in (
@@ -9391,6 +10654,8 @@ def _construct_tables(
             motor_encoding_comparison_register_hook,
             dark_light_glm_compute_hook,
             dark_light_glm_register_hook,
+            swap_glm_compute_hook,
+            swap_glm_register_hook,
         )
     ):
         raise TypeError("Analysis runtime hooks must be callable.")
@@ -12034,6 +13299,242 @@ def _construct_tables(
     DarkLightGLM = main_schema(DarkLightGLM)
     main_context["DarkLightGLM"] = DarkLightGLM
 
+    class SwapGLMParameters(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.SWAP_GLM_PARAMETERS_DEFINITION
+
+        @classmethod
+        def insert_parameters(
+            cls,
+            row: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate and insert one held-out swap parameter row."""
+            validated = _validate_swap_glm_parameter_row(row)
+            cls.insert1(validated, skip_duplicates=skip_duplicates)
+            return validated
+
+        @classmethod
+        def insert_defaults(
+            cls,
+            *,
+            skip_duplicates: bool = True,
+        ) -> list[dict[str, Any]]:
+            """Explicitly insert the current held-out scoring preset."""
+            rows = [
+                _validate_swap_glm_parameter_row(parameters)
+                for parameters in table_specs.SWAP_GLM_PARAMETER_PRESETS
+            ]
+            cls.insert(rows, skip_duplicates=skip_duplicates)
+            return rows
+
+    SwapGLMParameters = main_schema(SwapGLMParameters)
+    main_context["SwapGLMParameters"] = SwapGLMParameters
+
+    class SwapGLMSelection(spyglass_mixin, dj_module.Manual):
+        definition = table_specs.SWAP_GLM_SELECTION_DEFINITION
+
+        @classmethod
+        def insert_selection(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Validate, freeze, identify, and insert one held-out score."""
+            row = _swap_glm_selection_row(
+                key=key,
+                dark_light_glm_table=DarkLightGLM,
+                dark_light_glm_selection_table=DarkLightGLMSelection,
+                region_sorted_spikes_group_table=(
+                    RegionSortedSpikesGroup
+                ),
+                movement_firing_rate_table=MovementFiringRate,
+                movement_firing_rate_selection_table=(
+                    MovementFiringRateSelection
+                ),
+                epoch_intervals_table=EpochIntervals,
+                trajectory_intervals_table=TrajectoryIntervals,
+                wtrack_graph_table=WTrackGraph,
+                parameters_table=SwapGLMParameters,
+            )
+            cls.insert1(row, skip_duplicates=skip_duplicates)
+            return row
+
+    SwapGLMSelection = main_schema(SwapGLMSelection)
+    main_context["SwapGLMSelection"] = SwapGLMSelection
+
+    class SwapGLM(spyglass_mixin, dj_module.Computed):
+        definition = table_specs.SWAP_GLM_DEFINITION
+        _compute_hook = staticmethod(swap_glm_compute_hook)
+        _register_existing_hook = staticmethod(swap_glm_register_hook)
+
+        def make(self, key: Mapping[str, Any]) -> None:
+            """Compute, write, and insert one held-out swap bundle."""
+            selection = _fetch1_dict(SwapGLMSelection, key)
+            row = dict(
+                self._compute_hook(
+                    key=selection,
+                    parameters_table=SwapGLMParameters,
+                    dark_light_glm_table=DarkLightGLM,
+                    dark_light_glm_selection_table=DarkLightGLMSelection,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                row.pop("_created_artifact_paths", ())
+            )
+            try:
+                self.insert1(
+                    {
+                        "swap_glm_id": selection["swap_glm_id"],
+                        **row,
+                        "artifact_origin": "computed",
+                        "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                        "runtime_spyglass_git_commit": _spyglass_git_commit(),
+                    }
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+
+        @classmethod
+        def load_swap_glm_bundle(
+            cls,
+            key: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            """Load and validate one canonical held-out swap bundle."""
+            from v1ca1.spyglass.swap_glm import load_swap_glm_artifact
+
+            row = _fetch1_dict(cls, key)
+            selection = _fetch1_dict(
+                SwapGLMSelection,
+                {"swap_glm_id": row["swap_glm_id"]},
+            )
+            parameters = _fetch1_dict(
+                SwapGLMParameters,
+                {
+                    "swap_glm_param_name": selection[
+                        "swap_glm_param_name"
+                    ]
+                },
+            )
+            region_row = _fetch1_dict(
+                RegionSortedSpikesGroup,
+                {
+                    "region_sorted_spikes_group_id": selection[
+                        "region_sorted_spikes_group_id"
+                    ]
+                },
+            )
+            animal_name, session_date = _session_identity(
+                session_table,
+                selection,
+            )
+            bundle = load_swap_glm_artifact(
+                Path(row["artifact_manifest_path"]).parent
+            )
+            _validate_swap_glm_artifact_link(
+                bundle=bundle,
+                result_row=row,
+                selection_row=selection,
+                parameters_row=parameters,
+                region_row=region_row,
+                animal_name=animal_name,
+                date=session_date,
+            )
+            return bundle
+
+        @classmethod
+        def register_existing(
+            cls,
+            key: Mapping[str, Any],
+            *,
+            source_result_path: Path | str,
+            overwrite: bool = False,
+            source_v1ca1_git_commit: str | None = None,
+            source_spyglass_git_commit: str | None = None,
+            skip_duplicates: bool = False,
+        ) -> dict[str, Any]:
+            """Normalize one exact legacy held-out result and insert it."""
+            if overwrite:
+                raise ValueError(
+                    "Registered SwapGLM results are immutable; create a new "
+                    "selection instead of overwriting."
+                )
+            selection = _fetch1_dict(SwapGLMSelection, key)
+            result_key = {"swap_glm_id": selection["swap_glm_id"]}
+            existing = _existing_result_row(cls, result_key)
+            if existing is not None:
+                if skip_duplicates:
+                    return existing
+                raise ValueError(
+                    "SwapGLM already contains this immutable selection."
+                )
+            artifact_row = dict(
+                cls._register_existing_hook(
+                    key=selection,
+                    source_result_path=Path(source_result_path),
+                    parameters_table=SwapGLMParameters,
+                    dark_light_glm_table=DarkLightGLM,
+                    dark_light_glm_selection_table=DarkLightGLMSelection,
+                    region_sorted_spikes_group_table=(
+                        RegionSortedSpikesGroup
+                    ),
+                    movement_firing_rate_table=MovementFiringRate,
+                    movement_firing_rate_selection_table=(
+                        MovementFiringRateSelection
+                    ),
+                    movement_parameters_table=MovementParameters,
+                    position_table=Position,
+                    epoch_intervals_table=EpochIntervals,
+                    trajectory_intervals_table=TrajectoryIntervals,
+                    wtrack_graph_table=WTrackGraph,
+                    session_table=session_table,
+                    nwbfile_table=nwbfile_table,
+                    source_v1ca1_git_commit=source_v1ca1_git_commit,
+                    source_spyglass_git_commit=source_spyglass_git_commit,
+                    artifact_root=artifact_root,
+                )
+            )
+            created_artifact_paths = list(
+                artifact_row.pop("_created_artifact_paths", ())
+            )
+            row = {
+                "swap_glm_id": selection["swap_glm_id"],
+                **artifact_row,
+                "artifact_origin": "registered_existing",
+                "runtime_v1ca1_git_commit": _v1ca1_git_commit(),
+                "runtime_spyglass_git_commit": _spyglass_git_commit(),
+            }
+            try:
+                cls.insert1(
+                    row,
+                    skip_duplicates=False,
+                    allow_direct_insert=True,
+                )
+            except Exception:
+                _remove_created_artifacts(created_artifact_paths)
+                raise
+            return row
+
+    SwapGLM = main_schema(SwapGLM)
+    main_context["SwapGLM"] = SwapGLM
+
     analysis_context = {"Nwbfile": nwbfile_table}
     analysis_schema = _new_schema(schema_factory, analysis_context)
     analysis_schema.activate(
@@ -12124,6 +13625,9 @@ def _construct_tables(
         "dark_light_glm_parameters": DarkLightGLMParameters,
         "dark_light_glm_selection": DarkLightGLMSelection,
         "dark_light_glm": DarkLightGLM,
+        "swap_glm_parameters": SwapGLMParameters,
+        "swap_glm_selection": SwapGLMSelection,
+        "swap_glm": SwapGLM,
         "analysis_nwbfile": AnalysisNwbfile,
     }
 

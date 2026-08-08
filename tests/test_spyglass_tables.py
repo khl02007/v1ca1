@@ -29,6 +29,7 @@ from v1ca1.spyglass.tables import (
     _intervals_to_frame,
     _legacy_dpp_unit_identity_resolver,
     _legacy_dark_light_unit_identity_resolver,
+    _legacy_swap_glm_unit_identity_resolver,
     _load_tuning_similarity_inputs,
     _make_dpp_encoding_comparison_row,
     _make_dpp_tuning_curve_row,
@@ -37,6 +38,7 @@ from v1ca1.spyglass.tables import (
     _make_path_specific_place_decoding_row,
     _make_path_specific_place_tuning_curve_row,
     _make_ripple_modulation_row,
+    _make_swap_glm_row,
     _motor_encoding_comparison_selection_row,
     _movement_firing_rate_selection_row,
     _path_progression_decoding_selection_row,
@@ -45,7 +47,9 @@ from v1ca1.spyglass.tables import (
     _ripple_modulation_selection_row,
     _register_existing_dpp_encoding_comparison_row,
     _register_existing_dark_light_glm_row,
+    _register_existing_swap_glm_row,
     _stability_selection_row,
+    _swap_glm_selection_row,
     _tuning_similarity_selection_row,
     _validate_analysis_schema_prefix,
     _validate_dpp_encoding_comparison_artifact_link,
@@ -57,6 +61,8 @@ from v1ca1.spyglass.tables import (
     _validate_path_progression_decoding_artifact_link,
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
+    _validate_swap_glm_artifact_link,
+    _validate_swap_glm_parameter_row,
 )
 from v1ca1.spyglass.spikes import _sorting_output_sessions
 
@@ -1057,6 +1063,145 @@ def _build_dark_light_glm_selection(
     )
 
 
+def _swap_glm_selection_inputs() -> dict[str, Any]:
+    """Return one consistent held-out swap selection without artifact I/O."""
+    from v1ca1.spyglass.swap_glm import SOURCE_MODEL_NAMES
+
+    dark_light_inputs = _dark_light_glm_selection_inputs()
+    dark_light_selection = _build_dark_light_glm_selection(
+        dark_light_inputs
+    )
+    light_test_epoch = "06_r3"
+    light_test_movement_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "v1ca1-test-swap-light-test-movement",
+    )
+    light_test_movement_selection = {
+        **next(iter(dark_light_inputs["movement_selections"].values())),
+        "movement_firing_rate_id": light_test_movement_id,
+        "epoch": light_test_epoch,
+    }
+    movement_selections = {
+        **dark_light_inputs["movement_selections"],
+        light_test_movement_id: light_test_movement_selection,
+    }
+    movement_results = {
+        light_test_movement_id: {
+            "movement_firing_rate_id": light_test_movement_id,
+            "n_units": dark_light_inputs["region_row"]["n_units"],
+            "analysis_status": "valid",
+            "selected_units_sha256": dark_light_inputs["region_row"][
+                "selected_units_sha256"
+            ],
+        }
+    }
+    parameters = dict(table_specs.DEFAULT_SWAP_GLM_PARAMETERS)
+    snapshot = {
+        "artifact_dir": Path("/analysis/dark-light"),
+        "manifest_sha256": "1" * 64,
+        "selected_sha256_by_model": {
+            model_name: str(index + 2) * 64
+            for index, model_name in enumerate(SOURCE_MODEL_NAMES)
+        },
+        "parameter_sha256": dark_light_selection[
+            "dark_light_glm_parameters_sha256"
+        ],
+        "output_rule_sha256": dark_light_selection[
+            "dark_light_glm_output_rule_sha256"
+        ],
+        "analysis_status": "valid",
+        "metadata": {
+            "dark_light_glm_id": str(
+                dark_light_selection["dark_light_glm_id"]
+            ),
+            "animal_name": "L14",
+            "date": "20240102",
+            "region": "v1",
+            "light_epoch": dark_light_selection["light_epoch"],
+            "dark_epoch": dark_light_selection["dark_epoch"],
+        },
+    }
+    nwb_file_name = dark_light_selection["nwb_file_name"]
+    key = {
+        "nwb_file_name": nwb_file_name,
+        "dark_light_glm_id": dark_light_selection["dark_light_glm_id"],
+        "region_sorted_spikes_group_id": dark_light_selection[
+            "region_sorted_spikes_group_id"
+        ],
+        "light_test_movement_firing_rate_id": light_test_movement_id,
+        "dark_epoch": dark_light_selection["dark_epoch"],
+        "light_train_epoch": dark_light_selection["light_epoch"],
+        "light_test_epoch": light_test_epoch,
+        **{
+            f"light_test_{trajectory_type}_trajectory_type": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        **{
+            f"{trajectory_type}_configuration_name": trajectory_type
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        },
+        "swap_glm_param_name": parameters["swap_glm_param_name"],
+    }
+    return {
+        "key": key,
+        "dark_light_selection": dark_light_selection,
+        "dark_light_snapshot": snapshot,
+        "region_row": dark_light_inputs["region_row"],
+        "movement_selections": movement_selections,
+        "movement_results": movement_results,
+        "epoch_rows": [
+            *dark_light_inputs["epoch_rows"],
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": light_test_epoch,
+                "epoch_type": "run",
+                "condition": "BA",
+                "is_light": True,
+            },
+        ],
+        "trajectory_rows": [
+            {
+                "nwb_file_name": nwb_file_name,
+                "epoch": light_test_epoch,
+                "trajectory_type": trajectory_type,
+                "interval_count": 5,
+            }
+            for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+        ],
+        "graph_rows": dark_light_inputs["graph_rows"],
+        "parameters": parameters,
+    }
+
+
+def _build_swap_glm_selection(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build one held-out swap row from mutable fake upstream rows."""
+    return _swap_glm_selection_row(
+        key=inputs["key"],
+        dark_light_glm_table=object(),
+        dark_light_glm_selection_table=_FakeRelation(
+            inputs["dark_light_selection"]
+        ),
+        region_sorted_spikes_group_table=_FakeRelation(
+            inputs["region_row"]
+        ),
+        movement_firing_rate_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_results"],
+        ),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            inputs["movement_selections"],
+        ),
+        epoch_intervals_table=_FakeRowsRelation(inputs["epoch_rows"]),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        dark_light_snapshot=inputs["dark_light_snapshot"],
+    )
+
+
 def test_import_is_passive_in_fresh_interpreter() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     environment = os.environ.copy()
@@ -1118,6 +1263,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "dark_light_glm_parameters",
         "dark_light_glm_selection",
         "dark_light_glm",
+        "swap_glm_parameters",
+        "swap_glm_selection",
+        "swap_glm",
         "analysis_nwbfile",
     }
     assert [schema.activations[0][0] for schema in schemas] == [
@@ -1148,6 +1296,9 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "DarkLightGLMParameters" in schemas[0].context
     assert "DarkLightGLMSelection" in schemas[0].context
     assert "DarkLightGLM" in schemas[0].context
+    assert "SwapGLMParameters" in schemas[0].context
+    assert "SwapGLMSelection" in schemas[0].context
+    assert "SwapGLM" in schemas[0].context
     assert "PathProgressionDecodingParameters" in schemas[0].context
     assert (
         "PathProgressionDecodingComparisonSelection" in schemas[0].context
@@ -1503,6 +1654,27 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "task_dense_gain_model_path: filepath@analysis" in dark_light_result
     assert "'partial_valid'" in dark_light_result
     assert hasattr(bundle["dark_light_glm"], "register_existing")
+
+    swap_parameters = bundle["swap_glm_parameters"].definition
+    assert "swap_light_offset: bool" in swap_parameters
+    assert "observed_spatial_bin_size_cm: double" in swap_parameters
+    swap_selection = bundle["swap_glm_selection"].definition
+    assert "swap_glm_id: uuid" in swap_selection
+    assert "-> DarkLightGLM" in swap_selection
+    assert "-> RegionSortedSpikesGroup" in swap_selection
+    assert "light_test_movement_firing_rate_id=" in swap_selection
+    assert "light_test_center_to_left_trajectory_type=" in swap_selection
+    assert "dark_light_manifest_sha256: char(64)" in swap_selection
+    assert "dark_light_selected_sha256_by_model: longblob" in swap_selection
+    assert "dark_light_parameter_sha256: char(64)" in swap_selection
+    assert "upstream_analysis_status:" in swap_selection
+    swap_result = bundle["swap_glm"].definition
+    assert "-> SwapGLMSelection" in swap_result
+    assert "artifact_manifest_path: filepath@analysis" in swap_result
+    assert "swap_glm_path: filepath@analysis" in swap_result
+    assert "'upstream_terminal'" in swap_result
+    assert "'no_trajectory_samples'" in swap_result
+    assert hasattr(bundle["swap_glm"], "register_existing")
 
 
 def test_region_sorted_group_registration_skips_empty_and_bulk_inserts(
@@ -3792,6 +3964,20 @@ def test_dark_light_glm_selection_checks_conditions_and_snapshots() -> None:
     with pytest.raises(ValueError, match="frozen source snapshot"):
         _build_dark_light_glm_selection(inputs)
 
+    inputs = _dark_light_glm_selection_inputs()
+    light_id = inputs["key"]["light_movement_firing_rate_id"]
+    inputs["movement_selections"][light_id][
+        "position_series_name"
+    ] = "body_position"
+    inputs["position_rows"].append(
+        {
+            **inputs["position_rows"][1],
+            "position_series_name": "body_position",
+        }
+    )
+    with pytest.raises(ValueError, match="position_series_name"):
+        _build_dark_light_glm_selection(inputs)
+
 
 def test_dark_light_glm_selection_allows_terminal_movement_statuses() -> None:
     inputs = _dark_light_glm_selection_inputs()
@@ -3953,6 +4139,721 @@ def test_dark_light_registration_uses_canonical_selected_paths(
     assert Path(row["visual_model_path"]) == (
         artifact_dir / "selected" / "visual.nc"
     )
+
+
+def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:
+    parameters = dict(table_specs.DEFAULT_SWAP_GLM_PARAMETERS)
+    assert _validate_swap_glm_parameter_row(parameters) == parameters
+    inputs = _swap_glm_selection_inputs()
+
+    first = _build_swap_glm_selection(inputs)
+    second = _build_swap_glm_selection(_swap_glm_selection_inputs())
+
+    assert first == second
+    assert first["swap_glm_id"].version == 5
+    assert first["light_test_epoch"] == "06_r3"
+    assert first["dark_condition"] == "dark"
+    assert first["light_train_condition"] == "AB"
+    assert first["light_test_condition"] == "BA"
+    assert first["dark_light_manifest_sha256"] == "1" * 64
+    assert first["dark_light_selected_sha256_by_model"] == inputs[
+        "dark_light_snapshot"
+    ]["selected_sha256_by_model"]
+    assert first["dark_light_parameter_sha256"] == inputs[
+        "dark_light_snapshot"
+    ]["parameter_sha256"]
+    assert first["upstream_analysis_status"] == "valid"
+    assert first["swap_glm_parameters_sha256"] == provenance_sha256(
+        parameters
+    )
+    assert first["swap_glm_output_rule_sha256"] == provenance_sha256(
+        dict(table_specs.SWAP_GLM_OUTPUT_RULE)
+    )
+
+
+def test_swap_glm_selection_requires_shared_movement_definition() -> None:
+    inputs = _swap_glm_selection_inputs()
+    movement_id = inputs["key"]["light_test_movement_firing_rate_id"]
+    inputs["movement_selections"][movement_id][
+        "movement_parameters_sha256"
+    ] = "f" * 64
+
+    with pytest.raises(ValueError, match="frozen source snapshot"):
+        _build_swap_glm_selection(inputs)
+
+    inputs = _swap_glm_selection_inputs()
+    movement_id = inputs["key"]["light_test_movement_firing_rate_id"]
+    inputs["movement_selections"][movement_id][
+        "position_series_name"
+    ] = "body_position"
+    with pytest.raises(ValueError, match="position_series_name"):
+        _build_swap_glm_selection(inputs)
+
+
+def test_swap_glm_selection_checks_heldout_condition_and_laps() -> None:
+    inputs = _swap_glm_selection_inputs()
+    inputs["epoch_rows"][-1]["condition"] = "AB"
+    with pytest.raises(ValueError, match="conditions must differ"):
+        _build_swap_glm_selection(inputs)
+
+    inputs = _swap_glm_selection_inputs()
+    inputs["trajectory_rows"][0]["interval_count"] = 0
+    with pytest.raises(ValueError, match="at least one held-out lap"):
+        _build_swap_glm_selection(inputs)
+
+
+def test_swap_glm_selection_allows_no_valid_position_terminal() -> None:
+    inputs = _swap_glm_selection_inputs()
+    movement_id = inputs["key"]["light_test_movement_firing_rate_id"]
+    inputs["movement_results"][movement_id][
+        "analysis_status"
+    ] = "no_valid_position"
+
+    row = _build_swap_glm_selection(inputs)
+
+    assert row["light_test_movement_firing_rate_id"] == movement_id
+
+
+def test_swap_glm_context_loads_no_valid_position_movement_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The terminal movement status is recovered from the saved artifact."""
+    import numpy as np
+    import pynapple as nap
+
+    from v1ca1.spyglass import movement
+
+    inputs = _swap_glm_selection_inputs()
+    selection = _build_swap_glm_selection(inputs)
+    movement_id = selection["light_test_movement_firing_rate_id"]
+    n_units = int(inputs["region_row"]["n_units"])
+    identity_rows = [
+        {
+            "spikesorting_merge_id": "merge-a",
+            "unit_id": str(unit_id),
+            "stable_unit_id": f"merge-a:{unit_id}",
+            "group_unit_id": unit_id,
+        }
+        for unit_id in range(n_units)
+    ]
+    movement_table = movement._build_movement_table(
+        identity_rows=identity_rows,
+        animal_name="L14",
+        date="20240102",
+        region="v1",
+        epoch=selection["light_test_epoch"],
+        movement_spike_counts=np.zeros(n_units, dtype=np.int64),
+        movement_duration_s=0.0,
+        movement_firing_rates_hz=np.full(n_units, np.nan),
+        firing_rate_status="no_valid_position",
+        position_sample_count=1,
+        finite_position_sample_count=0,
+        finite_speed_sample_count=0,
+        movement_interval_count=0,
+        speed_threshold_cm_s=4.0,
+        speed_smoothing_sigma_s=0.1,
+    )
+    empty_intervals = nap.IntervalSet(
+        start=np.array([], dtype=float),
+        end=np.array([], dtype=float),
+        time_units="s",
+    )
+    artifact_paths = movement.write_movement_artifacts(
+        movement_table,
+        empty_intervals,
+        tmp_path / "movement",
+    )
+    movement_result = {
+        "movement_firing_rate_id": movement_id,
+        "movement_firing_rate_path": str(
+            artifact_paths["firing_rate_path"]
+        ),
+        "movement_intervals_path": str(
+            artifact_paths["movement_intervals_path"]
+        ),
+        "n_units": n_units,
+        "n_valid_units": 0,
+        "n_units_with_spikes": 0,
+        "movement_interval_count": 0,
+        "movement_duration_s": 0.0,
+        "analysis_status": "no_valid_position",
+        "selected_units_sha256": inputs["region_row"][
+            "selected_units_sha256"
+        ],
+    }
+    movement_selections = dict(inputs["movement_selections"])
+    movement_parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    movement_parameters_sha256 = provenance_sha256(movement_parameters)
+    for movement_selection in movement_selections.values():
+        movement_selection["movement_parameters_sha256"] = (
+            movement_parameters_sha256
+        )
+    test_epoch_row = next(
+        row
+        for row in inputs["epoch_rows"]
+        if row["epoch"] == selection["light_test_epoch"]
+    )
+    test_epoch_row.update({"start_time": 10.0, "stop_time": 20.0})
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_dark_light_snapshot",
+        lambda **kwargs: inputs["dark_light_snapshot"],
+    )
+
+    context = tables_module._load_swap_glm_context(
+        key=selection,
+        parameters_table=_FakeRelation(inputs["parameters"]),
+        dark_light_glm_table=object(),
+        dark_light_glm_selection_table=_FakeRelation(
+            inputs["dark_light_selection"]
+        ),
+        region_sorted_spikes_group_table=_FakeRelation(
+            inputs["region_row"]
+        ),
+        movement_firing_rate_table=_FakeRelation(movement_result),
+        movement_firing_rate_selection_table=_FakeKeyedRelation(
+            "movement_firing_rate_id",
+            movement_selections,
+        ),
+        movement_parameters_table=_FakeRelation(movement_parameters),
+        epoch_intervals_table=_FakeRowsRelation(inputs["epoch_rows"]),
+        trajectory_intervals_table=_FakeRowsRelation(
+            inputs["trajectory_rows"]
+        ),
+        wtrack_graph_table=_FakeRowsRelation(inputs["graph_rows"]),
+        session_table=_FakeRelation(
+            {
+                "subject_id": "L14",
+                "session_start_time": datetime(2024, 1, 2, 12, 30),
+            }
+        ),
+    )
+
+    assert context["movement"]["analysis_status"] == "no_valid_position"
+    assert movement.movement_interval_summary(
+        context["movement"]["movement_intervals"]
+    ) == (0, 0.0)
+
+
+def test_swap_glm_legacy_resolver_requires_imported_unique_units() -> None:
+    loaded = {
+        "ts_group": {0: object(), 1: object()},
+        "unit_ids": [
+            {"spikesorting_merge_id": "merge-a", "unit_id": 10},
+            {"spikesorting_merge_id": "merge-a", "unit_id": 11},
+        ],
+        "unit_metadata": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 10,
+                "sorting_unit_id": 101,
+            },
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": 11,
+                "sorting_unit_id": 102,
+            },
+        ],
+        "member_provenance": [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "merge_parent": "ImportedSpikeSorting",
+                "n_selected_units": 2,
+            }
+        ],
+    }
+    resolver = _legacy_swap_glm_unit_identity_resolver(loaded)
+    assert resolver["101"]["stable_unit_id"] == "merge-a:10"
+    assert resolver["102"]["group_unit_id"] == "1"
+
+    loaded["member_provenance"][0]["merge_parent"] = "CurationV1"
+    with pytest.raises(ValueError, match="ImportedSpikeSorting"):
+        _legacy_swap_glm_unit_identity_resolver(loaded)
+
+
+def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The compute hook receives position even for a terminal movement row."""
+    from v1ca1.spyglass import swap_glm
+
+    inputs = _swap_glm_selection_inputs()
+    selection = _build_swap_glm_selection(inputs)
+    movement_interval = object()
+    position = object()
+    trajectory_intervals = {
+        trajectory_type: object()
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    graph_inputs = {
+        trajectory_type: object()
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    spikes = object()
+    stable_unit_ids = [
+        {"spikesorting_merge_id": "merge-a", "unit_id": 10}
+    ]
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "dark_light_snapshot": inputs["dark_light_snapshot"],
+        "movement": {
+            "movement_intervals": movement_interval,
+            "analysis_status": "no_valid_position",
+        },
+        "movement_selection": {"position_series_name": "head_position"},
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "v1",
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_spikes",
+        lambda **kwargs: {
+            "ts_group": spikes,
+            "unit_ids": stable_unit_ids,
+        },
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_nwb_inputs",
+        lambda **kwargs: {
+            "position": position,
+            "trajectory_intervals": trajectory_intervals,
+            "graph_inputs": graph_inputs,
+        },
+    )
+    upstream = {
+        "dark_light_glm_id": str(selection["dark_light_glm_id"]),
+        "dark_light_manifest_sha256": selection[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": selection[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": selection[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": selection[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": selection[
+            "upstream_analysis_status"
+        ],
+    }
+    compute_calls = []
+    result = {
+        "upstream_provenance": upstream,
+        "n_units": 1,
+        "n_valid_units": 0,
+        "analysis_status": "no_valid_position",
+        "selected_units_sha256": inputs["region_row"][
+            "selected_units_sha256"
+        ],
+    }
+
+    def compute(**kwargs):
+        compute_calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(swap_glm, "compute_swap_glm", compute)
+    monkeypatch.setattr(
+        swap_glm,
+        "write_swap_glm_artifact",
+        lambda result, destination, **kwargs: {
+            "artifact_manifest_path": destination / "manifest.parquet",
+            "selected_units_path": destination / "selected_units.parquet",
+            "result_path": destination / "swap_glm.nc",
+        },
+    )
+
+    row = _make_swap_glm_row(
+        key=selection,
+        parameters_table=object(),
+        dark_light_glm_table=object(),
+        dark_light_glm_selection_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        position_table=object(),
+        epoch_intervals_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        artifact_root=tmp_path,
+    )
+
+    assert len(compute_calls) == 1
+    call = compute_calls[0]
+    assert call["spikes"] is spikes
+    assert call["stable_unit_ids"] is stable_unit_ids
+    assert call["movement_interval"] is movement_interval
+    assert call["trajectory_intervals"] is trajectory_intervals
+    assert call["graph_inputs_by_trajectory"] is graph_inputs
+    assert call["position"] is position
+    assert row["analysis_status"] == "no_valid_position"
+
+
+def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A valid bundle must retain its exact selection and canonical layout."""
+    from v1ca1.spyglass import swap_glm
+
+    inputs = _swap_glm_selection_inputs()
+    selection = _build_swap_glm_selection(inputs)
+    upstream = {
+        "dark_light_glm_id": str(selection["dark_light_glm_id"]),
+        "dark_light_manifest_sha256": selection[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": selection[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": selection[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": selection[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": selection[
+            "upstream_analysis_status"
+        ],
+    }
+    bundle = {
+        "metadata": {
+            "swap_glm_id": str(selection["swap_glm_id"]),
+            "animal_name": "L14",
+            "date": "20240102",
+            "region": "v1",
+            "dark_epoch": selection["dark_epoch"],
+            "light_train_epoch": selection["light_train_epoch"],
+            "light_test_epoch": selection["light_test_epoch"],
+        },
+        "parameters": {
+            "parameter_name": inputs["parameters"]["swap_glm_param_name"],
+            "parameter_sha256": selection[
+                "swap_glm_parameters_sha256"
+            ],
+            "output_rule_sha256": selection[
+                "swap_glm_output_rule_sha256"
+            ],
+            "swap_light_offset": inputs["parameters"][
+                "swap_light_offset"
+            ],
+            "observed_spatial_bin_size_cm": inputs["parameters"][
+                "observed_spatial_bin_size_cm"
+            ],
+        },
+        "upstream_provenance": upstream,
+        "n_units": 2,
+        "n_valid_units": 1,
+        "analysis_status": "partial_valid",
+        "selected_units_sha256": inputs["region_row"][
+            "selected_units_sha256"
+        ],
+        "artifact_origin": "computed",
+    }
+    monkeypatch.setattr(
+        swap_glm,
+        "validate_swap_glm_result",
+        lambda candidate: candidate,
+    )
+    artifact_dir = (
+        tmp_path
+        / "L14"
+        / "20240102"
+        / "swap_glm"
+        / (
+            f"{selection['light_train_epoch']}_train_to_"
+            f"{selection['light_test_epoch']}_test"
+        )
+        / f"dark_{selection['dark_epoch']}"
+        / "v1"
+        / str(selection["swap_glm_id"])
+    )
+    row = {
+        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+        "selected_units_path": str(
+            artifact_dir / "selected_units.parquet"
+        ),
+        "swap_glm_path": str(artifact_dir / "swap_glm.nc"),
+        "schema_version": swap_glm.RESULT_SCHEMA_VERSION,
+        "bundle_schema_version": swap_glm.BUNDLE_SCHEMA_VERSION,
+        "n_units": bundle["n_units"],
+        "n_valid_units": bundle["n_valid_units"],
+        "analysis_status": bundle["analysis_status"],
+        "selected_units_sha256": bundle["selected_units_sha256"],
+        "dark_light_manifest_sha256": upstream[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": upstream[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": upstream[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": upstream[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": upstream[
+            "upstream_analysis_status"
+        ],
+        "artifact_origin": "computed",
+    }
+
+    _validate_swap_glm_artifact_link(
+        bundle=bundle,
+        result_row=row,
+        selection_row=selection,
+        parameters_row=inputs["parameters"],
+        region_row=inputs["region_row"],
+        animal_name="L14",
+        date="20240102",
+    )
+
+    bad_path_row = {**row, "swap_glm_path": str(tmp_path / "wrong.nc")}
+    with pytest.raises(ValueError, match="canonical bundle"):
+        _validate_swap_glm_artifact_link(
+            bundle=bundle,
+            result_row=bad_path_row,
+            selection_row=selection,
+            parameters_row=inputs["parameters"],
+            region_row=inputs["region_row"],
+            animal_name="L14",
+            date="20240102",
+        )
+
+    bad_identity_bundle = {
+        **bundle,
+        "metadata": {**bundle["metadata"], "light_test_epoch": "10_r5"},
+    }
+    with pytest.raises(ValueError, match="light_test_epoch"):
+        _validate_swap_glm_artifact_link(
+            bundle=bad_identity_bundle,
+            result_row=row,
+            selection_row=selection,
+            parameters_row=inputs["parameters"],
+            region_row=inputs["region_row"],
+            animal_name="L14",
+            date="20240102",
+        )
+
+
+def test_swap_glm_registration_uses_canonical_bundle_and_strict_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    inputs = _swap_glm_selection_inputs()
+    selection = _build_swap_glm_selection(inputs)
+    movement_interval = object()
+    position = object()
+    trajectory_intervals = {
+        trajectory_type: object()
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    graph_inputs = {
+        trajectory_type: object()
+        for trajectory_type in _DPP_ENCODING_TRAJECTORIES
+    }
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "dark_light_snapshot": inputs["dark_light_snapshot"],
+        "movement": {
+            "movement_intervals": movement_interval,
+            "analysis_status": "valid",
+        },
+        "movement_parameters": {
+            "speed_threshold_cm_s": 4.0,
+        },
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "v1",
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_spikes",
+        lambda **kwargs: {"ts_group": {}, "unit_ids": []},
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_swap_glm_nwb_inputs",
+        lambda **kwargs: {
+            "position": position,
+            "position_row": {"analysis_start_offset_samples": 10},
+            "trajectory_intervals": trajectory_intervals,
+            "graph_inputs": graph_inputs,
+        },
+    )
+    resolver_calls = []
+    monkeypatch.setattr(
+        tables_module,
+        "_legacy_swap_glm_unit_identity_resolver",
+        lambda loaded: resolver_calls.append(loaded) or {},
+    )
+    from v1ca1.spyglass import swap_glm
+
+    upstream = {
+        "dark_light_glm_id": str(selection["dark_light_glm_id"]),
+        "dark_light_manifest_sha256": selection[
+            "dark_light_manifest_sha256"
+        ],
+        "dark_light_selected_sha256_by_model": selection[
+            "dark_light_selected_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": selection[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": selection[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": selection[
+            "upstream_analysis_status"
+        ],
+    }
+    register_calls = []
+
+    def register_existing(**kwargs):
+        register_calls.append(kwargs)
+        return {
+            "upstream_provenance": upstream,
+            "legacy_artifact_provenance": {"source": "legacy"},
+            "n_units": 1,
+            "n_valid_units": 1,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+        }
+
+    monkeypatch.setattr(
+        swap_glm,
+        "register_existing_swap_glm_artifact",
+        register_existing,
+    )
+    row = _register_existing_swap_glm_row(
+        key=selection,
+        source_result_path=tmp_path / "legacy.nc",
+        parameters_table=object(),
+        dark_light_glm_table=object(),
+        dark_light_glm_selection_table=object(),
+        region_sorted_spikes_group_table=object(),
+        movement_firing_rate_table=object(),
+        movement_firing_rate_selection_table=object(),
+        movement_parameters_table=object(),
+        position_table=object(),
+        epoch_intervals_table=object(),
+        trajectory_intervals_table=object(),
+        wtrack_graph_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        source_v1ca1_git_commit="v1",
+        source_spyglass_git_commit="sg",
+        artifact_root=tmp_path,
+    )
+
+    artifact_dir = (
+        tmp_path
+        / "L14"
+        / "20240102"
+        / "swap_glm"
+        / "02_r1_train_to_06_r3_test"
+        / "dark_08_r4"
+        / "v1"
+        / str(selection["swap_glm_id"])
+    )
+    assert resolver_calls
+    assert len(register_calls) == 1
+    registration = register_calls[0]
+    assert registration["spikes"] == {}
+    assert registration["stable_unit_ids"] == []
+    assert registration["movement_interval"] is movement_interval
+    assert registration["movement_analysis_status"] == "valid"
+    assert registration["trajectory_intervals"] is trajectory_intervals
+    assert registration["graph_inputs_by_trajectory"] is graph_inputs
+    assert registration["position"] is position
+    assert registration["position_offset_samples"] == 10
+    assert isinstance(registration["position_offset_samples"], int)
+    assert registration["speed_threshold_cm_s"] == 4.0
+    assert isinstance(registration["speed_threshold_cm_s"], float)
+    assert Path(row["artifact_manifest_path"]) == (
+        artifact_dir / "manifest.parquet"
+    )
+    assert Path(row["swap_glm_path"]) == artifact_dir / "swap_glm.nc"
+    assert row["legacy_artifact_provenance"][
+        "source_spyglass_git_commit"
+    ] == "sg"
+
+
+def test_swap_glm_failed_insert_removes_new_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed DataJoint insert removes only the newly written UUID bundle."""
+    result_id = uuid.uuid4()
+    artifact_dir = tmp_path / str(result_id)
+    retained_path = tmp_path / "preexisting.nc"
+    retained_path.write_bytes(b"keep")
+
+    def compute(**_kwargs):
+        artifact_dir.mkdir()
+        manifest_path = artifact_dir / "manifest.parquet"
+        selected_units_path = artifact_dir / "selected_units.parquet"
+        swap_path = artifact_dir / "swap_glm.nc"
+        for path in (manifest_path, selected_units_path, swap_path):
+            path.write_bytes(b"new")
+        return {
+            "artifact_manifest_path": str(manifest_path),
+            "selected_units_path": str(selected_units_path),
+            "swap_glm_path": str(swap_path),
+            "schema_version": "4",
+            "bundle_schema_version": "1",
+            "n_units": 2,
+            "n_valid_units": 1,
+            "analysis_status": "partial_valid",
+            "selected_units_sha256": "a" * 64,
+            "dark_light_manifest_sha256": "b" * 64,
+            "dark_light_selected_sha256_by_model": {"visual": "c" * 64},
+            "dark_light_parameter_sha256": "d" * 64,
+            "dark_light_output_rule_sha256": "e" * 64,
+            "upstream_analysis_status": "valid",
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_dir)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"swap_glm_id": result_id},
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"swap_glm_compute": compute}
+    )
+    result = bundle["swap_glm"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"swap_glm_id": result_id})
+
+    assert not artifact_dir.exists()
+    assert retained_path.read_bytes() == b"keep"
 
 
 def test_tuning_similarity_result_hooks_receive_fetched_selection(
