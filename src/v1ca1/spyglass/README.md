@@ -33,10 +33,35 @@ register artifacts, or write to NWB.
   writing.
 - `ripple_cross_region_xcorr.py` provides the fixed ripple-restricted CA1-to-V1
   cross-correlation computation and strict four-artifact legacy registration.
+- `offline/` runs selected computation modules directly from an augmented NWB,
+  without importing DataJoint or connecting to Spyglass.
 - `tables.py` lazily constructs the DataJoint tables and connects source
   readers, selections, computation, and `register_existing()`.
 - `__init__.py` exposes the lazy `activate()` and `ingest_v1ca1_nwb()` entry
   points.
+
+## Database-free Figure 1 validation
+
+The first offline slice computes movement firing rate, all/odd/even
+path-specific place tuning curves, and odd/even stability. Results are retained
+under `/stelmo/kyu/analysis/spyglass/runs/<run-id>`; source NWBs and legacy
+artifacts are opened read-only and are never overwritten. Start with L14:
+
+```bash
+python -m v1ca1.spyglass.offline.figure_1 \
+  --run-id figure1-v1 \
+  --animal-name L14 --date 20240611 --epoch 08_r4
+
+python -m v1ca1.paper_figures.figure_1_spyglass \
+  --run-id figure1-v1 --mode l14-validation
+```
+
+The second command renders a run-local Figure 1D validation without changing
+the original Figure 1 script. After adding the other three sessions with the
+same run ID and parameters, use `--mode full`; parameter changes require a new
+run ID. Offline selection UUIDs are intentionally run-local surrogates; the
+artifacts must be re-keyed to actual table selections before database
+registration.
 
 ## NWB source catalog
 
