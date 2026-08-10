@@ -1,4 +1,4 @@
-"""Render Figure 1D validation heatmaps from offline Spyglass artifacts."""
+"""Render Figure 1 from retained database-free Spyglass artifacts."""
 
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ import numpy as np
 from v1ca1.helper.session import REGIONS
 from v1ca1.paper_figures.datasets import get_processed_datasets
 from v1ca1.paper_figures.figure_1 import (
+    DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_POSITION_OFFSET,
+    DEFAULT_REGIONS as FULL_FIGURE_DEFAULT_REGIONS,
     FIGURE_FORMATS,
     PANEL_D_FIRING_RATE_NORMALIZATION,
     PANEL_D_HEATMAP_CMAP,
@@ -53,6 +55,7 @@ from v1ca1.spyglass.table_specs import (
 
 
 RUNS_DIRNAME = "runs"
+FIGURE_SCOPES = ("panel-d", "full-figure")
 FIGURE_MODES = ("l14-validation", "full")
 L14_DATASET = ("L14", "20240611", "08_r4")
 FULL_DATASETS = tuple(get_processed_datasets())
@@ -975,14 +978,24 @@ def render_figure_1d_validation(
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the explicit offline Figure 1D validation command."""
+    """Parse the database-free partial or complete Figure 1 command."""
     parser = argparse.ArgumentParser(
         description=(
-            "Render Figure 1D validation heatmaps from one retained offline "
-            "Spyglass run. This command never reads legacy analysis artifacts."
+            "Render Figure 1D or the complete Figure 1 from one retained "
+            "offline Spyglass run. This command never reads legacy analysis "
+            "artifacts."
         )
     )
     parser.add_argument("--run-id", required=True, help="Immutable offline run ID.")
+    parser.add_argument(
+        "--figure-scope",
+        choices=FIGURE_SCOPES,
+        default="panel-d",
+        help=(
+            "Render the historical Figure 1D validation or the complete "
+            "artifact-backed Figure 1. Default: panel-d"
+        ),
+    )
     parser.add_argument(
         "--mode",
         required=True,
@@ -1001,7 +1014,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=REGIONS,
         help=(
             "Regional sorting view to plot. May be repeated. "
-            f"Default: {', '.join(DEFAULT_REGIONS)}."
+            f"Default: {', '.join(DEFAULT_REGIONS)} for panel-d; "
+            f"{', '.join(FULL_FIGURE_DEFAULT_REGIONS)} for full-figure."
         ),
     )
     parser.add_argument(
@@ -1021,6 +1035,15 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--asset-dir",
+        type=Path,
+        default=DEFAULT_ASSET_DIR,
+        help=(
+            "Read-only Figure 1 static asset directory, used only by "
+            f"--figure-scope full-figure. Default: {DEFAULT_ASSET_DIR}"
+        ),
+    )
+    parser.add_argument(
         "--dpi",
         type=int,
         default=DEFAULT_DPI,
@@ -1030,8 +1053,43 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Load one offline campaign and render its Figure 1D validation."""
+    """Load one offline campaign and render the requested Figure 1 scope."""
     args = parse_arguments(argv)
+    if args.figure_scope == "full-figure":
+        from v1ca1.paper_figures._figure_1_spyglass_full import (
+            get_full_figure_output_path,
+            load_full_figure_1_payload,
+            render_full_figure_1,
+        )
+
+        payload = load_full_figure_1_payload(
+            scratch_root=args.scratch_root,
+            run_id=args.run_id,
+            mode=args.mode,
+            regions=(
+                tuple(args.region)
+                if args.region is not None
+                else FULL_FIGURE_DEFAULT_REGIONS
+            ),
+        )
+        output_path = (
+            get_full_figure_output_path(
+                run_dir=payload["run_dir"],
+                mode=args.mode,
+                output_format=args.output_format,
+            )
+            if args.output_path is None
+            else args.output_path
+        )
+        path = render_full_figure_1(
+            payload,
+            output_path=output_path,
+            asset_dir=args.asset_dir,
+            dpi=args.dpi,
+        )
+        print(f"Saved complete offline Spyglass Figure 1 to {path}")
+        return
+
     payload = load_figure_1d_payload(
         scratch_root=args.scratch_root,
         run_id=args.run_id,

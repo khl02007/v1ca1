@@ -63,6 +63,26 @@ run ID. Offline selection UUIDs are intentionally run-local surrogates; the
 artifacts must be re-keyed to actual table selections before database
 registration.
 
+The complete A–G workflow uses that validated Figure 1D campaign as a
+hash-pinned parent, then computes the example rasters/tuning curves, motor and
+DPP encoding, and path-progression decoding de novo. Validate L14 first:
+
+```bash
+python -m v1ca1.spyglass.offline.figure_1_full \
+  --run-id figure1-full-nwb-v1 \
+  --parent-run-id figure1d-nwb-v1 \
+  --animal-name L14 --date 20240611 --epoch 08_r4
+
+python -m v1ca1.paper_figures.figure_1_spyglass \
+  --figure-scope full-figure \
+  --run-id figure1-full-nwb-v1 --mode l14-validation
+```
+
+Add the remaining manuscript sessions to the same full run, then render with
+`--mode full`. The workflow opens augmented NWBs read-only, never loads legacy
+analysis artifacts, refuses to overwrite results, and writes all artifacts and
+figures below the selected run directory.
+
 ## NWB source catalog
 
 The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleIntervals`,

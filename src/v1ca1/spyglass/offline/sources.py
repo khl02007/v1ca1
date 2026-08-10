@@ -102,6 +102,33 @@ def select_figure_1_catalog(
     trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
 ) -> dict[str, Any]:
     """Select and validate one run epoch's Figure 1 NWB catalog rows."""
+    selection = select_run_epoch_catalog(
+        nwbfile,
+        nwb_file_name=nwb_file_name,
+        epoch=epoch,
+        position_roles=(position_role,),
+        trajectory_types=trajectory_types,
+        require_dark=True,
+    )
+    return {
+        "epoch_row": selection["epoch_row"],
+        "position_row": selection["position_rows"][str(position_role)],
+        "trajectory_rows": selection["trajectory_rows"],
+        "graph_rows": selection["graph_rows"],
+    }
+
+
+def select_run_epoch_catalog(
+    nwbfile: Any,
+    *,
+    nwb_file_name: str,
+    epoch: str,
+    position_roles: Sequence[str] = ("head",),
+    trajectory_types: Sequence[str] = TRAJECTORY_TYPES,
+    graph_configurations: Sequence[str] = (),
+    require_dark: bool = False,
+) -> dict[str, Any]:
+    """Select centimeter positions, intervals, and graphs for one run epoch."""
     catalog = catalog_augmented_nwb(nwbfile, nwb_file_name=nwb_file_name)
     epoch_row = _one_row(
         catalog["epoch_intervals"],
@@ -110,22 +137,34 @@ def select_figure_1_catalog(
     )
     if epoch_row.get("epoch_type") not in (None, "run"):
         raise ValueError(f"Figure 1 tuning requires a run epoch, got {epoch!r}.")
-    condition = str(epoch_row.get("condition", "")).strip().casefold()
-    is_light = epoch_row.get("is_light")
-    if condition != "dark" or is_light is None or bool(is_light):
-        raise ValueError(
-            "Figure 1 tuning requires an explicitly cataloged dark run epoch; "
-            f"got condition={epoch_row.get('condition')!r}, "
-            f"is_light={is_light!r}."
+    if require_dark:
+        condition = str(epoch_row.get("condition", "")).strip().casefold()
+        is_light = epoch_row.get("is_light")
+        if condition != "dark" or is_light is None or bool(is_light):
+            raise ValueError(
+                "Figure 1 tuning requires an explicitly cataloged dark run "
+                f"epoch; got condition={epoch_row.get('condition')!r}, "
+                f"is_light={is_light!r}."
+            )
+
+    requested_roles = tuple(str(value) for value in position_roles)
+    if (
+        not requested_roles
+        or any(not value for value in requested_roles)
+        or len(requested_roles) != len(set(requested_roles))
+    ):
+        raise ValueError("position_roles must be a non-empty unique sequence.")
+    position_rows = {
+        role: _one_row(
+            catalog["position"],
+            description="position",
+            epoch=epoch,
+            position_role=role,
         )
-    position_row = _one_row(
-        catalog["position"],
-        description="position",
-        epoch=epoch,
-        position_role=position_role,
-    )
-    if position_row.get("spatial_unit") != "cm":
-        raise ValueError("Selected position must use centimeters.")
+        for role in requested_roles
+    }
+    if any(row.get("spatial_unit") != "cm" for row in position_rows.values()):
+        raise ValueError("Selected positions must use centimeters.")
 
     requested = tuple(str(value) for value in trajectory_types)
     if not requested or len(requested) != len(set(requested)):
@@ -139,16 +178,24 @@ def select_figure_1_catalog(
             epoch=epoch,
             trajectory_type=trajectory_type,
         )
-        graph_rows[trajectory_type] = _one_row(
+    graph_names = tuple(
+        dict.fromkeys(
+            (*requested, *(str(value) for value in graph_configurations))
+        )
+    )
+    if any(not value for value in graph_names):
+        raise ValueError("graph_configurations must contain non-empty names.")
+    for configuration_name in graph_names:
+        graph_rows[configuration_name] = _one_row(
             catalog["wtrack_graph"],
             description="W-track graph",
-            configuration_name=trajectory_type,
+            configuration_name=configuration_name,
         )
-        if graph_rows[trajectory_type].get("coordinate_unit") != "cm":
+        if graph_rows[configuration_name].get("coordinate_unit") != "cm":
             raise ValueError("Selected W-track graph must use centimeters.")
     return {
         "epoch_row": epoch_row,
-        "position_row": position_row,
+        "position_rows": position_rows,
         "trajectory_rows": trajectory_rows,
         "graph_rows": graph_rows,
     }
@@ -172,6 +219,27 @@ def load_figure_1_catalog_objects(
         "graph_inputs": {
             trajectory_type: load_wtrack_graph(nwbfile, row)
             for trajectory_type, row in selection["graph_rows"].items()
+        },
+    }
+
+
+def load_run_epoch_catalog_objects(
+    nwbfile: Any,
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Load all objects selected by :func:`select_run_epoch_catalog`."""
+    return {
+        "positions": {
+            role: load_position(nwbfile, row, apply_analysis_offset=True)
+            for role, row in selection["position_rows"].items()
+        },
+        "trajectory_intervals": {
+            trajectory_type: load_interval_set(nwbfile, row)
+            for trajectory_type, row in selection["trajectory_rows"].items()
+        },
+        "graph_inputs": {
+            configuration_name: load_wtrack_graph(nwbfile, row)
+            for configuration_name, row in selection["graph_rows"].items()
         },
     }
 
@@ -252,11 +320,43 @@ def load_nwb_region_spikes(
     }
 
 
+def resolve_sorting_unit(
+    loaded_spikes: Mapping[str, Any],
+    *,
+    sorting_unit_id: Any,
+) -> dict[str, Any]:
+    """Resolve one region-local sorting ID to its persistent NWB identity."""
+    metadata = loaded_spikes.get("unit_metadata")
+    if not isinstance(metadata, Sequence):
+        raise ValueError("Loaded spikes do not contain unit_metadata.")
+    matches = [
+        (group_key, dict(row))
+        for group_key, row in enumerate(metadata)
+        if str(row.get("sorting_unit_id")) == str(sorting_unit_id)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "Expected exactly one unit for sorting_unit_id "
+            f"{sorting_unit_id!r}; found {len(matches)}."
+        )
+    group_key, row = matches[0]
+    return {
+        "group_key": int(group_key),
+        "sorting_unit_id": _native(row["sorting_unit_id"]),
+        "spikesorting_merge_id": str(row["spikesorting_merge_id"]),
+        "unit_id": _native(row["unit_id"]),
+        "metadata": row,
+    }
+
+
 __all__ = [
     "SOURCE_IDENTITY_POLICY",
     "imported_spike_sorting_merge_id",
     "load_figure_1_catalog_objects",
     "load_nwb_region_spikes",
+    "load_run_epoch_catalog_objects",
+    "resolve_sorting_unit",
     "select_figure_1_catalog",
+    "select_run_epoch_catalog",
     "validate_nwb_session_identity",
 ]

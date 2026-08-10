@@ -103,6 +103,15 @@ def test_load_nwb_region_spikes_uses_units_index_and_seconds() -> None:
     )
     np.testing.assert_allclose(loaded["spike_times_s"][0], [1.0, 2.0])
     assert list(loaded["ts_group"]) == [0, 1]
+    resolved = sources.resolve_sorting_unit(
+        loaded,
+        sorting_unit_id=303,
+    )
+    assert resolved["group_key"] == 1
+    assert resolved["unit_id"] == 12
+
+    with pytest.raises(ValueError, match="found 0"):
+        sources.resolve_sorting_unit(loaded, sorting_unit_id=999)
 
 
 def test_nwb_session_identity_must_match_cli_labels() -> None:
@@ -181,6 +190,54 @@ def test_figure_1_catalog_requires_an_explicit_dark_run(
         trajectory_types=("center_to_left",),
     )
     assert selected["epoch_row"]["condition"] == "dark"
+
+
+def test_run_epoch_catalog_supports_light_and_multiple_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = {
+        "epoch_intervals": [
+            {
+                "epoch": "02_r1",
+                "epoch_type": "run",
+                "condition": "AB",
+                "is_light": True,
+            }
+        ],
+        "position": [
+            {
+                "epoch": "02_r1",
+                "position_role": role,
+                "spatial_unit": "cm",
+            }
+            for role in ("head", "body")
+        ],
+        "trajectory_intervals": [
+            {"epoch": "02_r1", "trajectory_type": "center_to_left"}
+        ],
+        "wtrack_graph": [
+            {"configuration_name": name, "coordinate_unit": "cm"}
+            for name in ("center_to_left", "full_w")
+        ],
+    }
+    monkeypatch.setattr(
+        sources,
+        "catalog_augmented_nwb",
+        lambda *args, **kwargs: catalog,
+    )
+
+    selected = sources.select_run_epoch_catalog(
+        object(),
+        nwb_file_name="L1420240611_augmented.nwb",
+        epoch="02_r1",
+        position_roles=("head", "body"),
+        trajectory_types=("center_to_left",),
+        graph_configurations=("full_w",),
+    )
+
+    assert tuple(selected["position_rows"]) == ("head", "body")
+    assert tuple(selected["graph_rows"]) == ("center_to_left", "full_w")
+    assert selected["epoch_row"]["condition"] == "AB"
 
 
 def _complete_session(run_dir: Path) -> dict[str, object]:
