@@ -433,10 +433,10 @@ def get_unit_mask(
     movement_firing_rates: np.ndarray,
     threshold_hz: float,
 ) -> np.ndarray:
-    """Return the boolean mask of units above the requested movement-rate threshold."""
+    """Return units at or above the requested movement-rate threshold."""
     movement_firing_rates = np.asarray(movement_firing_rates, dtype=float)
     return np.isfinite(movement_firing_rates) & (
-        movement_firing_rates > float(threshold_hz)
+        movement_firing_rates >= float(threshold_hz)
     )
 
 
@@ -2441,14 +2441,15 @@ def run_nested_lap_cv(
         n_selected = int(np.sum(unit_mask))
         print(
             f"{print_prefix}Outer fold {outer_index + 1}/{n_outer}: "
-            f"{n_selected}/{n_units} units pass train-only FR>{min_firing_rate_hz:.3f} Hz; "
+            f"{n_selected}/{n_units} units pass train-only "
+            f"FR>={min_firing_rate_hz:.3f} Hz; "
             f"train bins={outer_train_bin_count[outer_index]}, "
             f"test bins={outer_test_bin_count[outer_index]}."
         )
         if n_selected == 0:
             raise ValueError(
                 f"Outer fold {outer_index} selected no units at "
-                f"FR>{min_firing_rate_hz:.3f} Hz."
+                f"FR>={min_firing_rate_hz:.3f} Hz."
             )
         outer_unit_selected[outer_index, unit_mask] = 1
 

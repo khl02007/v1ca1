@@ -494,6 +494,19 @@ def test_compute_motor_covariates_uses_selected_speed_smoothing_sigma(
     assert observed == {"sigma": 0.25}
 
 
+def test_get_unit_mask_includes_exact_movement_firing_rate_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _reload_motor_module(monkeypatch)
+
+    mask = module.get_unit_mask(
+        np.asarray([np.nan, 0.49, 0.5, 0.51], dtype=float),
+        threshold_hz=0.5,
+    )
+
+    assert mask.tolist() == [False, False, True, True]
+
+
 def test_select_run_epochs_deduplicates_requested_epochs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
