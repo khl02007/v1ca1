@@ -250,6 +250,48 @@ def test_full_campaign_validates_identity_parent_and_duplicates(
         )
 
 
+def test_prepare_full_campaign_reloads_its_own_session_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = full.get_run_dir("figure1-full", scratch_root=tmp_path)
+    session = _complete_session(run_dir)
+    session_path = run_dir / "L14" / "20240611" / "session_manifest.json"
+    session_path.write_text(json.dumps(session), encoding="utf-8")
+    parent = {"run_id": "parent", "manifest_sha256": "a" * 64, "sessions": []}
+    campaign = {
+        "schema_version": full.MANIFEST_SCHEMA_VERSION,
+        "run_id": "figure1-full",
+        "analysis_parameters": full.build_full_figure_configuration(parent),
+        "source_identity_policy": dict(full.SOURCE_IDENTITY_POLICY),
+        "sessions": [
+            {
+                "animal_name": "L14",
+                "date": "20240611",
+                "session_manifest_path": session_path.relative_to(
+                    run_dir
+                ).as_posix(),
+            }
+        ],
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(campaign), encoding="utf-8")
+    monkeypatch.setattr(
+        full,
+        "build_parent_snapshot",
+        lambda *args, **kwargs: parent,
+    )
+
+    loaded_run_dir, loaded, loaded_parent = full.prepare_full_figure_campaign(
+        run_id="figure1-full",
+        parent_run_id="parent",
+        scratch_root=tmp_path,
+    )
+
+    assert loaded_run_dir == run_dir
+    assert full.canonical_json(loaded) == full.canonical_json(campaign)
+    assert loaded_parent == parent
+
+
 def test_master_session_delegates_loaded_inputs_without_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

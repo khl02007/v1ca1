@@ -237,6 +237,27 @@ def prepare_full_figure_campaign(
         scratch_root=scratch_root,
     )
     configuration = build_full_figure_configuration(parent_snapshot)
+    run_dir = get_run_dir(run_id, scratch_root=scratch_root)
+    if (run_dir / CAMPAIGN_MANIFEST_FILENAME).exists():
+        loaded_run_dir, campaign, _ = load_full_figure_campaign(
+            run_id,
+            scratch_root=scratch_root,
+        )
+        if canonical_json(campaign.get("analysis_parameters")) != canonical_json(
+            configuration
+        ):
+            raise ValueError(
+                "Existing campaign uses different analysis parameters; "
+                "use a new run_id."
+            )
+        if canonical_json(campaign.get("source_identity_policy")) != canonical_json(
+            SOURCE_IDENTITY_POLICY
+        ):
+            raise ValueError(
+                "Existing campaign uses a different unit identity policy; "
+                "use a new run_id."
+            )
+        return loaded_run_dir, campaign, parent_snapshot
     run_dir, campaign = prepare_campaign(
         run_id=run_id,
         analysis_parameters=configuration,
