@@ -752,6 +752,12 @@ def test_compute_orchestration_normalizes_explicit_spline_outputs(
         return dataset
 
     monkeypatch.setattr(module, "_fit_candidate_dataset", fake_fit_candidate)
+    cache_cleanup_calls = []
+    monkeypatch.setattr(
+        module,
+        "_clear_jax_fit_caches",
+        lambda: cache_cleanup_calls.append(None),
+    )
     epoch_paths = {
         epoch: {trajectory: object() for trajectory in TRAJECTORY_TYPES}
         for epoch in ("08_r4", "02_r1")
@@ -781,6 +787,7 @@ def test_compute_orchestration_normalizes_explicit_spline_outputs(
 
     assert result["parameters"]["schema_version"] == "4"
     assert result["n_candidates"] == 5
+    assert len(cache_cleanup_calls) == 5
     assert "n_splines" in result["selection_summary"].dims
     assert all(
         "spatial_bin_size_cm" not in dataset.attrs

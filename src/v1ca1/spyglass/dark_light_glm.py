@@ -9,6 +9,7 @@ counts.  This module keeps those contracts distinct through
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import gc
 import hashlib
 import json
 import os
@@ -135,6 +136,17 @@ def _analysis_module() -> Any:
     from v1ca1.task_progression import dark_light_glm
 
     return dark_light_glm
+
+
+def _clear_jax_fit_caches() -> None:
+    """Best-effort cleanup of JAX caches between large candidate fits."""
+    try:
+        import jax
+    except ModuleNotFoundError:
+        pass
+    else:
+        jax.clear_caches()
+    gc.collect()
 
 
 class _IsolatingPopulationGLM:
@@ -1109,30 +1121,33 @@ def compute_dark_light_glm(
 
     for bin_size_s in parameters["bin_sizes_s"]:
         for position_basis in position_basis_configs:
-            dataset = _fit_candidate_dataset(
-                model_name="visual",
-                spikes=spikes,
-                trajectory_intervals_by_epoch=trajectory_intervals_by_epoch,
-                task_progression_by_epoch=task_progression_by_epoch,
-                speed_by_epoch=speed_by_epoch,
-                light_epoch=light_epoch,
-                dark_epoch=dark_epoch,
-                folds_by_trajectory=folds_by_trajectory,
-                movement_by_epoch=movement_by_epoch,
-                bin_size_s=bin_size_s,
-                position_basis=position_basis,
-                ridges=parameters["ridges"],
-                unit_mask=unit_mask,
-                segment_edges=segment_edges,
-                animal_name=animal_name,
-                date=date,
-                region=region,
-                selected_dark_rates=selected_dark_rates,
-                selected_light_rates=selected_light_rates,
-                parameters=parameters,
-                sources=source_metadata,
-                fit_parameters=fit_parameters,
-            )
+            try:
+                dataset = _fit_candidate_dataset(
+                    model_name="visual",
+                    spikes=spikes,
+                    trajectory_intervals_by_epoch=trajectory_intervals_by_epoch,
+                    task_progression_by_epoch=task_progression_by_epoch,
+                    speed_by_epoch=speed_by_epoch,
+                    light_epoch=light_epoch,
+                    dark_epoch=dark_epoch,
+                    folds_by_trajectory=folds_by_trajectory,
+                    movement_by_epoch=movement_by_epoch,
+                    bin_size_s=bin_size_s,
+                    position_basis=position_basis,
+                    ridges=parameters["ridges"],
+                    unit_mask=unit_mask,
+                    segment_edges=segment_edges,
+                    animal_name=animal_name,
+                    date=date,
+                    region=region,
+                    selected_dark_rates=selected_dark_rates,
+                    selected_light_rates=selected_light_rates,
+                    parameters=parameters,
+                    sources=source_metadata,
+                    fit_parameters=fit_parameters,
+                )
+            finally:
+                _clear_jax_fit_caches()
             key = _candidate_key(
                 "visual",
                 bin_size_s=bin_size_s,
@@ -1157,30 +1172,33 @@ def compute_dark_light_glm(
     )
     selected_bin_size_s = float(shared_selection["bin_size_s"])
     for model_name in MODEL_NAMES[1:]:
-        dataset = _fit_candidate_dataset(
-            model_name=model_name,
-            spikes=spikes,
-            trajectory_intervals_by_epoch=trajectory_intervals_by_epoch,
-            task_progression_by_epoch=task_progression_by_epoch,
-            speed_by_epoch=speed_by_epoch,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-            folds_by_trajectory=folds_by_trajectory,
-            movement_by_epoch=movement_by_epoch,
-            bin_size_s=selected_bin_size_s,
-            position_basis=selected_position_basis,
-            ridges=parameters["ridges"],
-            unit_mask=unit_mask,
-            segment_edges=segment_edges,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            selected_dark_rates=selected_dark_rates,
-            selected_light_rates=selected_light_rates,
-            parameters=parameters,
-            sources=source_metadata,
-            fit_parameters=fit_parameters,
-        )
+        try:
+            dataset = _fit_candidate_dataset(
+                model_name=model_name,
+                spikes=spikes,
+                trajectory_intervals_by_epoch=trajectory_intervals_by_epoch,
+                task_progression_by_epoch=task_progression_by_epoch,
+                speed_by_epoch=speed_by_epoch,
+                light_epoch=light_epoch,
+                dark_epoch=dark_epoch,
+                folds_by_trajectory=folds_by_trajectory,
+                movement_by_epoch=movement_by_epoch,
+                bin_size_s=selected_bin_size_s,
+                position_basis=selected_position_basis,
+                ridges=parameters["ridges"],
+                unit_mask=unit_mask,
+                segment_edges=segment_edges,
+                animal_name=animal_name,
+                date=date,
+                region=region,
+                selected_dark_rates=selected_dark_rates,
+                selected_light_rates=selected_light_rates,
+                parameters=parameters,
+                sources=source_metadata,
+                fit_parameters=fit_parameters,
+            )
+        finally:
+            _clear_jax_fit_caches()
         key = _candidate_key(
             model_name,
             bin_size_s=selected_bin_size_s,
