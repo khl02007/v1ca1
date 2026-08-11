@@ -299,9 +299,10 @@ MANIFEST_COLUMNS = (
 
 
 def _analysis_module() -> Any:
-    """Import the existing analysis implementation only when it is needed."""
+    """Import the existing evaluator and initialize its spline dependency."""
     from v1ca1.task_progression import swap_glm_comparison
 
+    swap_glm_comparison._require_spline_basis()
     return swap_glm_comparison
 
 

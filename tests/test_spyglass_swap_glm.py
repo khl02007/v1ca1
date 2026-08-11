@@ -681,6 +681,7 @@ def test_parameters_preserve_legacy_defaults() -> None:
 def test_output_rule_matches_reused_analysis_contract() -> None:
     analysis = module._analysis_module()
     module._validate_reused_analysis_contract(analysis)
+    assert analysis.BSplineEval is not None
     assert module.OUTPUT_RULE["unit_validity_policy"] == (
         "upstream_valid_glm_fit_and_all_expected_primary_scores_finite"
     )
