@@ -175,10 +175,10 @@ def test_panel_b_intersects_fixed_filters_in_both_epochs(
         scratch_root=tmp_path,
     )
 
-    assert set(table["unit"]) == {1}
-    assert set(table["epoch_type"]) == {"light", "dark"}
-    assert set(table["comparison_label"]) == {"left_turn", "right_turn"}
-    assert len(table) == 4
+    assert table["unit"].tolist() == [1]
+    assert table["comparison_label"].tolist() == ["right_turn"]
+    assert table["similarity_dark"].tolist() == pytest.approx([0.41])
+    assert table["similarity_light"].tolist() == pytest.approx([0.41])
 
 
 def test_nwb_graph_length_uses_stored_geometry_and_spacing() -> None:

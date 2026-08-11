@@ -341,7 +341,7 @@ def _build_panel_b_overlap_table(
     *,
     scratch_root: Path,
 ) -> pd.DataFrame:
-    """Build explicitly filtered light/dark all-unit overlap rows."""
+    """Build explicitly filtered, paired light/dark overlap rows."""
     tables = []
     expected_labels = set(_dark_light.PANEL_C_SIMILARITY_COMPARISON_LABELS)
     for session in sessions:
@@ -412,7 +412,20 @@ def _build_panel_b_overlap_table(
                     ],
                 ]
             )
-    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+    if not tables:
+        return pd.DataFrame(
+            columns=[
+                "animal_name",
+                "date",
+                "unit",
+                "comparison_label",
+                "similarity_light",
+                "similarity_dark",
+            ]
+        )
+    return _dark_light.build_panel_c_similarity_pairs(
+        pd.concat(tables, ignore_index=True)
+    )
 
 
 def _load_panel_a_examples(
