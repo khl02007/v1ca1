@@ -21,4 +21,17 @@ def run_full_figure_1_session(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return run_full_figure_session(*args, **kwargs)
 
 
-__all__ = ["run_figure_1_session", "run_full_figure_1_session"]
+def run_figure_2_session(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Lazily run one session's complete offline Figure 2 inputs."""
+    from v1ca1.spyglass.offline.figure_2 import (
+        run_figure_2_session as _run_figure_2_session,
+    )
+
+    return _run_figure_2_session(*args, **kwargs)
+
+
+__all__ = [
+    "run_figure_1_session",
+    "run_figure_2_session",
+    "run_full_figure_1_session",
+]

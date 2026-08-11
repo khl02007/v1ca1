@@ -83,6 +83,26 @@ Add the remaining manuscript sessions to the same full run, then render with
 analysis artifacts, refuses to overwrite results, and writes all artifacts and
 figures below the selected run directory.
 
+## Database-free Figure 2 validation
+
+Figure 2 extends the completed Figure 1 campaign with AB/BA movement inputs,
+light tuning and stability, dark/light overlap, both decoders, a de novo
+`legacy_v4_v1` dark/light GLM fit, and the forward AB-to-BA swap test. Run one
+session at a time; the dark epoch is inherited from the parent:
+
+```bash
+python -m v1ca1.spyglass.offline.figure_2 \
+  --run-id figure2-nwb-v1 --parent-run-id figure1-full-nwb-v2 \
+  --animal-name L14 --date 20240611
+
+python -m v1ca1.paper_figures.figure_2_spyglass \
+  --run-id figure2-nwb-v1
+```
+
+Add all four manuscript sessions before rendering. The workflow writes only
+below its run directory and does not modify the canonical Figure 2 script, the
+standalone AB/gray/BA Figure 2A script, a database, NWBs, or legacy artifacts.
+
 ## NWB source catalog
 
 The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleIntervals`,
