@@ -103,6 +103,33 @@ Add all four manuscript sessions before rendering. The workflow writes only
 below its run directory and does not modify the canonical Figure 2 script, the
 standalone AB/gray/BA Figure 2A script, a database, NWBs, or legacy artifacts.
 
+## Database-free Figure 3 validation
+
+Figure 3 uses the completed Figure 2 campaign as a hash-pinned parent. It
+computes light-epoch ripple modulation and both manuscript RippleGLM models
+for each session; L15 additionally supplies the ripple cross-correlation and
+an NWB-derived LFP/raster example. Run L14 first, using a GPU for the GLMs:
+
+```bash
+python -m v1ca1.spyglass.offline.figure_3 \
+  --run-id figure3-nwb-gpu-v1 --parent-run-id figure2-nwb-gpu-v1 \
+  --animal-name L14 --date 20240611
+```
+
+After inspecting L14, add the other three manuscript sessions with the same
+run ID, then render the complete figure:
+
+```bash
+python -m v1ca1.paper_figures.figure_3_spyglass \
+  --run-id figure3-nwb-gpu-v1
+```
+
+The runner uses only detector-qualified, speed-gated NWB ripples from the
+light epoch, reuses the hash-verified dark Figure 2 inputs for panel E, and
+writes below the selected run directory. It does not connect to DataJoint,
+read legacy Figure 3 artifacts, overwrite an NWB, or use a synthetic panel
+fallback.
+
 ## NWB source catalog
 
 The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleIntervals`,
