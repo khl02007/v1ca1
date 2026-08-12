@@ -892,7 +892,7 @@ def _build_xcorr_payload(
     coordinate_updates: dict[str, Any] = {}
     for region in REGIONS:
         dim = f"{region}_unit"
-        id_coordinate = f"{region}_unit_id"
+        id_coordinate = f"{region}_source_unit_id"
         nwb_ids = np.asarray(dataset.coords[id_coordinate].values).astype(str)
         missing = sorted(set(nwb_ids).difference(maps[region]))
         if missing:

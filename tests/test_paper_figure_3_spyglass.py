@@ -157,6 +157,103 @@ def test_unit_table_maps_stable_nwb_ids_to_sorting_ids() -> None:
         )
 
 
+def test_xcorr_payload_maps_canonical_source_unit_coordinates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map canonical xcorr source IDs while retaining summary-based ranking."""
+    import xarray as xr
+
+    run_dir = tmp_path / "runs" / "figure3"
+    run_dir.mkdir(parents=True)
+    sessions = _sessions()
+    l15 = next(row for row in sessions if row["animal_name"] == "L15")
+    record = l15["artifacts"]["ripple_cross_region_xcorr"][0]
+    record["artifact_manifest_path"] = (
+        "L15/20241121/ripple_cross_region_xcorr/02_r1/result/manifest.parquet"
+    )
+    summary = pd.DataFrame.from_records(
+        [
+            {
+                "ca1_unit_id": ca1_unit_id,
+                "ca1_stable_unit_id": f"merge:{ca1_unit_id}",
+                "v1_unit_id": v1_unit_id,
+                "v1_stable_unit_id": f"merge:{v1_unit_id}",
+                "peak_norm_xcorr": peak,
+                "peak_lag_s": lag,
+                "status": figure.legacy.PAIR_STATUS_VALID,
+            }
+            for ca1_unit_id, rows in {
+                "101": (
+                    ("201", 1.0, 0.1),
+                    ("202", 5.0, -0.1),
+                    ("203", 3.0, 0.0),
+                ),
+                "102": (
+                    ("201", 9.0, 0.1),
+                    ("202", 8.0, -0.1),
+                    ("203", 7.0, 0.0),
+                ),
+            }.items()
+            for v1_unit_id, peak, lag in rows
+        ]
+    )
+    xcorr = np.arange(2 * 3 * 2, dtype=float).reshape(2, 3, 2)
+    dataset = xr.Dataset(
+        {"xcorr": (("ca1_unit", "v1_unit", "lag_s"), xcorr)},
+        coords={
+            "ca1_unit": np.asarray(["merge:101", "merge:102"]),
+            "ca1_source_unit_id": ("ca1_unit", np.asarray(["101", "102"])),
+            "v1_unit": np.asarray(["merge:201", "merge:202", "merge:203"]),
+            "v1_source_unit_id": (
+                "v1_unit",
+                np.asarray(["201", "202", "203"]),
+            ),
+            "lag_s": np.asarray([-0.005, 0.0]),
+        },
+    )
+    result = {
+        "animal_name": "L15",
+        "date": "20241121",
+        "epoch": figure.LIGHT_EPOCH,
+        "artifact_origin": "computed",
+        "parameters": {
+            "bin_size_s": figure.legacy.DEFAULT_XCORR_BIN_SIZE_S,
+            "max_lag_s": figure.legacy.DEFAULT_XCORR_MAX_LAG_S,
+            "expected_detector_zscore_threshold": 2.0,
+            "require_speed_gated": True,
+        },
+        "summary": summary,
+        "dataset": dataset,
+    }
+    monkeypatch.setattr(
+        figure.ripple_cross_region_xcorr,
+        "load_ripple_cross_region_xcorr_artifact",
+        lambda _path: result,
+    )
+    unit_maps = {
+        ("L15", "20241121"): {
+            "ca1": {"101": 41, "102": 7},
+            "v1": {"201": 30, "202": 10, "203": 20},
+        }
+    }
+
+    payload = figure._build_xcorr_payload(run_dir, sessions, unit_maps)
+
+    assert payload["summary_table"]["ca1_nwb_unit_id"].unique().tolist() == [
+        "101",
+        "102",
+    ]
+    assert payload["summary_table"]["ca1_stable_unit_id"].unique().tolist() == [
+        "merge:101",
+        "merge:102",
+    ]
+    assert payload["ca1_unit_ids"].tolist() == [7, 41]
+    assert payload["v1_unit_ids"].tolist() == [30, 10, 20]
+    assert payload["v1_order_reference_ca1_unit"] == 7
+    np.testing.assert_array_equal(payload["xcorr"], xcorr[[1, 0]])
+
+
 def test_schematic_unit_mapping_audits_embedded_sorting_ids() -> None:
     payload = {
         "ca1_unit_ids": np.asarray(["101"]),
