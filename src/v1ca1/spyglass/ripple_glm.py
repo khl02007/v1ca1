@@ -1302,6 +1302,16 @@ def _assert_array_close(
         raise ValueError(f"{name} does not match its required scientific invariant.")
 
 
+def _timestamp_subtraction_atol(left: Any, right: Any) -> np.ndarray:
+    """Return one-float-ULP tolerances for differences of absolute times."""
+    left_array = np.asarray(left, dtype=float)
+    right_array = np.asarray(right, dtype=float)
+    if left_array.shape != right_array.shape:
+        raise ValueError("Timestamp subtraction arrays must have matching shapes.")
+    scale = np.maximum(np.abs(left_array), np.abs(right_array))
+    return np.maximum(1e-12, np.spacing(scale))
+
+
 def _validate_selected_units(
     table: Any,
     *,
@@ -1460,21 +1470,37 @@ def _validate_window_variables(
         arrays["source_window_start_s"] - arrays["ripple_start_time_s"],
         np.full(n_samples, parameters["source_window_offset_s"], dtype=float),
         name="source window offset",
+        rtol=0.0,
+        atol=_timestamp_subtraction_atol(
+            arrays["source_window_start_s"], arrays["ripple_start_time_s"]
+        ),
     )
     _assert_array_close(
         arrays["source_window_end_s"] - arrays["source_window_start_s"],
         np.full(n_samples, parameters["source_window_s"], dtype=float),
         name="source window width",
+        rtol=0.0,
+        atol=_timestamp_subtraction_atol(
+            arrays["source_window_end_s"], arrays["source_window_start_s"]
+        ),
     )
     _assert_array_close(
         arrays["target_window_start_s"] - arrays["ripple_start_time_s"],
         np.full(n_samples, parameters["target_window_offset_s"], dtype=float),
         name="target window offset",
+        rtol=0.0,
+        atol=_timestamp_subtraction_atol(
+            arrays["target_window_start_s"], arrays["ripple_start_time_s"]
+        ),
     )
     _assert_array_close(
         arrays["target_window_end_s"] - arrays["target_window_start_s"],
         np.full(n_samples, parameters["target_window_s"], dtype=float),
         name="target window width",
+        rtol=0.0,
+        atol=_timestamp_subtraction_atol(
+            arrays["target_window_end_s"], arrays["target_window_start_s"]
+        ),
     )
     digest = _provenance_sha256({name: value.tolist() for name, value in arrays.items()})
     if digest != selected_events_sha256:

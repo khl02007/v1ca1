@@ -206,7 +206,11 @@ def _fake_fit(
 
 @pytest.fixture
 def computed(inputs: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    monkeypatch.setattr(scientific_module, "_fit_ripple_glm_on_prepared_epoch", _fake_fit)
+    monkeypatch.setattr(
+        scientific_module,
+        "_fit_ripple_glm_on_prepared_epoch",
+        _fake_fit,
+    )
     return compute_ripple_glm(**inputs)
 
 
@@ -424,6 +428,50 @@ def test_validation_rejects_tampered_window_hash(
     tampered["dataset"] = computed["dataset"].copy(deep=True)
     tampered["dataset"]["ripple_start_time_s"].values[0] += 0.01
     with pytest.raises(ValueError, match="offset|hash"):
+        validate_ripple_glm_result(tampered)
+
+
+def test_unix_scale_window_differences_use_float_resolution(
+    inputs: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accept exact windows whose absolute seconds lose sub-ULP precision."""
+    time_shift = 1_718_136_250.2204514
+    kwargs = dict(inputs)
+    ripple_table = inputs["ripple_table"].copy()
+    ripple_table[["start_time", "end_time"]] += time_shift
+    kwargs["ripple_table"] = ripple_table
+    kwargs["epoch_interval"] = _Interval(time_shift, time_shift + 10.0)
+    kwargs["source_spikes"] = {
+        key: _SpikeTrain((spike_train.t + time_shift).tolist())
+        for key, spike_train in inputs["source_spikes"].items()
+    }
+    kwargs["target_spikes"] = {
+        key: _SpikeTrain((spike_train.t + time_shift).tolist())
+        for key, spike_train in inputs["target_spikes"].items()
+    }
+    monkeypatch.setattr(
+        scientific_module,
+        "_fit_ripple_glm_on_prepared_epoch",
+        _fake_fit,
+    )
+
+    result = compute_ripple_glm(**kwargs)
+
+    dataset = result["dataset"]
+    source_widths = (
+        dataset["source_window_end_s"].values
+        - dataset["source_window_start_s"].values
+    )
+    assert result["analysis_status"] == "valid"
+    assert np.any(source_widths != 0.2)
+    assert np.max(np.abs(source_widths - 0.2)) <= np.spacing(
+        np.max(np.abs(dataset["source_window_end_s"].values))
+    )
+
+    tampered = dict(result)
+    tampered["dataset"] = dataset.copy(deep=True)
+    tampered["dataset"]["source_window_end_s"].values[0] += 10e-6
+    with pytest.raises(ValueError, match="source window width"):
         validate_ripple_glm_result(tampered)
 
 
