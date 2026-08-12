@@ -78,7 +78,11 @@ def _payload(run_dir: Path) -> dict[str, Any]:
         "prediction_examples": [{"payload": "prediction"}],
         "behavior_payload": {"payload": "behavior"},
         "source_comparison_payload": {"payload": "source-comparison"},
-        "xcorr_payload": {"payload": "xcorr"},
+        "xcorr_payload": {
+            "payload": "xcorr",
+            "lag_s": np.asarray([-0.01, 0.0, 0.01], dtype=np.float64),
+            "xcorr": np.ones((1, 1, 3), dtype=np.float64),
+        },
     }
 
 
@@ -252,6 +256,40 @@ def test_xcorr_payload_maps_canonical_source_unit_coordinates(
     assert payload["v1_unit_ids"].tolist() == [30, 10, 20]
     assert payload["v1_order_reference_ca1_unit"] == 7
     np.testing.assert_array_equal(payload["xcorr"], xcorr[[1, 0]])
+
+
+def test_xcorr_display_copy_matches_legacy_float32_ranking_and_boundary() -> None:
+    """Apply legacy cache precision before lag-window and partner selection."""
+    xcorr = np.ones((1, 2, 3), dtype=np.float64)
+    xcorr[0, 1] += 1e-8
+    payload = {
+        "ca1_unit_ids": np.asarray([11]),
+        "v1_unit_ids": np.asarray([101, 102]),
+        "lag_s": np.asarray([-0.299999999, 0.0, 0.01], dtype=np.float64),
+        "xcorr": xcorr,
+    }
+
+    display = figure._legacy_xcorr_display_precision(payload)
+
+    assert payload["lag_s"].dtype == np.float64
+    assert payload["xcorr"].dtype == np.float64
+    assert display["lag_s"].dtype == np.float32
+    assert display["xcorr"].dtype == np.float32
+    assert float(payload["lag_s"][0]) >= figure.legacy.DEFAULT_XCORR_LAG_WINDOW_S[0]
+    assert float(display["lag_s"][0]) < figure.legacy.DEFAULT_XCORR_LAG_WINDOW_S[0]
+
+    full_precision = figure.legacy.prepare_xcorr_payload_for_display(
+        payload,
+        n_ca1_units=1,
+        v1_fraction=0.5,
+    )
+    legacy_precision = figure.legacy.prepare_xcorr_payload_for_display(
+        display,
+        n_ca1_units=1,
+        v1_fraction=0.5,
+    )
+    assert full_precision["v1_unit_ids"].tolist() == [102]
+    assert legacy_precision["v1_unit_ids"].tolist() == [101]
 
 
 def test_schematic_unit_mapping_audits_embedded_sorting_ids() -> None:
@@ -464,7 +502,7 @@ def test_source_injection_never_opens_legacy_artifacts_and_restores(
             epoch_types=figure.legacy.PANEL_E_GLM_EPOCH_ORDER,
         ) is payload["source_comparison_payload"]
         xcorr_animal, xcorr_date, xcorr_epoch = figure.legacy.DEFAULT_XCORR_DATASET
-        assert figure.legacy.load_top_ca1_xcorr_panel_data(
+        xcorr_payload = figure.legacy.load_top_ca1_xcorr_panel_data(
             run_dir,
             animal_name=xcorr_animal,
             date=xcorr_date,
@@ -474,7 +512,10 @@ def test_source_injection_never_opens_legacy_artifacts_and_restores(
             max_lag_s=figure.legacy.DEFAULT_XCORR_MAX_LAG_S,
             bin_size_s=figure.legacy.DEFAULT_XCORR_BIN_SIZE_S,
             display_vmax=figure.legacy.DEFAULT_XCORR_DISPLAY_VMAX,
-        ) is payload["xcorr_payload"]
+        )
+        assert xcorr_payload is not payload["xcorr_payload"]
+        assert xcorr_payload["xcorr"].dtype == np.float32
+        assert xcorr_payload["lag_s"].dtype == np.float32
         with pytest.raises(figure._UnexpectedLegacyRequest, match="fallback"):
             figure.legacy.load_example_ripple_lfp_trace(run_dir)
         with pytest.raises(figure._UnexpectedLegacyRequest, match="fallback"):
@@ -531,6 +572,9 @@ def test_renderer_is_run_local_atomic_and_refuses_overwrite(
     assert calls[0]["light_epoch"] == "02_r1"
     assert calls[0]["dark_epoch"] is None
     assert calls[0]["sleep_epoch"] is None
+    assert calls[0]["regions"] == tuple(figure.legacy.DEFAULT_REGIONS)
+    assert calls[0]["regions"] == figure.DISPLAY_REGIONS
+    assert payload["regions"] == figure.REGIONS
     assert calls[0]["ripple_threshold_zscore"] is None
     assert (
         figure.legacy.load_pooled_ripple_heatmap_epoch_tables

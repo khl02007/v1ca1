@@ -37,6 +37,7 @@ DEFAULT_DPI = 300
 EXPECTED_DATASETS = tuple(get_processed_datasets())
 LIGHT_EPOCH = "02_r1"
 REGIONS = ("ca1", "v1")
+DISPLAY_REGIONS = tuple(legacy.DEFAULT_REGIONS)
 GLM_SOURCE_MODES = (
     ripple_glm.DEFAULT_SOURCE_PREDICTOR_MODE,
     "mean_activity",
@@ -947,6 +948,16 @@ def _build_xcorr_payload(
     }
 
 
+def _legacy_xcorr_display_precision(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy XCorr display arrays at the legacy NetCDF float precision."""
+    output = dict(payload)
+    output["lag_s"] = np.array(payload["lag_s"], dtype=np.float32, copy=True)
+    output["xcorr"] = np.array(payload["xcorr"], dtype=np.float32, copy=True)
+    return output
+
+
 def _map_schematic_unit_ids(
     payload: Mapping[str, Any],
     *,
@@ -1241,7 +1252,7 @@ def _offline_sources(payload: Mapping[str, Any]):
             )
         ):
             raise _UnexpectedLegacyRequest("Figure 3 requested a foreign XCorr result.")
-        return payload["xcorr_payload"]
+        return _legacy_xcorr_display_precision(payload["xcorr_payload"])
 
     def forbid_fallback(*_args: Any, **_kwargs: Any) -> Any:
         raise _UnexpectedLegacyRequest("Synthetic or legacy Figure 3 fallback is disabled.")
@@ -1303,7 +1314,7 @@ def render_figure_3(
                 light_epoch=LIGHT_EPOCH,
                 dark_epoch=None,
                 sleep_epoch=None,
-                regions=payload["regions"],
+                regions=DISPLAY_REGIONS,
                 ripple_threshold_zscore=None,
                 ripple_window_s=legacy.DEFAULT_RIPPLE_WINDOW_S,
                 ripple_window_offset_s=legacy.DEFAULT_RIPPLE_WINDOW_OFFSET_S,
