@@ -130,6 +130,21 @@ writes below the selected run directory. It does not connect to DataJoint,
 read legacy Figure 3 artifacts, overwrite an NWB, or use a synthetic panel
 fallback.
 
+To replace only the illustrative L15 schematic without recomputing GLMs, make
+an immutable supplement against a complete four-session Figure 3 run, then
+render into the supplement directory:
+
+```bash
+python -m v1ca1.spyglass.offline.figure_3_schematic_supplement \
+  --run-id figure3-schematic-v1 --base-run-id figure3-nwb-gpu-v2
+python -m v1ca1.paper_figures.figure_3_spyglass \
+  --run-id figure3-nwb-gpu-v2 --supplement-run-id figure3-schematic-v1
+```
+
+The supplement pins the base manifests, L15 NWB fingerprint, CA1 modulation,
+superseded schematic, and corrected CA1 selector policy. It writes no database,
+NWB, base-run, or legacy-artifact data.
+
 ## NWB source catalog
 
 The source tables are `EpochIntervals`, `TrajectoryIntervals`, `RippleIntervals`,

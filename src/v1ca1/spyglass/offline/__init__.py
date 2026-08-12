@@ -39,7 +39,19 @@ def run_figure_3_session(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return _run_figure_3_session(*args, **kwargs)
 
 
+def build_figure_3_schematic_supplement(
+    *args: Any, **kwargs: Any
+) -> dict[str, Any]:
+    """Lazily build one immutable Figure 3 schematic supplement."""
+    from v1ca1.spyglass.offline.figure_3_schematic_supplement import (
+        build_figure_3_schematic_supplement as _build_supplement,
+    )
+
+    return _build_supplement(*args, **kwargs)
+
+
 __all__ = [
+    "build_figure_3_schematic_supplement",
     "run_figure_1_session",
     "run_figure_2_session",
     "run_figure_3_session",

@@ -464,3 +464,146 @@ def test_failed_renderer_removes_only_its_temporary_output(
 
     assert not output.exists()
     assert not list(output.parent.glob(".*.tmp.svg"))
+
+
+def test_supplement_replaces_only_schematic_and_moves_output_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_run_dir = tmp_path / "runs" / "base"
+    supplement_run_dir = tmp_path / "runs" / "supplement"
+    base_run_dir.mkdir(parents=True)
+    supplement_run_dir.mkdir(parents=True)
+    sessions = _sessions()
+    campaign = {"analysis_parameters": {"pipeline": "figure_3"}}
+    sentinels = {
+        "heatmap_epoch_tables": object(),
+        "glm_epoch_tables": object(),
+        "prediction_examples": object(),
+        "behavior_payload": object(),
+        "source_comparison_payload": object(),
+        "xcorr_payload": object(),
+    }
+    monkeypatch.setattr(
+        "v1ca1.spyglass.offline.figure_3.load_figure_3_campaign",
+        lambda *_args, **_kwargs: (base_run_dir, campaign, sessions),
+    )
+    monkeypatch.setattr(figure, "_ordered_sessions", lambda values: list(values))
+    monkeypatch.setattr(
+        figure,
+        "_load_nwb_sorting_unit_maps",
+        lambda _session: {"ca1": {"101": 10}, "v1": {"201": 20}},
+    )
+    monkeypatch.setattr(figure, "_load_glm_results", lambda *_args: {})
+    monkeypatch.setattr(
+        figure,
+        "_load_modulation_epoch_tables",
+        lambda *_args: sentinels["heatmap_epoch_tables"],
+    )
+    monkeypatch.setattr(
+        figure,
+        "_build_glm_epoch_tables",
+        lambda *_args: sentinels["glm_epoch_tables"],
+    )
+    monkeypatch.setattr(
+        figure,
+        "_load_schematic_payload",
+        lambda *_args: {"payload": "base-schematic"},
+    )
+    monkeypatch.setattr(
+        figure,
+        "_build_prediction_examples",
+        lambda *_args: sentinels["prediction_examples"],
+    )
+    monkeypatch.setattr(
+        figure,
+        "_build_behavior_payload",
+        lambda *_args, **_kwargs: sentinels["behavior_payload"],
+    )
+    monkeypatch.setattr(
+        figure,
+        "_build_source_comparison_payload",
+        lambda *_args: sentinels["source_comparison_payload"],
+    )
+    monkeypatch.setattr(
+        figure,
+        "_build_xcorr_payload",
+        lambda *_args: sentinels["xcorr_payload"],
+    )
+    supplement_payload = {
+        "ca1_unit_ids": np.asarray(["101"]),
+        "v1_unit_ids": np.asarray(["201"]),
+        "ca1_unit_identity": [{"unit_id": 101, "sorting_unit_id": 10}],
+        "v1_unit_identity": [{"unit_id": 201, "sorting_unit_id": 20}],
+    }
+    calls: list[tuple[str, str | None]] = []
+
+    def load_supplement(
+        run_id: str,
+        *,
+        expected_base_run_id: str | None,
+        scratch_root: Path,
+    ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+        calls.append((run_id, expected_base_run_id))
+        return supplement_run_dir, {"run_id": run_id}, supplement_payload
+
+    monkeypatch.setattr(
+        "v1ca1.spyglass.offline.figure_3_schematic_supplement."
+        "load_figure_3_schematic_supplement",
+        load_supplement,
+    )
+
+    payload = figure.load_figure_3_payload(
+        run_id="base",
+        supplement_run_id="supplement",
+        scratch_root=tmp_path,
+    )
+
+    assert calls == [("supplement", "base")]
+    assert payload["run_dir"] == supplement_run_dir
+    assert payload["base_run_dir"] == base_run_dir
+    assert payload["campaign"] is campaign
+    assert payload["sessions"] == sessions
+    assert payload["schematic_payload"]["ca1_unit_ids"].tolist() == [10]
+    assert payload["schematic_payload"]["v1_unit_ids"].tolist() == [20]
+    for name, sentinel in sentinels.items():
+        assert payload[name] is sentinel
+    assert figure.get_output_path(run_dir=payload["run_dir"]).is_relative_to(
+        supplement_run_dir
+    )
+
+
+def test_renderer_cli_forwards_optional_supplement_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supplement_run_dir = tmp_path / "runs" / "supplement"
+    supplement_run_dir.mkdir(parents=True)
+    calls: list[dict[str, Any]] = []
+
+    def load_payload(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"run_dir": supplement_run_dir}
+
+    rendered: list[Path] = []
+    monkeypatch.setattr(figure, "load_figure_3_payload", load_payload)
+    monkeypatch.setattr(
+        figure,
+        "render_figure_3",
+        lambda _payload, *, output_path, dpi: rendered.append(Path(output_path)),
+    )
+
+    figure.main(
+        [
+            "--run-id",
+            "base",
+            "--supplement-run-id",
+            "supplement",
+            "--scratch-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert calls[0]["run_id"] == "base"
+    assert calls[0]["supplement_run_id"] == "supplement"
+    assert rendered == [supplement_run_dir / "figures" / "figure_3_spyglass.svg"]

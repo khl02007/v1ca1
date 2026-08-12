@@ -911,26 +911,36 @@ def _select_schematic_event(
     ca1_modulation_summary: pd.DataFrame,
     ca1_spikes: Mapping[str, np.ndarray],
     v1_spikes: Mapping[str, np.ndarray],
+    ranked_ca1_unit_ids: Sequence[str] | None = None,
 ) -> tuple[pd.Series, list[str], list[str], np.ndarray]:
     """Select the fixed real-data schematic event and displayed units."""
-    summary = ca1_modulation_summary.copy()
-    summary["unit_id"] = summary["unit_id"].map(str)
-    summary = summary.loc[summary["unit_id"].isin(ca1_spikes)].copy()
-    if len(summary) < SCHEMATIC_N_UNITS_PER_REGION:
-        raise ValueError("Too few CA1 modulation units for the schematic.")
-    modulation = pd.to_numeric(
-        summary["ripple_modulation_index"], errors="coerce"
-    ).to_numpy(dtype=float)
-    summary["_finite"] = np.isfinite(modulation)
-    summary["_absolute_modulation"] = np.where(
-        np.isfinite(modulation), np.abs(modulation), -np.inf
-    )
-    summary = summary.sort_values(
-        ["_finite", "_absolute_modulation", "unit_id"],
-        ascending=[False, False, True],
-        kind="stable",
-    )
-    ranked_ca1 = summary["unit_id"].tolist()
+    if ranked_ca1_unit_ids is None:
+        summary = ca1_modulation_summary.copy()
+        summary["unit_id"] = summary["unit_id"].map(str)
+        summary = summary.loc[summary["unit_id"].isin(ca1_spikes)].copy()
+        if len(summary) < SCHEMATIC_N_UNITS_PER_REGION:
+            raise ValueError("Too few CA1 modulation units for the schematic.")
+        modulation = pd.to_numeric(
+            summary["ripple_modulation_index"], errors="coerce"
+        ).to_numpy(dtype=float)
+        summary["_finite"] = np.isfinite(modulation)
+        summary["_absolute_modulation"] = np.where(
+            np.isfinite(modulation), np.abs(modulation), -np.inf
+        )
+        summary = summary.sort_values(
+            ["_finite", "_absolute_modulation", "unit_id"],
+            ascending=[False, False, True],
+            kind="stable",
+        )
+        ranked_ca1 = summary["unit_id"].tolist()
+    else:
+        ranked_ca1 = [str(unit_id) for unit_id in ranked_ca1_unit_ids]
+        if len(ranked_ca1) != len(set(ranked_ca1)):
+            raise ValueError("Ranked CA1 schematic unit IDs must be unique.")
+        if not set(ranked_ca1).issubset(ca1_spikes):
+            raise ValueError("Ranked CA1 schematic units are absent from spike data.")
+        if len(ranked_ca1) < SCHEMATIC_N_UNITS_PER_REGION:
+            raise ValueError("Too few ranked CA1 units for the schematic.")
     best: tuple[tuple[float, ...], pd.Series, list[str], list[str]] | None = None
     for row_index, row in ripple_table.reset_index(drop=True).iterrows():
         start = float(row["start_time"])
@@ -1267,8 +1277,14 @@ def _build_schematic_payload(
     ca1: Mapping[str, Any],
     v1: Mapping[str, Any],
     ca1_modulation: Mapping[str, Any],
+    selector_kwargs: Mapping[str, Any] | None = None,
+    selector_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the L15 panel-B LFP/spike example directly from the NWB."""
+    if (selector_kwargs is None) != (selector_policy is None):
+        raise ValueError(
+            "selector_kwargs and selector_policy must be supplied together."
+        )
     ca1_spikes = _spike_times_by_stable_id(ca1)
     v1_spikes = _spike_times_by_stable_id(v1)
     selected, ca1_units, v1_units, score = _select_schematic_event(
@@ -1276,6 +1292,7 @@ def _build_schematic_payload(
         ca1_modulation_summary=ca1_modulation["summary"],
         ca1_spikes=ca1_spikes,
         v1_spikes=v1_spikes,
+        **({} if selector_kwargs is None else dict(selector_kwargs)),
     )
     ripple_start = float(selected["start_time"])
     ripple_end = float(selected["end_time"])
@@ -1287,29 +1304,33 @@ def _build_schematic_payload(
     )
     ca1_metadata = _unit_metadata_by_stable_id(ca1)
     v1_metadata = _unit_metadata_by_stable_id(v1)
+    metadata = {
+        "schema_version": SCHEMATIC_SCHEMA_VERSION,
+        "animal_name": animal_name,
+        "date": date,
+        "epoch": epoch,
+        "nwb_file_name": nwb_file_name,
+        "artifact_origin": "computed_from_augmented_nwb",
+        "time_unit": "s",
+        "time_reference": "augmented_nwb_ephys_timestamps",
+        "electrical_series_name": lfp["electrical_series_name"],
+        "electrical_series_object_id": lfp["electrical_series_object_id"],
+        "time_before_s": SCHEMATIC_TIME_BEFORE_S,
+        "time_after_s": SCHEMATIC_TIME_AFTER_S,
+        "filter_padding_s": SCHEMATIC_FILTER_PADDING_S,
+        "n_units_per_region": SCHEMATIC_N_UNITS_PER_REGION,
+        "target_ripple_duration_s": SCHEMATIC_TARGET_RIPPLE_DURATION_S,
+        "lowcut_hz": DEFAULT_LOWCUT_HZ,
+        "highcut_hz": DEFAULT_HIGHCUT_HZ,
+        "filter_order": DEFAULT_FILTER_ORDER,
+        "target_sampling_frequency_hz": DEFAULT_TARGET_NEW_SAMPLING_FREQUENCY,
+        "notch_filter_enabled": DEFAULT_ENABLE_NOTCH_FILTER,
+    }
+    if selector_policy is not None:
+        metadata["selector_policy"] = dict(selector_policy)
+        metadata["selector_policy_sha256"] = provenance_sha256(selector_policy)
     return {
-        "metadata": {
-            "schema_version": SCHEMATIC_SCHEMA_VERSION,
-            "animal_name": animal_name,
-            "date": date,
-            "epoch": epoch,
-            "nwb_file_name": nwb_file_name,
-            "artifact_origin": "computed_from_augmented_nwb",
-            "time_unit": "s",
-            "time_reference": "augmented_nwb_ephys_timestamps",
-            "electrical_series_name": lfp["electrical_series_name"],
-            "electrical_series_object_id": lfp["electrical_series_object_id"],
-            "time_before_s": SCHEMATIC_TIME_BEFORE_S,
-            "time_after_s": SCHEMATIC_TIME_AFTER_S,
-            "filter_padding_s": SCHEMATIC_FILTER_PADDING_S,
-            "n_units_per_region": SCHEMATIC_N_UNITS_PER_REGION,
-            "target_ripple_duration_s": SCHEMATIC_TARGET_RIPPLE_DURATION_S,
-            "lowcut_hz": DEFAULT_LOWCUT_HZ,
-            "highcut_hz": DEFAULT_HIGHCUT_HZ,
-            "filter_order": DEFAULT_FILTER_ORDER,
-            "target_sampling_frequency_hz": DEFAULT_TARGET_NEW_SAMPLING_FREQUENCY,
-            "notch_filter_enabled": DEFAULT_ENABLE_NOTCH_FILTER,
-        },
+        "metadata": metadata,
         "time_s": lfp["time_s"],
         "filtered_lfp": lfp["filtered_lfp"],
         "ripple_start_s": ripple_start,

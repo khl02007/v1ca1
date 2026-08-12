@@ -1023,6 +1023,7 @@ def _load_schematic_payload(
 def load_figure_3_payload(
     *,
     run_id: str,
+    supplement_run_id: str | None = None,
     scratch_root: Path = DEFAULT_SCRATCH_ROOT,
 ) -> dict[str, Any]:
     """Load every artifact needed by canonical Figure 3 without legacy paths."""
@@ -1047,7 +1048,7 @@ def load_figure_3_payload(
         for session in sessions
     }
     glm_results = _load_glm_results(run_dir, sessions, unit_maps)
-    return {
+    payload = {
         "run_dir": run_dir,
         "campaign": campaign,
         "sessions": sessions,
@@ -1073,6 +1074,27 @@ def load_figure_3_payload(
         ),
         "xcorr_payload": _build_xcorr_payload(run_dir, sessions, unit_maps),
     }
+    if supplement_run_id is not None:
+        from v1ca1.spyglass.offline.figure_3_schematic_supplement import (
+            load_figure_3_schematic_supplement,
+        )
+
+        supplement_run_dir, supplement, schematic = (
+            load_figure_3_schematic_supplement(
+                supplement_run_id,
+                expected_base_run_id=run_id,
+                scratch_root=scratch_root,
+            )
+        )
+        animal_name, date, _epoch = legacy.DEFAULT_PANEL_B_SCHEMATIC_DATASET
+        payload["schematic_payload"] = _map_schematic_unit_ids(
+            schematic,
+            unit_maps=unit_maps[(animal_name, date)],
+        )
+        payload["base_run_dir"] = run_dir
+        payload["run_dir"] = supplement_run_dir
+        payload["schematic_supplement"] = supplement
+    return payload
 
 
 def _require_common_request(
@@ -1303,6 +1325,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse the database-free Figure 3 renderer arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--supplement-run-id")
     parser.add_argument(
         "--scratch-root",
         type=Path,
@@ -1323,6 +1346,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_arguments(argv)
     payload = load_figure_3_payload(
         run_id=args.run_id,
+        supplement_run_id=args.supplement_run_id,
         scratch_root=args.scratch_root,
     )
     output_path = (
