@@ -438,12 +438,24 @@ def test_source_injection_never_opens_legacy_artifacts_and_restores(
             figure.EXPECTED_DATASETS,
             **common,
             **glm,
-            region="v1",
-            epoch_types=figure.legacy.PANEL_D_EPOCH_ORDER,
             tuning_similarity_metric=(
                 figure.legacy.DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC
             ),
         ) is payload["behavior_payload"]
+        with pytest.raises(
+            figure._UnexpectedLegacyRequest,
+            match="foreign Panel E inputs",
+        ):
+            figure.legacy.load_glm_dark_activity_devexp_tables(
+                run_dir,
+                figure.EXPECTED_DATASETS,
+                **common,
+                **glm,
+                region="ca1",
+                tuning_similarity_metric=(
+                    figure.legacy.DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC
+                ),
+            )
         assert figure.legacy.load_glm_source_predictor_comparison_tables(
             run_dir,
             figure.EXPECTED_DATASETS,

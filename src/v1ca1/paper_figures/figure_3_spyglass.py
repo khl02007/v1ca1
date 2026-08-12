@@ -1183,10 +1183,16 @@ def _offline_sources(payload: Mapping[str, Any]):
         _require_common_request(data_root, datasets, kwargs, payload=payload)
         _require_glm_settings(kwargs)
         if (
-            str(kwargs.get("region")) != "v1"
+            str(kwargs.get("region", legacy.DEFAULT_PANEL_D_REGION))
+            != legacy.DEFAULT_PANEL_D_REGION
             or tuple(kwargs.get("epoch_types", legacy.PANEL_D_EPOCH_ORDER))
             != legacy.PANEL_D_EPOCH_ORDER
-            or str(kwargs.get("tuning_similarity_metric"))
+            or str(
+                kwargs.get(
+                    "tuning_similarity_metric",
+                    legacy.DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
+                )
+            )
             != legacy.DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC
         ):
             raise _UnexpectedLegacyRequest("Figure 3 requested foreign Panel E inputs.")
