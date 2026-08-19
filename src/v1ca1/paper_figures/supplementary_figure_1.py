@@ -20,34 +20,23 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import (
-    BOTTOM_ROW_PANEL_WSPACE,
     BOTTOM_ROW_PLOT_BOUNDS,
     DECODING_CROSS_TRAJECTORY_COMPARISONS,
     DECODING_SIGNIFICANCE_CONTRASTS,
     DEFAULT_ASSET_DIR,
     DEFAULT_FIGURE_WIDTH_MM as FIGURE_1_WIDTH_MM,
     DEFAULT_HEATMAP_HEIGHT_MM,
-    DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
-    DEFAULT_PANEL_E_WIDTH_FRACTION,
     DEFAULT_POSITION_BIN_COUNT,
     HEATMAP_COLORBAR_ASPECT,
     HEATMAP_COLORBAR_LABEL_FONTSIZE,
     HEATMAP_COLORBAR_LABELPAD,
     HEATMAP_COLORBAR_PAD,
-    HEATMAP_ORDER_LABEL_OFFSET,
-    HEATMAP_PATH_LABEL_OFFSET,
-    PANEL_D_LABEL_X,
     PANEL_D_LABEL_Y,
     PANEL_D_HEATMAP_BLOCK_OUTLINE_COLOR,
     PANEL_D_HEATMAP_BLOCK_OUTLINE_LINEWIDTH,
     PANEL_D_TRAJECTORY_TYPES,
-    PANEL_E_AXIS_LABEL_FONTSIZE,
     PANEL_H_DECODING_ANIMALS,
     STABILITY_REGIONS,
-    TASK_PROGRESSION_XLABEL,
-    add_centered_axis_text,
-    add_centered_below_axis_text,
-    add_panel_d_heatmap_block_outlines,
     build_decoding_trial_error_table,
     compute_tuning_curve_peak_positions,
     compute_decoding_permutation_tests,
@@ -62,7 +51,7 @@ from v1ca1.paper_figures.figure_1 import (
     plot_stability_panel,
     significance_stars,
 )
-from v1ca1.paper_figures.figure_3 import load_dark_movement_firing_rate_table
+from v1ca1.paper_figures.figure_3_old import load_dark_movement_firing_rate_table
 from v1ca1.paper_figures.heatmaps import setup_heatmap_comparison_panel
 from v1ca1.paper_figures.style import (
     EMPHASIS_HISTOGRAM_KWARGS,
@@ -81,9 +70,7 @@ DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = FIGURE_1_WIDTH_MM
 DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM = 40.0
 DEFAULT_CA1_HEATMAP_ROW_HEIGHT_MM = DEFAULT_HEATMAP_HEIGHT_MM
-DEFAULT_FIGURE_HEIGHT_MM = (
-    DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM + DEFAULT_CA1_HEATMAP_ROW_HEIGHT_MM
-)
+DEFAULT_FIGURE_HEIGHT_MM = DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM
 DARK_MOVEMENT_FIRING_RATE_REGION = "v1"
 DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ = 0.5
 DARK_MOVEMENT_FIRING_RATE_BIN_COUNT = 24
@@ -1477,53 +1464,18 @@ def add_ca1_heatmap_title(
     )
 
 
-def make_supplementary_figure_1(
+def add_supplementary_figure_1_abc_panels(
+    fig: Any,
+    grid_spec: Any,
     *,
     data_root: Path,
     asset_dir: Path,
-    output_path: Path,
     datasets: Sequence[DatasetId],
-    dpi: int,
-    dark_movement_fr_cache_dir: Path | None = None,
+    dark_movement_fr_cache_dir: Path,
     refresh_dark_movement_fr_cache: bool = False,
-    position_bin_count: int = DEFAULT_POSITION_BIN_COUNT,
-    position_offset: int = DEFAULT_POSITION_OFFSET,
-    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    sigma_bins: float = DEFAULT_SIGMA_BINS,
-    panel_d_cache_dir: Path | None = None,
-    refresh_panel_d_cache: bool = False,
-) -> Path:
-    """Build and save Supplementary Figure 1."""
-    import matplotlib.pyplot as plt
-
-    dark_movement_fr_cache_dir = (
-        Path(output_path).parent / "cache"
-        if dark_movement_fr_cache_dir is None
-        else Path(dark_movement_fr_cache_dir)
-    )
-    panel_d_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_d_cache_dir is None
-        else Path(panel_d_cache_dir)
-    )
-    apply_paper_style()
-    fig = plt.figure(
-        figsize=figure_size(
-            DEFAULT_FIGURE_WIDTH_MM,
-            DEFAULT_FIGURE_HEIGHT_MM,
-        ),
-        constrained_layout=True,
-    )
-    outer_grid = fig.add_gridspec(
-        nrows=2,
-        ncols=1,
-        height_ratios=[
-            DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM,
-            DEFAULT_CA1_HEATMAP_ROW_HEIGHT_MM,
-        ],
-        hspace=0.08,
-    )
-    moved_grid = outer_grid[0, 0].subgridspec(
+) -> tuple[Any, Any, Any]:
+    """Add the shared Supplementary Figure 1 panels A, B, and C."""
+    moved_grid = grid_spec.subgridspec(
         nrows=1,
         ncols=3,
         width_ratios=[0.30, 0.30, 0.40],
@@ -1557,91 +1509,48 @@ def make_supplementary_figure_1(
     )
     moved_stability_axis.set_title("Tuning stability", fontsize=8, pad=2)
     label_axis(moved_stability_axis, "C", x=-0.02, y=1.01)
+    return moved_anatomy_axis, moved_firing_rate_axis, moved_stability_axis
 
-    lower_grid = outer_grid[1, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=[
-            DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION,
-            DEFAULT_PANEL_E_WIDTH_FRACTION,
-        ],
-        wspace=BOTTOM_ROW_PANEL_WSPACE,
-    )
-    lower_right_grid = lower_grid[0, 1].subgridspec(
-        nrows=2,
-        ncols=1,
-        height_ratios=LOWER_ROW_RIGHT_HEIGHT_RATIOS,
-        hspace=LOWER_ROW_RIGHT_HSPACE,
-    )
-    tuning_similarity_axis = fig.add_subplot(lower_right_grid[0, 0])
-    plot_pooled_turn_tuning_similarity_panel(
-        tuning_similarity_axis,
-        data_root=data_root,
-        datasets=datasets,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
-        panel_d_cache_dir=panel_d_cache_dir,
-        refresh_panel_d_cache=refresh_panel_d_cache,
-    )
-    tuning_similarity_axis.set_title(
-        TUNING_SIMILARITY_TITLE,
-        fontsize=8,
-        pad=2,
-    )
 
-    ca1_panel = plot_pooled_ca1_dark_heatmap_panel(
+def make_supplementary_figure_1(
+    *,
+    data_root: Path,
+    asset_dir: Path,
+    output_path: Path,
+    datasets: Sequence[DatasetId],
+    dpi: int,
+    dark_movement_fr_cache_dir: Path | None = None,
+    refresh_dark_movement_fr_cache: bool = False,
+) -> Path:
+    """Build and save Supplementary Figure 1 panels A, B, and C."""
+    import matplotlib.pyplot as plt
+
+    dark_movement_fr_cache_dir = (
+        Path(output_path).parent / "cache"
+        if dark_movement_fr_cache_dir is None
+        else Path(dark_movement_fr_cache_dir)
+    )
+    apply_paper_style()
+    fig = plt.figure(
+        figsize=figure_size(
+            DEFAULT_FIGURE_WIDTH_MM,
+            DEFAULT_FIGURE_HEIGHT_MM,
+        ),
+        constrained_layout=True,
+    )
+    outer_grid = fig.add_gridspec(nrows=1, ncols=1)
+    add_supplementary_figure_1_abc_panels(
         fig,
-        lower_grid[0, 0],
+        outer_grid[0, 0],
         data_root=data_root,
+        asset_dir=asset_dir,
         datasets=datasets,
-        position_bin_count=position_bin_count,
-        position_offset=position_offset,
-        speed_threshold_cm_s=speed_threshold_cm_s,
-        sigma_bins=sigma_bins,
-        panel_d_cache_dir=panel_d_cache_dir,
-        refresh_panel_d_cache=False,
+        dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
+        refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
     )
-    decoding_axis = fig.add_subplot(lower_right_grid[1, 0])
-    plot_pooled_same_turn_decoding_panel(
-        decoding_axis,
-        data_root=data_root,
-        datasets=datasets,
-    )
-    decoding_axis.set_title(
-        DECODING_COMPARISON_TITLE,
-        fontsize=8,
-        pad=2,
-    )
-
-    corner_axis = ca1_panel["corner_axis"]
-    tuning_schematic_axes = ca1_panel["tuning_schematic_axes"]
-    order_schematic_axes = ca1_panel["order_schematic_axes"]
-    heatmap_axes = ca1_panel["heatmap_axes"]
 
     fig.canvas.draw()
-    add_panel_d_heatmap_block_outlines(heatmap_axes)
     fig.set_constrained_layout(False)
-    label_axis(corner_axis, "D", x=PANEL_D_LABEL_X, y=PANEL_D_LABEL_Y)
-    label_axis(tuning_similarity_axis, "E", x=-0.03, y=1.01)
-    label_axis(decoding_axis, "F", x=-0.03, y=1.01)
-    add_ca1_heatmap_title(fig, corner_axis, tuning_schematic_axes)
-    add_centered_axis_text(
-        fig,
-        order_schematic_axes,
-        "Order",
-        y_offset=HEATMAP_ORDER_LABEL_OFFSET,
-        rotation=90,
-        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
-    )
-    add_centered_below_axis_text(
-        fig,
-        heatmap_axes[-1, :],
-        TASK_PROGRESSION_XLABEL,
-        y_offset=HEATMAP_PATH_LABEL_OFFSET,
-        fontsize=PANEL_E_AXIS_LABEL_FONTSIZE,
-    )
 
     save_figure(fig, output_path, dpi=dpi)
     plt.close(fig)
@@ -1690,23 +1599,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Recompute and overwrite cached dark movement firing-rate tables.",
     )
     parser.add_argument(
-        "--panel-d-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for cached Panel D V1/CA1 heatmap matrices. "
-            "Default: <output-dir>/cache."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-d-cache",
-        action="store_true",
-        help=(
-            "Recompute the Panel D V1/CA1 heatmaps and overwrite their caches even "
-            "when a matching cache exists."
-        ),
-    )
-    parser.add_argument(
         "--format",
         dest="output_format",
         choices=FIGURE_FORMATS,
@@ -1721,39 +1613,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Animal/date data set to include as animal:date. May be repeated. "
             "Default: use v1ca1.paper_figures.datasets."
         ),
-    )
-    parser.add_argument(
-        "--position-bin-count",
-        type=int,
-        default=DEFAULT_POSITION_BIN_COUNT,
-        help=(
-            "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {DEFAULT_POSITION_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore. "
-            f"Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
     )
     parser.add_argument(
         "--dpi",
@@ -1778,11 +1637,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.dark_movement_fr_cache_dir is not None
         else args.output_dir / "cache"
     )
-    panel_d_cache_dir = (
-        args.panel_d_cache_dir
-        if args.panel_d_cache_dir is not None
-        else args.output_dir / "cache"
-    )
     make_supplementary_figure_1(
         data_root=args.data_root,
         asset_dir=args.asset_dir,
@@ -1791,12 +1645,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         dpi=args.dpi,
         dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
         refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
-        position_bin_count=args.position_bin_count,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
-        sigma_bins=args.sigma_bins,
-        panel_d_cache_dir=panel_d_cache_dir,
-        refresh_panel_d_cache=args.refresh_panel_d_cache,
     )
 
 

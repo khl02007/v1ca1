@@ -101,12 +101,12 @@ DEFAULT_PANEL_H_WIDTH_FRACTION = DEFAULT_PANEL_G_WIDTH_FRACTION
 PANEL_H_DECODING_ANIMALS = ("L12", "L14", "L15", "L19")
 BOTTOM_ROW_PANEL_WSPACE = 0.05
 BOTTOM_ROW_PLOT_BOUNDS = (0.14, 0.18, 0.78, 0.72)
-PANEL_G_TITLE = "Cross path decoding"
+PANEL_G_TITLE = "Cross-path decoding"
 PANEL_E_RIGHT_ANNOTATION_X = 0.56
 PANEL_E_RIGHT_SUMMARY_POSITION = (0.97, 0.06)
 PANEL_F_RIGHT_SUMMARY_POSITION = (0.97, 0.06)
 PANEL_F_RIGHT_SUMMARY_Y_STEP = 0.12
-PANEL_C_EXAMPLE_TITLE = "Example dark DPP coding cells"
+PANEL_C_EXAMPLE_TITLE = "Path-invariant V1 cells in darkness"
 PANEL_C_LABEL_X_OFFSET = -0.04
 PANEL_D_LABEL_X = -0.12
 PANEL_D_LABEL_Y = 1.04
@@ -269,12 +269,12 @@ STABILITY_REGION_COLORS = REGION_COLORS
 ENCODING_DPP_COMPARISONS = (
     (
         "dpp_vs_absolute_place",
-        "DPP - absolute place",
+        "PI - absolute place",
         "delta_bits_generalized_place_vs_tp",
     ),
     (
         "dpp_vs_absolute_task_progression",
-        "DPP - distance-to-reward",
+        "PI - distance-to-reward",
         "delta_bits_gtp_vs_tp",
     ),
 )
@@ -346,6 +346,9 @@ DECODING_SIGNIFICANCE_BRACKET_LINEWIDTH = 0.6
 DECODING_SIGNIFICANCE_LABEL_FONTSIZE = 7.0
 DECODING_SIGNIFICANCE_LABEL_Y_OFFSET = 0.004
 DELTA_LOG_LIKELIHOOD_AXIS_LABEL = "Δ log likelihood\n(bits/spike)"
+PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL = (
+    "Δ log likelihood (bits/spike)"
+)
 STABILITY_TABLE_COLUMNS = (
     "animal_name",
     "date",
@@ -437,7 +440,26 @@ CYCLE_ARROW_SPECS = (
 )
 CYCLE_ARROW_LINEWIDTH = 1.08
 CYCLE_ARROW_MUTATION_SCALE = 12.6
-TASK_DESIGN_TOP_LEFT_BOUNDS = (0.02, 0.40, 0.46, 0.56)
+CYCLE_TURN_GROUP_TRAJECTORY_LAYOUT = (
+    ("center_to_left", (0.14, 0.63, 0.28, 0.26)),
+    ("right_to_center", (0.14, 0.27, 0.28, 0.26)),
+    ("left_to_center", (0.58, 0.63, 0.28, 0.26)),
+    ("center_to_right", (0.58, 0.27, 0.28, 0.26)),
+)
+CYCLE_TURN_GROUP_ARROW_SPECS = (
+    ((0.42, 0.76), (0.58, 0.76), 0.0),
+    ((0.72, 0.63), (0.72, 0.53), 0.0),
+    ((0.58, 0.40), (0.42, 0.40), 0.0),
+    ((0.28, 0.53), (0.28, 0.63), 0.0),
+)
+CYCLE_TURN_GROUP_BOUNDS = (
+    (0.08, 0.19, 0.40, 0.75),
+    (0.52, 0.19, 0.40, 0.75),
+)
+CYCLE_TURN_GROUP_LABELS = ("Right turn", "Left turn")
+CYCLE_TURN_GROUP_LABEL_Y = 0.12
+TASK_DESIGN_TOP_LEFT_SCALE = 1.2
+TASK_DESIGN_TOP_LEFT_BOUNDS = (-0.032, 0.328, 0.552, 0.672)
 TASK_DESIGN_TOP_RIGHT_BOUNDS = (0.52, 0.40, 0.46, 0.56)
 TASK_DESIGN_BOTTOM_BOUNDS = (0.02, 0.02, 0.96, 0.28)
 TASK_DESIGN_CONDITION_TRACK_BOUNDS = (
@@ -460,7 +482,7 @@ TASK_DESIGN_PROGRESSION_SEGMENTS = (
     ("BA", ("B", "A")),
     ("dark", ("dark",)),
 )
-TASK_DESIGN_TITLE = "W-track task with visual landmarks"
+TASK_DESIGN_TITLE = "W-maze task with visual stimuli"
 TASK_DESIGN_PROGRESSION_SLEEP_LABEL = "sleep"
 TASK_DESIGN_PROGRESSION_DURATION_LABEL = "Run/sleep epochs (~25 min each)"
 TASK_DESIGN_RUN_EPOCH_LINEWIDTH = 1.20
@@ -1786,7 +1808,7 @@ def load_encoding_delta_table(
         ENCODING_MIN_TUNING_STABILITY_CORRELATION
     ),
 ) -> Any:
-    """Load DPP-model deltas for active, stable dark-epoch V1 units."""
+    """Load PI-model deltas for active, stable dark-epoch V1 units."""
     import pandas as pd
 
     rows: list[dict[str, Any]] = []
@@ -3607,7 +3629,11 @@ def draw_behavior_task_design_panel(
         transform=ax.transAxes,
         zorder=21,
     )
-    draw_w_track_cycle_panel(trajectory_ax, include_visual_stimuli=False)
+    draw_w_track_cycle_panel(
+        trajectory_ax,
+        include_visual_stimuli=False,
+        group_by_turn=True,
+    )
     draw_visual_stimuli_schematic(
         arena_ax,
         show_condition_labels=True,
@@ -4300,26 +4326,45 @@ def draw_w_track_cycle_panel(
     ax: "Axes",
     *,
     include_visual_stimuli: bool = True,
+    group_by_turn: bool = False,
 ) -> None:
-    """Draw the four-trajectory W-track task cycle schematic."""
+    """Draw the W-track cycle, optionally grouping paths by turn direction."""
+    from matplotlib.patches import Rectangle
+
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.grid(False)
     ax.axis("off")
 
-    for trajectory_type, bounds in CYCLE_TRAJECTORY_LAYOUT:
+    trajectory_layout = (
+        CYCLE_TURN_GROUP_TRAJECTORY_LAYOUT
+        if group_by_turn
+        else CYCLE_TRAJECTORY_LAYOUT
+    )
+    arrow_specs = (
+        CYCLE_TURN_GROUP_ARROW_SPECS if group_by_turn else CYCLE_ARROW_SPECS
+    )
+    track_linewidth = 0.65 if group_by_turn else 1.2
+    trajectory_linewidth = 1.15 if group_by_turn else 1.4
+    arrow_mutation_scale = 9.0 if group_by_turn else 13.0
+    cycle_arrow_linewidth = 0.8 if group_by_turn else CYCLE_ARROW_LINEWIDTH
+    cycle_arrow_mutation_scale = (
+        8.5 if group_by_turn else CYCLE_ARROW_MUTATION_SCALE
+    )
+
+    for trajectory_type, bounds in trajectory_layout:
         inset = ax.inset_axes(bounds)
         draw_w_track_schematic(
             inset,
             trajectory_name=trajectory_type,
             arrow_color=PANEL_E_TRAJECTORY_COLORS[trajectory_type],
-            track_linewidth=1.2,
-            trajectory_linewidth=1.4,
-            arrow_mutation_scale=13.0,
+            track_linewidth=track_linewidth,
+            trajectory_linewidth=trajectory_linewidth,
+            arrow_mutation_scale=arrow_mutation_scale,
             fill_track=False,
         )
 
-    for start, end, rad in CYCLE_ARROW_SPECS:
+    for start, end, rad in arrow_specs:
         ax.annotate(
             "",
             xy=end,
@@ -4329,14 +4374,44 @@ def draw_w_track_cycle_panel(
             arrowprops={
                 "arrowstyle": "-|>",
                 "color": "black",
-                "linewidth": CYCLE_ARROW_LINEWIDTH,
-                "mutation_scale": CYCLE_ARROW_MUTATION_SCALE,
+                "linewidth": cycle_arrow_linewidth,
+                "mutation_scale": cycle_arrow_mutation_scale,
                 "shrinkA": 0,
                 "shrinkB": 0,
                 "connectionstyle": f"arc3,rad={rad}",
             },
             annotation_clip=False,
         )
+    if group_by_turn:
+        for bounds, label in zip(
+            CYCLE_TURN_GROUP_BOUNDS,
+            CYCLE_TURN_GROUP_LABELS,
+            strict=True,
+        ):
+            left, bottom, width, height = bounds
+            ax.add_patch(
+                Rectangle(
+                    (left, bottom),
+                    width,
+                    height,
+                    facecolor="none",
+                    edgecolor="0.45",
+                    linewidth=0.65,
+                    linestyle=(0, (3.0, 2.0)),
+                    transform=ax.transAxes,
+                    clip_on=False,
+                    zorder=2,
+                )
+            )
+            ax.text(
+                left + 0.5 * width,
+                CYCLE_TURN_GROUP_LABEL_Y,
+                label,
+                ha="center",
+                va="center",
+                fontsize=5.8,
+                transform=ax.transAxes,
+            )
     if include_visual_stimuli:
         draw_visual_stimuli_schematic(ax)
 
@@ -4355,7 +4430,7 @@ def _format_delta_advantage_summary(
     label: str | None = None,
     include_median: bool = True,
 ) -> str:
-    """Return compact DPP-side summary text for delta log-likelihood values."""
+    """Return compact PI-side summary text for delta log-likelihood values."""
     values = np.asarray(values, dtype=float).reshape(-1)
     values = values[np.isfinite(values)]
     prefix = "" if label is None else f"{label}\n"
@@ -4535,7 +4610,7 @@ def plot_stability_panel(
 
 
 def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
-    """Plot pooled V1 motor+DPP versus motor delta log-likelihood values."""
+    """Plot pooled V1 motor+PI versus motor delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     values = np.asarray(
@@ -4584,7 +4659,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
     ax.text(
         PANEL_E_RIGHT_ANNOTATION_X,
         0.97,
-        "Motor+DPP better",
+        "Motor+PI better",
         ha="left",
         va="top",
         fontsize=5.5,
@@ -4614,7 +4689,11 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.set_xlim(*x_limits)
-    ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
+    ax.set_xlabel(
+        PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
+        fontsize=7,
+        labelpad=2,
+    )
     ax.set_ylabel("Fraction", fontsize=7, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -4622,7 +4701,7 @@ def plot_motor_delta_panel(ax: "Axes", motor_delta_table: Any) -> None:
 
 
 def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
-    """Plot pooled V1 DPP-versus-absolute-model delta log-likelihood values."""
+    """Plot pooled V1 PI-versus-absolute-model delta log-likelihood values."""
     x_limits = (-1.0, 1.0)
     bin_edges = np.round(np.arange(x_limits[0], x_limits[1] + 0.05, 0.1), 10)
     all_values = np.asarray(
@@ -4683,7 +4762,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.03,
         0.97,
-        "Abs place better",
+        "Alloc. place better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -4693,7 +4772,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.03,
         0.82,
-        "Distance-to-reward\nbetter",
+        "Distance traveled\nbetter",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -4703,7 +4782,7 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
     ax.text(
         0.67,
         0.97,
-        "DPP better",
+        "PI better",
         ha="left",
         va="top",
         fontsize=4.8,
@@ -4736,7 +4815,11 @@ def plot_encoding_delta_panel(ax: "Axes", encoding_delta_table: Any) -> None:
         transform=ax.transAxes,
     )
     ax.set_xlim(*x_limits)
-    ax.set_xlabel(DELTA_LOG_LIKELIHOOD_AXIS_LABEL, fontsize=7, labelpad=2)
+    ax.set_xlabel(
+        PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
+        fontsize=7,
+        labelpad=2,
+    )
     ax.set_ylabel("Fraction", fontsize=7, labelpad=2)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

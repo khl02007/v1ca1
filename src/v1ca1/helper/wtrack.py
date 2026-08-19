@@ -224,6 +224,25 @@ def get_wtrack_total_length(animal_name: str) -> float:
     )
 
 
+def get_wtrack_segment_edges(animal_name: str) -> np.ndarray:
+    """Return normalized edges for the three physical path segments."""
+    geometry = get_wtrack_geometry(animal_name)
+    diagonal_segment_length = float(
+        np.sqrt(geometry["dx"] ** 2 + geometry["dy"] ** 2)
+    )
+    total_length = get_wtrack_total_length(animal_name)
+    first_edge = (
+        geometry["long_segment_length"] + diagonal_segment_length / 2.0
+    ) / total_length
+    second_edge = (
+        geometry["long_segment_length"]
+        + diagonal_segment_length
+        + geometry["short_segment_length"]
+        + diagonal_segment_length / 2.0
+    ) / total_length
+    return np.asarray([0.0, first_edge, second_edge, 1.0], dtype=float)
+
+
 def get_wtrack_node_positions(
     animal_name: str,
     side: str | None = None,

@@ -46,7 +46,7 @@ from v1ca1.paper_figures.figure_1 import (
     DECODING_XTICK_LABEL_FONTSIZE,
     DECODING_YLABEL_FONTSIZE,
     DECODING_YLABEL_X,
-    DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
+    PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL,
     ENCODING_COMPARISON_BIN_SIZE_S,
     ENCODING_COMPARISON_RELATIVE_DIR,
     ENCODING_COMPARISON_MIN_SPIKES,
@@ -986,6 +986,10 @@ def test_load_encoding_delta_table_intersects_firing_rate_and_stability(
         "dpp_vs_absolute_place",
         "dpp_vs_absolute_task_progression",
     ]
+    assert [label for _comparison, label, _column in ENCODING_DPP_COMPARISONS] == [
+        "PI - absolute place",
+        "PI - distance-to-reward",
+    ]
 
 
 def test_load_decoding_absolute_error_table_reads_sample_level_npz(
@@ -1841,7 +1845,7 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
     titles = (
         "Comparison to motor",
         "Comparison to alternative codes",
-        "Cross path decoding",
+        "Cross-path decoding",
     )
     for axis, title in zip(axes, titles, strict=True):
         axis.set_title(title, fontsize=8, pad=2)
@@ -1864,7 +1868,7 @@ def test_add_aligned_panel_headers_uses_shared_vertical_position() -> None:
         "F",
         "Comparison to alternative codes",
         "G",
-        "Cross path decoding",
+        "Cross-path decoding",
     ]
     assert {text.get_position()[1] for text in header_texts} == {
         header_texts[0].get_position()[1]
@@ -1881,7 +1885,7 @@ def test_add_aligned_panel_headers_at_label_positions_uses_requested_x_positions
     titles = (
         "Comparison to motor",
         "Comparison to alternative codes",
-        "Cross path decoding",
+        "Cross-path decoding",
     )
     for axis, title in zip(axes, titles, strict=True):
         axis.set_title(title, fontsize=8, pad=2)
@@ -1905,7 +1909,7 @@ def test_add_aligned_panel_headers_at_label_positions_uses_requested_x_positions
         "F",
         "Comparison to alternative codes",
         "G",
-        "Cross path decoding",
+        "Cross-path decoding",
     ]
     assert [text.get_position()[0] for text in header_texts[0::2]] == pytest.approx(
         label_x_positions
@@ -1957,6 +1961,14 @@ def test_add_aligned_panel_headers_supports_top_row_title_sizes() -> None:
     plt.close(fig)
 
 
+def test_figure_1_uses_requested_panel_a_and_g_titles() -> None:
+    assert (
+        figure_1_module.TASK_DESIGN_TITLE
+        == "W-maze task with visual stimuli"
+    )
+    assert figure_1_module.PANEL_G_TITLE == "Cross-path decoding"
+
+
 def test_add_panel_header_at_reference_y_aligns_to_reference_axis_level() -> None:
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -1969,7 +1981,7 @@ def test_add_panel_header_at_reference_y_aligns_to_reference_axis_level() -> Non
         fig,
         axes[0],
         label="C",
-        title="Example dark DPP coding cells",
+        title="Path-invariant V1 cells in darkness",
         label_x_offset=-0.04,
         reference_axis=axes[1],
         reference_y=1.04,
@@ -1980,7 +1992,7 @@ def test_add_panel_header_at_reference_y_aligns_to_reference_axis_level() -> Non
     )[1]
 
     assert label_text.get_text() == "C"
-    assert title_text.get_text() == "Example dark DPP coding cells"
+    assert title_text.get_text() == "Path-invariant V1 cells in darkness"
     assert label_text.get_position()[1] == pytest.approx(expected_y)
     assert title_text.get_position()[1] == pytest.approx(expected_y)
     plt.close(fig)
@@ -2255,13 +2267,20 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
     arena_bounds = arena_ax.get_position()
     condition_bounds = condition_ax.get_position()
     assert trajectory_bounds.x0 < arena_bounds.x0
-    assert trajectory_bounds.x1 < arena_bounds.x0
-    assert trajectory_bounds.y0 == pytest.approx(arena_bounds.y0)
-    assert trajectory_bounds.height == pytest.approx(arena_bounds.height)
-    assert trajectory_bounds.width == pytest.approx(arena_bounds.width)
-    assert trajectory_bounds.height == pytest.approx(2.0 * condition_bounds.height)
+    assert trajectory_bounds.x1 == pytest.approx(arena_bounds.x0)
+    assert trajectory_bounds.y0 < arena_bounds.y0
+    assert trajectory_bounds.height == pytest.approx(
+        figure_1_module.TASK_DESIGN_TOP_LEFT_SCALE * arena_bounds.height
+    )
+    assert trajectory_bounds.width == pytest.approx(
+        figure_1_module.TASK_DESIGN_TOP_LEFT_SCALE * arena_bounds.width
+    )
+    assert trajectory_bounds.height == pytest.approx(
+        2.0
+        * figure_1_module.TASK_DESIGN_TOP_LEFT_SCALE
+        * condition_bounds.height
+    )
     assert condition_bounds.y1 < trajectory_bounds.y0
-    assert condition_bounds.x0 == pytest.approx(trajectory_bounds.x0)
     assert condition_bounds.x1 == pytest.approx(arena_bounds.x1)
     assert not any(child.images for child in ax.child_axes)
     assert [text.get_text() for text in ax.texts if text.get_text()] == [
@@ -2280,6 +2299,29 @@ def test_draw_behavior_task_design_panel_places_schematics_without_behavior_phot
         if text.get_text()
     ]
     assert trajectory_labels == []
+    turn_group_rectangles = [
+        patch
+        for patch in trajectory_ax.patches
+        if isinstance(patch, Rectangle)
+    ]
+    assert len(turn_group_rectangles) == 2
+    turn_group_bounds = np.asarray(
+        [
+            (
+                rectangle.get_x(),
+                rectangle.get_y(),
+                rectangle.get_width(),
+                rectangle.get_height(),
+            )
+            for rectangle in turn_group_rectangles
+        ]
+    )
+    assert turn_group_bounds == pytest.approx(
+        np.asarray(figure_1_module.CYCLE_TURN_GROUP_BOUNDS)
+    )
+    assert [
+        text.get_text() for text in trajectory_ax.texts if text.get_text()
+    ] == list(figure_1_module.CYCLE_TURN_GROUP_LABELS)
 
     arena_text_by_label = {
         text.get_text(): text for text in arena_ax.texts if text.get_text()
@@ -2576,6 +2618,83 @@ def test_draw_w_track_cycle_panel_adds_four_inset_schematics() -> None:
     )
     visible_text = [text.get_text() for text in ax.texts if text.get_text()]
     assert visible_text == ["L", "C", "R", "Visual stimuli"]
+    plt.close(fig)
+
+
+def test_draw_w_track_cycle_panel_groups_paths_by_turn() -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    fig, ax = plt.subplots()
+    draw_w_track_cycle_panel(
+        ax,
+        include_visual_stimuli=False,
+        group_by_turn=True,
+    )
+
+    assert len(ax.child_axes) == 4
+    assert [
+        inset.patches[-1].get_linewidth() for inset in ax.child_axes
+    ] == pytest.approx([0.65] * 4)
+    assert figure_1_module.CYCLE_TURN_GROUP_TRAJECTORY_LAYOUT == (
+        ("center_to_left", (0.14, 0.63, 0.28, 0.26)),
+        ("right_to_center", (0.14, 0.27, 0.28, 0.26)),
+        ("left_to_center", (0.58, 0.63, 0.28, 0.26)),
+        ("center_to_right", (0.58, 0.27, 0.28, 0.26)),
+    )
+    assert figure_1_module.CYCLE_TURN_GROUP_ARROW_SPECS == (
+        ((0.42, 0.76), (0.58, 0.76), 0.0),
+        ((0.72, 0.63), (0.72, 0.53), 0.0),
+        ((0.58, 0.40), (0.42, 0.40), 0.0),
+        ((0.28, 0.53), (0.28, 0.63), 0.0),
+    )
+    turn_group_rectangles = [
+        patch for patch in ax.patches if isinstance(patch, Rectangle)
+    ]
+    assert len(turn_group_rectangles) == 2
+    turn_group_bounds = np.asarray(
+        [
+            (
+                rectangle.get_x(),
+                rectangle.get_y(),
+                rectangle.get_width(),
+                rectangle.get_height(),
+            )
+            for rectangle in turn_group_rectangles
+        ]
+    )
+    assert turn_group_bounds == pytest.approx(
+        np.asarray(figure_1_module.CYCLE_TURN_GROUP_BOUNDS)
+    )
+    assert [
+        rectangle.get_linewidth() for rectangle in turn_group_rectangles
+    ] == pytest.approx([0.65, 0.65])
+    assert [rectangle.get_linestyle() for rectangle in turn_group_rectangles] == [
+        (0, (3.0, 2.0)),
+        (0, (3.0, 2.0)),
+    ]
+    turn_group_labels = [text for text in ax.texts if text.get_text()]
+    assert [text.get_text() for text in turn_group_labels] == list(
+        figure_1_module.CYCLE_TURN_GROUP_LABELS
+    )
+    assert [text.get_position()[1] for text in turn_group_labels] == pytest.approx(
+        [0.12, 0.12]
+    )
+    arrow_patches = [
+        text.arrow_patch
+        for text in ax.texts
+        if getattr(text, "arrow_patch", None) is not None
+    ]
+    assert len(arrow_patches) == 4
+    assert all(
+        patch.get_mutation_scale() == pytest.approx(8.5)
+        for patch in arrow_patches
+    )
+    assert all(
+        patch.get_linewidth() == pytest.approx(0.8) for patch in arrow_patches
+    )
     plt.close(fig)
 
 
@@ -3000,13 +3119,15 @@ def test_plot_motor_delta_panel_draws_fraction_histogram() -> None:
     plot_motor_delta_panel(ax, table)
 
     assert ax.get_ylabel() == "Fraction"
-    assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
+    assert ax.get_xlabel() == PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL
+    assert ax.get_xlabel() == "Δ log likelihood (bits/spike)"
+    assert "\n" not in ax.get_xlabel()
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
     assert "Motor only better" in text_labels
-    assert "Motor+DPP better" in text_labels
+    assert "Motor+PI better" in text_labels
     assert "50% >0" in text_labels
     assert "50% >0, med. 0.10" not in text_labels
     assert "n = 4 cells\n2 animals" in text_labels
@@ -3049,11 +3170,11 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
                 "dpp_vs_absolute_place",
             ],
             "comparison_label": [
-                "DPP - absolute place",
-                "DPP - absolute place",
-                "DPP - distance-to-reward",
-                "DPP - distance-to-reward",
-                "DPP - absolute place",
+                "PI - absolute place",
+                "PI - absolute place",
+                "PI - distance-to-reward",
+                "PI - distance-to-reward",
+                "PI - absolute place",
             ],
             "delta_log_likelihood_bits_per_spike": [-0.1, 0.2, -0.3, 0.1, np.nan],
         }
@@ -3062,19 +3183,23 @@ def test_plot_encoding_delta_panel_draws_two_model_comparisons() -> None:
     plot_encoding_delta_panel(ax, table)
 
     assert ax.get_ylabel() == "Fraction"
-    assert ax.get_xlabel() == DELTA_LOG_LIKELIHOOD_AXIS_LABEL
+    assert ax.get_xlabel() == PANEL_E_F_DELTA_LOG_LIKELIHOOD_AXIS_LABEL
+    assert ax.get_xlabel() == "Δ log likelihood (bits/spike)"
+    assert "\n" not in ax.get_xlabel()
     assert ax.xaxis.label.get_fontsize() == pytest.approx(7.0)
     assert ax.get_title() == ""
     assert ax.get_xlim() == pytest.approx((-1.0, 1.0))
     text_labels = [text.get_text() for text in ax.texts]
-    assert "Abs place better" in text_labels
-    assert "Distance-to-reward\nbetter" in text_labels
-    assert text_labels.count("DPP better") == 1
+    assert "Alloc. place better" in text_labels
+    assert "Distance traveled\nbetter" in text_labels
+    assert "Abs place better" not in text_labels
+    assert "Distance-to-reward\nbetter" not in text_labels
+    assert text_labels.count("PI better") == 1
     assert text_labels.count("50% >0") == 2
-    assert "DPP > abs place\n50% >0" not in text_labels
-    assert "DPP > dist.-to-reward\n50% >0" not in text_labels
-    assert "DPP > abs place\n50% >0, med. 0.05" not in text_labels
-    assert "DPP > dist.-to-reward\n50% >0, med. -0.10" not in text_labels
+    assert "PI > abs place\n50% >0" not in text_labels
+    assert "PI > dist.-to-reward\n50% >0" not in text_labels
+    assert "PI > abs place\n50% >0, med. 0.05" not in text_labels
+    assert "PI > dist.-to-reward\n50% >0, med. -0.10" not in text_labels
     assert "n = 2 cells\n2 animals" in text_labels
     assert ax.texts[0].get_color() == ENCODING_DPP_COMPARISON_COLORS[
         "dpp_vs_absolute_place"

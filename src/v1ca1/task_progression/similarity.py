@@ -85,6 +85,125 @@ def interpolate_nans(values: np.ndarray) -> np.ndarray:
     return output
 
 
+def make_segment_masks(
+    progression: np.ndarray,
+    segment_edges: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Return nonoverlapping bin-center masks for normalized path segments."""
+    values = np.asarray(progression, dtype=float).reshape(-1)
+    edges = np.asarray(segment_edges, dtype=float).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("Path progression must contain finite bin centers.")
+    if edges.size < 2 or not np.isfinite(edges).all():
+        raise ValueError("Segment edges must contain at least two finite values.")
+    if np.any(np.diff(edges) <= 0.0):
+        raise ValueError("Segment edges must be strictly increasing.")
+    if edges[0] < 0.0 or edges[-1] > 1.0:
+        raise ValueError("Normalized segment edges must lie within [0, 1].")
+
+    values = np.clip(values, edges[0], edges[-1])
+    masks = []
+    for index, (start, stop) in enumerate(zip(edges[:-1], edges[1:])):
+        if index == edges.size - 2:
+            mask = (values >= start) & (values <= stop)
+        else:
+            mask = (values >= start) & (values < stop)
+        if not np.any(mask):
+            raise ValueError(
+                f"Segment {index} contains no tuning-curve bin centers."
+            )
+        masks.append(mask)
+    if not np.all(np.sum(np.vstack(masks), axis=0) == 1):
+        raise ValueError("Segment masks must assign every bin exactly once.")
+    return tuple(masks)
+
+
+def compute_segmented_shape_overlap(
+    curve_a: np.ndarray,
+    curve_b: np.ndarray,
+    progression: np.ndarray,
+    segment_edges: np.ndarray,
+    *,
+    eps: float = 1e-12,
+    both_silent_score: float | None = None,
+) -> dict[str, Any]:
+    """Return unit-area overlap and mean rate separately for each segment."""
+    values_a = np.asarray(curve_a, dtype=float)
+    values_b = np.asarray(curve_b, dtype=float)
+    progression = np.asarray(progression, dtype=float).reshape(-1)
+    if (
+        values_a.ndim != 1
+        or values_b.ndim != 1
+        or values_a.shape != values_b.shape
+        or values_a.size != progression.size
+    ):
+        raise ValueError(
+            "Segmented overlap requires aligned one-dimensional curves and "
+            "progression bin centers."
+        )
+    masks = make_segment_masks(progression, segment_edges)
+    scores: list[float] = []
+    means_a: list[float] = []
+    means_b: list[float] = []
+    areas_a: list[float] = []
+    areas_b: list[float] = []
+    statuses: list[str] = []
+    for mask in masks:
+        segment_a = values_a[mask]
+        segment_b = values_b[mask]
+        status = "valid"
+        score = np.nan
+        mean_a = np.nan
+        mean_b = np.nan
+        area_a = np.nan
+        area_b = np.nan
+        if not np.isfinite(segment_a).any():
+            status = "no_finite_a_bins"
+        elif not np.isfinite(segment_b).any():
+            status = "no_finite_b_bins"
+        elif np.isinf(segment_a).any():
+            status = "nonfinite_a_curve"
+        elif np.isinf(segment_b).any():
+            status = "nonfinite_b_curve"
+        elif np.any(segment_a[np.isfinite(segment_a)] < -float(eps)) or np.any(
+            segment_b[np.isfinite(segment_b)] < -float(eps)
+        ):
+            status = "negative_firing_rate"
+        else:
+            segment_a = np.maximum(interpolate_nans(segment_a), 0.0)
+            segment_b = np.maximum(interpolate_nans(segment_b), 0.0)
+            mean_a = float(np.mean(segment_a))
+            mean_b = float(np.mean(segment_b))
+            area_a = float(np.sum(segment_a))
+            area_b = float(np.sum(segment_b))
+            if area_a <= float(eps) and area_b <= float(eps):
+                status = "both_silent"
+                if both_silent_score is not None:
+                    score = float(both_silent_score)
+                    status = "valid"
+            elif area_a <= float(eps) or area_b <= float(eps):
+                score = 0.0
+            else:
+                score = float(
+                    np.minimum(segment_a / area_a, segment_b / area_b).sum()
+                )
+                score = float(np.clip(score, 0.0, 1.0))
+        scores.append(float(score))
+        means_a.append(float(mean_a))
+        means_b.append(float(mean_b))
+        areas_a.append(float(area_a))
+        areas_b.append(float(area_b))
+        statuses.append(status)
+    return {
+        "scores": scores,
+        "mean_rates_a_hz": means_a,
+        "mean_rates_b_hz": means_b,
+        "areas_a": areas_a,
+        "areas_b": areas_b,
+        "statuses": statuses,
+    }
+
+
 def flip_curve_if_requested(
     curve: np.ndarray,
     *,

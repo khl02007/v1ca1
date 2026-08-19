@@ -135,6 +135,10 @@ MOTOR_PANEL_VARIABLE_LABELS = {
     "head_angular_speed_deg_s": "Head ang. speed\n(deg/s)",
 }
 PANEL_TITLE_FONTSIZE = 8.0
+PANEL_B_TITLE = (
+    "Motor variables over normalized path progression across dark and light"
+)
+PANEL_C_TITLE = "Dark-light motor profile correlation"
 STABILITY_FILTERED_SIMILARITY_MIN_CORRELATION = 0.5
 DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ = 0.5
 DARK_LIGHT_CORRELATION_BINS = np.linspace(-1.0, 1.0, 21)
@@ -172,6 +176,7 @@ PANEL_A_GRID_LEFT = 0.140
 PANEL_A_GRID_RIGHT = 0.940
 PANEL_A_GRID_TOP = 0.965
 PANEL_A_GRID_BOTTOM = 0.055
+PANEL_GRID_HSPACE = 0.04
 PANEL_A_FIGURE_1D_WIDTH_CORRECTION = 0.995515695
 PANEL_A_HEATMAP_WIDTH_FRACTION = (
     DEFAULT_HEATMAP_PANEL_WIDTH_FRACTION * PANEL_A_FIGURE_1D_WIDTH_CORRECTION
@@ -2266,6 +2271,85 @@ def plot_dark_ordered_light_heatmap_regions(
     return color_image
 
 
+def add_supplementary_figure_3_bc_panels(
+    fig: Any,
+    motor_grid_spec: Any,
+    bottom_spacer_grid_spec: Any,
+    motor_summary_grid_spec: Any,
+    *,
+    data_root: Path,
+    datasets: Sequence[DatasetId],
+    panel_b_label: str = "B",
+    panel_c_label: str = "C",
+) -> tuple[np.ndarray, list[Any]]:
+    """Add the shared Supplementary Figure 3 panels B and C."""
+    motor_grid = motor_grid_spec.subgridspec(
+        nrows=len(MOTOR_VARIABLES),
+        ncols=len(PANEL_B_TRAJECTORY_TYPES),
+        hspace=MOTOR_GRID_HSPACE,
+        wspace=MOTOR_GRID_WSPACE,
+    )
+    motor_axes = np.asarray(
+        [
+            [
+                fig.add_subplot(motor_grid[row_index, column_index])
+                for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
+            ]
+            for row_index in range(len(MOTOR_VARIABLES))
+        ],
+        dtype=object,
+    )
+    motor_table = load_panel_b_motor_progression_table(
+        data_root=data_root,
+        datasets=datasets,
+    )
+    plot_panel_b_motor_progression_grid(
+        motor_axes,
+        motor_table,
+        datasets=datasets,
+    )
+
+    bottom_spacer_axis = fig.add_subplot(bottom_spacer_grid_spec)
+    bottom_spacer_axis.axis("off")
+    motor_summary_grid = motor_summary_grid_spec.subgridspec(
+        nrows=1,
+        ncols=len(PANEL_B_TRAJECTORY_TYPES),
+        wspace=MOTOR_SUMMARY_GRID_WSPACE,
+    )
+    motor_summary_axes = [
+        fig.add_subplot(motor_summary_grid[0, column_index])
+        for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
+    ]
+    motor_profile_correlation_table = build_panel_c_motor_profile_correlation_table(
+        motor_table,
+        datasets=datasets,
+    )
+    plot_panel_c_motor_profile_correlations(
+        motor_summary_axes,
+        motor_profile_correlation_table,
+        datasets=datasets,
+    )
+
+    fig.canvas.draw()
+    add_centered_axis_text(
+        fig,
+        motor_summary_axes,
+        PANEL_C_TITLE,
+        y_offset=0.025,
+        fontsize=PANEL_TITLE_FONTSIZE,
+    )
+    label_axis(motor_summary_axes[0], panel_c_label, x=-0.30, y=1.05)
+    add_centered_axis_text(
+        fig,
+        motor_axes[0, :],
+        PANEL_B_TITLE,
+        y_offset=0.010,
+        fontsize=PANEL_TITLE_FONTSIZE,
+    )
+    label_axis(motor_axes[0, 0], panel_b_label, x=-0.28, y=1.05)
+    return motor_axes, motor_summary_axes
+
+
 def make_supplementary_figure_3(
     *,
     data_root: Path,
@@ -2312,7 +2396,7 @@ def make_supplementary_figure_3(
             DEFAULT_BOTTOM_SECTION_SPACER_MM,
             DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
         ],
-        hspace=0.04,
+        hspace=PANEL_GRID_HSPACE,
         left=PANEL_A_GRID_LEFT,
         right=PANEL_A_GRID_RIGHT,
         top=PANEL_A_GRID_TOP,
@@ -2338,70 +2422,14 @@ def make_supplementary_figure_3(
     spacer_axis = fig.add_subplot(outer_grid[1, 0])
     spacer_axis.axis("off")
 
-    motor_grid = outer_grid[2, 0].subgridspec(
-        nrows=len(MOTOR_VARIABLES),
-        ncols=len(PANEL_B_TRAJECTORY_TYPES),
-        hspace=MOTOR_GRID_HSPACE,
-        wspace=MOTOR_GRID_WSPACE,
-    )
-    motor_axes = np.asarray(
-        [
-            [
-                fig.add_subplot(motor_grid[row_index, column_index])
-                for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
-            ]
-            for row_index in range(len(MOTOR_VARIABLES))
-        ],
-        dtype=object,
-    )
-    motor_table = load_panel_b_motor_progression_table(
+    add_supplementary_figure_3_bc_panels(
+        fig,
+        outer_grid[2, 0],
+        outer_grid[3, 0],
+        outer_grid[4, 0],
         data_root=data_root,
         datasets=datasets,
     )
-    plot_panel_b_motor_progression_grid(
-        motor_axes,
-        motor_table,
-        datasets=datasets,
-    )
-
-    bottom_spacer_axis = fig.add_subplot(outer_grid[3, 0])
-    bottom_spacer_axis.axis("off")
-    motor_summary_grid = outer_grid[4, 0].subgridspec(
-        nrows=1,
-        ncols=len(PANEL_B_TRAJECTORY_TYPES),
-        wspace=MOTOR_SUMMARY_GRID_WSPACE,
-    )
-    motor_summary_axes = [
-        fig.add_subplot(motor_summary_grid[0, column_index])
-        for column_index in range(len(PANEL_B_TRAJECTORY_TYPES))
-    ]
-    motor_profile_correlation_table = build_panel_c_motor_profile_correlation_table(
-        motor_table,
-        datasets=datasets,
-    )
-    plot_panel_c_motor_profile_correlations(
-        motor_summary_axes,
-        motor_profile_correlation_table,
-        datasets=datasets,
-    )
-
-    fig.canvas.draw()
-    add_centered_axis_text(
-        fig,
-        motor_summary_axes,
-        "Dark-light motor profile correlation",
-        y_offset=0.025,
-        fontsize=PANEL_TITLE_FONTSIZE,
-    )
-    label_axis(motor_summary_axes[0], "C", x=-0.30, y=1.05)
-    add_centered_axis_text(
-        fig,
-        motor_axes[0, :],
-        "Motor variables over normalized path progression across dark and light",
-        y_offset=0.010,
-        fontsize=PANEL_TITLE_FONTSIZE,
-    )
-    label_axis(motor_axes[0, 0], "B", x=-0.28, y=1.05)
     label_axis(
         panel_a_axis,
         "A",

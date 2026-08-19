@@ -1532,6 +1532,9 @@ def plot_panel_a_example(
     epoch_axis_width: float = 0.40,
     schematic_axis_left: float = 0.012,
     schematic_axis_width: float = 0.070,
+    schematic_axis_height: float = 0.075,
+    schematic_track_linewidth: float = 0.45,
+    schematic_trajectory_linewidth: float = 0.65,
     show_correlation: bool = False,
     similarity_annotation: str = "correlation",
     correlation_text_position: tuple[float, float] = (0.96, 0.92),
@@ -1556,28 +1559,27 @@ def plot_panel_a_example(
     y_max = _get_panel_a_y_max(example) if y_max is None else float(y_max)
     raster_y = PANEL_A_EXAMPLE_RASTER_Y + y_shift
     raster_height = PANEL_A_EXAMPLE_RASTER_HEIGHT
-    schematic_height = 0.075
     section_centers = _panel_a_raster_section_centers(example, trajectories)
     for trajectory_type in reversed(trajectories):
         schematic_y = (
             raster_y
             + raster_height * section_centers[trajectory_type]
-            - schematic_height / 2.0
+            - schematic_axis_height / 2.0
         )
         schematic_ax = ax.inset_axes(
             [
                 schematic_axis_left,
                 schematic_y,
                 schematic_axis_width,
-                schematic_height,
+                schematic_axis_height,
             ]
         )
         draw_w_track_schematic(
             schematic_ax,
             trajectory_name=trajectory_type,
             arrow_color=PANEL_TRAJECTORY_COLORS[trajectory_type],
-            track_linewidth=0.45,
-            trajectory_linewidth=0.65,
+            track_linewidth=schematic_track_linewidth,
+            trajectory_linewidth=schematic_trajectory_linewidth,
             arrow_mutation_scale=5.8,
             fill_track=False,
         )

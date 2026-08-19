@@ -8,6 +8,8 @@ import pytest
 import v1ca1.paper_figures._dark_light as dark_light_module
 import v1ca1.paper_figures.supplementary_figure_2 as supp_figure_2_module
 from v1ca1.paper_figures.supplementary_figure_2 import (
+    AXIS_LABEL_FONTSIZE_PT,
+    AXIS_TITLE_FONTSIZE_PT,
     DEFAULT_ANIMAL_ROW_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
     DEFAULT_OUTPUT_NAME,
@@ -17,14 +19,19 @@ from v1ca1.paper_figures.supplementary_figure_2 import (
     MIXED_GLM_FULL_BEST_AXIS_BOUNDS,
     MIXED_GLM_FULL_DELTA_AXIS_BOUNDS,
     MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM,
+    MIN_PUBLICATION_FONTSIZE_PT,
     NESTED_DARK_ACTIVE_FR_THRESHOLD_HZ,
     NESTED_TUNING_STABILITY_CORRELATION_THRESHOLD,
+    PANEL_TITLE_FONTSIZE,
     SCALAR_MODEL_NAME,
     SCALAR_BASELINE_SCORE_COLUMN,
     SCALAR_BASELINE_SCORE_VARIABLE,
     FIGURE_2B_DELTA_SUBPANEL_BOUNDS,
     FIGURE_2B_DELTA_BOX_WIDTH,
+    FIGURE_2B_DELTA_LABEL_FONTSIZE,
+    FIGURE_2B_DELTA_LABEL_Y_OFFSET,
     SCALAR_PANEL_HEIGHT_MM,
+    build_dark_scaffold_additive_delta_table,
     get_figure_height_mm,
     get_swap_tuning_curve_comparison_path,
     get_swap_tuning_curve_comparison_dataset_path,
@@ -54,7 +61,7 @@ def test_default_cli_matches_letter_width_with_one_inch_margins() -> None:
     assert args.dark_epoch is None
     assert get_figure_height_mm(0) == pytest.approx(DEFAULT_ANIMAL_ROW_HEIGHT_MM)
     assert get_figure_height_mm(3) == pytest.approx(
-        SCALAR_PANEL_HEIGHT_MM
+        2.0 * SCALAR_PANEL_HEIGHT_MM
         + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
     )
     panel_b_left = min(
@@ -66,6 +73,79 @@ def test_default_cli_matches_letter_width_with_one_inch_margins() -> None:
         MIXED_GLM_FULL_BEST_AXIS_BOUNDS[0] + MIXED_GLM_FULL_BEST_AXIS_BOUNDS[2],
     )
     assert 0.5 * (panel_b_left + panel_b_right) == pytest.approx(0.5)
+    assert MIXED_GLM_FULL_DELTA_AXIS_BOUNDS == pytest.approx(
+        (0.08, 0.14, 0.50, 0.70)
+    )
+    assert MIXED_GLM_FULL_BEST_AXIS_BOUNDS == pytest.approx(
+        (0.62, 0.18, 0.30, 0.60)
+    )
+
+
+def test_build_dark_scaffold_additive_delta_table_computes_matched_delta(
+) -> None:
+    pandas = pytest.importorskip("pandas")
+
+    matched_row = {
+        "animal_name": "L14",
+        "date": "20240611",
+        "region": "v1",
+        "dark_train_epoch": "08_r4",
+        "light_train_epoch": "02_r1",
+        "light_test_epoch": "06_r3",
+        "trajectory": "center_to_left",
+        "unit": 1,
+        "MS_bits_per_spike": 0.40,
+        "A_bits_per_spike": 0.15,
+    }
+    mismatches = (
+        ("animal_name", "L15"),
+        ("date", "20240612"),
+        ("region", "ca1"),
+        ("dark_train_epoch", "10_r5"),
+        ("light_train_epoch", "04_r2"),
+        ("light_test_epoch", "02_r1"),
+        ("trajectory", "center_to_right"),
+        ("unit", 2),
+    )
+    mixed_table = pandas.DataFrame(
+        [matched_row]
+        + [
+            {**matched_row, column: value}
+            for column, value in mismatches
+        ]
+    )
+    scalar_qc_table = pandas.DataFrame(
+        [
+            {
+                "animal_name": "L14",
+                "date": "20240611",
+                "region": "v1",
+                "dark_epoch": "08_r4",
+                "light_train_epoch": "02_r1",
+                "light_test_epoch": "06_r3",
+                "trajectory": "center_to_left",
+                "unit": 1,
+                "delta_ll_bits_per_spike": 0.10,
+            }
+        ]
+    )
+    original_mixed = mixed_table.copy(deep=True)
+    original_scalar_qc = scalar_qc_table.copy(deep=True)
+
+    result = build_dark_scaffold_additive_delta_table(
+        mixed_table,
+        scalar_qc_table,
+    )
+
+    assert result is not mixed_table
+    assert result is not scalar_qc_table
+    assert len(result) == 1
+    np.testing.assert_allclose(
+        result["delta_ll_bits_per_spike"].to_numpy(dtype=float),
+        [0.25],
+    )
+    pandas.testing.assert_frame_equal(mixed_table, original_mixed)
+    pandas.testing.assert_frame_equal(scalar_qc_table, original_scalar_qc)
 
 
 def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
@@ -102,6 +182,9 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
 
     assert len(axis.child_axes) == 2
     assert len(FIGURE_2B_DELTA_SUBPANEL_BOUNDS) == 4
+    assert [bounds[2] for bounds in FIGURE_2B_DELTA_SUBPANEL_BOUNDS] == (
+        pytest.approx([0.21] * 4)
+    )
     assert [child_axis.get_title() for child_axis in axis.child_axes] == [
         "L14",
         "L15",
@@ -114,11 +197,29 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
     ]
     assert len(boxes) == 3
     first_axis = axis.child_axes[0]
-    assert first_axis.get_xlim() == pytest.approx(dark_light_module.PANEL_H_DELTA_X_LIMITS)
+    assert first_axis.get_xlim() == pytest.approx((-0.05, 0.25))
+    assert axis.child_axes[1].get_xlim() == pytest.approx((-0.15, 0.45))
+    assert first_axis.get_xlim() != pytest.approx(axis.child_axes[1].get_xlim())
     assert [tick.get_text() for tick in first_axis.get_yticklabels()] == [
         dark_light_module.PANEL_TRAJECTORY_LABELS[trajectory]
         for trajectory in dark_light_module.PANEL_H_DELTA_TRAJECTORIES
     ]
+    assert first_axis.get_ylabel() == "Path"
+    assert first_axis.yaxis.label.get_fontsize() == pytest.approx(
+        AXIS_LABEL_FONTSIZE_PT
+    )
+    assert all(
+        child_axis.title.get_fontsize() == pytest.approx(AXIS_TITLE_FONTSIZE_PT)
+        for child_axis in axis.child_axes
+    )
+    assert all(
+        tick.get_fontsize() >= MIN_PUBLICATION_FONTSIZE_PT
+        for child_axis in axis.child_axes
+        for tick in (
+            *child_axis.get_xticklabels(),
+            *child_axis.get_yticklabels(),
+        )
+    )
     assert [
         line.get_xdata()[0]
         for child_axis in axis.child_axes
@@ -145,28 +246,113 @@ def test_plot_figure_2b_delta_ll_boxplots_groups_heldout_values() -> None:
         if ">0" in text.get_text()
     ]
     assert fraction_labels == ["100% >0", "0% >0", "100% >0"]
-    fraction_text_colors = [
-        text.get_color()
-        for child_axis in axis.child_axes
-        for text in child_axis.texts
-        if ">0" in text.get_text()
-    ]
-    assert fraction_text_colors[:2] == [
-        dark_light_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
-        dark_light_module.PANEL_TRAJECTORY_COLORS["center_to_left"],
-    ]
     fraction_text_artists = [
         text
         for child_axis in axis.child_axes
         for text in child_axis.texts
         if ">0" in text.get_text()
     ]
-    assert all(text.get_position()[0] > 1.0 for text in fraction_text_artists)
-    assert all(text.get_ha() == "left" for text in fraction_text_artists)
+    np.testing.assert_allclose(
+        [text.get_position() for text in fraction_text_artists],
+        [
+            (0.15, 3.0 - FIGURE_2B_DELTA_LABEL_Y_OFFSET),
+            (-0.1, 3.0 - FIGURE_2B_DELTA_LABEL_Y_OFFSET),
+            (0.4, 0.0 - FIGURE_2B_DELTA_LABEL_Y_OFFSET),
+        ],
+    )
+    assert all(text.get_ha() == "center" for text in fraction_text_artists)
+    assert all(text.get_va() == "top" for text in fraction_text_artists)
+    assert all(
+        text.get_fontsize() == pytest.approx(FIGURE_2B_DELTA_LABEL_FONTSIZE)
+        for text in fraction_text_artists
+    )
+    assert all(text.get_fontweight() == "bold" for text in fraction_text_artists)
+    assert all(text.get_color() == "0.20" for text in fraction_text_artists)
+    assert all(
+        text.get_bbox_patch().get_alpha() == pytest.approx(0.85)
+        for text in fraction_text_artists
+    )
     assert all(not text.get_clip_on() for text in fraction_text_artists)
     assert FIGURE_2B_DELTA_BOX_WIDTH == pytest.approx(0.13)
     assert axis.get_legend() is None
     assert axis.texts[-1].get_text() == "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)"
+    assert axis.texts[-1].get_fontsize() == pytest.approx(
+        AXIS_LABEL_FONTSIZE_PT
+    )
+    plt.close(fig)
+
+
+def test_plot_figure_2b_delta_ll_boxplots_uses_per_animal_tukey_limits() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    l14_values = [-2.0, -1.0, 0.0, 1.0, 2.0, 40.0]
+    l15_values = [10.0, 11.0, 12.0, 13.0, 100.0]
+    table = pandas.DataFrame(
+        {
+            "animal_name": (
+                ["L14"] * len(l14_values) + ["L15"] * len(l15_values)
+            ),
+            "trajectory": ["center_to_left"] * (
+                len(l14_values) + len(l15_values)
+            ),
+            "light_train_epoch": ["02_r1"] * (
+                len(l14_values) + len(l15_values)
+            ),
+            "light_test_epoch": ["06_r3"] * (
+                len(l14_values) + len(l15_values)
+            ),
+            "delta_ll_bits_per_spike": l14_values + l15_values,
+        }
+    )
+    fig, axis = plt.subplots()
+
+    plot_figure_2b_delta_ll_boxplots(
+        axis,
+        table,
+        animal_names=("L14", "L15"),
+    )
+
+    assert len(axis.child_axes) == 2
+    # Matplotlib's 1.5-IQR whiskers are [-2, 2] and [10, 13]; the
+    # outliers at 40 and 100 do not determine the visible range. Limits
+    # include zero, then add max(0.05, 8% of the resulting span) per side.
+    assert axis.child_axes[0].get_xlim() == pytest.approx((-2.32, 2.32))
+    assert axis.child_axes[1].get_xlim() == pytest.approx((-1.04, 14.04))
+    assert axis.child_axes[0].get_xlim() != pytest.approx(
+        axis.child_axes[1].get_xlim()
+    )
+    plt.close(fig)
+
+
+def test_plot_figure_2b_delta_ll_boxplots_accepts_dedicated_x_limits() -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = pandas.DataFrame(
+        {
+            "animal_name": ["L14"],
+            "trajectory": ["center_to_left"],
+            "light_train_epoch": ["02_r1"],
+            "light_test_epoch": ["06_r3"],
+            "delta_ll_bits_per_spike": [4.0],
+        }
+    )
+    fig, axis = plt.subplots()
+
+    plot_figure_2b_delta_ll_boxplots(
+        axis,
+        table,
+        animal_names=("L14",),
+        x_limits=(-2.0, 18.0),
+    )
+
+    assert len(axis.child_axes) == 1
+    assert axis.child_axes[0].get_xlim() == pytest.approx((-2.0, 18.0))
     plt.close(fig)
 
 
@@ -903,8 +1089,8 @@ def test_plot_mixed_glm_full_additive_pairwise_delta_uses_displayed_contrasts() 
     )
 
     assert axis.yticklabels == [
-        "Dark scaffold - Independent",
-        "Dark scaffold - Additive",
+        "Multiplicative - Independent",
+        "Multiplicative - Additive",
         "Independent - Additive",
     ]
     assert len(axis.boxplot_values) == 3
@@ -929,8 +1115,16 @@ def test_plot_mixed_glm_full_additive_best_fraction_bar_displays_model_names(
     fig.canvas.draw()
 
     assert axis.get_title() == "Best model"
+    assert axis.title.get_fontsize() == pytest.approx(AXIS_TITLE_FONTSIZE_PT)
     assert [tick.get_text() for tick in axis.get_yticklabels()] == []
     assert axis.get_xlabel() == "Frac. cells"
+    assert axis.xaxis.label.get_fontsize() == pytest.approx(
+        AXIS_LABEL_FONTSIZE_PT
+    )
+    assert all(
+        tick.get_fontsize() >= MIN_PUBLICATION_FONTSIZE_PT
+        for tick in axis.get_xticklabels()
+    )
     assert [patch.get_width() for patch in axis.patches] == pytest.approx(
         [0.2, 0.4, 0.2, 0.2]
     )
@@ -946,14 +1140,125 @@ def test_plot_mixed_glm_full_additive_best_fraction_bar_displays_model_names(
         if text.get_text()
         in {
             "Independent\n20%",
-            "Dark scaffold\n40%",
+            "Multiplicative\n40%",
             "Additive\n20%",
             "tie\n20%",
         }
     ]
     assert len(model_texts) == 4
     assert all(text.get_color() == "0.20" for text in model_texts)
+    assert [text.get_position()[1] for text in model_texts] == pytest.approx(
+        [0.28, 0.62, 0.28, 0.62]
+    )
+    assert all(
+        text.get_fontsize() == pytest.approx(MIN_PUBLICATION_FONTSIZE_PT)
+        for text in model_texts
+    )
     plt.close(fig)
+
+
+def test_make_supplementary_figure_2_enforces_publication_font_hierarchy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.text import Text
+
+    trajectories = tuple(dark_light_module.PANEL_H_DELTA_TRAJECTORIES)
+    scalar_table = pandas.DataFrame(
+        {
+            "animal_name": ["L14"] * len(trajectories),
+            "date": ["20240611"] * len(trajectories),
+            "region": ["v1"] * len(trajectories),
+            "dark_epoch": ["08_r4"] * len(trajectories),
+            "trajectory": trajectories,
+            "unit": list(range(1, len(trajectories) + 1)),
+            "light_train_epoch": ["02_r1"] * len(trajectories),
+            "light_test_epoch": ["06_r3"] * len(trajectories),
+            "delta_ll_bits_per_spike": [0.2, -0.1, 0.1, 0.3],
+        }
+    )
+    mixed_table = pandas.DataFrame(
+        {
+            "animal_name": ["L14"] * len(trajectories),
+            "date": ["20240611"] * len(trajectories),
+            "region": ["v1"] * len(trajectories),
+            "dark_train_epoch": ["08_r4"] * len(trajectories),
+            "trajectory": trajectories,
+            "unit": list(range(1, len(trajectories) + 1)),
+            "light_train_epoch": ["02_r1"] * len(trajectories),
+            "light_test_epoch": ["06_r3"] * len(trajectories),
+            "V_bits_per_spike": [1.0, 0.8, 0.9, 1.1],
+            "MS_bits_per_spike": [0.8, 0.9, 0.7, 1.0],
+            "A_bits_per_spike": [0.7, 0.6, 0.8, 0.9],
+            "winner": ["V", "MS", "A", "V"],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        supp_figure_2_module,
+        "load_panel_h_swap_delta_table",
+        lambda **_kwargs: scalar_table,
+    )
+    monkeypatch.setattr(
+        supp_figure_2_module,
+        "load_mixed_glm_full_additive_delta_table",
+        lambda **_kwargs: mixed_table,
+    )
+
+    def fake_save_figure(fig, output_path: Path, **_kwargs: object) -> Path:
+        fig.canvas.draw()
+        visible_text = [
+            text
+            for text in fig.findobj(match=Text)
+            if text.get_visible() and text.get_text().strip()
+        ]
+        captured["text_sizes"] = [
+            (text.get_text(), text.get_fontsize()) for text in visible_text
+        ]
+        captured["panel_labels"] = [
+            (text.get_text(), text.get_fontsize())
+            for text in visible_text
+            if text.get_text() in {"A", "B", "C"}
+            and text.get_fontweight() == "bold"
+        ]
+        return output_path
+
+    monkeypatch.setattr(supp_figure_2_module, "save_figure", fake_save_figure)
+    output_path = tmp_path / "supplementary_figure_2.svg"
+
+    make_supplementary_figure_2(
+        data_root=Path("/analysis"),
+        output_path=output_path,
+        datasets=[("L14", "20240611", "08_r4")],
+        region="v1",
+        dark_epoch=None,
+        dpi=300,
+    )
+
+    text_sizes = captured["text_sizes"]
+    assert [
+        (text, size)
+        for text, size in text_sizes
+        if size < MIN_PUBLICATION_FONTSIZE_PT
+    ] == []
+    panel_labels = captured["panel_labels"]
+    assert [text for text, _size in panel_labels] == ["A", "B", "C"]
+    assert [size for _text, size in panel_labels] == pytest.approx(
+        [PANEL_TITLE_FONTSIZE] * 3
+    )
+    for text, size in text_sizes:
+        if text in {
+            "Path",
+            "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)",
+            "Frac. cells",
+            "L14",
+            "Best model",
+        }:
+            assert size == pytest.approx(AXIS_LABEL_FONTSIZE_PT)
 
 
 def test_plot_hybrid_best_fraction_bar_uses_pairwise_v_h_winner(
@@ -1055,6 +1360,7 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     mixed_full_tables = []
     mixed_full_plot_tables = []
     mixed_full_best_tables = []
+    minimum_font_texts = []
     empirical_multiplicative_plot_tables = []
     empirical_multiplicative_best_tables = []
     hybrid_load_calls = []
@@ -1077,7 +1383,10 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
             {
                 "animal_name": ["L14"],
                 "date": ["20240611"],
+                "region": ["v1"],
+                "dark_epoch": ["08_r4"],
                 "trajectory": ["center_to_left"],
+                "unit": [1],
                 "light_train_epoch": ["02_r1"],
                 "light_test_epoch": ["06_r3"],
                 "delta_ll_bits_per_spike": [0.2],
@@ -1095,7 +1404,7 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
                 "kwargs": kwargs,
             }
         )
-        ax.text(0.5, 0.5, "4B boxes")
+        minimum_font_texts.append(ax.text(0.5, 0.5, "4B boxes", fontsize=3.0))
 
     def fake_load_empirical_pairwise_delta_table(**kwargs: object):
         empirical_load_calls.append(kwargs)
@@ -1174,6 +1483,7 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
                 "region": ["v1"],
                 "dark_train_epoch": ["08_r4"],
                 "light_train_epoch": ["02_r1"],
+                "light_test_epoch": ["06_r3"],
                 "unit": [1],
                 "swap_segment_index_1based": [1],
                 "winner": ["A"],
@@ -1192,11 +1502,15 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
         **kwargs: object,
     ):
         mixed_full_plot_tables.append((table, kwargs))
-        ax.text(0.5, 0.5, "mixed full")
+        minimum_font_texts.append(
+            ax.text(0.5, 0.5, "mixed full", fontsize=3.0)
+        )
 
     def fake_plot_mixed_glm_full_additive_best_fraction_bar(ax, table):
         mixed_full_best_tables.append(table)
-        ax.text(0.5, 0.5, "mixed full best")
+        minimum_font_texts.append(
+            ax.text(0.5, 0.5, "mixed full best", fontsize=3.0)
+        )
 
     def fake_plot_empirical_multiplicative_pairwise_delta(ax, table):
         empirical_multiplicative_plot_tables.append(table)
@@ -1479,7 +1793,7 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     assert calls["figsize"][0] == pytest.approx(DEFAULT_FIGURE_WIDTH_MM / 25.4)
     assert calls["figsize"][1] == pytest.approx(
         (
-            SCALAR_PANEL_HEIGHT_MM
+            2.0 * SCALAR_PANEL_HEIGHT_MM
             + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
         )
         / 25.4
@@ -1490,12 +1804,20 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     assert calls["panel_labels"] == [
         "A",
         "B",
+        "C",
     ]
     assert calls["axis_titles"][0] == (
-        "Dark scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory"
+        "Multiplicative - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and path"
     )
     assert calls["axis_titles"][1] == (
-        "Comparison between Dark scaffold, independent, and additive models"
+        "Multiplicative - Additive \N{GREEK CAPITAL LETTER DELTA} LL by animal and path"
+    )
+    assert calls["axis_titles"][2] == (
+        "Comparison between multiplicative, independent, and additive models"
+    )
+    assert all(
+        text.get_fontsize() >= MIN_PUBLICATION_FONTSIZE_PT
+        for text in minimum_font_texts
     )
     assert "Additive segment" not in calls["texts"]
     assert [call["datasets"] for call in load_calls] == [datasets]
@@ -1507,8 +1829,18 @@ def test_make_supplementary_figure_2_plots_figure_2b_boxes_per_animal(
     assert load_calls[0]["min_tuning_stability_correlation"] == pytest.approx(
         dark_light_module.PANEL_D_MIN_TUNING_STABILITY_CORRELATION
     )
-    assert len(figure_2b_boxplot_calls) == 1
+    assert len(figure_2b_boxplot_calls) == 2
     assert figure_2b_boxplot_calls[0]["kwargs"] == {"animal_names": ("L14", "L15")}
+    assert figure_2b_boxplot_calls[1]["kwargs"] == {"animal_names": ("L14", "L15")}
+    assert all(
+        "x_limits" not in call["kwargs"] for call in figure_2b_boxplot_calls
+    )
+    additive_delta_table = figure_2b_boxplot_calls[1]["table"]
+    assert additive_delta_table is not mixed_full_tables[0]
+    assert "delta_ll_bits_per_spike" not in mixed_full_tables[0]
+    assert additive_delta_table["delta_ll_bits_per_spike"].iloc[0] == pytest.approx(
+        0.10
+    )
     assert len(empirical_load_calls) == 0
     assert len(empirical_plot_tables) == 0
     assert len(empirical_best_tables) == 0

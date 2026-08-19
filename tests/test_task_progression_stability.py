@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 
 import numpy as np
@@ -34,7 +35,7 @@ def _make_curve(values_by_unit: dict[int, list[float]]) -> xr.DataArray:
         dims=("unit", "tp"),
         coords={
             "unit": units,
-            "tp": np.arange(values.shape[1], dtype=float),
+            "tp": np.linspace(0.2, 0.8, values.shape[1]),
         },
     )
 
@@ -115,12 +116,103 @@ def test_build_stability_table_retains_all_units_without_firing_rate_filter() ->
         "valid",
         "constant_odd_curve",
     ]
+    assert table["stability_shape_overlap"].tolist() == pytest.approx(
+        [1.0, 2.0 / 3.0, 5.0 / 6.0]
+    )
+    assert table["shape_overlap_status"].tolist() == ["valid"] * 3
+    assert table["odd_tuning_curve_area"].tolist() == pytest.approx(
+        [6.0, 6.0, 12.0]
+    )
+    assert table["even_tuning_curve_area"].tolist() == pytest.approx(
+        [12.0, 6.0, 6.0]
+    )
     assert np.allclose(table["firing_rate_hz"], [0.1, 0.0, 2.0])
     assert table["n_odd_trials"].tolist() == [3, 3, 3]
     assert table["n_even_trials"].tolist() == [2, 2, 2]
     assert table["n_odd_spikes"].tolist() == [4, 3, 2]
     assert table["n_even_spikes"].tolist() == [3, 2, 1]
     assert table["n_paired_finite_bins"].tolist() == [3, 3, 3]
+
+
+def test_build_stability_table_saves_segmented_overlap_json_fields() -> None:
+    """Odd/even segment scores and diagnostics remain audit-ready."""
+    from v1ca1.helper.wtrack import get_wtrack_segment_edges
+
+    module = _reload_stability_module()
+    odd_curve = _make_curve(
+        {
+            11: [1.0, 3.0, 2.0, 4.0, 5.0, 5.0],
+            12: [1.0, 3.0, 0.0, 0.0, 5.0, 5.0],
+        }
+    )
+    even_curve = _make_curve(
+        {
+            11: [2.0, 6.0, 0.0, 0.0, 10.0, 10.0],
+            12: [2.0, 6.0, 0.0, 0.0, 10.0, 10.0],
+        }
+    )
+
+    table = module.build_stability_table_for_tuning_curves(
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="02_r1",
+        trajectory_type="center_to_left",
+        expected_unit_ids=[11, 12],
+        odd_tuning_curve=odd_curve,
+        even_tuning_curve=even_curve,
+        epoch_firing_rates=pd.Series({11: 2.0, 12: 2.0}, dtype=float),
+        odd_spike_counts=pd.Series({11: 8, 12: 6}, dtype=int),
+        even_spike_counts=pd.Series({11: 8, 12: 8}, dtype=int),
+        n_odd_trials=3,
+        n_even_trials=3,
+        odd_duration_s=12.0,
+        even_duration_s=12.0,
+        n_odd_feature_samples=120,
+        n_even_feature_samples=120,
+    ).set_index("unit")
+
+    assert table.loc[11, "stability_segmented_shape_overlap"] == (
+        pytest.approx(2.0 / 3.0)
+    )
+    assert json.loads(
+        table.loc[11, "segment_stability_shape_overlaps"]
+    ) == pytest.approx([1.0, 0.0, 1.0])
+    assert json.loads(
+        table.loc[11, "segment_shape_overlap_statuses"]
+    ) == ["valid", "valid", "valid"]
+    assert json.loads(
+        table.loc[11, "odd_segment_mean_firing_rates_hz"]
+    ) == pytest.approx([2.0, 3.0, 5.0])
+    assert json.loads(
+        table.loc[11, "even_segment_mean_firing_rates_hz"]
+    ) == pytest.approx([4.0, 0.0, 10.0])
+    assert json.loads(
+        table.loc[11, "odd_segment_tuning_curve_areas"]
+    ) == pytest.approx([4.0, 6.0, 10.0])
+    assert json.loads(
+        table.loc[11, "even_segment_tuning_curve_areas"]
+    ) == pytest.approx([8.0, 0.0, 20.0])
+    assert json.loads(
+        table.loc[11, "segment_edges_normalized"]
+    ) == pytest.approx(get_wtrack_segment_edges("L14"))
+    assert table.loc[11, "segmented_shape_overlap_status"] == "valid"
+
+    segment_scores = json.loads(
+        table.loc[12, "segment_stability_shape_overlaps"]
+    )
+    assert segment_scores[0] == pytest.approx(1.0)
+    assert np.isnan(segment_scores[1])
+    assert segment_scores[2] == pytest.approx(1.0)
+    assert json.loads(
+        table.loc[12, "segment_shape_overlap_statuses"]
+    ) == ["valid", "both_silent", "valid"]
+    assert table.loc[12, "stability_segmented_shape_overlap"] == (
+        pytest.approx(1.0)
+    )
+    assert table.loc[12, "segmented_shape_overlap_status"] == (
+        "partial_invalid_segments"
+    )
 
 
 def test_build_stability_table_retains_unavailable_trajectory_rows() -> None:
@@ -149,10 +241,30 @@ def test_build_stability_table_retains_unavailable_trajectory_rows() -> None:
 
     assert table["unit"].tolist() == [21, 22]
     assert table["stability_correlation"].isna().all()
+    assert table["stability_shape_overlap"].isna().all()
     assert table["stability_status"].tolist() == [
         "no_even_trials",
         "no_even_trials",
     ]
+    assert table["shape_overlap_status"].tolist() == [
+        "no_even_trials",
+        "no_even_trials",
+    ]
+    assert table["odd_tuning_curve_area"].isna().all()
+    assert table["even_tuning_curve_area"].isna().all()
+    assert table["stability_segmented_shape_overlap"].isna().all()
+    assert table["segmented_shape_overlap_status"].tolist() == [
+        "no_even_trials",
+        "no_even_trials",
+    ]
+    for row in table.itertuples(index=False):
+        scores = json.loads(row.segment_stability_shape_overlaps)
+        assert len(scores) == 3
+        assert np.isnan(scores).all()
+        assert json.loads(row.segment_shape_overlap_statuses) == [
+            "no_even_trials"
+        ] * 3
+        assert len(json.loads(row.segment_edges_normalized)) == 4
     assert table["n_even_trials"].tolist() == [0, 0]
     assert table["n_even_finite_bins"].tolist() == [0, 0]
 
@@ -182,7 +294,76 @@ def test_build_stability_table_normalizes_infinite_curve_to_invalid_nan() -> Non
 
     assert np.isnan(table.loc[0, "stability_correlation"])
     assert table.loc[0, "stability_status"] == "nonfinite_odd_curve"
+    assert np.isnan(table.loc[0, "stability_shape_overlap"])
+    assert table.loc[0, "shape_overlap_status"] == "nonfinite_odd_curve"
     assert np.isnan(table.loc[0, "firing_rate_hz"])
+
+
+def test_shape_overlap_interpolates_nans_and_ignores_multiplicative_gain() -> None:
+    module = _reload_stability_module()
+
+    result = module._evaluate_stability_shape_overlap(
+        np.asarray([1.0, np.nan, 3.0]),
+        np.asarray([2.0, 4.0, 6.0]),
+        n_odd_spikes=4,
+        n_even_spikes=8,
+    )
+
+    assert result["stability_shape_overlap"] == pytest.approx(1.0)
+    assert result["odd_tuning_curve_area"] == pytest.approx(6.0)
+    assert result["even_tuning_curve_area"] == pytest.approx(12.0)
+    assert result["shape_overlap_status"] == "valid"
+
+
+@pytest.mark.parametrize(
+    ("odd_curve", "even_curve", "status"),
+    (
+        ([0.0, 0.0, 0.0], [1.0, 2.0, 3.0], "nonpositive_odd_area"),
+        ([1.0, 2.0, 3.0], [0.0, 0.0, 0.0], "nonpositive_even_area"),
+        ([1.0, -1.0, 3.0], [1.0, 2.0, 3.0], "negative_odd_curve"),
+        ([1.0, 2.0, 3.0], [1.0, -1.0, 3.0], "negative_even_curve"),
+    ),
+)
+def test_shape_overlap_reports_independent_invalid_status(
+    odd_curve: list[float],
+    even_curve: list[float],
+    status: str,
+) -> None:
+    module = _reload_stability_module()
+
+    result = module._evaluate_stability_shape_overlap(
+        np.asarray(odd_curve),
+        np.asarray(even_curve),
+        n_odd_spikes=2,
+        n_even_spikes=2,
+    )
+
+    assert np.isnan(result["stability_shape_overlap"])
+    assert result["shape_overlap_status"] == status
+
+
+def test_empty_stability_table_includes_shape_overlap_schema() -> None:
+    module = _reload_stability_module()
+
+    table = module._empty_stability_table()
+
+    assert table.empty
+    assert table["stability_shape_overlap"].dtype.kind == "f"
+    assert table["odd_tuning_curve_area"].dtype.kind == "f"
+    assert table["even_tuning_curve_area"].dtype.kind == "f"
+    assert table["shape_overlap_status"].dtype.kind in {"O", "U"}
+    assert table["stability_segmented_shape_overlap"].dtype.kind == "f"
+    for column in (
+        "segment_stability_shape_overlaps",
+        "segment_shape_overlap_statuses",
+        "odd_segment_mean_firing_rates_hz",
+        "even_segment_mean_firing_rates_hz",
+        "odd_segment_tuning_curve_areas",
+        "even_segment_tuning_curve_areas",
+        "segment_edges_normalized",
+        "segmented_shape_overlap_status",
+    ):
+        assert table[column].dtype.kind in {"O", "U"}
 
 
 def test_build_stability_table_rejects_curve_unit_mismatch() -> None:

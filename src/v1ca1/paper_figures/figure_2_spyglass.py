@@ -15,7 +15,7 @@ import pandas as pd
 
 from v1ca1.helper.session import TRAJECTORY_TYPES
 from v1ca1.paper_figures import _dark_light
-from v1ca1.paper_figures import figure_2 as legacy
+from v1ca1.paper_figures import figure_2_old as legacy
 from v1ca1.paper_figures.datasets import get_processed_datasets, normalize_dataset_id
 from v1ca1.spyglass import (
     movement,

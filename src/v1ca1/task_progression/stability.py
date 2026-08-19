@@ -5,13 +5,14 @@ from __future__ import annotations
 This script loads a task-progression session through the shared helpers, splits
 each trajectory's laps into one-indexed odd and even trials, computes separate
 normalized task-progression tuning curves for each split, and saves per-unit
-odd/even tuning correlations. Every source unit is retained, including units
-whose stability is undefined; explicit QC columns describe those cases. Summary
-histograms are saved as one 2x2 figure per epoch, with selected regions overlaid
-in each trajectory panel.
+odd/even tuning correlations and unit-area shape overlaps. Every source unit is
+retained, including units whose stability is undefined; explicit QC columns
+describe those cases. Summary histograms are saved as one 2x2 figure per epoch,
+with selected regions overlaid in each trajectory panel.
 """
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -19,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from v1ca1.helper.run_logging import write_run_log
+from v1ca1.helper.wtrack import get_wtrack_segment_edges
 from v1ca1.task_progression._session import (
     DEFAULT_DATA_ROOT,
     DEFAULT_PLACE_BIN_SIZE_CM,
@@ -40,6 +42,7 @@ from v1ca1.task_progression.tuning_analysis import (
     get_similarity_axis_limits,
     interpolate_nans,
 )
+from v1ca1.task_progression.similarity import compute_segmented_shape_overlap
 
 
 REGION_COLORS = {
@@ -50,6 +53,8 @@ MIN_FINITE_BINS_PER_CURVE = 2
 MIN_FEATURE_SAMPLES_PER_SPLIT = 2
 CONSTANT_CURVE_EPS = 1e-12
 CORRELATION_BOUND_TOLERANCE = 1e-9
+SHAPE_OVERLAP_EPS = 1e-12
+SHAPE_OVERLAP_BOUND_TOLERANCE = 1e-9
 STABILITY_NAN_POLICY = "linear_interpolate"
 
 
@@ -129,6 +134,19 @@ def _empty_stability_table() -> pd.DataFrame:
             "n_even_finite_bins": pd.Series(dtype=int),
             "n_paired_finite_bins": pd.Series(dtype=int),
             "stability_status": pd.Series(dtype=str),
+            "stability_shape_overlap": pd.Series(dtype=float),
+            "odd_tuning_curve_area": pd.Series(dtype=float),
+            "even_tuning_curve_area": pd.Series(dtype=float),
+            "shape_overlap_status": pd.Series(dtype=str),
+            "stability_segmented_shape_overlap": pd.Series(dtype=float),
+            "segment_stability_shape_overlaps": pd.Series(dtype=str),
+            "segment_shape_overlap_statuses": pd.Series(dtype=str),
+            "odd_segment_mean_firing_rates_hz": pd.Series(dtype=str),
+            "even_segment_mean_firing_rates_hz": pd.Series(dtype=str),
+            "odd_segment_tuning_curve_areas": pd.Series(dtype=str),
+            "even_segment_tuning_curve_areas": pd.Series(dtype=str),
+            "segment_edges_normalized": pd.Series(dtype=str),
+            "segmented_shape_overlap_status": pd.Series(dtype=str),
         }
     )
 
@@ -283,6 +301,182 @@ def _evaluate_stability_correlation(
     }
 
 
+def _evaluate_stability_shape_overlap(
+    odd_curve: np.ndarray,
+    even_curve: np.ndarray,
+    *,
+    n_odd_spikes: int,
+    n_even_spikes: int,
+) -> dict[str, Any]:
+    """Return unit-area odd/even shape overlap and independent curve QC."""
+    odd_curve = np.asarray(odd_curve, dtype=float).reshape(-1)
+    even_curve = np.asarray(even_curve, dtype=float).reshape(-1)
+    if odd_curve.shape != even_curve.shape:
+        raise ValueError(
+            "Odd and even tuning curves must have matching shapes. "
+            f"Got {odd_curve.shape} and {even_curve.shape}."
+        )
+
+    result: dict[str, Any] = {
+        "stability_shape_overlap": np.nan,
+        "odd_tuning_curve_area": np.nan,
+        "even_tuning_curve_area": np.nan,
+        "shape_overlap_status": "valid",
+    }
+    odd_finite = np.isfinite(odd_curve)
+    even_finite = np.isfinite(even_curve)
+
+    invalid_status: str | None = None
+    if n_odd_spikes <= 0:
+        invalid_status = "no_odd_spikes"
+    elif n_even_spikes <= 0:
+        invalid_status = "no_even_spikes"
+    elif np.any(np.isinf(odd_curve)):
+        invalid_status = "nonfinite_odd_curve"
+    elif np.any(np.isinf(even_curve)):
+        invalid_status = "nonfinite_even_curve"
+    elif np.count_nonzero(odd_finite) < MIN_FINITE_BINS_PER_CURVE:
+        invalid_status = "insufficient_odd_finite_bins"
+    elif np.count_nonzero(even_finite) < MIN_FINITE_BINS_PER_CURVE:
+        invalid_status = "insufficient_even_finite_bins"
+    elif np.any(odd_curve[odd_finite] < -SHAPE_OVERLAP_EPS):
+        invalid_status = "negative_odd_curve"
+    elif np.any(even_curve[even_finite] < -SHAPE_OVERLAP_EPS):
+        invalid_status = "negative_even_curve"
+
+    if invalid_status is None:
+        odd = np.maximum(interpolate_nans(odd_curve), 0.0)
+        even = np.maximum(interpolate_nans(even_curve), 0.0)
+        odd_area = float(odd.sum())
+        even_area = float(even.sum())
+        result["odd_tuning_curve_area"] = odd_area
+        result["even_tuning_curve_area"] = even_area
+        if not np.isfinite(odd_area):
+            invalid_status = "nonfinite_odd_area"
+        elif not np.isfinite(even_area):
+            invalid_status = "nonfinite_even_area"
+        elif odd_area <= SHAPE_OVERLAP_EPS:
+            invalid_status = "nonpositive_odd_area"
+        elif even_area <= SHAPE_OVERLAP_EPS:
+            invalid_status = "nonpositive_even_area"
+        else:
+            overlap = float(np.minimum(odd / odd_area, even / even_area).sum())
+            if not np.isfinite(overlap):
+                invalid_status = "nonfinite_shape_overlap"
+            elif not (
+                -SHAPE_OVERLAP_BOUND_TOLERANCE
+                <= overlap
+                <= 1.0 + SHAPE_OVERLAP_BOUND_TOLERANCE
+            ):
+                invalid_status = "out_of_bounds_shape_overlap"
+            else:
+                result["stability_shape_overlap"] = float(
+                    np.clip(overlap, 0.0, 1.0)
+                )
+
+    result["shape_overlap_status"] = invalid_status or "valid"
+    return result
+
+
+def _evaluate_segmented_stability_shape_overlap(
+    odd_curve: np.ndarray,
+    even_curve: np.ndarray,
+    progression: np.ndarray,
+    segment_edges: np.ndarray,
+    *,
+    n_odd_spikes: int,
+    n_even_spikes: int,
+) -> dict[str, Any]:
+    """Return odd/even unit-area overlap within physical path segments."""
+    split_status = None
+    if n_odd_spikes <= 0:
+        split_status = "no_odd_spikes"
+    elif n_even_spikes <= 0:
+        split_status = "no_even_spikes"
+    if split_status is not None:
+        unavailable = [np.nan] * (len(segment_edges) - 1)
+        return {
+            "stability_segmented_shape_overlap": np.nan,
+            "segment_stability_shape_overlaps": json.dumps(unavailable),
+            "segment_shape_overlap_statuses": json.dumps(
+                [split_status] * len(unavailable)
+            ),
+            "odd_segment_mean_firing_rates_hz": json.dumps(unavailable),
+            "even_segment_mean_firing_rates_hz": json.dumps(unavailable),
+            "odd_segment_tuning_curve_areas": json.dumps(unavailable),
+            "even_segment_tuning_curve_areas": json.dumps(unavailable),
+            "segment_edges_normalized": json.dumps(
+                np.asarray(segment_edges, dtype=float).tolist()
+            ),
+            "segmented_shape_overlap_status": split_status,
+        }
+    try:
+        result = compute_segmented_shape_overlap(
+            odd_curve,
+            even_curve,
+            progression,
+            segment_edges,
+        )
+    except ValueError as exc:
+        if "contains no tuning-curve bin centers" not in str(exc):
+            raise
+        unavailable = [np.nan] * (len(segment_edges) - 1)
+        return {
+            "stability_segmented_shape_overlap": np.nan,
+            "segment_stability_shape_overlaps": json.dumps(unavailable),
+            "segment_shape_overlap_statuses": json.dumps(
+                ["insufficient_segment_bins"] * len(unavailable)
+            ),
+            "odd_segment_mean_firing_rates_hz": json.dumps(unavailable),
+            "even_segment_mean_firing_rates_hz": json.dumps(unavailable),
+            "odd_segment_tuning_curve_areas": json.dumps(unavailable),
+            "even_segment_tuning_curve_areas": json.dumps(unavailable),
+            "segment_edges_normalized": json.dumps(
+                np.asarray(segment_edges, dtype=float).tolist()
+            ),
+            "segmented_shape_overlap_status": "insufficient_segment_bins",
+        }
+    scores = np.asarray(result["scores"], dtype=float)
+    statuses = [str(value) for value in result["statuses"]]
+    finite = np.isfinite(scores)
+    if finite.all():
+        aggregate = float(np.mean(scores))
+        status = "valid"
+    elif finite.any():
+        aggregate = float(np.mean(scores[finite]))
+        status = "partial_invalid_segments"
+    else:
+        aggregate = float("nan")
+        status = "no_valid_segments"
+    return {
+        "stability_segmented_shape_overlap": aggregate,
+        "segment_stability_shape_overlaps": json.dumps(result["scores"]),
+        "segment_shape_overlap_statuses": json.dumps(statuses),
+        "odd_segment_mean_firing_rates_hz": json.dumps(
+            result["mean_rates_a_hz"]
+        ),
+        "even_segment_mean_firing_rates_hz": json.dumps(
+            result["mean_rates_b_hz"]
+        ),
+        "odd_segment_tuning_curve_areas": json.dumps(result["areas_a"]),
+        "even_segment_tuning_curve_areas": json.dumps(result["areas_b"]),
+        "segment_edges_normalized": json.dumps(
+            np.asarray(segment_edges, dtype=float).tolist()
+        ),
+        "segmented_shape_overlap_status": status,
+    }
+
+
+def _tuning_curve_progression(tuning_curve: Any) -> np.ndarray:
+    """Return the sole non-unit coordinate from one tuning-curve array."""
+    dimensions = [str(value) for value in tuning_curve.dims if str(value) != "unit"]
+    if len(dimensions) != 1 or dimensions[0] not in tuning_curve.coords:
+        raise ValueError(
+            "Odd/even tuning curves must have one non-unit progression coordinate."
+        )
+    return np.asarray(tuning_curve.coords[dimensions[0]].values, dtype=float)
+
+
 def build_stability_table_for_tuning_curves(
     *,
     animal_name: str,
@@ -318,6 +512,7 @@ def build_stability_table_for_tuning_curves(
         raise ValueError("Even spike-count units do not match the source sorting units.")
 
     curves_available = odd_tuning_curve is not None and even_tuning_curve is not None
+    segment_edges = get_wtrack_segment_edges(animal_name)
     if curves_available:
         _validate_tuning_curve_units(
             odd_tuning_curve,
@@ -329,6 +524,14 @@ def build_stability_table_for_tuning_curves(
             expected_unit_ids=unit_ids,
             split_name="even",
         )
+        odd_progression = _tuning_curve_progression(odd_tuning_curve)
+        even_progression = _tuning_curve_progression(even_tuning_curve)
+        if odd_progression.shape != even_progression.shape or not np.array_equal(
+            odd_progression,
+            even_progression,
+            equal_nan=True,
+        ):
+            raise ValueError("Odd/even tuning-curve progression grids differ.")
     elif trajectory_status is None:
         raise ValueError(
             "A trajectory_status is required when odd/even tuning curves are unavailable."
@@ -346,6 +549,22 @@ def build_stability_table_for_tuning_curves(
                 n_odd_spikes=n_odd_spikes,
                 n_even_spikes=n_even_spikes,
             )
+            shape_overlap_qc = _evaluate_stability_shape_overlap(
+                odd_tuning_curve.sel(unit=unit).values,
+                even_tuning_curve.sel(unit=unit).values,
+                n_odd_spikes=n_odd_spikes,
+                n_even_spikes=n_even_spikes,
+            )
+            segmented_shape_overlap_qc = (
+                _evaluate_segmented_stability_shape_overlap(
+                    odd_tuning_curve.sel(unit=unit).values,
+                    even_tuning_curve.sel(unit=unit).values,
+                    odd_progression,
+                    segment_edges,
+                    n_odd_spikes=n_odd_spikes,
+                    n_even_spikes=n_even_spikes,
+                )
+            )
         else:
             correlation_qc = {
                 "stability_correlation": np.nan,
@@ -353,6 +572,35 @@ def build_stability_table_for_tuning_curves(
                 "n_odd_finite_bins": 0,
                 "n_even_finite_bins": 0,
                 "n_paired_finite_bins": 0,
+            }
+            shape_overlap_qc = {
+                "stability_shape_overlap": np.nan,
+                "odd_tuning_curve_area": np.nan,
+                "even_tuning_curve_area": np.nan,
+                "shape_overlap_status": str(trajectory_status),
+            }
+            segmented_shape_overlap_qc = {
+                "stability_segmented_shape_overlap": np.nan,
+                "segment_stability_shape_overlaps": json.dumps(
+                    [np.nan, np.nan, np.nan]
+                ),
+                "segment_shape_overlap_statuses": json.dumps(
+                    [str(trajectory_status)] * 3
+                ),
+                "odd_segment_mean_firing_rates_hz": json.dumps(
+                    [np.nan, np.nan, np.nan]
+                ),
+                "even_segment_mean_firing_rates_hz": json.dumps(
+                    [np.nan, np.nan, np.nan]
+                ),
+                "odd_segment_tuning_curve_areas": json.dumps(
+                    [np.nan, np.nan, np.nan]
+                ),
+                "even_segment_tuning_curve_areas": json.dumps(
+                    [np.nan, np.nan, np.nan]
+                ),
+                "segment_edges_normalized": json.dumps(segment_edges.tolist()),
+                "segmented_shape_overlap_status": str(trajectory_status),
             }
         rows.append(
             {
@@ -372,6 +620,8 @@ def build_stability_table_for_tuning_curves(
                 "n_odd_spikes": n_odd_spikes,
                 "n_even_spikes": n_even_spikes,
                 **correlation_qc,
+                **shape_overlap_qc,
+                **segmented_shape_overlap_qc,
             }
         )
 
@@ -776,6 +1026,8 @@ def main() -> None:
             "minimum_finite_bins_per_curve": MIN_FINITE_BINS_PER_CURVE,
             "minimum_feature_samples_per_split": MIN_FEATURE_SAMPLES_PER_SPLIT,
             "constant_curve_epsilon": CONSTANT_CURVE_EPS,
+            "shape_overlap_metric": "unit_area_minimum_overlap",
+            "shape_overlap_epsilon": SHAPE_OVERLAP_EPS,
             "nan_policy": STABILITY_NAN_POLICY,
             "firing_rate_filter_applied": False,
         },

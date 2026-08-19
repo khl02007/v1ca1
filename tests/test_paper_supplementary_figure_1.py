@@ -69,12 +69,12 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     assert args.asset_dir == DEFAULT_ASSET_DIR
     assert args.dark_movement_fr_cache_dir is None
     assert args.refresh_dark_movement_fr_cache is False
-    assert args.panel_d_cache_dir is None
-    assert args.refresh_panel_d_cache is False
-    assert args.position_bin_count == DEFAULT_POSITION_BIN_COUNT
-    assert args.position_offset == DEFAULT_POSITION_OFFSET
-    assert args.speed_threshold_cm_s == pytest.approx(DEFAULT_SPEED_THRESHOLD_CM_S)
-    assert args.sigma_bins == pytest.approx(DEFAULT_SIGMA_BINS)
+    assert not hasattr(args, "panel_d_cache_dir")
+    assert not hasattr(args, "refresh_panel_d_cache")
+    assert not hasattr(args, "position_bin_count")
+    assert not hasattr(args, "position_offset")
+    assert not hasattr(args, "speed_threshold_cm_s")
+    assert not hasattr(args, "sigma_bins")
     assert not hasattr(args, "decoding_n_permutations")
     assert not hasattr(args, "decoding_permutation_seed")
     assert DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM == pytest.approx(40.0)
@@ -83,7 +83,6 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     )
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
         DEFAULT_MOVED_FIGURE_1_ROW_HEIGHT_MM
-        + DEFAULT_CA1_HEATMAP_ROW_HEIGHT_MM
     )
     assert DARK_MOVEMENT_FIRING_RATE_THRESHOLD_HZ == pytest.approx(0.5)
     assert CA1_HEATMAP_REGION == "ca1"
@@ -95,7 +94,7 @@ def test_default_cli_matches_supplementary_figure_format() -> None:
     assert not hasattr(args, "refresh_panel_heatmap_cache")
 
 
-def test_main_forwards_ca1_heatmap_options(
+def test_main_forwards_abc_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -123,29 +122,17 @@ def test_main_forwards_ca1_heatmap_options(
             "svg",
             "--dataset",
             "L14:20240611:08_r4",
-            "--panel-d-cache-dir",
+            "--dark-movement-fr-cache-dir",
             "/cache",
-            "--refresh-panel-d-cache",
-            "--position-bin-count",
-            "60",
-            "--position-offset",
-            "12",
-            "--speed-threshold-cm-s",
-            "5",
-            "--sigma-bins",
-            "2",
+            "--refresh-dark-movement-fr-cache",
         ]
     )
 
     assert calls["data_root"] == Path("/analysis")
     assert calls["output_path"] == tmp_path / "ca1_supp.svg"
     assert calls["datasets"] == [("L14", "20240611", "08_r4")]
-    assert calls["panel_d_cache_dir"] == Path("/cache")
-    assert calls["refresh_panel_d_cache"] is True
-    assert calls["position_bin_count"] == 60
-    assert calls["position_offset"] == 12
-    assert calls["speed_threshold_cm_s"] == pytest.approx(5.0)
-    assert calls["sigma_bins"] == pytest.approx(2.0)
+    assert calls["dark_movement_fr_cache_dir"] == Path("/cache")
+    assert calls["refresh_dark_movement_fr_cache"] is True
 
 
 def test_plot_pooled_stability_panel_uses_all_datasets(
@@ -871,39 +858,8 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
         calls["dark_movement_fr_col"] = ax.get_subplotspec().colspan.start
         ax.text(0.5, 0.5, "dark fr")
 
-    def fake_plot_pooled_ca1_dark_heatmap_panel(figure, grid_spec, **kwargs):
-        calls["ca1_heatmap_kwargs"] = kwargs
-        calls["ca1_grid_spec"] = grid_spec
-        heatmap_grid = grid_spec.subgridspec(nrows=5, ncols=5)
-        axes = np.asarray(
-            [
-                [
-                    figure.add_subplot(heatmap_grid[row, col])
-                    for col in range(5)
-                ]
-                for row in range(5)
-            ],
-            dtype=object,
-        )
-        axes[0, 0].axis("off")
-        panel = {
-            "corner_axis": axes[0, 0],
-            "tuning_schematic_axes": axes[0, 1:],
-            "order_schematic_axes": axes[1:, 0],
-            "heatmap_axes": axes[1:, 1:],
-        }
-        calls["ca1_panel"] = panel
-        return panel
-
-    def fake_plot_pooled_turn_tuning_similarity_panel(ax, **kwargs):
-        calls["tuning_similarity_axis"] = ax
-        calls["tuning_similarity_kwargs"] = kwargs
-        ax.text(0.5, 0.5, "tuning similarity")
-
-    def fake_plot_pooled_same_turn_decoding_panel(ax, **kwargs):
-        calls["decoding_axis"] = ax
-        calls["decoding_kwargs"] = kwargs
-        ax.text(0.5, 0.5, "same-turn decoding")
+    def fail_removed_panel(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Removed Supplementary Figure 1 panel was plotted.")
 
     def fake_save_figure(figure, output_path: Path, dpi: int):
         figure.canvas.draw()
@@ -939,17 +895,17 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     monkeypatch.setattr(
         supp_figure_1_module,
         "plot_pooled_ca1_dark_heatmap_panel",
-        fake_plot_pooled_ca1_dark_heatmap_panel,
+        fail_removed_panel,
     )
     monkeypatch.setattr(
         supp_figure_1_module,
         "plot_pooled_turn_tuning_similarity_panel",
-        fake_plot_pooled_turn_tuning_similarity_panel,
+        fail_removed_panel,
     )
     monkeypatch.setattr(
         supp_figure_1_module,
         "plot_pooled_same_turn_decoding_panel",
-        fake_plot_pooled_same_turn_decoding_panel,
+        fail_removed_panel,
     )
     monkeypatch.setattr(supp_figure_1_module, "save_figure", fake_save_figure)
 
@@ -973,14 +929,15 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     )
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
-    assert sorted(calls["panel_labels"]) == ["A", "B", "C", "D", "E", "F"]
+    assert sorted(calls["panel_labels"]) == ["A", "B", "C"]
+    assert "Probe and histology" in calls["axis_titles"]
     assert "V1 firing rate in darkness" in calls["axis_titles"]
     assert "Tuning stability" in calls["axis_titles"]
-    assert TUNING_SIMILARITY_TITLE in calls["axis_titles"]
-    assert DECODING_COMPARISON_TITLE in calls["axis_titles"]
-    assert CA1_HEATMAP_TITLE in calls["figure_texts"]
-    assert "Order" in calls["figure_texts"]
-    assert figure_1_module.TASK_PROGRESSION_XLABEL in calls["figure_texts"]
+    assert TUNING_SIMILARITY_TITLE not in calls["axis_titles"]
+    assert DECODING_COMPARISON_TITLE not in calls["axis_titles"]
+    assert CA1_HEATMAP_TITLE not in calls["figure_texts"]
+    assert "Order" not in calls["figure_texts"]
+    assert figure_1_module.TASK_PROGRESSION_XLABEL not in calls["figure_texts"]
     assert calls["anatomy_kwargs"]["asset_dir"] == asset_dir
     assert calls["pooled_stability_kwargs"]["datasets"] == datasets
     assert calls["pooled_stability_col"] == 2
@@ -988,30 +945,3 @@ def test_make_supplementary_figure_1_uses_paper_style_and_figure_1_width(
     assert calls["dark_movement_fr_col"] == 1
     assert calls["dark_movement_fr_kwargs"]["cache_dir"] == output_path.parent / "cache"
     assert calls["dark_movement_fr_kwargs"]["refresh_cache"] is False
-    assert calls["ca1_grid_spec"].colspan.start == 0
-    assert calls["ca1_grid_spec"].get_topmost_subplotspec().rowspan.start == 1
-    assert calls["ca1_panel"]["heatmap_axes"].shape == (4, 4)
-    assert calls["ca1_heatmap_kwargs"] == {
-        "data_root": Path("/analysis"),
-        "datasets": datasets,
-        "position_bin_count": DEFAULT_POSITION_BIN_COUNT,
-        "position_offset": DEFAULT_POSITION_OFFSET,
-        "speed_threshold_cm_s": DEFAULT_SPEED_THRESHOLD_CM_S,
-        "sigma_bins": DEFAULT_SIGMA_BINS,
-        "panel_d_cache_dir": output_path.parent / "cache",
-        "refresh_panel_d_cache": False,
-    }
-    assert calls["tuning_similarity_kwargs"] == {
-        "data_root": Path("/analysis"),
-        "datasets": datasets,
-        "position_bin_count": DEFAULT_POSITION_BIN_COUNT,
-        "position_offset": DEFAULT_POSITION_OFFSET,
-        "speed_threshold_cm_s": DEFAULT_SPEED_THRESHOLD_CM_S,
-        "sigma_bins": DEFAULT_SIGMA_BINS,
-        "panel_d_cache_dir": output_path.parent / "cache",
-        "refresh_panel_d_cache": False,
-    }
-    assert calls["decoding_kwargs"] == {
-        "data_root": Path("/analysis"),
-        "datasets": datasets,
-    }

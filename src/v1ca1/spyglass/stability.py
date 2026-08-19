@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 from numbers import Real
 import os
 from pathlib import Path
@@ -441,6 +442,9 @@ def _terminal_stability_table(
                 "trajectory_type": str(trajectory_type),
                 "firing_rate_hz": float(firing_rates.loc[group_unit_id]),
                 "stability_correlation": np.nan,
+                "stability_shape_overlap": np.nan,
+                "odd_tuning_curve_area": np.nan,
+                "even_tuning_curve_area": np.nan,
                 "n_odd_trials": 0,
                 "n_even_trials": 0,
                 "odd_duration_s": 0.0,
@@ -453,6 +457,16 @@ def _terminal_stability_table(
                 "n_even_finite_bins": 0,
                 "n_paired_finite_bins": 0,
                 "stability_status": str(status),
+                "shape_overlap_status": str(status),
+                "stability_segmented_shape_overlap": np.nan,
+                "segment_stability_shape_overlaps": "[NaN, NaN, NaN]",
+                "segment_shape_overlap_statuses": json.dumps([str(status)] * 3),
+                "odd_segment_mean_firing_rates_hz": "[NaN, NaN, NaN]",
+                "even_segment_mean_firing_rates_hz": "[NaN, NaN, NaN]",
+                "odd_segment_tuning_curve_areas": "[NaN, NaN, NaN]",
+                "even_segment_tuning_curve_areas": "[NaN, NaN, NaN]",
+                "segment_edges_normalized": "[0.0, NaN, NaN, 1.0]",
+                "segmented_shape_overlap_status": str(status),
             }
         )
     table = pd.DataFrame.from_records(rows, columns=_empty_stability_table().columns)
@@ -756,7 +770,12 @@ def compute_selected_stability_from_tuning_curves(
     movement_firing_rate_table: pd.DataFrame,
 ) -> dict[str, Any]:
     """Compute fixed-QC stability from matching persisted odd/even curves."""
-    from v1ca1.task_progression.stability import _evaluate_stability_correlation
+    from v1ca1.task_progression.stability import (
+        _evaluate_segmented_stability_shape_overlap,
+        _evaluate_stability_correlation,
+        _evaluate_stability_shape_overlap,
+    )
+    from v1ca1.helper.wtrack import get_wtrack_segment_edges
 
     identity = _validate_curve_pair(odd_tuning_curve, even_tuning_curve)
     movement = _movement_rates_for_curve_pair(
@@ -782,6 +801,13 @@ def compute_selected_stability_from_tuning_curves(
         trajectory_status = movement["status"]
 
     metadata = odd_tuning_curve.attrs
+    progression = np.asarray(
+        odd_tuning_curve.coords[odd_tuning_curve.dims[1]].values,
+        dtype=float,
+    )
+    if np.nanmax(progression) > 1.0 + 1e-9:
+        progression = progression / float(metadata["graph_length_cm"])
+    segment_edges = get_wtrack_segment_edges(str(metadata["animal_name"]))
     rows: list[dict[str, Any]] = []
     for index, unit in identity.iterrows():
         stable_id = str(unit["stable_unit_id"])
@@ -794,6 +820,22 @@ def compute_selected_stability_from_tuning_curves(
                 n_odd_spikes=n_odd_spikes,
                 n_even_spikes=n_even_spikes,
             )
+            shape_overlap_qc = _evaluate_stability_shape_overlap(
+                np.asarray(odd_tuning_curve.values[index], dtype=float),
+                np.asarray(even_tuning_curve.values[index], dtype=float),
+                n_odd_spikes=n_odd_spikes,
+                n_even_spikes=n_even_spikes,
+            )
+            segmented_shape_overlap_qc = (
+                _evaluate_segmented_stability_shape_overlap(
+                    np.asarray(odd_tuning_curve.values[index], dtype=float),
+                    np.asarray(even_tuning_curve.values[index], dtype=float),
+                    progression,
+                    segment_edges,
+                    n_odd_spikes=n_odd_spikes,
+                    n_even_spikes=n_even_spikes,
+                )
+            )
         else:
             correlation_qc = {
                 "stability_correlation": np.nan,
@@ -801,6 +843,25 @@ def compute_selected_stability_from_tuning_curves(
                 "n_odd_finite_bins": 0,
                 "n_even_finite_bins": 0,
                 "n_paired_finite_bins": 0,
+            }
+            shape_overlap_qc = {
+                "stability_shape_overlap": np.nan,
+                "odd_tuning_curve_area": np.nan,
+                "even_tuning_curve_area": np.nan,
+                "shape_overlap_status": trajectory_status,
+            }
+            segmented_shape_overlap_qc = {
+                "stability_segmented_shape_overlap": np.nan,
+                "segment_stability_shape_overlaps": "[NaN, NaN, NaN]",
+                "segment_shape_overlap_statuses": json.dumps(
+                    [trajectory_status] * 3
+                ),
+                "odd_segment_mean_firing_rates_hz": "[NaN, NaN, NaN]",
+                "even_segment_mean_firing_rates_hz": "[NaN, NaN, NaN]",
+                "odd_segment_tuning_curve_areas": "[NaN, NaN, NaN]",
+                "even_segment_tuning_curve_areas": "[NaN, NaN, NaN]",
+                "segment_edges_normalized": json.dumps(segment_edges.tolist()),
+                "segmented_shape_overlap_status": trajectory_status,
             }
         rows.append(
             {
@@ -812,6 +873,15 @@ def compute_selected_stability_from_tuning_curves(
                 "trajectory_type": str(metadata["trajectory_type"]),
                 "firing_rate_hz": float(movement["rates"].loc[stable_id]),
                 "stability_correlation": correlation_qc["stability_correlation"],
+                "stability_shape_overlap": shape_overlap_qc[
+                    "stability_shape_overlap"
+                ],
+                "odd_tuning_curve_area": shape_overlap_qc[
+                    "odd_tuning_curve_area"
+                ],
+                "even_tuning_curve_area": shape_overlap_qc[
+                    "even_tuning_curve_area"
+                ],
                 "n_odd_trials": int(odd_tuning_curve.attrs["n_trials"]),
                 "n_even_trials": int(even_tuning_curve.attrs["n_trials"]),
                 "odd_duration_s": float(
@@ -832,6 +902,10 @@ def compute_selected_stability_from_tuning_curves(
                 "n_even_finite_bins": correlation_qc["n_even_finite_bins"],
                 "n_paired_finite_bins": correlation_qc["n_paired_finite_bins"],
                 "stability_status": correlation_qc["stability_status"],
+                "shape_overlap_status": shape_overlap_qc[
+                    "shape_overlap_status"
+                ],
+                **segmented_shape_overlap_qc,
             }
         )
     columns = empty_stability_table().columns

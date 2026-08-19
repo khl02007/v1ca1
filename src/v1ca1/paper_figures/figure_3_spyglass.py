@@ -13,7 +13,7 @@ import uuid
 import numpy as np
 import pandas as pd
 
-from v1ca1.paper_figures import figure_3 as legacy
+from v1ca1.paper_figures import figure_3_old as legacy
 from v1ca1.paper_figures.datasets import get_processed_datasets, normalize_dataset_id
 from v1ca1.spyglass import (
     movement,

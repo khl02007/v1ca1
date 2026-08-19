@@ -201,6 +201,9 @@ PANEL_B_DPPI_MIN_OUTLINE_COLOR = "#238B45"
 PANEL_B_DPPI_MAX_OUTLINE_COLOR = "#6A51A3"
 PANEL_B_DPPI_CURVE_AXIS_BOUNDS = (0.08, 0.29, 0.84, 0.28)
 PANEL_B_DPPI_RATE_COLORS = ("#000000", "#000000")
+PANEL_B_DPPI_GRAY_OVERLAP_COLOR = "#BDBDBD"
+PANEL_B_DPPI_GRAY_OVERLAP_ALPHA = 0.55
+PANEL_B_DPPI_PATH_COLORED_SECOND_RATE_SCALE = 0.55
 PANEL_B_DPPI_RATE_LINEWIDTH = 1.9
 PANEL_B_DPPI_OUTLINE_LINEWIDTH = 1.35
 PANEL_B_DPPI_MAX_FILL_ALPHA = 0.16
@@ -533,6 +536,7 @@ def _draw_overlap_curve_schematic(
     second_rate: np.ndarray,
     first_color: str,
     second_color: str,
+    gray_overlap_only: bool = False,
 ) -> None:
     """Draw one schematic same-turn overlap computation."""
     x = np.asarray(position, dtype=float)
@@ -551,24 +555,35 @@ def _draw_overlap_curve_schematic(
     overlap = np.minimum(curve_a, curve_b)
     envelope = np.maximum(curve_a, curve_b)
 
-    ax.fill_between(
-        x,
-        0.0,
-        envelope,
-        color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
-        alpha=PANEL_B_DPPI_MAX_FILL_ALPHA,
-        linewidth=0.0,
-        zorder=1,
-    )
-    ax.fill_between(
-        x,
-        0.0,
-        overlap,
-        color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
-        alpha=PANEL_B_DPPI_MIN_FILL_ALPHA,
-        linewidth=0.0,
-        zorder=2,
-    )
+    if gray_overlap_only:
+        ax.fill_between(
+            x,
+            0.0,
+            overlap,
+            color=PANEL_B_DPPI_GRAY_OVERLAP_COLOR,
+            alpha=PANEL_B_DPPI_GRAY_OVERLAP_ALPHA,
+            linewidth=0.0,
+            zorder=1,
+        )
+    else:
+        ax.fill_between(
+            x,
+            0.0,
+            envelope,
+            color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
+            alpha=PANEL_B_DPPI_MAX_FILL_ALPHA,
+            linewidth=0.0,
+            zorder=1,
+        )
+        ax.fill_between(
+            x,
+            0.0,
+            overlap,
+            color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
+            alpha=PANEL_B_DPPI_MIN_FILL_ALPHA,
+            linewidth=0.0,
+            zorder=2,
+        )
     ax.plot(
         x,
         curve_a,
@@ -583,20 +598,21 @@ def _draw_overlap_curve_schematic(
         linewidth=PANEL_B_DPPI_RATE_LINEWIDTH,
         zorder=4,
     )
-    ax.plot(
-        x,
-        envelope,
-        color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
-        linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
-        zorder=5,
-    )
-    ax.plot(
-        x,
-        overlap,
-        color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
-        linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
-        zorder=6,
-    )
+    if not gray_overlap_only:
+        ax.plot(
+            x,
+            envelope,
+            color=PANEL_B_DPPI_MAX_OUTLINE_COLOR,
+            linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
+            zorder=5,
+        )
+        ax.plot(
+            x,
+            overlap,
+            color=PANEL_B_DPPI_MIN_OUTLINE_COLOR,
+            linewidth=PANEL_B_DPPI_OUTLINE_LINEWIDTH,
+            zorder=6,
+        )
     for label, color, (label_x, label_y) in (
         ("r1", first_color, PANEL_B_DPPI_RATE_LABEL_POSITIONS[0]),
         ("r2", second_color, PANEL_B_DPPI_RATE_LABEL_POSITIONS[1]),
@@ -690,6 +706,8 @@ def _add_centered_colored_text_fragments(
 def plot_panel_b_dppi_schematic(
     ax: Any,
     example: dict[str, Any],
+    *,
+    style: str = "legacy",
 ) -> None:
     """Draw a compact schematic defining DPPI as max same-turn overlap."""
     ax.set_xlim(0.0, 1.0)
@@ -700,9 +718,27 @@ def plot_panel_b_dppi_schematic(
         ax.text(0.5, 0.5, "No example\ncurves", ha="center", va="center")
         return
     first_trajectory, second_trajectory = trajectories[:2]
+    if style not in {"legacy", "path_colored_gray_overlap"}:
+        raise ValueError(f"Unsupported DPPI schematic style {style!r}.")
+    use_path_colored_style = style == "path_colored_gray_overlap"
     curve_position = np.linspace(0.0, 1.0, 121)
     first_rate = np.exp(-0.5 * ((curve_position - 0.44) / 0.075) ** 2)
-    second_rate = 0.92 * np.exp(-0.5 * ((curve_position - 0.57) / 0.075) ** 2)
+    second_rate_scale = (
+        PANEL_B_DPPI_PATH_COLORED_SECOND_RATE_SCALE
+        if use_path_colored_style
+        else 0.92
+    )
+    second_rate = second_rate_scale * np.exp(
+        -0.5 * ((curve_position - 0.57) / 0.075) ** 2
+    )
+    rate_colors = (
+        (
+            PANEL_TRAJECTORY_COLORS[first_trajectory],
+            PANEL_TRAJECTORY_COLORS[second_trajectory],
+        )
+        if use_path_colored_style
+        else PANEL_B_DPPI_RATE_COLORS
+    )
     ax.text(
         PANEL_B_DPPI_TITLE_POSITION[0],
         PANEL_B_DPPI_TITLE_POSITION[1],
@@ -726,9 +762,23 @@ def plot_panel_b_dppi_schematic(
         y=PANEL_B_DPPI_FORMULA_Y,
         fragments=(
             ("∫ ", PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR),
-            ("min(r1,r2)", PANEL_B_DPPI_MIN_OUTLINE_COLOR),
+            (
+                "min(r1,r2)",
+                (
+                    PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR
+                    if use_path_colored_style
+                    else PANEL_B_DPPI_MIN_OUTLINE_COLOR
+                ),
+            ),
             (" / ∫ ", PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR),
-            ("max(r1,r2)", PANEL_B_DPPI_MAX_OUTLINE_COLOR),
+            (
+                "max(r1,r2)",
+                (
+                    PANEL_B_DPPI_FORMULA_NEUTRAL_COLOR
+                    if use_path_colored_style
+                    else PANEL_B_DPPI_MAX_OUTLINE_COLOR
+                ),
+            ),
         ),
         fontsize=MIN_PUBLICATION_FONTSIZE_PT,
     )
@@ -738,8 +788,9 @@ def plot_panel_b_dppi_schematic(
         position=curve_position,
         first_rate=first_rate,
         second_rate=second_rate,
-        first_color=PANEL_B_DPPI_RATE_COLORS[0],
-        second_color=PANEL_B_DPPI_RATE_COLORS[1],
+        first_color=rate_colors[0],
+        second_color=rate_colors[1],
+        gray_overlap_only=use_path_colored_style,
     )
     for trajectory_name, bounds in zip(
         (first_trajectory, second_trajectory),
@@ -986,6 +1037,7 @@ def plot_panel_b_dpp_overlap_with_schematic(
     show_scatter_linear_fit: bool = False,
     show_scatter_r2: bool = False,
     scatter_equal_aspect: bool = False,
+    schematic_style: str = "legacy",
 ) -> None:
     """Plot Figure 2 Panel B with DPPI schematic and overlap summaries."""
     ax.set_xlim(0.0, 1.0)
@@ -1005,7 +1057,11 @@ def plot_panel_b_dpp_overlap_with_schematic(
     if show_grouped:
         grouped_ax = ax.inset_axes(PANEL_B_GROUPED_AXIS_BOUNDS)
     scatter_ax = ax.inset_axes(scatter_bounds)
-    plot_panel_b_dppi_schematic(schematic_ax, example)
+    plot_panel_b_dppi_schematic(
+        schematic_ax,
+        example,
+        style=schematic_style,
+    )
     if show_grouped:
         plot_panel_b_dpp_overlap_grouped(
             grouped_ax,

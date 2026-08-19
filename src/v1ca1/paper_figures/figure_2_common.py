@@ -24,7 +24,7 @@ from v1ca1.paper_figures.figure_1 import (
     PANEL_D_MIN_MOVEMENT_FIRING_RATE_HZ,
     get_stability_table_path,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures._figure_3_shared import (
     DARK_MOVEMENT_FR_CACHE_COLUMNS,
     DARK_MOVEMENT_FR_CACHE_VERSION,
     DEFAULT_FIGURE_HEIGHT_MM as FIGURE_4_HEIGHT_MM,

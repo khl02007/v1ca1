@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
+from v1ca1.paper_figures import _figure_2_base as figure_2_base
 from v1ca1.paper_figures.datasets import (
     DEFAULT_DARK_EPOCH,
     DatasetId,
@@ -17,7 +18,7 @@ from v1ca1.paper_figures.datasets import (
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import get_stability_table_path
-from v1ca1.paper_figures.figure_3 import load_dark_movement_firing_rate_table
+from v1ca1.paper_figures.figure_3_old import load_dark_movement_firing_rate_table
 from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
@@ -36,7 +37,7 @@ from v1ca1.paper_figures._dark_light import (
     load_panel_h_swap_delta_table,
     parse_dataset_id,
 )
-from v1ca1.paper_figures.figure_2 import (
+from v1ca1.paper_figures.figure_2_old import (
     PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ,
     PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION,
 )
@@ -49,16 +50,34 @@ from v1ca1.paper_figures.style import (
 
 
 DEFAULT_OUTPUT_NAME = "supplementary_figure_2"
+MIN_PUBLICATION_FONTSIZE_PT = figure_2_base.MIN_PUBLICATION_FONTSIZE_PT
+AXIS_LABEL_FONTSIZE_PT = 7.0
+AXIS_TITLE_FONTSIZE_PT = 7.0
 SCALAR_MODEL_NAME = "task_segment_scalar"
 FIGURE_2B_DELTA_BOX_WIDTH = 0.13
+FIGURE_2B_DELTA_LABEL_Y_OFFSET = 0.14
+FIGURE_2B_DELTA_LABEL_FONTSIZE = MIN_PUBLICATION_FONTSIZE_PT
+FIGURE_2B_DELTA_X_PADDING_FRACTION = 0.08
+FIGURE_2B_DELTA_MIN_X_PADDING = 0.05
 FIGURE_2B_DELTA_SUBPANEL_BOUNDS = (
-    (0.03, 0.18, 0.22, 0.68),
-    (0.27, 0.18, 0.22, 0.68),
-    (0.51, 0.18, 0.22, 0.68),
-    (0.75, 0.18, 0.22, 0.68),
+    (0.03, 0.18, 0.21, 0.68),
+    (0.27, 0.18, 0.21, 0.68),
+    (0.51, 0.18, 0.21, 0.68),
+    (0.75, 0.18, 0.21, 0.68),
 )
-MIXED_GLM_FULL_DELTA_AXIS_BOUNDS = (0.115, 0.14, 0.54, 0.70)
-MIXED_GLM_FULL_BEST_AXIS_BOUNDS = (0.695, 0.32, 0.19, 0.32)
+DARK_SCAFFOLD_ADDITIVE_MATCH_COLUMNS = (
+    "animal_name",
+    "date",
+    "region",
+    "dark_train_epoch",
+    "light_train_epoch",
+    "light_test_epoch",
+    "trajectory",
+    "unit",
+)
+MIXED_GLM_FULL_DELTA_AXIS_BOUNDS = (0.08, 0.14, 0.50, 0.70)
+MIXED_GLM_FULL_BEST_AXIS_BOUNDS = (0.62, 0.18, 0.30, 0.60)
+MIXED_GLM_FULL_BEST_LABEL_Y_POSITIONS = (0.28, 0.62)
 LETTER_PAPER_WIDTH_IN = 8.5
 LETTER_HORIZONTAL_MARGIN_IN = 1.0
 DEFAULT_FIGURE_WIDTH_MM = (
@@ -110,7 +129,7 @@ MIXED_GLM_TASK_LABEL = MULTIPLICATIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_SA_LABEL = ADDITIVE_SEGMENT_SHORT_LABEL
 MIXED_EMPIRICAL_AD_LABEL = ADDITIVE_SHORT_LABEL
 FULL_ADDITIVE_INDEPENDENT_LABEL = "Independent"
-FULL_ADDITIVE_DARK_SCAFFOLD_LABEL = "Dark scaffold"
+FULL_ADDITIVE_DARK_SCAFFOLD_LABEL = "Multiplicative"
 FULL_ADDITIVE_ADDITIVE_LABEL = ADDITIVE_LABEL
 FULL_ADDITIVE_BEST_MODEL_DISPLAY_LABELS = {
     "V": FULL_ADDITIVE_INDEPENDENT_LABEL,
@@ -254,8 +273,11 @@ def plot_figure_2b_delta_ll_boxplots(
     swap_delta_table: Any,
     *,
     animal_names: Sequence[str] | None = None,
+    x_limits: tuple[float, float] | None = None,
 ) -> None:
     """Plot Figure 2B delta LL distributions in animal subpanels."""
+    from matplotlib.ticker import MaxNLocator
+
     trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
     table = _filter_panel_h_heldout_delta(swap_delta_table)
     if animal_names is None:
@@ -286,6 +308,7 @@ def plot_figure_2b_delta_ll_boxplots(
         plotted_positions = []
         plotted_colors = []
         plotted_positive_fractions = []
+        child_x_limits = x_limits
         if has_required_columns:
             animal_rows = table[
                 table["animal_name"].astype(str) == animal_name
@@ -325,22 +348,45 @@ def plot_figure_2b_delta_ll_boxplots(
                 patch.set_facecolor(color)
                 patch.set_edgecolor("0.25")
                 patch.set_alpha(0.68)
-            for position, color, fraction in zip(
+            if child_x_limits is None:
+                whisker_values = [0.0]
+                for whisker in boxplot["whiskers"]:
+                    values = np.asarray(whisker.get_xdata(), dtype=float)
+                    whisker_values.extend(values[np.isfinite(values)].tolist())
+                lower_limit = float(np.min(whisker_values))
+                upper_limit = float(np.max(whisker_values))
+                span = upper_limit - lower_limit
+                padding = max(
+                    FIGURE_2B_DELTA_MIN_X_PADDING,
+                    FIGURE_2B_DELTA_X_PADDING_FRACTION * span,
+                )
+                child_x_limits = (
+                    lower_limit - padding,
+                    upper_limit + padding,
+                )
+            for values, position, fraction in zip(
+                plotted_values,
                 plotted_positions,
-                plotted_colors,
                 plotted_positive_fractions,
                 strict=True,
             ):
                 child_ax.text(
-                    1.02,
-                    position,
+                    float(np.median(values)),
+                    position - FIGURE_2B_DELTA_LABEL_Y_OFFSET,
                     f"{fraction:.0%} >0",
-                    ha="left",
-                    va="center",
-                    fontsize=3.6,
-                    color=color,
+                    ha="center",
+                    va="top",
+                    fontsize=FIGURE_2B_DELTA_LABEL_FONTSIZE,
+                    fontweight="bold",
+                    color="0.20",
                     clip_on=False,
-                    transform=child_ax.get_yaxis_transform(),
+                    zorder=4,
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.85,
+                        "pad": 0.15,
+                    },
                 )
         else:
             child_ax.text(
@@ -349,11 +395,16 @@ def plot_figure_2b_delta_ll_boxplots(
                 "No finite\nvalues",
                 ha="center",
                 va="center",
-                fontsize=4.8,
+                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                 transform=child_ax.transAxes,
             )
 
-        child_ax.set_xlim(*PANEL_H_DELTA_X_LIMITS)
+        if child_x_limits is None:
+            child_x_limits = PANEL_H_DELTA_X_LIMITS
+        child_ax.set_xlim(*child_x_limits)
+        child_ax.xaxis.set_major_locator(
+            MaxNLocator(nbins=5, steps=(1.0, 2.0, 2.5, 5.0, 10.0))
+        )
         child_ax.set_ylim(-0.55, max(len(trajectory_types) - 1, 0) + 0.55)
         child_ax.set_yticks(list(trajectory_positions.values()))
         if animal_index == 0:
@@ -363,14 +414,18 @@ def plot_figure_2b_delta_ll_boxplots(
                     for trajectory_type in trajectory_types
                 ]
             )
-            child_ax.set_ylabel("Trajectory", fontsize=5.2)
+            child_ax.set_ylabel("Path", fontsize=AXIS_LABEL_FONTSIZE_PT)
         else:
             child_ax.set_yticklabels([])
             child_ax.tick_params(axis="y", length=0)
-        child_ax.set_title(animal_name, fontsize=5.6, pad=1.2)
+        child_ax.set_title(animal_name, fontsize=AXIS_TITLE_FONTSIZE_PT, pad=1.2)
         child_ax.spines["top"].set_visible(False)
         child_ax.spines["right"].set_visible(False)
-        child_ax.tick_params(labelsize=4.5, length=1.2, pad=0.8)
+        child_ax.tick_params(
+            labelsize=MIN_PUBLICATION_FONTSIZE_PT,
+            length=1.2,
+            pad=0.8,
+        )
 
     if not any_plotted:
         ax.text(
@@ -379,7 +434,7 @@ def plot_figure_2b_delta_ll_boxplots(
             "No finite Figure 2B\nDelta LL values",
             ha="center",
             va="center",
-            fontsize=5.0,
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
             transform=ax.transAxes,
         )
 
@@ -389,7 +444,7 @@ def plot_figure_2b_delta_ll_boxplots(
         "\N{GREEK CAPITAL LETTER DELTA}LL (bits/spike)",
         ha="center",
         va="top",
-        fontsize=5.2,
+        fontsize=AXIS_LABEL_FONTSIZE_PT,
         transform=ax.transAxes,
     )
 
@@ -399,8 +454,65 @@ def get_figure_height_mm(n_animal_rows: int) -> float:
     if int(n_animal_rows) <= 0:
         return DEFAULT_ANIMAL_ROW_HEIGHT_MM
     return (
-        SCALAR_PANEL_HEIGHT_MM
+        2.0 * SCALAR_PANEL_HEIGHT_MM
         + MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM
+    )
+
+
+def build_dark_scaffold_additive_delta_table(
+    mixed_full_additive_table: Any,
+    panel_a_delta_table: Any,
+) -> Any:
+    """Return Panel-A-matched multiplicative-minus-additive delta LL rows."""
+    if mixed_full_additive_table is None or panel_a_delta_table is None:
+        return None
+
+    table = mixed_full_additive_table.copy()
+    required_columns = {
+        *DARK_SCAFFOLD_ADDITIVE_MATCH_COLUMNS,
+        "MS_bits_per_spike",
+        "A_bits_per_spike",
+    }
+    missing_columns = sorted(required_columns.difference(table.columns))
+    if missing_columns:
+        raise KeyError(
+            "Full-additive table is missing required column(s): "
+            + ", ".join(missing_columns)
+        )
+    table["delta_ll_bits_per_spike"] = (
+        np.asarray(table["MS_bits_per_spike"], dtype=float)
+        - np.asarray(table["A_bits_per_spike"], dtype=float)
+    )
+    table = _filter_panel_h_heldout_delta(table)
+
+    reference_table = _filter_panel_h_heldout_delta(panel_a_delta_table.copy())
+    if (
+        "dark_epoch" in reference_table
+        and "dark_train_epoch" not in reference_table
+    ):
+        reference_table = reference_table.rename(
+            columns={"dark_epoch": "dark_train_epoch"}
+        )
+    missing_reference_columns = sorted(
+        set(DARK_SCAFFOLD_ADDITIVE_MATCH_COLUMNS).difference(
+            reference_table.columns
+        )
+    )
+    if missing_reference_columns:
+        raise KeyError(
+            "Panel A delta table is missing required column(s): "
+            + ", ".join(missing_reference_columns)
+        )
+
+    reference_keys = reference_table[
+        list(DARK_SCAFFOLD_ADDITIVE_MATCH_COLUMNS)
+    ].drop_duplicates()
+    return table.merge(
+        reference_keys,
+        on=list(DARK_SCAFFOLD_ADDITIVE_MATCH_COLUMNS),
+        how="inner",
+        validate="many_to_one",
+        sort=False,
     )
 
 
@@ -2357,7 +2469,7 @@ def filter_swapped_segment_shared_scaffold_gain_table(
     gain_table: Any,
     comparison_table: Any,
 ) -> Any:
-    """Return swapped-segment gains where the dark scaffold beats additive."""
+    """Return swapped-segment gains where the multiplicative model beats additive."""
     import pandas as pd
 
     gain_columns = list(FULL_SEGMENT_GAIN_TABLE_COLUMNS)
@@ -2462,7 +2574,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
     *,
     threshold: float = FULL_SEGMENT_LOG_GAIN_THRESHOLD,
 ) -> None:
-    """Plot swapped-segment coefficients where the dark scaffold beats additive."""
+    """Plot coefficients where the multiplicative model beats additive."""
     trajectory_types = tuple(PANEL_H_DELTA_TRAJECTORIES)
     filtered_table = filter_swapped_segment_shared_scaffold_gain_table(
         gain_table,
@@ -2482,7 +2594,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
         ax.text(
             0.5,
             0.5,
-            "No swapped-segment\nDark scaffold > Additive values",
+            "No swapped-segment\nMultiplicative > Additive values",
             ha="center",
             va="center",
         )
@@ -2579,7 +2691,7 @@ def plot_swapped_segment_shared_scaffold_gain_histograms(
         0.50,
         0.055,
         (
-            "Swapped segment only; Dark scaffold > Additive; "
+            "Swapped segment only; multiplicative > Additive; "
             f"cells={len(unique_cells)}, trajectory-unit fits={len(unique_fits)}"
         ),
         ha="center",
@@ -3518,7 +3630,7 @@ def plot_mixed_glm_full_additive_pairwise_delta(
             "Missing columns:\n" + "\n".join(missing_columns[:3]),
             ha="center",
             va="center",
-            fontsize=5.0,
+            fontsize=MIN_PUBLICATION_FONTSIZE_PT,
         )
     else:
         plotted_values = []
@@ -3593,7 +3705,7 @@ def plot_mixed_glm_full_additive_pairwise_delta(
                 ax.legend(
                     handles=legend_handles,
                     frameon=False,
-                    fontsize=4.6,
+                    fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                     handlelength=0.9,
                     ncols=2,
                     borderaxespad=0.0,
@@ -3628,7 +3740,7 @@ def plot_mixed_glm_full_additive_pairwise_delta(
                         f"{right_label} {right_fraction:.0%}",
                         ha="left",
                         va="center",
-                        fontsize=4.5,
+                        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                         color="0.25",
                     )
                     ax.text(
@@ -3637,7 +3749,7 @@ def plot_mixed_glm_full_additive_pairwise_delta(
                         f"{left_label} {left_fraction:.0%}",
                         ha="right",
                         va="center",
-                        fontsize=4.5,
+                        fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                         color="0.25",
                     )
 
@@ -3646,10 +3758,18 @@ def plot_mixed_glm_full_additive_pairwise_delta(
         ax.set_xlim(min(ax.get_xlim()[0], -0.05), max(ax.get_xlim()[1], 0.05))
     ax.set_yticks(pair_centers)
     ax.set_yticklabels(pair_labels)
-    ax.set_xlabel("ΔLL (bits/spike)", labelpad=1.2)
+    ax.set_xlabel(
+        "ΔLL (bits/spike)",
+        fontsize=AXIS_LABEL_FONTSIZE_PT,
+        labelpad=1.2,
+    )
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(labelsize=5.2, length=1.5, pad=1.0)
+    ax.tick_params(
+        labelsize=MIN_PUBLICATION_FONTSIZE_PT,
+        length=1.5,
+        pad=1.0,
+    )
 
 
 def plot_mixed_glm_full_additive_best_fraction_bar(ax: Any, delta_table: Any) -> None:
@@ -3678,6 +3798,7 @@ def plot_mixed_glm_full_additive_best_fraction_bar(ax: Any, delta_table: Any) ->
         for label in labels
     ]
     left = 0.0
+    visible_label_index = 0
     for label, display_label, fraction in zip(
         labels,
         display_labels,
@@ -3696,30 +3817,51 @@ def plot_mixed_glm_full_additive_best_fraction_bar(ax: Any, delta_table: Any) ->
             linewidth=0.35,
         )
         if fraction >= 0.08:
+            label_y = MIXED_GLM_FULL_BEST_LABEL_Y_POSITIONS[
+                visible_label_index % len(MIXED_GLM_FULL_BEST_LABEL_Y_POSITIONS)
+            ]
+            ax.plot(
+                [left + fraction / 2.0, left + fraction / 2.0],
+                [0.16, label_y - 0.02],
+                color="0.55",
+                linewidth=0.35,
+                zorder=1,
+            )
             ax.text(
                 left + fraction / 2.0,
-                0.28,
+                label_y,
                 f"{display_label}\n{fraction:.0%}",
                 ha="center",
                 va="bottom",
-                fontsize=3.7,
+                fontsize=MIN_PUBLICATION_FONTSIZE_PT,
                 color="0.20",
                 linespacing=0.90,
+                zorder=2,
             )
+            visible_label_index += 1
         left += fraction
 
     ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(-0.28, 0.80)
+    ax.set_ylim(-0.28, 1.05)
     ax.set_yticks([])
     ax.set_xticks([0.0, 0.5, 1.0])
     ax.set_xticklabels(["0", "0.5", "1"])
-    ax.set_xlabel("Frac. cells", fontsize=4.8, labelpad=0.8)
-    ax.set_title("Best model", fontsize=5.2, pad=1.0)
+    ax.set_xlabel(
+        "Frac. cells",
+        fontsize=AXIS_LABEL_FONTSIZE_PT,
+        labelpad=0.8,
+    )
+    ax.set_title("Best model", fontsize=AXIS_TITLE_FONTSIZE_PT, pad=1.0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    ax.tick_params(axis="x", labelsize=4.5, length=1.2, pad=0.8)
+    ax.tick_params(
+        axis="x",
+        labelsize=MIN_PUBLICATION_FONTSIZE_PT,
+        length=1.2,
+        pad=0.8,
+    )
 
 
 def plot_empirical_multiplicative_pairwise_delta(ax: Any, delta_table: Any) -> None:
@@ -3874,10 +4016,10 @@ def make_supplementary_figure_2(
         return output_path
 
     outer_grid = fig.add_gridspec(
-        nrows=2,
+        nrows=3,
         ncols=1,
         height_ratios=(
-            [SCALAR_PANEL_HEIGHT_MM]
+            [SCALAR_PANEL_HEIGHT_MM, SCALAR_PANEL_HEIGHT_MM]
             + [MIXED_GLM_EMPIRICAL_PANEL_HEIGHT_MM]
         ),
         hspace=PER_ANIMAL_GRID_HSPACE,
@@ -3906,19 +4048,35 @@ def make_supplementary_figure_2(
         animal_names=tuple(animal_groups),
     )
     scalar_axis.set_title(
-        "Dark scaffold - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and trajectory",
+        "Multiplicative - Independent \N{GREEK CAPITAL LETTER DELTA} LL by animal and path",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )
     label_axis(scalar_axis, "A", x=-0.115, y=1.02)
 
-    mixed_axis = fig.add_subplot(outer_grid[1, 0])
     mixed_full_additive_table = load_mixed_glm_full_additive_delta_table(
         data_root=data_root,
         datasets=datasets,
         region=region,
         dark_epoch=dark_epoch,
     )
+    dark_scaffold_additive_axis = fig.add_subplot(outer_grid[1, 0])
+    plot_figure_2b_delta_ll_boxplots(
+        dark_scaffold_additive_axis,
+        build_dark_scaffold_additive_delta_table(
+            mixed_full_additive_table,
+            scalar_swap_delta_table,
+        ),
+        animal_names=tuple(animal_groups),
+    )
+    dark_scaffold_additive_axis.set_title(
+        "Multiplicative - Additive \N{GREEK CAPITAL LETTER DELTA} LL by animal and path",
+        fontsize=PANEL_TITLE_FONTSIZE,
+        pad=2,
+    )
+    label_axis(dark_scaffold_additive_axis, "B", x=-0.115, y=1.02)
+
+    mixed_axis = fig.add_subplot(outer_grid[2, 0])
     mixed_axis.set_xlim(0.0, 1.0)
     mixed_axis.set_ylim(0.0, 1.0)
     mixed_axis.axis("off")
@@ -3934,12 +4092,16 @@ def make_supplementary_figure_2(
         mixed_full_additive_table,
     )
     mixed_axis.set_title(
-        "Comparison between Dark scaffold, independent, and additive models",
+        "Comparison between multiplicative, independent, and additive models",
         fontsize=PANEL_TITLE_FONTSIZE,
         pad=2,
     )
-    label_axis(mixed_axis, "B", x=-0.115, y=1.02)
+    label_axis(mixed_axis, "C", x=-0.115, y=1.02)
 
+    figure_2_base._raise_text_to_minimum_fontsize(
+        fig,
+        MIN_PUBLICATION_FONTSIZE_PT,
+    )
     save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
     print(f"Saved Supplementary Figure 2 to {output_path}")

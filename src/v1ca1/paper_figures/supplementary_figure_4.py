@@ -15,7 +15,7 @@ from v1ca1.paper_figures.datasets import (
     get_processed_datasets,
     normalize_figure_epoch_dataset_id,
 )
-from v1ca1.paper_figures.figure_3 import (
+from v1ca1.paper_figures.figure_3_old import (
     DEFAULT_FIGURE_CACHE_DIR,
     DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
     DEFAULT_MINIMUM_RIPPLE_MEAN_ZSCORE,

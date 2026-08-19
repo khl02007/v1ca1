@@ -220,6 +220,9 @@ def test_empty_stability_table_has_persistent_identity_schema() -> None:
         "trajectory_type",
         "stability_correlation",
         "stability_status",
+        "stability_segmented_shape_overlap",
+        "segment_stability_shape_overlaps",
+        "segmented_shape_overlap_status",
     }.issubset(table.columns)
 
 
@@ -227,13 +230,19 @@ def test_stability_from_tuning_curves_uses_saved_identities_and_rates() -> None:
     odd = _canonical_tuning_curve(
         trial_subset="odd",
         values=np.asarray(
-            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ]
         ),
     )
     even = _canonical_tuning_curve(
         trial_subset="even",
         values=np.asarray(
-            [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+            [
+                [2.0, 4.0, 6.0, 8.0, 10.0],
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+            ]
         ),
     )
     movement_rates = _movement_firing_rate_table()
@@ -265,19 +274,38 @@ def test_stability_from_tuning_curves_uses_saved_identities_and_rates() -> None:
     )
     assert result["table"]["n_odd_spikes"].tolist() == [4, 4]
     assert result["table"]["n_even_spikes"].tolist() == [4, 4]
+    assert result["table"]["stability_segmented_shape_overlap"].tolist() == (
+        pytest.approx([1.0, 23.0 / 27.0])
+    )
+    assert json.loads(
+        result["table"].loc[0, "segment_stability_shape_overlaps"]
+    ) == pytest.approx([1.0, 1.0, 1.0])
+    assert json.loads(
+        result["table"].loc[0, "segment_shape_overlap_statuses"]
+    ) == ["valid", "valid", "valid"]
+    assert result["table"]["segmented_shape_overlap_status"].tolist() == [
+        "valid",
+        "valid",
+    ]
 
 
 def test_stability_from_tuning_curves_applies_fixed_no_even_spikes_qc() -> None:
     odd = _canonical_tuning_curve(
         trial_subset="odd",
         values=np.asarray(
-            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ]
         ),
     )
     even = _canonical_tuning_curve(
         trial_subset="even",
         values=np.asarray(
-            [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+            [
+                [2.0, 4.0, 6.0, 8.0, 10.0],
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+            ]
         ),
         spike_counts=(0, 4),
     )
@@ -310,7 +338,10 @@ def test_stability_from_tuning_curves_applies_fixed_no_even_spikes_qc() -> None:
             _canonical_tuning_curve(
                 trial_subset="even",
                 values=np.asarray(
-                    [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+                    [
+                        [2.0, 4.0, 6.0, 8.0, 10.0],
+                        [1.0, 2.0, 3.0, 4.0, 5.0],
+                    ]
                 ),
                 stable_unit_ids=(("merge-a", "11"), ("merge-c", "33")),
             ),
@@ -320,9 +351,12 @@ def test_stability_from_tuning_curves_applies_fixed_no_even_spikes_qc() -> None:
             _canonical_tuning_curve(
                 trial_subset="even",
                 values=np.asarray(
-                    [[2.0, 4.0, 6.0, 8.0], [1.0, 2.0, 3.0, 4.0]]
+                    [
+                        [2.0, 4.0, 6.0, 8.0, 10.0],
+                        [1.0, 2.0, 3.0, 4.0, 5.0],
+                    ]
                 ),
-                centers_cm=np.asarray([1.25, 3.75, 6.25, 8.75]),
+                centers_cm=np.asarray([1.2, 3.6, 6.0, 8.4, 10.8]),
             ),
             "identical position bins",
         ),
@@ -335,7 +369,10 @@ def test_stability_from_tuning_curves_rejects_mismatched_curves(
     odd = _canonical_tuning_curve(
         trial_subset="odd",
         values=np.asarray(
-            [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ]
         ),
     )
 
@@ -525,6 +562,20 @@ def test_compute_selected_stability_propagates_upstream_terminal_status(
     ]
     assert result["table"]["stability_status"].tolist() == [status, status]
     assert result["table"]["firing_rate_hz"].isna().all()
+    assert result["table"]["stability_segmented_shape_overlap"].isna().all()
+    assert result["table"]["segmented_shape_overlap_status"].tolist() == [
+        status,
+        status,
+    ]
+    for row in result["table"].itertuples(index=False):
+        scores = json.loads(row.segment_stability_shape_overlaps)
+        assert len(scores) == 3
+        assert np.isnan(scores).all()
+        assert json.loads(row.segment_shape_overlap_statuses) == [status] * 3
+        segment_edges = json.loads(row.segment_edges_normalized)
+        assert len(segment_edges) == 4
+        assert segment_edges[0] == pytest.approx(0.0)
+        assert segment_edges[-1] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
