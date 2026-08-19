@@ -10,9 +10,38 @@ from pathlib import Path
 import pytest
 
 from v1ca1.helper.session import TRAJECTORY_TYPES
+from v1ca1.paper_figures import figure_2 as paper_figure_2
 from v1ca1.spyglass.offline import figure_2
 from v1ca1.spyglass.offline.manifests import file_sha256
 from v1ca1.spyglass.selection import provenance_sha256
+
+
+_HISTORICAL_PANEL_A_EXAMPLES = (
+    {
+        "animal_name": "L14",
+        "date": "20240611",
+        "sorting_unit_id": 34,
+        "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+    {
+        "animal_name": "L15",
+        "date": "20241121",
+        "sorting_unit_id": 473,
+        "trajectory_types": ("center_to_right", "left_to_center"),
+    },
+    {
+        "animal_name": "L12",
+        "date": "20240421",
+        "sorting_unit_id": 37,
+        "trajectory_types": ("center_to_right", "left_to_center"),
+    },
+    {
+        "animal_name": "L14",
+        "date": "20240611",
+        "sorting_unit_id": 30,
+        "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+)
 
 
 def _write(path: Path, value: bytes = b"artifact") -> Path:
@@ -175,8 +204,14 @@ def _nwb_source_snapshot(
     return figure_2._catalog_snapshot(selection)
 
 
-def _complete_session(run_dir: Path) -> dict[str, object]:
+def _complete_session(
+    run_dir: Path,
+    *,
+    panel_a_examples: tuple[dict[str, object], ...] | None = None,
+) -> dict[str, object]:
     """Create the exact artifact multiplicities required by Figure 2."""
+    if panel_a_examples is None:
+        panel_a_examples = figure_2.FIGURE_2_PANEL_A_EXAMPLES
     movement = [
         _flat_record(
             run_dir,
@@ -232,7 +267,7 @@ def _complete_session(run_dir: Path) -> dict[str, object]:
                 epoch=epoch,
                 trajectory_types=tuple(spec["trajectory_types"]),
             )
-            for spec in figure_2.FIGURE_2_PANEL_A_EXAMPLES
+            for spec in panel_a_examples
             if spec["animal_name"] == "L14" and spec["date"] == "20240611"
             for epoch in ("08_r4", "02_r1")
         ],
@@ -248,6 +283,15 @@ def _complete_session(run_dir: Path) -> dict[str, object]:
         "nwb_path": parent["full_session"]["nwb_path"],
         "nwb_fingerprint": parent["full_session"]["nwb_fingerprint"],
         "epochs": {"dark": "08_r4", "AB": "02_r1", "BA": "06_r3"},
+        "parameters": {
+            "panel_a_examples": [
+                {
+                    **dict(spec),
+                    "trajectory_types": list(spec["trajectory_types"]),
+                }
+                for spec in panel_a_examples
+            ]
+        },
         "parent_figure_1_full": {"run_id": "figure1-parent"},
         "parent_artifacts": parent["parent_artifacts"],
         "source_identity": [parent["source_identity"]],
@@ -281,6 +325,24 @@ def test_configuration_freezes_approved_figure_2_contract() -> None:
         60,
     )
     assert configuration["swap_glm_parameters"]["swap_light_offset"] is False
+
+
+def test_panel_a_examples_match_the_current_paper_figure() -> None:
+    paper_examples = tuple(
+        {
+            "animal_name": animal_name,
+            "date": date,
+            "sorting_unit_id": sorting_unit_id,
+            "trajectory_types": trajectory_types,
+        }
+        for animal_name, date, region, sorting_unit_id, trajectory_types in (
+            paper_figure_2.FIGURE_2_PANEL_A_EXAMPLES
+        )
+        if region == figure_2.FIGURE_2_REGION
+    )
+
+    assert len(paper_examples) == 8
+    assert figure_2.FIGURE_2_PANEL_A_EXAMPLES == paper_examples
 
 
 def test_catalog_snapshot_retains_reconstructable_nwb_selectors() -> None:
@@ -576,6 +638,50 @@ def test_session_loader_checks_artifacts_and_parent_source_identity(
             run_dir=run_dir,
             scratch_root=tmp_path,
         )
+
+
+def test_session_loader_accepts_historical_frozen_panel_a_examples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs" / "figure2-historical"
+    session = _complete_session(
+        run_dir,
+        panel_a_examples=_HISTORICAL_PANEL_A_EXAMPLES,
+    )
+    path = run_dir / "L14" / "20240611" / "session_manifest.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(session), encoding="utf-8")
+    parent_snapshot = session["parent_figure_1_full"]
+    monkeypatch.setattr(
+        figure_2,
+        "build_full_figure_1_parent_snapshot",
+        lambda *args, **kwargs: parent_snapshot,
+    )
+    monkeypatch.setattr(
+        figure_2,
+        "_load_parent_inputs",
+        lambda *args, **kwargs: _parent_inputs(),
+    )
+    monkeypatch.setattr(
+        figure_2,
+        "_validate_nwb_source_snapshots",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        figure_2,
+        "_validate_analysis_roles",
+        lambda *args, **kwargs: None,
+    )
+
+    loaded = figure_2.load_figure_2_session_manifest(
+        path,
+        run_dir=run_dir,
+        scratch_root=tmp_path,
+    )
+
+    assert len(loaded["parameters"]["panel_a_examples"]) == 4
+    assert len(loaded["artifacts"]["figure_examples"]) == 4
 
 
 def test_runner_removes_only_a_new_failed_session_directory(

@@ -24,8 +24,10 @@ MANIFEST_FILENAME = "manifest.parquet"
 SELECTED_UNITS_FILENAME = "selected_units.parquet"
 RESULT_FILENAME = "swap_glm.nc"
 
+VISUAL_ADDITIVE_MODEL_NAME = "visual_additive_delta"
 MODEL_NAMES = (
     "visual",
+    VISUAL_ADDITIVE_MODEL_NAME,
     "task_segment_bump",
     "task_segment_scalar",
     "task_dense_gain",
@@ -37,7 +39,22 @@ SOURCE_MODEL_NAMES = (
     "task_segment_scalar",
     "task_dense_gain",
 )
-DERIVED_MODEL_SOURCES = MappingProxyType({"dark": "task_segment_bump"})
+DERIVED_MODEL_SOURCES = MappingProxyType(
+    {
+        VISUAL_ADDITIVE_MODEL_NAME: "visual",
+        "dark": "task_segment_bump",
+    }
+)
+LEGACY_SCHEMA4_MODEL_NAMES = (
+    "visual",
+    "task_segment_bump",
+    "task_segment_scalar",
+    "task_dense_gain",
+    "dark",
+)
+LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES = MappingProxyType(
+    {"dark": "task_segment_bump"}
+)
 LEGACY_SCHEMA6_MODEL_NAMES = (
     "visual",
     "visual_additive_delta",
@@ -89,9 +106,21 @@ LEGACY_SCHEMA6_VISUAL_EMPIRICAL_MODEL_DEFINITIONS = MappingProxyType(
         ),
     }
 )
+VISUAL_EMPIRICAL_MODEL_DEFINITIONS = MappingProxyType(
+    {
+        "outside_swapped_segment": (
+            "The target selected visual light count at held-out speed."
+        ),
+        VISUAL_ADDITIVE_MODEL_NAME: (
+            "On the swapped segment, target visual dark count at held-out speed "
+            "plus source visual light-minus-dark count delta at reference speed."
+        ),
+    }
+)
+PREDICTION_COUNT_CLIP_EPS = 1e-12
 DEFAULT_SWAP_LIGHT_OFFSET = False
 DEFAULT_OBSERVED_SPATIAL_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
-RESULT_SCHEMA_VERSION = "4"
+RESULT_SCHEMA_VERSION = "5"
 BUNDLE_SCHEMA_VERSION = "1"
 
 METRIC_PREFIXES = (
@@ -180,7 +209,7 @@ FIXED_SCIENTIFIC_ATTRS = MappingProxyType(
 
 OUTPUT_RULE = MappingProxyType(
     {
-        "version": 2,
+        "version": 3,
         "models": MODEL_NAMES,
         "derived_model_sources": dict(DERIVED_MODEL_SOURCES),
         "swap_configuration": {
@@ -202,6 +231,14 @@ OUTPUT_RULE = MappingProxyType(
             },
         },
         "fit_source": "exact_selected_dark_light_glm_artifact",
+        "visual_additive_delta": {
+            "outside_swapped_segment": "target_visual_light_at_heldout_speed",
+            "inside_swapped_segment": (
+                "target_visual_dark_at_heldout_speed_plus_"
+                "source_visual_light_minus_dark_at_reference_speed"
+            ),
+            "prediction_count_clip_eps": PREDICTION_COUNT_CLIP_EPS,
+        },
         "evaluation_epoch": "held_out_light_movement_laps",
         "primary_metric": PRIMARY_METRIC,
         "unit_policy": "all_upstream_dark_light_selected_units_in_saved_order",
@@ -309,14 +346,14 @@ def _analysis_module() -> Any:
 def _validate_reused_analysis_contract(analysis: Any) -> None:
     """Fail if the fixed Spyglass contract drifts from the reused evaluator."""
     expected_models = tuple(getattr(analysis, "DEFAULT_MODEL_NAMES", ()))
-    if expected_models != MODEL_NAMES:
+    if expected_models != LEGACY_SCHEMA4_MODEL_NAMES:
         raise ValueError(
             "SwapGLM model order differs from swap_glm_comparison."
         )
     expected_sources = dict(
         getattr(analysis, "DERIVED_SELECTED_MODEL_SOURCES", {})
     )
-    if expected_sources != dict(DERIVED_MODEL_SOURCES):
+    if expected_sources != dict(LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES):
         raise ValueError(
             "SwapGLM derived-model sources differ from "
             "swap_glm_comparison."
@@ -337,6 +374,9 @@ def _provenance_sha256(value: Any) -> str:
 
 
 OUTPUT_RULE_SHA256 = _provenance_sha256(dict(OUTPUT_RULE))
+LEGACY_SCHEMA4_OUTPUT_RULE_SHA256 = (
+    "e730dcdee948232670ece391af58a8053417a172e1229ddd38e5d269bd24f408"
+)
 
 
 def _path_component(value: Any, *, name: str) -> str:
@@ -785,6 +825,8 @@ def _terminal_dataset(
 def _audit_scores(
     selected_units: pd.DataFrame,
     dataset: Any,
+    *,
+    model_names: Sequence[str] = MODEL_NAMES,
 ) -> tuple[pd.DataFrame, str]:
     """Attach per-unit score QC without allowing one unit to affect another."""
     output = selected_units.copy()
@@ -803,7 +845,7 @@ def _audit_scores(
     if tuple(dataset[raw_name].dims) != expected_dimensions:
         raise ValueError("Swap spike-count dimensions are noncanonical.")
     for coordinate, expected in (
-        ("model", MODEL_NAMES),
+        ("model", model_names),
         ("trajectory", TRAJECTORY_TYPES),
     ):
         if coordinate not in dataset.coords or not np.array_equal(
@@ -820,7 +862,7 @@ def _audit_scores(
         raise ValueError("Swap score audit unit order differs from selected_units.")
     primary = np.asarray(dataset[primary_name].values, dtype=float)
     expected_shape = (
-        len(MODEL_NAMES),
+        len(model_names),
         len(TRAJECTORY_TYPES),
         len(output),
     )
@@ -830,7 +872,7 @@ def _audit_scores(
         raise ValueError("Visual-reference primary swap scores must be NaN.")
     delta = primary[1:]
     if delta.shape != (
-        len(MODEL_NAMES) - 1,
+        len(model_names) - 1,
         len(TRAJECTORY_TYPES),
         len(output),
     ):
@@ -842,7 +884,7 @@ def _audit_scores(
     if spike_sum.shape != (len(TRAJECTORY_TYPES), len(output)):
         raise ValueError("Swap spike-count array has an unexpected shape.")
     finite_count = np.sum(np.isfinite(delta), axis=(0, 1)).astype(int)
-    expected_count = (len(MODEL_NAMES) - 1) * len(TRAJECTORY_TYPES)
+    expected_count = (len(model_names) - 1) * len(TRAJECTORY_TYPES)
     output["test_light_spike_count"] = np.nansum(spike_sum, axis=0)
     output["n_finite_primary_scores"] = finite_count
     output["n_expected_primary_scores"] = expected_count
@@ -889,6 +931,221 @@ def _effective_parameters(
         "output_rule_sha256": str(output_rule_sha256),
         **validated,
     }
+
+
+def _visual_additive_delta_count(
+    *,
+    target_light_count: np.ndarray,
+    target_dark_count: np.ndarray,
+    source_light_reference_count: np.ndarray,
+    source_dark_reference_count: np.ndarray,
+    swap_mask: np.ndarray,
+) -> np.ndarray:
+    """Return the exact count-space additive visual swap prediction."""
+    target_light_count = np.asarray(target_light_count, dtype=float)
+    target_dark_count = np.asarray(target_dark_count, dtype=float)
+    source_light_reference_count = np.asarray(
+        source_light_reference_count,
+        dtype=float,
+    )
+    source_dark_reference_count = np.asarray(
+        source_dark_reference_count,
+        dtype=float,
+    )
+    if not (
+        target_dark_count.shape
+        == source_light_reference_count.shape
+        == source_dark_reference_count.shape
+        == target_light_count.shape
+    ):
+        raise ValueError("Visual additive prediction counts must share one shape.")
+    mask = np.asarray(swap_mask, dtype=bool).reshape(-1)
+    if target_light_count.ndim != 2 or mask.shape != (
+        target_light_count.shape[0],
+    ):
+        raise ValueError(
+            "Visual additive prediction requires a bin-by-unit count matrix "
+            "and one aligned swap mask."
+        )
+    swapped = target_light_count.copy()
+    additive = (
+        target_dark_count
+        + source_light_reference_count
+        - source_dark_reference_count
+    )
+    swapped[mask] = np.maximum(
+        additive[mask],
+        PREDICTION_COUNT_CLIP_EPS,
+    )
+    return swapped
+
+
+def _evaluate_visual_additive_delta_on_test_epoch(
+    *,
+    analysis: Any,
+    dataset: Any,
+    test_inputs_by_traj: Mapping[str, Mapping[str, Any]],
+    segment_edges: np.ndarray,
+    bin_size_s: float,
+    n_splines: int,
+    spline_order: int,
+) -> dict[str, dict[str, Any]]:
+    """Score the count-space additive visual swap on held-out light data."""
+    results: dict[str, dict[str, Any]] = {}
+    grid = np.asarray(dataset.coords["tp_grid"].values, dtype=float)
+    unit_ids = np.asarray(dataset.coords["unit"].values)
+    for trajectory in TRAJECTORY_TYPES:
+        swap_info = OUTPUT_RULE["swap_configuration"][trajectory]
+        source_trajectory = str(swap_info["source_trajectory"])
+        swap_segment_index = int(swap_info["segment_index"])
+        test_inputs = test_inputs_by_traj[trajectory]
+        p_test = np.asarray(test_inputs["p"], dtype=float)
+        y_test = np.asarray(test_inputs["y"], dtype=float)
+        swap_mask = analysis._segment_mask(
+            p_test,
+            segment_edges,
+            swap_segment_index,
+        )
+
+        target_light = analysis.predict_selected_light_eta(
+            dataset=dataset,
+            model_name="visual",
+            trajectory=trajectory,
+            p_eval=p_test,
+            speed_values=test_inputs["v"],
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+        )
+        target_dark = analysis.predict_selected_dark_eta(
+            dataset=dataset,
+            trajectory=trajectory,
+            p_eval=p_test,
+            speed_values=test_inputs["v"],
+            n_splines=n_splines,
+            spline_order=spline_order,
+        )
+        source_light_reference = analysis.predict_selected_light_eta(
+            dataset=dataset,
+            model_name="visual",
+            trajectory=source_trajectory,
+            p_eval=p_test,
+            speed_values=None,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            segment_edges=segment_edges,
+            allow_missing_speed=True,
+        )
+        source_dark_reference = analysis.predict_selected_dark_eta(
+            dataset=dataset,
+            trajectory=source_trajectory,
+            p_eval=p_test,
+            speed_values=None,
+            n_splines=n_splines,
+            spline_order=spline_order,
+            allow_missing_speed=True,
+        )
+        target_light_count = np.exp(target_light["light_eta"])
+        swapped_count = _visual_additive_delta_count(
+            target_light_count=target_light_count,
+            target_dark_count=np.exp(target_dark["dark_eta"]),
+            source_light_reference_count=np.exp(
+                source_light_reference["light_eta"]
+            ),
+            source_dark_reference_count=np.exp(
+                source_dark_reference["dark_eta"]
+            ),
+            swap_mask=swap_mask,
+        )
+
+        grid_mask = analysis._segment_mask(
+            grid,
+            segment_edges,
+            swap_segment_index,
+        )
+        target_dark_grid_hz = analysis._selected_var_by_trajectory(
+            dataset,
+            "dark_hz_grid",
+            trajectory,
+        )
+        target_light_grid_hz = analysis._selected_var_by_trajectory(
+            dataset,
+            "train_light_hz_grid",
+            trajectory,
+        )
+        source_dark_grid_hz = analysis._selected_var_by_trajectory(
+            dataset,
+            "dark_hz_grid",
+            source_trajectory,
+        )
+        source_light_grid_hz = analysis._selected_var_by_trajectory(
+            dataset,
+            "train_light_hz_grid",
+            source_trajectory,
+        )
+        swapped_grid_count = _visual_additive_delta_count(
+            target_light_count=target_light_grid_hz * float(bin_size_s),
+            target_dark_count=target_dark_grid_hz * float(bin_size_s),
+            source_light_reference_count=(
+                source_light_grid_hz * float(bin_size_s)
+            ),
+            source_dark_reference_count=(
+                source_dark_grid_hz * float(bin_size_s)
+            ),
+            swap_mask=grid_mask,
+        )
+
+        y_segment = y_test[swap_mask] if np.any(swap_mask) else y_test[:0]
+        unswapped_segment_count = (
+            target_light_count[swap_mask]
+            if np.any(swap_mask)
+            else target_light_count[:0]
+        )
+        swapped_segment_count = (
+            swapped_count[swap_mask]
+            if np.any(swap_mask)
+            else swapped_count[:0]
+        )
+        results[trajectory] = {
+            "unit_ids": unit_ids,
+            "swap_source_trajectory": source_trajectory,
+            "swap_segment_index_1based": swap_segment_index + 1,
+            "swap_segment_start": float(segment_edges[swap_segment_index]),
+            "swap_segment_end": float(segment_edges[swap_segment_index + 1]),
+            "dark_hz_grid": target_dark_grid_hz,
+            "train_light_hz_grid": target_light_grid_hz,
+            "test_light_unswapped_hz_grid": target_light_grid_hz,
+            "test_light_swapped_hz_grid": (
+                swapped_grid_count / float(bin_size_s)
+            ),
+            "test_light_full_unswapped_metrics": (
+                analysis.summarize_raw_poisson_metrics(
+                    y_test,
+                    target_light_count,
+                )
+            ),
+            "test_light_full_swapped_metrics": (
+                analysis.summarize_raw_poisson_metrics(
+                    y_test,
+                    swapped_count,
+                )
+            ),
+            "test_light_swapped_segment_unswapped_metrics": (
+                analysis.summarize_raw_poisson_metrics(
+                    y_segment,
+                    unswapped_segment_count,
+                )
+            ),
+            "test_light_swapped_segment_swapped_metrics": (
+                analysis.summarize_raw_poisson_metrics(
+                    y_segment,
+                    swapped_segment_count,
+                )
+            ),
+            "test_light_full_n_bins": int(y_test.shape[0]),
+            "test_light_swapped_segment_n_bins": int(y_segment.shape[0]),
+        }
+    return results
 
 
 def compute_swap_glm(
@@ -1195,19 +1452,33 @@ def compute_swap_glm(
         / f"{DERIVED_MODEL_SOURCES.get(model_name, model_name)}.nc"
         for model_name in MODEL_NAMES
     }
-    results_by_model = {
-        model_name: analysis.evaluate_selected_model_on_test_epoch(
-            model_name=model_name,
-            datasets_by_model=selected_datasets,
-            test_inputs_by_traj=test_inputs_by_traj,
-            segment_edges=segment_edges,
-            bin_size_s=float(shared_metadata["bin_size_s"]),
-            n_splines=int(shared_metadata["n_splines"]),
-            spline_order=int(shared_metadata["spline_order"]),
-            swap_light_offset=parameters["swap_light_offset"],
+    results_by_model = {}
+    for model_name in MODEL_NAMES:
+        if model_name == VISUAL_ADDITIVE_MODEL_NAME:
+            results_by_model[model_name] = (
+                _evaluate_visual_additive_delta_on_test_epoch(
+                    analysis=analysis,
+                    dataset=source_selected_datasets["visual"],
+                    test_inputs_by_traj=test_inputs_by_traj,
+                    segment_edges=segment_edges,
+                    bin_size_s=float(shared_metadata["bin_size_s"]),
+                    n_splines=int(shared_metadata["n_splines"]),
+                    spline_order=int(shared_metadata["spline_order"]),
+                )
+            )
+            continue
+        results_by_model[model_name] = (
+            analysis.evaluate_selected_model_on_test_epoch(
+                model_name=model_name,
+                datasets_by_model=selected_datasets,
+                test_inputs_by_traj=test_inputs_by_traj,
+                segment_edges=segment_edges,
+                bin_size_s=float(shared_metadata["bin_size_s"]),
+                n_splines=int(shared_metadata["n_splines"]),
+                spline_order=int(shared_metadata["spline_order"]),
+                swap_light_offset=parameters["swap_light_offset"],
+            )
         )
-        for model_name in MODEL_NAMES
-    }
     source_payload = {} if sources is None else dict(sources)
     source_payload["dark_light_glm_artifact"] = upstream_provenance
     fit_parameters = {
@@ -1243,8 +1514,13 @@ def compute_swap_glm(
         sources=source_payload,
         fit_parameters=fit_parameters,
     )
+    dataset["selected_source_model"] = (
+        ("model",),
+        _expected_selected_source_models(MODEL_NAMES, DERIVED_MODEL_SOURCES),
+    )
     dataset.attrs.update(
         {
+            "schema_version": RESULT_SCHEMA_VERSION,
             "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
             "analysis_status": "valid",
             "parameter_name": parameters["parameter_name"],
@@ -1270,6 +1546,19 @@ def compute_swap_glm(
             "observed_spatial_bin_size_cm": parameters[
                 "observed_spatial_bin_size_cm"
             ],
+            "prediction_count_clip_eps": PREDICTION_COUNT_CLIP_EPS,
+            "visual_empirical_model_definitions_json": json.dumps(
+                dict(VISUAL_EMPIRICAL_MODEL_DEFINITIONS),
+                sort_keys=True,
+            ),
+            "derived_model_sources_json": json.dumps(
+                dict(DERIVED_MODEL_SOURCES),
+                sort_keys=True,
+            ),
+            "fit_parameters_json": json.dumps(
+                fit_parameters,
+                sort_keys=True,
+            ),
         }
     )
     selected_units, analysis_status = _audit_scores(selected_units, dataset)
@@ -1642,7 +1931,173 @@ def _validate_nonterminal_swap_dataset(
     )
     if str(fit_parameters.get("swapped_component", "")) != expected_component:
         raise ValueError("Swap fit parameters have a stale swapped component.")
+    if str(expected_schema_version) == RESULT_SCHEMA_VERSION:
+        prediction_clip = float(
+            dataset.attrs.get("prediction_count_clip_eps", np.nan)
+        )
+        if not np.isclose(
+            prediction_clip,
+            PREDICTION_COUNT_CLIP_EPS,
+            rtol=1e-12,
+            atol=1e-15,
+        ):
+            raise ValueError(
+                "Swap dataset has stale additive prediction clipping."
+            )
+        if _json_mapping_attr(
+            dataset,
+            "visual_empirical_model_definitions_json",
+        ) != dict(VISUAL_EMPIRICAL_MODEL_DEFINITIONS):
+            raise ValueError(
+                "Swap dataset has stale visual empirical-model definitions."
+            )
     _validate_swap_score_arithmetic(dataset)
+
+
+def _validate_loaded_schema4_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and return one immutable historical schema-4 bundle."""
+    copied = dict(result)
+    metadata = _metadata(**dict(copied["metadata"]))
+    raw_parameters = dict(copied["parameters"])
+    validated_parameters = validate_swap_glm_parameters(
+        swap_light_offset=raw_parameters["swap_light_offset"],
+        observed_spatial_bin_size_cm=raw_parameters[
+            "observed_spatial_bin_size_cm"
+        ],
+    )
+    parameter_name = _path_component(
+        raw_parameters["parameter_name"],
+        name="parameter_name",
+    )
+    expected_parameter_sha256 = _provenance_sha256(
+        {
+            "swap_glm_param_name": parameter_name,
+            **validated_parameters,
+        }
+    )
+    if str(raw_parameters["parameter_sha256"]) != expected_parameter_sha256:
+        raise ValueError("Historical parameter_sha256 is stale.")
+    if str(raw_parameters["output_rule_sha256"]) != (
+        LEGACY_SCHEMA4_OUTPUT_RULE_SHA256
+    ):
+        raise ValueError("Historical output_rule_sha256 is stale.")
+    parameters = {
+        "parameter_name": parameter_name,
+        "parameter_sha256": expected_parameter_sha256,
+        "output_rule_sha256": LEGACY_SCHEMA4_OUTPUT_RULE_SHA256,
+        **validated_parameters,
+    }
+
+    upstream = dict(copied["upstream_provenance"])
+    selected_hashes = dict(
+        upstream.get("dark_light_selected_sha256_by_model", {})
+    )
+    if set(selected_hashes) != set(SOURCE_MODEL_NAMES) or any(
+        not _is_sha256(value) for value in selected_hashes.values()
+    ):
+        raise ValueError("Historical DarkLight selected-model digests are incomplete.")
+    for name in (
+        "dark_light_manifest_sha256",
+        "dark_light_parameter_sha256",
+        "dark_light_output_rule_sha256",
+    ):
+        if not _is_sha256(upstream.get(name, "")):
+            raise ValueError(f"Historical DarkLight {name} must be SHA-256.")
+    _uuid_string(upstream.get("dark_light_glm_id"), name="dark_light_glm_id")
+
+    selected_units = copied["selected_units"].copy()
+    if tuple(selected_units.columns) != SELECTED_UNIT_COLUMNS:
+        raise ValueError("Historical selected_units schema is stale.")
+    for name in IDENTITY_COLUMNS:
+        selected_units[name] = selected_units[name].astype(str)
+    if (
+        selected_units["stable_unit_id"].duplicated().any()
+        or selected_units["group_unit_id"].duplicated().any()
+        or selected_units.duplicated(
+            subset=["spikesorting_merge_id", "unit_id"]
+        ).any()
+    ):
+        raise ValueError("Historical selected-unit identities are not unique.")
+    if not np.array_equal(
+        selected_units["selection_index"].to_numpy(dtype=int),
+        np.arange(len(selected_units), dtype=int),
+    ):
+        raise ValueError("Historical selection_index is not contiguous.")
+
+    dataset = copied["dataset"]
+    if str(dataset.attrs.get("schema_version", "")) != "4" or not np.array_equal(
+        np.asarray(dataset.coords.get("model", ()), dtype=str),
+        np.asarray(LEGACY_SCHEMA4_MODEL_NAMES, dtype=str),
+    ):
+        raise ValueError("Historical bundle is not canonical schema 4.")
+    expected_metadata = {
+        "animal_name": metadata["animal_name"],
+        "date": metadata["date"],
+        "region": metadata["region"],
+        "dark_train_epoch": metadata["dark_epoch"],
+        "light_train_epoch": metadata["light_train_epoch"],
+        "light_test_epoch": metadata["light_test_epoch"],
+    }
+    for name, expected in expected_metadata.items():
+        if str(dataset.attrs.get(name, "")) != str(expected):
+            raise ValueError(f"Historical swap dataset has mismatched {name!r}.")
+    if not np.array_equal(
+        np.asarray(dataset.coords.get("unit", ()), dtype=str),
+        selected_units["group_unit_id"].astype(str).to_numpy(),
+    ):
+        raise ValueError("Historical swap dataset unit order is stale.")
+    status = str(copied["analysis_status"])
+    if status not in ANALYSIS_STATUSES or str(
+        dataset.attrs.get("analysis_status", "")
+    ) != status:
+        raise ValueError("Historical swap analysis_status is stale.")
+    expected_score_count = (
+        (len(LEGACY_SCHEMA4_MODEL_NAMES) - 1) * len(TRAJECTORY_TYPES)
+    )
+    if np.any(
+        selected_units["n_expected_primary_scores"].to_numpy(dtype=int)
+        != expected_score_count
+    ):
+        raise ValueError("Historical selected-unit score counts are stale.")
+    terminal_statuses = {
+        "upstream_terminal",
+        "no_units",
+        "no_valid_position",
+        "no_movement",
+        "no_trajectory_samples",
+    }
+    if status in terminal_statuses:
+        if str(dataset.attrs.get("fit_stage", "")) != "terminal":
+            raise ValueError("Historical terminal swap marker is stale.")
+    else:
+        _validate_nonterminal_swap_dataset(
+            dataset,
+            model_names=LEGACY_SCHEMA4_MODEL_NAMES,
+            derived_sources=LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES,
+            expected_schema_version="4",
+        )
+        selected_units, derived_status = _audit_scores(
+            selected_units,
+            dataset,
+            model_names=LEGACY_SCHEMA4_MODEL_NAMES,
+        )
+        if derived_status != status:
+            raise ValueError("Historical swap score audit is stale.")
+
+    copied.update(
+        {
+            "metadata": metadata,
+            "parameters": parameters,
+            "upstream_provenance": upstream,
+            "selected_units": selected_units,
+            "analysis_status": status,
+            "selected_units_sha256": _selected_units_sha256(selected_units),
+            "n_units": len(selected_units),
+            "n_valid_units": int(selected_units["valid_swap_score"].sum()),
+            "historical_schema_version": "4",
+        }
+    )
+    return copied
 
 
 def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -1660,6 +2115,8 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
     missing = sorted(required.difference(result))
     if missing:
         raise ValueError(f"Swap result is missing fields {missing!r}.")
+    if str(result["dataset"].attrs.get("schema_version", "")) == "4":
+        return _validate_loaded_schema4_result(result)
     copied = dict(result)
     metadata = _metadata(**dict(copied["metadata"]))
     raw_parameters = dict(copied["parameters"])
@@ -1809,7 +2266,9 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
     if str(dataset.attrs.get("analysis_status", "")) != status:
         raise ValueError("Swap dataset analysis_status does not match the bundle.")
     if str(dataset.attrs.get("schema_version", "")) != RESULT_SCHEMA_VERSION:
-        raise ValueError("Swap dataset schema_version is not legacy-compatible v4.")
+        raise ValueError(
+            f"Swap dataset schema_version is not canonical v{RESULT_SCHEMA_VERSION}."
+        )
     expected_dataset_attrs = {
         "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
         "parameter_name": parameters["parameter_name"],
@@ -2229,9 +2688,16 @@ def _normalize_legacy_swap_dataset(dataset: Any) -> tuple[Any, dict[str, Any]]:
             list(LEGACY_SCHEMA6_DIAGNOSTIC_VARIABLES)
         )
         normalized.attrs = dict(dataset.attrs)
-        normalized.attrs.pop("prediction_count_clip_eps", None)
-        normalized.attrs.pop("visual_empirical_model_definitions_json", None)
         normalized.attrs["schema_version"] = RESULT_SCHEMA_VERSION
+        normalized.attrs["prediction_count_clip_eps"] = (
+            PREDICTION_COUNT_CLIP_EPS
+        )
+        normalized.attrs["visual_empirical_model_definitions_json"] = (
+            json.dumps(
+                dict(VISUAL_EMPIRICAL_MODEL_DEFINITIONS),
+                sort_keys=True,
+            )
+        )
         normalized.attrs["derived_model_sources_json"] = json.dumps(
             dict(DERIVED_MODEL_SOURCES),
             sort_keys=True,
@@ -2257,14 +2723,32 @@ def _normalize_legacy_swap_dataset(dataset: Any) -> tuple[Any, dict[str, Any]]:
             "dark_score_source": "legacy_source_and_exact_nwb_rescore",
             "requires_legacy_preprocessing_provenance": True,
         }
-    if schema_version != RESULT_SCHEMA_VERSION:
-        raise ValueError("Existing swap artifact must use schema version 4 or 6.")
-    if model_names == MODEL_NAMES:
+    if schema_version == RESULT_SCHEMA_VERSION:
+        if model_names != MODEL_NAMES:
+            raise ValueError("Current swap artifact has stale model order.")
         _validate_nonterminal_swap_dataset(dataset)
         return dataset, {
             "source_schema_version": RESULT_SCHEMA_VERSION,
             "source_model_names": list(MODEL_NAMES),
             "compared_model_names": list(MODEL_NAMES),
+            "dropped_schema6_diagnostics": [],
+            "synthesized_selected_source_model": False,
+            "dark_score_source": "legacy_source_and_exact_nwb_rescore",
+            "requires_legacy_preprocessing_provenance": True,
+        }
+    if schema_version != "4":
+        raise ValueError("Existing swap artifact must use schema version 4, 5, or 6.")
+    if model_names == LEGACY_SCHEMA4_MODEL_NAMES:
+        _validate_nonterminal_swap_dataset(
+            dataset,
+            model_names=LEGACY_SCHEMA4_MODEL_NAMES,
+            derived_sources=LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES,
+            expected_schema_version="4",
+        )
+        return dataset, {
+            "source_schema_version": "4",
+            "source_model_names": list(LEGACY_SCHEMA4_MODEL_NAMES),
+            "compared_model_names": list(LEGACY_SCHEMA4_MODEL_NAMES),
             "dropped_schema6_diagnostics": [],
             "synthesized_selected_source_model": False,
             "dark_score_source": "legacy_source_and_exact_nwb_rescore",
@@ -2294,9 +2778,10 @@ def _normalize_legacy_swap_dataset(dataset: Any) -> tuple[Any, dict[str, Any]]:
         normalized,
         model_names=SOURCE_MODEL_NAMES,
         derived_sources={},
+        expected_schema_version="4",
     )
     return normalized, {
-        "source_schema_version": RESULT_SCHEMA_VERSION,
+        "source_schema_version": "4",
         "source_model_names": list(SOURCE_MODEL_NAMES),
         "compared_model_names": list(SOURCE_MODEL_NAMES),
         "dropped_schema6_diagnostics": [],

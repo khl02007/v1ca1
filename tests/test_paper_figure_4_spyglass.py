@@ -14,14 +14,14 @@ import pytest
 from v1ca1.paper_figures import figure_4_spyglass as figure
 
 
-def test_figure_4_adapter_is_promoted_and_uses_canonical_renderer() -> None:
+def test_figure_4_adapter_is_promoted_and_figure_3_adapter_is_available() -> None:
     code = (
         "import importlib.util; "
         "from v1ca1.paper_figures import figure_4_spyglass; "
         "assert figure_4_spyglass.DEFAULT_OUTPUT_NAME == 'figure_4_spyglass'; "
         "assert figure_4_spyglass.canonical.DEFAULT_OUTPUT_NAME == 'figure_4'; "
         "assert importlib.util.find_spec("
-        "'v1ca1.paper_figures.figure_3_spyglass') is None"
+        "'v1ca1.paper_figures.figure_3_spyglass') is not None"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 

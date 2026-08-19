@@ -105,10 +105,34 @@ FIGURE_2_REGION = "v1"
 FIGURE_2_TUNING_PARAMETERS = dict(LEGACY_TUNING_CURVE_PARAMETERS)
 FIGURE_2_PANEL_A_EXAMPLES = (
     {
+        "animal_name": "L15",
+        "date": "20241121",
+        "sorting_unit_id": 409,
+        "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+    {
         "animal_name": "L14",
         "date": "20240611",
         "sorting_unit_id": 34,
         "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+    {
+        "animal_name": "L14",
+        "date": "20240611",
+        "sorting_unit_id": 30,
+        "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+    {
+        "animal_name": "L15",
+        "date": "20241121",
+        "sorting_unit_id": 418,
+        "trajectory_types": ("center_to_left", "right_to_center"),
+    },
+    {
+        "animal_name": "L14",
+        "date": "20240611",
+        "sorting_unit_id": 172,
+        "trajectory_types": ("center_to_right", "left_to_center"),
     },
     {
         "animal_name": "L15",
@@ -117,16 +141,16 @@ FIGURE_2_PANEL_A_EXAMPLES = (
         "trajectory_types": ("center_to_right", "left_to_center"),
     },
     {
+        "animal_name": "L15",
+        "date": "20241121",
+        "sorting_unit_id": 70,
+        "trajectory_types": ("center_to_right", "left_to_center"),
+    },
+    {
         "animal_name": "L12",
         "date": "20240421",
         "sorting_unit_id": 37,
         "trajectory_types": ("center_to_right", "left_to_center"),
-    },
-    {
-        "animal_name": "L14",
-        "date": "20240611",
-        "sorting_unit_id": 30,
-        "trajectory_types": ("center_to_left", "right_to_center"),
     },
 )
 _CORE_ARTIFACT_FAMILIES = {
@@ -1468,11 +1492,33 @@ def _verify_computed_record(
     raise ValueError("Figure 2 result does not declare its artifacts.")
 
 
-def _expected_example_count(animal_name: str, date: str) -> int:
-    """Return two epoch payloads per fixed example cell in one session."""
+def _session_panel_a_examples(
+    session: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    """Return the Panel A selections frozen into one session manifest."""
+    parameters = session.get("parameters")
+    examples = (
+        parameters.get("panel_a_examples")
+        if isinstance(parameters, Mapping)
+        else None
+    )
+    if not isinstance(examples, list) or any(
+        not isinstance(spec, Mapping) for spec in examples
+    ):
+        raise ValueError("Figure 2 session lacks frozen Panel A selections.")
+    return tuple(examples)
+
+
+def _expected_example_count(
+    animal_name: str,
+    date: str,
+    *,
+    panel_a_examples: Sequence[Mapping[str, Any]],
+) -> int:
+    """Return two epoch payloads per frozen example cell in one session."""
     return 2 * sum(
         str(spec["animal_name"]) == str(animal_name) and str(spec["date"]) == str(date)
-        for spec in FIGURE_2_PANEL_A_EXAMPLES
+        for spec in panel_a_examples
     )
 
 
@@ -1769,6 +1815,7 @@ def load_figure_2_session_manifest(
     ):
         raise ValueError("Figure 2 light epoch assignments changed.")
     _validate_nwb_source_snapshots(session, epochs)
+    panel_a_examples = _session_panel_a_examples(session)
 
     artifacts = session.get("artifacts")
     required = {
@@ -1784,6 +1831,7 @@ def load_figure_2_session_manifest(
         "figure_examples": _expected_example_count(
             session["animal_name"],
             session["date"],
+            panel_a_examples=panel_a_examples,
         ),
     }
     for family, expected_count in expected_counts.items():
@@ -1836,7 +1884,7 @@ def load_figure_2_session_manifest(
             epoch,
             tuple(str(value) for value in spec["trajectory_types"]),
         )
-        for spec in FIGURE_2_PANEL_A_EXAMPLES
+        for spec in panel_a_examples
         if str(spec["animal_name"]) == str(session["animal_name"])
         and str(spec["date"]) == str(session["date"])
         for epoch in (str(epochs["dark"]), str(epochs["AB"]))

@@ -1645,15 +1645,19 @@ DARK_LIGHT_GLM_PARAMETER_PRESETS = (
 
 SWAP_GLM_OUTPUT_RULE = MappingProxyType(
     {
-        "version": 2,
+        "version": 3,
         "models": (
             "visual",
+            "visual_additive_delta",
             "task_segment_bump",
             "task_segment_scalar",
             "task_dense_gain",
             "dark",
         ),
-        "derived_model_sources": {"dark": "task_segment_bump"},
+        "derived_model_sources": {
+            "visual_additive_delta": "visual",
+            "dark": "task_segment_bump",
+        },
         "swap_configuration": {
             "center_to_left": {
                 "source_trajectory": "center_to_right",
@@ -1673,6 +1677,16 @@ SWAP_GLM_OUTPUT_RULE = MappingProxyType(
             },
         },
         "fit_source": "exact_selected_dark_light_glm_artifact",
+        "visual_additive_delta": {
+            "outside_swapped_segment": (
+                "target_visual_light_at_heldout_speed"
+            ),
+            "inside_swapped_segment": (
+                "target_visual_dark_at_heldout_speed_plus_"
+                "source_visual_light_minus_dark_at_reference_speed"
+            ),
+            "prediction_count_clip_eps": 1e-12,
+        },
         "evaluation_epoch": "held_out_light_movement_laps",
         "primary_metric": (
             "test_light_swapped_segment_swapped_delta_model_minus_visual_"
@@ -1726,8 +1740,8 @@ DEFAULT_SWAP_GLM_PARAMETERS = MappingProxyType(
 )
 
 
-# Swap scoring itself has one legacy-compatible rule. Current-v5 versus
-# normalized-legacy-v4 provenance is frozen by the selected DarkLightGLM row.
+# Swap scoring has one current rule. Historical schema-4 and schema-6 inputs
+# retain their frozen source provenance during registration.
 SWAP_GLM_PARAMETER_PRESETS = (DEFAULT_SWAP_GLM_PARAMETERS,)
 
 

@@ -295,7 +295,7 @@ def _result_dataset(
             "tp_observed_edge": observed_edges,
         },
         attrs={
-            "schema_version": "4",
+            "schema_version": module.RESULT_SCHEMA_VERSION,
             "animal_name": "L14",
             "date": "20240611",
             "region": "v1",
@@ -341,6 +341,11 @@ def _result_dataset(
                 },
                 sort_keys=True,
             ),
+            "prediction_count_clip_eps": module.PREDICTION_COUNT_CLIP_EPS,
+            "visual_empirical_model_definitions_json": json.dumps(
+                dict(module.VISUAL_EMPIRICAL_MODEL_DEFINITIONS),
+                sort_keys=True,
+            ),
         },
     )
     if selected_source_paths is not None:
@@ -361,7 +366,7 @@ def _schema6_dataset(
         unit_ids=unit_ids,
         selected_source_paths=selected_source_paths,
     )
-    source_indices = np.asarray([0, 0, 0, 0, 0, 1, 2, 3, 4], dtype=int)
+    source_indices = np.asarray([0, 1, 0, 0, 0, 2, 3, 4, 5], dtype=int)
     dataset = dataset.isel(model=source_indices).assign_coords(
         model=np.asarray(module.LEGACY_SCHEMA6_MODEL_NAMES, dtype=str)
     )
@@ -447,6 +452,42 @@ def _reduced_schema4_dataset(
         fit_parameters,
         sort_keys=True,
     )
+    dataset.attrs["schema_version"] = "4"
+    dataset.attrs.pop("prediction_count_clip_eps", None)
+    dataset.attrs.pop("visual_empirical_model_definitions_json", None)
+    return dataset
+
+
+def _full_schema4_dataset(
+    *,
+    unit_ids=(11, 12),
+    selected_source_paths: dict[str, str] | None = None,
+):
+    """Return the historical five-model canonical schema-4 result."""
+    dataset = _result_dataset(
+        unit_ids=unit_ids,
+        selected_source_paths=selected_source_paths,
+    ).sel(model=list(module.LEGACY_SCHEMA4_MODEL_NAMES))
+    dataset.attrs = dict(dataset.attrs)
+    dataset.attrs["schema_version"] = "4"
+    dataset.attrs.pop("prediction_count_clip_eps", None)
+    dataset.attrs.pop("visual_empirical_model_definitions_json", None)
+    dataset.attrs["derived_model_sources_json"] = json.dumps(
+        dict(module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES),
+        sort_keys=True,
+    )
+    fit_parameters = json.loads(dataset.attrs["fit_parameters_json"])
+    fit_parameters["models"] = list(module.LEGACY_SCHEMA4_MODEL_NAMES)
+    fit_parameters["requested_models"] = list(
+        module.LEGACY_SCHEMA4_MODEL_NAMES
+    )
+    fit_parameters["derived_model_sources"] = dict(
+        module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES
+    )
+    dataset.attrs["fit_parameters_json"] = json.dumps(
+        fit_parameters,
+        sort_keys=True,
+    )
     return dataset
 
 
@@ -464,6 +505,7 @@ def _write_legacy_selected_sources(
         paths[model_name] = str(path)
         hashes[model_name] = module._file_sha256(path)
     paths["dark"] = paths["task_segment_bump"]
+    paths[module.VISUAL_ADDITIVE_MODEL_NAME] = paths["visual"]
     return paths, hashes
 
 
@@ -482,6 +524,7 @@ def _prepare_registration_source(
     ] = selected_hashes
     monkeypatch.setattr(module, "_load_dark_light_input", lambda _path: upstream)
     monkeypatch.setattr(module, "_analysis_module", lambda: fake_analysis)
+    _patch_fake_additive_evaluator(monkeypatch)
     monkeypatch.setattr(
         module,
         "_derive_task_progression",
@@ -494,7 +537,7 @@ def _prepare_registration_source(
             selected_source_paths=selected_paths,
         )
     elif schema == "4-full":
-        dataset = _result_dataset(
+        dataset = _full_schema4_dataset(
             unit_ids=(11, 12),
             selected_source_paths=selected_paths,
         )
@@ -540,8 +583,10 @@ def _register_kwargs(source: Path, destination: Path) -> dict[str, object]:
 class FakeAnalysis:
     """Small source-compatible facade that records reuse of legacy helpers."""
 
-    DEFAULT_MODEL_NAMES = module.MODEL_NAMES
-    DERIVED_SELECTED_MODEL_SOURCES = dict(module.DERIVED_MODEL_SOURCES)
+    DEFAULT_MODEL_NAMES = module.LEGACY_SCHEMA4_MODEL_NAMES
+    DERIVED_SELECTED_MODEL_SOURCES = dict(
+        module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES
+    )
     SWAP_CONFIG = dict(module.OUTPUT_RULE["swap_configuration"])
 
     def __init__(self, *, second_unit_valid=True, missing_trajectory=None):
@@ -604,6 +649,22 @@ class FakeAnalysis:
         )
 
 
+def _patch_fake_additive_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replace the exact additive evaluator only for facade-based tests."""
+
+    def evaluate(*, analysis, **_kwargs):
+        analysis.evaluated.append(module.VISUAL_ADDITIVE_MODEL_NAME)
+        return {trajectory: {} for trajectory in TRAJECTORY_TYPES}
+
+    monkeypatch.setattr(
+        module,
+        "_evaluate_visual_additive_delta_on_test_epoch",
+        evaluate,
+    )
+
+
 def _compute(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -626,6 +687,7 @@ def _compute(
     )
     monkeypatch.setattr(module, "_load_dark_light_input", lambda _path: upstream)
     monkeypatch.setattr(module, "_analysis_module", lambda: fake_analysis)
+    _patch_fake_additive_evaluator(monkeypatch)
     _patch_identities(monkeypatch)
     result = module.compute_swap_glm(
         swap_glm_id=RESULT_ID,
@@ -645,6 +707,49 @@ def _compute(
         task_progression_by_trajectory={name: object() for name in TRAJECTORY_TYPES},
     )
     return result, fake_analysis
+
+
+def _historical_schema4_result(result: dict[str, object]) -> dict[str, object]:
+    """Return a historical five-model view of one current test result."""
+    dataset = result["dataset"].sel(
+        model=list(module.LEGACY_SCHEMA4_MODEL_NAMES)
+    ).copy(deep=True)
+    dataset.attrs = dict(dataset.attrs)
+    dataset.attrs["schema_version"] = "4"
+    dataset.attrs["output_rule_sha256"] = (
+        module.LEGACY_SCHEMA4_OUTPUT_RULE_SHA256
+    )
+    dataset.attrs.pop("prediction_count_clip_eps", None)
+    dataset.attrs.pop("visual_empirical_model_definitions_json", None)
+    dataset.attrs["derived_model_sources_json"] = json.dumps(
+        dict(module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES),
+        sort_keys=True,
+    )
+    fit_parameters = json.loads(dataset.attrs["fit_parameters_json"])
+    fit_parameters["models"] = list(module.LEGACY_SCHEMA4_MODEL_NAMES)
+    fit_parameters["derived_model_sources"] = dict(
+        module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES
+    )
+    dataset.attrs["fit_parameters_json"] = json.dumps(
+        fit_parameters,
+        sort_keys=True,
+    )
+    selected_units, status = module._audit_scores(
+        result["selected_units"],
+        dataset,
+        model_names=module.LEGACY_SCHEMA4_MODEL_NAMES,
+    )
+    dataset.attrs["analysis_status"] = status
+    return {
+        **result,
+        "parameters": {
+            **result["parameters"],
+            "output_rule_sha256": module.LEGACY_SCHEMA4_OUTPUT_RULE_SHA256,
+        },
+        "selected_units": selected_units,
+        "dataset": dataset,
+        "analysis_status": status,
+    }
 
 
 def test_artifact_path_is_session_first_and_epoch_explicit(tmp_path: Path) -> None:
@@ -678,6 +783,129 @@ def test_parameters_preserve_legacy_defaults() -> None:
     }
 
 
+def test_visual_additive_delta_uses_count_space_delta_and_clips() -> None:
+    target_light = np.asarray([[7.0, 8.0], [9.0, 10.0]])
+    predicted = module._visual_additive_delta_count(
+        target_light_count=target_light,
+        target_dark_count=np.asarray([[1.0, 1.0], [4.0, 1.0]]),
+        source_light_reference_count=np.asarray(
+            [[2.0, 2.0], [9.0, 2.0]]
+        ),
+        source_dark_reference_count=np.asarray(
+            [[3.0, 3.0], [3.0, 8.0]]
+        ),
+        swap_mask=np.asarray([False, True]),
+    )
+
+    np.testing.assert_allclose(predicted[0], target_light[0])
+    assert predicted[1, 0] == pytest.approx(10.0)
+    assert predicted[1, 1] == pytest.approx(
+        module.PREDICTION_COUNT_CLIP_EPS
+    )
+
+
+def test_visual_additive_evaluator_uses_heldout_target_and_reference_source() -> None:
+    xr = pytest.importorskip("xarray")
+    grid = np.asarray([0.1, 0.9])
+    light_by_trajectory = np.asarray(
+        [[7.0, 7.0], [9.0, 9.0], [7.0, 7.0], [9.0, 9.0]]
+    )[:, :, None]
+    dark_by_trajectory = np.asarray(
+        [[4.0, 4.0], [3.0, 3.0], [4.0, 4.0], [3.0, 3.0]]
+    )[:, :, None]
+    dataset = xr.Dataset(
+        {
+            "train_light_hz_grid": (
+                ("trajectory", "tp_grid", "unit"),
+                light_by_trajectory,
+            ),
+            "dark_hz_grid": (
+                ("trajectory", "tp_grid", "unit"),
+                dark_by_trajectory,
+            ),
+        },
+        coords={
+            "trajectory": np.asarray(TRAJECTORY_TYPES),
+            "tp_grid": grid,
+            "unit": np.asarray(["101"]),
+        },
+    )
+
+    class AdditiveAnalysis:
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def _segment_mask(values, edges, segment_index):
+            values = np.asarray(values)
+            if segment_index == len(edges) - 2:
+                return (values >= edges[segment_index]) & (
+                    values <= edges[segment_index + 1]
+                )
+            return (values >= edges[segment_index]) & (
+                values < edges[segment_index + 1]
+            )
+
+        def predict_selected_light_eta(
+            self, *, trajectory, speed_values, p_eval, **_kwargs
+        ):
+            self.calls.append(("light", trajectory, speed_values))
+            count = 7.0 if speed_values is not None else 9.0
+            return {"light_eta": np.log(np.full((len(p_eval), 1), count))}
+
+        def predict_selected_dark_eta(
+            self, *, trajectory, speed_values, p_eval, **_kwargs
+        ):
+            self.calls.append(("dark", trajectory, speed_values))
+            count = 4.0 if speed_values is not None else 3.0
+            return {"dark_eta": np.log(np.full((len(p_eval), 1), count))}
+
+        @staticmethod
+        def _selected_var_by_trajectory(dataset, name, trajectory):
+            return np.asarray(dataset[name].sel(trajectory=trajectory).values)
+
+        @staticmethod
+        def summarize_raw_poisson_metrics(_observed, predicted):
+            return {"predicted_count": np.asarray(predicted)}
+
+    analysis = AdditiveAnalysis()
+    heldout_speed = np.asarray([2.0, 3.0])
+    test_inputs = {
+        trajectory: {
+            "p": grid,
+            "y": np.zeros((2, 1)),
+            "v": heldout_speed,
+        }
+        for trajectory in TRAJECTORY_TYPES
+    }
+    result = module._evaluate_visual_additive_delta_on_test_epoch(
+        analysis=analysis,
+        dataset=dataset,
+        test_inputs_by_traj=test_inputs,
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0]),
+        bin_size_s=1.0,
+        n_splines=5,
+        spline_order=3,
+    )
+
+    full_prediction = result["center_to_left"][
+        "test_light_full_swapped_metrics"
+    ]["predicted_count"][:, 0]
+    np.testing.assert_allclose(full_prediction, [7.0, 10.0])
+    assert any(
+        kind == "light"
+        and trajectory == "center_to_left"
+        and speed is heldout_speed
+        for kind, trajectory, speed in analysis.calls
+    )
+    assert any(
+        kind == "light"
+        and trajectory == "center_to_right"
+        and speed is None
+        for kind, trajectory, speed in analysis.calls
+    )
+
+
 def test_output_rule_matches_reused_analysis_contract() -> None:
     analysis = module._analysis_module()
     module._validate_reused_analysis_contract(analysis)
@@ -695,8 +923,10 @@ def test_output_rule_matches_reused_analysis_contract() -> None:
 
 def test_reused_analysis_contract_rejects_drift() -> None:
     drifted = SimpleNamespace(
-        DEFAULT_MODEL_NAMES=module.MODEL_NAMES,
-        DERIVED_SELECTED_MODEL_SOURCES=dict(module.DERIVED_MODEL_SOURCES),
+        DEFAULT_MODEL_NAMES=module.LEGACY_SCHEMA4_MODEL_NAMES,
+        DERIVED_SELECTED_MODEL_SOURCES=dict(
+            module.LEGACY_SCHEMA4_DERIVED_MODEL_SOURCES
+        ),
         SWAP_CONFIG={**dict(module.OUTPUT_RULE["swap_configuration"]), "bad": {}},
     )
     with pytest.raises(ValueError, match="swap configuration"):
@@ -709,7 +939,7 @@ def test_parameters_reject_invalid_observed_bin_size(value: float) -> None:
         module.validate_swap_glm_parameters(observed_spatial_bin_size_cm=value)
 
 
-def test_compute_reuses_all_five_existing_model_evaluators(
+def test_compute_reuses_existing_evaluators_and_additive_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, fake_analysis = _compute(monkeypatch)
@@ -728,7 +958,7 @@ def test_one_nonfinite_unit_does_not_invalidate_other_units(
     assert result["analysis_status"] == "partial_valid"
     audit = result["selected_units"]
     assert audit["valid_swap_score"].tolist() == [True, False]
-    assert audit["n_finite_primary_scores"].tolist() == [16, 15]
+    assert audit["n_finite_primary_scores"].tolist() == [20, 19]
 
 
 def test_upstream_invalid_fit_cannot_produce_valid_swap_score(
@@ -737,7 +967,7 @@ def test_upstream_invalid_fit_cannot_produce_valid_swap_score(
     result, _ = _compute(monkeypatch, upstream_valid=(True, False))
     audit = result["selected_units"]
     assert result["analysis_status"] == "partial_valid"
-    assert audit["n_finite_primary_scores"].tolist() == [16, 16]
+    assert audit["n_finite_primary_scores"].tolist() == [20, 20]
     assert audit["valid_swap_score"].tolist() == [True, False]
 
 
@@ -928,6 +1158,51 @@ def test_write_load_roundtrip_and_checksum_guard(
         module.load_swap_glm_artifact(destination)
 
 
+def test_load_preserves_historical_schema4_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, _ = _compute(monkeypatch)
+    historical = module.validate_swap_glm_result(
+        _historical_schema4_result(current)
+    )
+    destination = tmp_path / str(RESULT_ID)
+    destination.mkdir()
+    historical["selected_units"].to_parquet(
+        destination / module.SELECTED_UNITS_FILENAME,
+        index=False,
+    )
+    historical["dataset"].to_netcdf(destination / module.RESULT_FILENAME)
+    common = module._manifest_common(historical)
+    rows = []
+    for artifact_key, filename, artifact_kind in (
+        ("selected_units", module.SELECTED_UNITS_FILENAME, "parquet"),
+        ("swap_glm", module.RESULT_FILENAME, "netcdf"),
+    ):
+        artifact_path = destination / filename
+        rows.append(
+            {
+                "artifact_key": artifact_key,
+                "relative_path": filename,
+                "artifact_kind": artifact_kind,
+                "file_size_bytes": artifact_path.stat().st_size,
+                "sha256": module._file_sha256(artifact_path),
+                **common,
+            }
+        )
+    pd.DataFrame.from_records(
+        rows,
+        columns=module.MANIFEST_COLUMNS,
+    ).to_parquet(destination / module.MANIFEST_FILENAME, index=False)
+
+    loaded = module.load_swap_glm_artifact(destination)
+
+    assert loaded["historical_schema_version"] == "4"
+    assert loaded["dataset"].coords["model"].values.tolist() == list(
+        module.LEGACY_SCHEMA4_MODEL_NAMES
+    )
+
+
 def test_validate_rejects_dataset_unit_reordering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1042,6 +1317,7 @@ def test_legacy_selected_source_verification_checks_each_file(tmp_path: Path) ->
         paths[model_name] = str(path)
         hashes[model_name] = module._file_sha256(path)
     paths["dark"] = paths["task_segment_bump"]
+    paths[module.VISUAL_ADDITIVE_MODEL_NAME] = paths["visual"]
     xr = pytest.importorskip("xarray")
     dataset = xr.Dataset(
         attrs={
@@ -1076,6 +1352,7 @@ def test_register_existing_validates_and_copies_bundle(
     ] = selected_hashes
     monkeypatch.setattr(module, "_load_dark_light_input", lambda _path: upstream)
     monkeypatch.setattr(module, "_analysis_module", lambda: fake_analysis)
+    _patch_fake_additive_evaluator(monkeypatch)
     monkeypatch.setattr(
         module,
         "_derive_task_progression",
@@ -1150,8 +1427,15 @@ def test_register_existing_normalizes_legacy_schema_and_exactly_rescores(
     assert preprocessing["selected_position_offset_samples"] == 10
     assert preprocessing["selected_speed_threshold_cm_s"] == 4.0
     assert preprocessing["legacy_fields_required"] is True
-    if schema != "4-reduced":
+    if schema == "6":
         assert normalization["compared_model_names"] == list(module.MODEL_NAMES)
+        assert normalization["dark_score_source"] == (
+            "legacy_source_and_exact_nwb_rescore"
+        )
+    elif schema == "4-full":
+        assert normalization["compared_model_names"] == list(
+            module.LEGACY_SCHEMA4_MODEL_NAMES
+        )
         assert normalization["dark_score_source"] == (
             "legacy_source_and_exact_nwb_rescore"
         )

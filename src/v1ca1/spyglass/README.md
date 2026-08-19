@@ -101,25 +101,51 @@ figure. Promotion validates that receipt and the campaign manifest, copies the
 figure atomically, and writes the corresponding receipt beside the published
 artifact. Omit `--replace-promoted-output` unless replacement is intentional.
 
-## Database-free Figure 2 validation
+## Database-free Figures 2 and 3 validation
 
 Figure 2 extends the completed Figure 1 campaign with AB/BA movement inputs,
 light tuning and stability, dark/light overlap, both decoders, a de novo
-`legacy_v4_v1` dark/light GLM fit, and the forward AB-to-BA swap test. Run one
-session at a time; the dark epoch is inherited from the parent:
+`legacy_v4_v1` dark/light GLM fit, and the forward AB-to-BA swap test. The
+Figure 2 adapter renders the current progression-tuning, circular-shift, and
+path-invariance panels. The Figure 3 adapter uses the retained multiplicative
+and additive swap predictions from the same campaign. Run one session at a
+time; the dark epoch is inherited from the parent:
 
 ```bash
 python -m v1ca1.spyglass.offline.figure_2 \
-  --run-id figure2-nwb-v1 --parent-run-id figure1-full-nwb-v2 \
+  --run-id figure2-nwb-v2 --parent-run-id figure1-full-nwb-v2 \
   --animal-name L14 --date 20240611
-
-python -m v1ca1.paper_figures.figure_2_spyglass \
-  --run-id figure2-nwb-v1
 ```
 
-Add all four manuscript sessions before rendering. The workflow writes only
-below its run directory and does not modify the canonical Figure 2 script, the
-standalone AB/gray/BA Figure 2A script, a database, NWBs, or legacy artifacts.
+Add all four manuscript sessions before rendering either figure. After
+validating the run-local artifacts, promotion to the canonical output is an
+explicit, receipt-checked operation:
+
+```bash
+python -m v1ca1.paper_figures.figure_2_spyglass \
+  --run-id figure2-nwb-v2 \
+  --output-path \
+    /stelmo/kyu/analysis/spyglass/runs/figure2-nwb-v2/figures/figure_2_spyglass_current.svg \
+  --promote-to paper_figures/output/figure_2.svg \
+  --replace-promoted-output
+
+python -m v1ca1.paper_figures.figure_3_spyglass \
+  --run-id figure2-nwb-v2 \
+  --output-path \
+    /stelmo/kyu/analysis/spyglass/runs/figure2-nwb-v2/figures/figure_3_spyglass_current.svg \
+  --promote-to paper_figures/output/figure_3.svg \
+  --replace-promoted-output
+```
+
+Each render writes a checksum-bearing provenance receipt beside the run-local
+figure; promotion verifies that receipt and publishes it beside the canonical
+artifact. Historical
+four-example campaigns remain readable for provenance, but cannot render the
+current eight-example Figure 2 or the additive comparison in Figure 3; use a
+new immutable run ID. The workflow writes only below its run directory and
+does not modify either canonical figure script, a database, NWBs, or legacy
+artifacts; only the explicit promotion step writes the requested canonical
+figure and receipt.
 
 ## Database-free Figure 4 validation
 

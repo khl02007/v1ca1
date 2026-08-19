@@ -15,7 +15,13 @@ import pandas as pd
 
 from v1ca1.helper.session import TRAJECTORY_TYPES
 from v1ca1.paper_figures import _dark_light
+from v1ca1.paper_figures import figure_2 as canonical
 from v1ca1.paper_figures import figure_2_old as legacy
+from v1ca1.paper_figures._spyglass_figure_artifact import (
+    get_figure_provenance_path,
+    promote_spyglass_figure,
+    write_figure_provenance,
+)
 from v1ca1.paper_figures.datasets import get_processed_datasets, normalize_dataset_id
 from v1ca1.spyglass import (
     movement,
@@ -32,12 +38,15 @@ from v1ca1.spyglass.nwb import (
 from v1ca1.spyglass.offline.figure_1_examples import load_example_payload
 from v1ca1.spyglass.offline.manifests import (
     DEFAULT_SCRATCH_ROOT,
+    file_sha256,
     get_run_dir,
+    load_json,
     nwb_fingerprint,
     resolve_run_path,
 )
 from v1ca1.spyglass.offline.sources import validate_nwb_session_identity
 from v1ca1.spyglass.selection import canonical_json
+from v1ca1.spyglass.table_specs import LEGACY_TUNING_CURVE_PARAMETERS
 
 DEFAULT_OUTPUT_NAME = "figure_2_spyglass"
 DEFAULT_OUTPUT_FORMAT = "svg"
@@ -49,6 +58,10 @@ REGION = "v1"
 MINIMUM_MOVEMENT_FIRING_RATE_HZ = 0.5
 MINIMUM_STABILITY_CORRELATION = 0.5
 FORWARD_SWAP_MODEL = "task_segment_scalar"
+TUNING_CURVE_PARAM_NAME = str(
+    LEGACY_TUNING_CURVE_PARAMETERS["tuning_curve_param_name"]
+)
+FIGURE_ARTIFACT_KIND = "complete_spyglass_figure_2"
 
 
 def _one_record(
@@ -252,6 +265,338 @@ def _load_stability_tables(
     return tables
 
 
+def _initial_parent_session(
+    session: Mapping[str, Any],
+    *,
+    scratch_root: Path,
+) -> tuple[dict[str, Any], Path]:
+    """Load the checksum-pinned initial parent session for dark artifacts."""
+    parent_artifacts = session.get("parent_artifacts", {})
+    if not isinstance(parent_artifacts, Mapping):
+        raise ValueError("Session parent_artifacts must be a mapping.")
+    run_dir = _parent_run_dir(
+        session,
+        parent="initial",
+        scratch_root=scratch_root,
+    )
+    relative_path = parent_artifacts.get("initial_session_manifest_path")
+    expected_sha256 = parent_artifacts.get("initial_session_manifest_sha256")
+    if relative_path is None or expected_sha256 is None:
+        raise ValueError(
+            "Session parent_artifacts is missing the initial manifest pointer."
+        )
+    path = resolve_run_path(str(relative_path), run_dir=run_dir)
+    if file_sha256(path) != str(expected_sha256):
+        raise ValueError("Initial parent session manifest checksum changed.")
+    return load_json(path), run_dir
+
+
+def _epoch_tuning_curve_records(
+    session: Mapping[str, Any],
+    *,
+    epoch: str,
+    run_dir: Path,
+    scratch_root: Path,
+) -> tuple[Sequence[Mapping[str, Any]], Path]:
+    """Return validated tuning-curve records and their owning run root."""
+    if str(epoch) == _session_dark_epoch(session):
+        parent_session, source_root = _initial_parent_session(
+            session,
+            scratch_root=scratch_root,
+        )
+        records = parent_session.get("artifacts", {}).get(
+            "path_specific_place_tuning_curve",
+            (),
+        )
+    else:
+        source_root = run_dir
+        records = session.get("artifacts", {}).get(
+            "path_specific_place_tuning_curve",
+            (),
+        )
+    if not isinstance(records, Sequence):
+        raise ValueError("Path-specific tuning-curve records are malformed.")
+    return records, source_root
+
+
+def _load_path_curve(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    source_root: Path,
+    epoch: str,
+    trajectory_type: str,
+    trial_subset: str,
+) -> tuple[dict[str, np.ndarray], Path]:
+    """Load one path curve as a stable-unit keyed one-dimensional lookup."""
+    import xarray as xr
+
+    record = _one_record(
+        records,
+        label="PathSpecificPlaceTuningCurve artifact",
+        epoch=epoch,
+        region=REGION,
+        trajectory_type=trajectory_type,
+        trial_subset=trial_subset,
+        tuning_curve_param_name=TUNING_CURVE_PARAM_NAME,
+    )
+    path = _record_artifact_path(
+        record,
+        "tuning_curve_path",
+        run_dir=source_root,
+    )
+    with xr.open_dataarray(path) as data:
+        if "unit" not in data.dims or data.ndim != 2:
+            raise ValueError(f"Tuning curve must be unit by position: {path}")
+        if "stable_unit_id" not in data.coords:
+            raise ValueError(f"Tuning curve lacks stable_unit_id: {path}")
+        stable_ids = np.asarray(data.coords["stable_unit_id"].values).astype(str)
+        values = np.asarray(data.transpose("unit", ...).values, dtype=float)
+    if stable_ids.size != len(set(stable_ids)):
+        raise ValueError(f"Tuning curve contains duplicate stable units: {path}")
+    return {
+        stable_id: np.asarray(values[index], dtype=float)
+        for index, stable_id in enumerate(stable_ids)
+    }, path
+
+
+def _stability_shape_overlap(
+    row: Mapping[str, Any],
+    odd_curve: np.ndarray,
+    even_curve: np.ndarray,
+) -> tuple[float, str]:
+    """Return saved shape overlap or reconstruct an older artifact exactly."""
+    row_fields = set(row.index) if hasattr(row, "index") else set(row)
+    if {"stability_shape_overlap", "shape_overlap_status"}.issubset(
+        row_fields
+    ):
+        return (
+            float(row["stability_shape_overlap"]),
+            str(row["shape_overlap_status"]),
+        )
+    from v1ca1.task_progression.stability import (
+        _evaluate_stability_shape_overlap,
+    )
+
+    result = _evaluate_stability_shape_overlap(
+        odd_curve,
+        even_curve,
+        n_odd_spikes=int(row["n_odd_spikes"]),
+        n_even_spikes=int(row["n_even_spikes"]),
+    )
+    return (
+        float(result["stability_shape_overlap"]),
+        str(result["shape_overlap_status"]),
+    )
+
+
+def _path_passes_rate_and_stability(
+    row: Mapping[str, Any],
+) -> bool:
+    """Return the current strict per-path firing-rate and stability gate."""
+    rate_result = canonical.compute_pooled_path_movement_firing_rate(
+        float(row["n_odd_spikes"]),
+        float(row["n_even_spikes"]),
+        float(row["odd_duration_s"]),
+        float(row["even_duration_s"]),
+    )
+    rate = float(rate_result["path_movement_firing_rate_hz"])
+    correlation = float(row["stability_correlation"])
+    return bool(
+        rate_result["path_movement_firing_rate_status"] == "valid"
+        and np.isfinite(rate)
+        and rate > MINIMUM_MOVEMENT_FIRING_RATE_HZ
+        and np.isfinite(correlation)
+        and correlation > MINIMUM_STABILITY_CORRELATION
+    )
+
+
+def _build_panel_b_shift_profile_table(
+    run_dir: Path,
+    sessions: Sequence[Mapping[str, Any]],
+    *,
+    scratch_root: Path,
+) -> pd.DataFrame:
+    """Build current Panel B profiles from pinned all/odd/even path curves."""
+    records: list[dict[str, Any]] = []
+    for session in sessions:
+        animal_name = str(session["animal_name"])
+        date = str(session["date"])
+        dark_epoch = _session_dark_epoch(session)
+        light_epoch = LIGHT_EPOCH
+        sorting_unit_by_nwb_id = _load_nwb_sorting_unit_map(session)
+        dark_curve_records, dark_root = _epoch_tuning_curve_records(
+            session,
+            epoch=dark_epoch,
+            run_dir=run_dir,
+            scratch_root=scratch_root,
+        )
+        light_curve_records, light_root = _epoch_tuning_curve_records(
+            session,
+            epoch=light_epoch,
+            run_dir=run_dir,
+            scratch_root=scratch_root,
+        )
+        dark_stability_tables = _load_stability_tables(
+            session,
+            epoch=dark_epoch,
+            run_dir=run_dir,
+            scratch_root=scratch_root,
+        )
+        light_stability_tables = _load_stability_tables(
+            session,
+            epoch=light_epoch,
+            run_dir=run_dir,
+            scratch_root=scratch_root,
+        )
+        dark_stability_by_path = {
+            str(table["trajectory_type"].iloc[0]): table
+            for table in dark_stability_tables
+            if not table.empty
+        }
+        light_stability_by_path = {
+            str(table["trajectory_type"].iloc[0]): table
+            for table in light_stability_tables
+            if not table.empty
+        }
+        for path_name in canonical.PANEL_B_PATH_ORDER:
+            curve_sets: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+            for epoch_type, epoch, curve_records, source_root in (
+                ("dark", dark_epoch, dark_curve_records, dark_root),
+                ("light", light_epoch, light_curve_records, light_root),
+            ):
+                for trial_subset in ("all", "odd", "even"):
+                    curve_sets[(epoch_type, trial_subset)], _path = (
+                        _load_path_curve(
+                            curve_records,
+                            source_root=source_root,
+                            epoch=epoch,
+                            trajectory_type=path_name,
+                            trial_subset=trial_subset,
+                        )
+                    )
+            dark_stability = dark_stability_by_path.get(path_name)
+            light_stability = light_stability_by_path.get(path_name)
+            if dark_stability is None or light_stability is None:
+                raise ValueError(f"Missing stability table for path {path_name!r}.")
+            if dark_stability["stable_unit_id"].duplicated().any() or (
+                light_stability["stable_unit_id"].duplicated().any()
+            ):
+                raise ValueError(
+                    f"Stability table has duplicate units for path {path_name!r}."
+                )
+            dark_rows = dark_stability.set_index("stable_unit_id", drop=False)
+            light_rows = light_stability.set_index("stable_unit_id", drop=False)
+            stable_ids = sorted(set(dark_rows.index).intersection(light_rows.index))
+            for stable_id in stable_ids:
+                dark_row = dark_rows.loc[stable_id]
+                light_row = light_rows.loc[stable_id]
+                if not _path_passes_rate_and_stability(dark_row) or not (
+                    _path_passes_rate_and_stability(light_row)
+                ):
+                    continue
+                required_curves = [
+                    curve_sets[(condition, subset)].get(str(stable_id))
+                    for condition in ("dark", "light")
+                    for subset in ("all", "odd", "even")
+                ]
+                if any(curve is None for curve in required_curves):
+                    raise ValueError(
+                        "Tuning curves are missing a stability-selected unit "
+                        f"{stable_id!r} on path {path_name!r}."
+                    )
+                (
+                    dark_curve,
+                    dark_odd,
+                    dark_even,
+                    light_curve,
+                    light_odd,
+                    light_even,
+                ) = required_curves
+                profile = canonical.compute_circular_shift_overlap_profile(
+                    dark_curve,
+                    light_curve,
+                )
+                profile_status = str(profile["profile_status"])
+                if profile_status == "both_conditions_silent":
+                    continue
+                dark_split, dark_split_status = _stability_shape_overlap(
+                    dark_row,
+                    dark_odd,
+                    dark_even,
+                )
+                light_split, _light_split_status = _stability_shape_overlap(
+                    light_row,
+                    light_odd,
+                    light_even,
+                )
+                exact_scores = np.asarray(profile["overlap_scores"], dtype=float)
+                minimum_overlap = float(np.min(exact_scores))
+                denominator = dark_split - minimum_overlap
+                if dark_split_status != "valid" or not np.isfinite(dark_split):
+                    rescaling_status = "invalid_split_half"
+                elif denominator <= canonical._TUNING_SIMILARITY_EPS:
+                    rescaling_status = "nonpositive_denominator"
+                else:
+                    rescaling_status = "valid"
+                common_scores = canonical._interpolate_periodic_shift_profile(
+                    np.asarray(
+                        profile["signed_normalized_shifts"],
+                        dtype=float,
+                    ),
+                    exact_scores,
+                )
+                rescaled_scores = (
+                    (common_scores - minimum_overlap) / denominator
+                    if rescaling_status == "valid"
+                    else np.full(common_scores.shape, np.nan, dtype=float)
+                )
+                dark_nwb_unit_id = str(dark_row["unit_id"])
+                if str(light_row["unit_id"]) != dark_nwb_unit_id:
+                    raise ValueError("Dark and light stability identities disagree.")
+                if dark_nwb_unit_id not in sorting_unit_by_nwb_id:
+                    raise ValueError(
+                        f"NWB unit {dark_nwb_unit_id!r} has no sorting-unit ID."
+                    )
+                unit_id = int(sorting_unit_by_nwb_id[dark_nwb_unit_id])
+                for shift, overlap, rescaled in zip(
+                    canonical.PANEL_H_SHIFT_PROFILE_GRID,
+                    common_scores,
+                    rescaled_scores,
+                    strict=True,
+                ):
+                    records.append(
+                        {
+                            "animal_name": animal_name,
+                            "date": date,
+                            "region": REGION,
+                            "unit": unit_id,
+                            "path": path_name,
+                            "dark_epoch": dark_epoch,
+                            "light_epoch": light_epoch,
+                            "normalized_shift": float(shift),
+                            "overlap": float(overlap),
+                            "minimum_overlap": minimum_overlap,
+                            "dark_split_half_overlap": dark_split,
+                            "light_split_half_overlap": light_split,
+                            "split_half_overlap": dark_split,
+                            "rescaling_denominator": denominator,
+                            "rescaled_overlap": float(rescaled),
+                            "rescaling_status": rescaling_status,
+                            "n_progression_bins": int(
+                                profile["n_progression_bins"]
+                            ),
+                            "profile_status": profile_status,
+                            "cache_version": (
+                                canonical.PANEL_H_SHIFT_PROFILE_CACHE_VERSION
+                            ),
+                        }
+                    )
+    return pd.DataFrame.from_records(
+        records,
+        columns=canonical.PANEL_H_SHIFT_PROFILE_COLUMNS,
+    )
+
+
 def _eligible_units(
     movement_table: pd.DataFrame,
     stability_tables: Sequence[pd.DataFrame],
@@ -335,7 +680,7 @@ def _load_similarity_tables(
     return output
 
 
-def _build_panel_b_overlap_table(
+def _build_panel_c_overlap_table(
     run_dir: Path,
     sessions: Sequence[Mapping[str, Any]],
     *,
@@ -432,7 +777,7 @@ def _load_panel_a_examples(
     run_dir: Path,
     sessions: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Load four cells, each with computed dark and AB payloads."""
+    """Load the current eight cells with computed dark and AB payloads."""
     session_by_key = {
         (str(session["animal_name"]), str(session["date"])): session
         for session in sessions
@@ -449,7 +794,7 @@ def _load_panel_a_examples(
         region,
         unit_id,
         trajectories,
-    ) in legacy._figure_2.FIGURE_2_PANEL_A_EXAMPLES:
+    ) in canonical.FIGURE_2_PANEL_A_EXAMPLES:
         session = session_by_key[(str(animal_name), str(date))]
         epoch_rates = {}
         for epoch_type, epoch in (
@@ -1055,6 +1400,34 @@ def _build_panel_e_decoding_tables(
     )
 
 
+def _current_panel_a_contract() -> list[dict[str, Any]]:
+    """Return the current renderer's immutable eight-example selection."""
+    return [
+        {
+            "animal_name": str(animal_name),
+            "date": str(date),
+            "sorting_unit_id": int(unit_id),
+            "trajectory_types": [str(value) for value in trajectories],
+        }
+        for animal_name, date, region, unit_id, trajectories in (
+            canonical.FIGURE_2_PANEL_A_EXAMPLES
+        )
+        if str(region) == REGION
+    ]
+
+
+def _require_current_figure_2_contract(campaign: Mapping[str, Any]) -> None:
+    """Reject historical campaigns that cannot render current Figure 2."""
+    parameters = campaign.get("analysis_parameters", {})
+    observed = parameters.get("panel_a_examples")
+    expected = _current_panel_a_contract()
+    if canonical_json(observed) != canonical_json(expected):
+        raise ValueError(
+            "Selected Figure 2 campaign predates the current eight-example "
+            "Panel A contract; compute a new immutable run before rendering."
+        )
+
+
 def load_figure_2_payload(
     *,
     run_id: str,
@@ -1074,12 +1447,8 @@ def load_figure_2_payload(
         FIGURE_2_PIPELINE
     ):
         raise ValueError("Selected campaign is not a Figure 2 offline run.")
+    _require_current_figure_2_contract(campaign)
     sessions = _ordered_sessions(unordered_sessions)
-    panel_e_summary, panel_e_trials = _build_panel_e_decoding_tables(
-        run_dir,
-        sessions,
-        scratch_root=scratch_root,
-    )
     return {
         "run_dir": run_dir,
         "campaign": campaign,
@@ -1087,25 +1456,24 @@ def load_figure_2_payload(
         "datasets": EXPECTED_DATASETS,
         "regions": (REGION,),
         "panel_a_examples": _load_panel_a_examples(run_dir, sessions),
-        "panel_b_overlap_table": _build_panel_b_overlap_table(
+        "panel_b_shift_profile_table": _build_panel_b_shift_profile_table(
             run_dir,
             sessions,
             scratch_root=scratch_root,
         ),
-        "panel_d_swap_payload": _build_panel_d_swap_payload(
+        "panel_c_overlap_table": _build_panel_c_overlap_table(
             run_dir,
             sessions,
             scratch_root=scratch_root,
         ),
-        "panel_e_decoding_error_table": panel_e_summary,
-        "panel_e_decoding_trial_error_table": panel_e_trials,
     }
 
 
 @contextmanager
 def _offline_sources(payload: Mapping[str, Any]):
     """Inject only retained campaign payloads into the canonical renderer."""
-    base = legacy._figure_2
+    example_backend = canonical._figure_2
+    overlap_backend = canonical._figure_2._figure_2
     originals: list[tuple[Any, str, Any]] = []
 
     def replace(module: Any, name: str, value: Any) -> None:
@@ -1144,13 +1512,9 @@ def _offline_sources(payload: Mapping[str, Any]):
         if str(kwargs.get("region", REGION)) != REGION:
             raise ValueError("Canonical Figure 2 requested an unexpected region.")
 
-    def load_glm(**kwargs: Any) -> dict[str, Any]:
-        require_request(kwargs)
-        return payload["panel_d_swap_payload"]
-
     def load_overlap(**kwargs: Any) -> pd.DataFrame:
         require_request(kwargs)
-        return payload["panel_b_overlap_table"]
+        return payload["panel_c_overlap_table"]
 
     def keep_filtered(table: Any, **kwargs: Any) -> Any:
         require_request(kwargs)
@@ -1160,24 +1524,32 @@ def _offline_sources(payload: Mapping[str, Any]):
             MINIMUM_STABILITY_CORRELATION
         ):
             raise ValueError("Canonical Figure 2 requested unexpected unit filters.")
-        if table is not payload["panel_b_overlap_table"]:
+        if table is not payload["panel_c_overlap_table"]:
             raise ValueError("Canonical Figure 2 attempted to refilter foreign data.")
         return table
 
-    def load_decoding(**kwargs: Any) -> pd.DataFrame:
+    def load_shift_profiles(**kwargs: Any) -> pd.DataFrame:
         require_request(kwargs)
-        return payload["panel_e_decoding_error_table"]
+        if float(kwargs["min_path_movement_firing_rate_hz"]) != (
+            MINIMUM_MOVEMENT_FIRING_RATE_HZ
+        ) or float(kwargs["min_stability_correlation"]) != (
+            MINIMUM_STABILITY_CORRELATION
+        ):
+            raise ValueError("Canonical Figure 2 requested unexpected path filters.")
+        return payload["panel_b_shift_profile_table"]
 
-    def load_decoding_trials(**kwargs: Any) -> pd.DataFrame:
-        require_request(kwargs)
-        return payload["panel_e_decoding_trial_error_table"]
-
-    replace(base, "load_panel_glm_data", load_glm)
-    replace(base, "load_panel_a_example_data", load_example)
-    replace(base, "load_panel_b_tuning_overlap_table", load_overlap)
-    replace(base, "filter_panel_b_overlap_by_even_odd_stability", keep_filtered)
-    replace(base, "load_panel_e_decoding_error_table", load_decoding)
-    replace(legacy, "build_panel_e_decoding_trial_error_table", load_decoding_trials)
+    replace(example_backend, "load_panel_a_example_data", load_example)
+    replace(overlap_backend, "load_panel_b_tuning_overlap_table", load_overlap)
+    replace(
+        overlap_backend,
+        "filter_panel_b_overlap_by_even_odd_stability",
+        keep_filtered,
+    )
+    replace(
+        canonical,
+        "load_or_compute_panel_h_shift_profile_table",
+        load_shift_profiles,
+    )
     try:
         yield
     finally:
@@ -1192,11 +1564,28 @@ def get_output_path(
 ) -> Path:
     """Return the canonical run-local Figure 2 output path."""
     output_format = str(output_format).lower()
-    if output_format not in legacy._figure_2.FIGURE_FORMATS:
+    if output_format not in canonical.FIGURE_FORMATS:
         raise ValueError(
-            f"output_format must be one of {legacy._figure_2.FIGURE_FORMATS!r}."
+            f"output_format must be one of {canonical.FIGURE_FORMATS!r}."
         )
     return Path(run_dir) / "figures" / f"{DEFAULT_OUTPUT_NAME}.{output_format}"
+
+
+def promote_figure_2(
+    payload: Mapping[str, Any],
+    *,
+    source_path: Path,
+    destination_path: Path,
+    replace: bool = False,
+) -> Path:
+    """Publish a validated run-local Figure 2 and its receipt."""
+    return promote_spyglass_figure(
+        payload,
+        source_path=source_path,
+        destination_path=destination_path,
+        artifact_kind=FIGURE_ARTIFACT_KIND,
+        replace=replace,
+    )
 
 
 def render_figure_2(
@@ -1204,8 +1593,6 @@ def render_figure_2(
     *,
     output_path: Path,
     dpi: int = DEFAULT_DPI,
-    decoding_n_permutations: int = legacy.DECODING_PERMUTATION_COUNT,
-    decoding_permutation_seed: int = legacy.DECODING_PERMUTATION_SEED,
 ) -> Path:
     """Render the canonical layout using only new campaign-backed inputs."""
     run_dir = Path(payload["run_dir"]).resolve(strict=True)
@@ -1214,36 +1601,57 @@ def render_figure_2(
         raise ValueError("Figure 2 output must remain inside its campaign run.")
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite Figure 2 output: {output_path}")
-    if output_path.suffix.lower().lstrip(".") not in legacy._figure_2.FIGURE_FORMATS:
+    provenance_path = get_figure_provenance_path(output_path)
+    if provenance_path.exists():
+        raise FileExistsError(
+            f"Refusing to overwrite Figure 2 provenance: {provenance_path}"
+        )
+    if output_path.suffix.lower().lstrip(".") not in canonical.FIGURE_FORMATS:
         raise ValueError("Figure 2 output has an unsupported format.")
     temporary_path = output_path.with_name(
         f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
     )
+    linked_output = False
     try:
         with _offline_sources(payload):
-            rendered = legacy.make_figure_2(
+            rendered = canonical.make_figure_2(
                 data_root=run_dir,
                 output_path=temporary_path,
                 datasets=payload["datasets"],
                 regions=payload["regions"],
                 light_epoch=LIGHT_EPOCH,
                 dark_epoch=None,
-                position_bin_count=legacy._figure_2.DEFAULT_POSITION_BIN_COUNT,
-                position_offset=legacy._figure_2.DEFAULT_POSITION_OFFSET,
-                speed_threshold_cm_s=legacy._figure_2.DEFAULT_SPEED_THRESHOLD_CM_S,
-                sigma_bins=legacy._figure_2.DEFAULT_SIGMA_BINS,
+                position_bin_count=(
+                    canonical._figure_2.DEFAULT_POSITION_BIN_COUNT
+                ),
+                position_offset=canonical._figure_2.DEFAULT_POSITION_OFFSET,
+                speed_threshold_cm_s=(
+                    canonical._figure_2.DEFAULT_SPEED_THRESHOLD_CM_S
+                ),
+                sigma_bins=canonical._figure_2.DEFAULT_SIGMA_BINS,
                 dpi=int(dpi),
                 panel_example_cache_dir=run_dir / "figures" / "cache",
                 refresh_panel_example_cache=False,
-                decoding_n_permutations=int(decoding_n_permutations),
-                decoding_permutation_seed=int(decoding_permutation_seed),
+                panel_tuning_similarity_cache_dir=(
+                    run_dir / "figures" / "cache"
+                ),
+                refresh_panel_tuning_similarity_cache=False,
             )
         if Path(rendered).resolve(strict=True) != temporary_path:
             raise ValueError("Figure 2 renderer returned an unexpected output path.")
         os.link(temporary_path, output_path)
+        linked_output = True
         temporary_path.unlink()
+        write_figure_provenance(
+            payload,
+            figure_path=output_path,
+            artifact_kind=FIGURE_ARTIFACT_KIND,
+        )
     except BaseException:
         temporary_path.unlink(missing_ok=True)
+        if linked_output:
+            output_path.unlink(missing_ok=True)
+            provenance_path.unlink(missing_ok=True)
         raise
     return output_path
 
@@ -1259,22 +1667,27 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-format",
-        choices=legacy._figure_2.FIGURE_FORMATS,
+        choices=canonical.FIGURE_FORMATS,
         default=DEFAULT_OUTPUT_FORMAT,
     )
     parser.add_argument("--output-path", type=Path)
+    parser.add_argument(
+        "--promote-to",
+        type=Path,
+        help=(
+            "Publish the validated artifact and receipt to this path."
+        ),
+    )
+    parser.add_argument(
+        "--replace-promoted-output",
+        action="store_true",
+        help="Explicitly replace an existing promoted artifact and receipt.",
+    )
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
-    parser.add_argument(
-        "--decoding-n-permutations",
-        type=int,
-        default=legacy.DECODING_PERMUTATION_COUNT,
-    )
-    parser.add_argument(
-        "--decoding-permutation-seed",
-        type=int,
-        default=legacy.DECODING_PERMUTATION_SEED,
-    )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.replace_promoted_output and args.promote_to is None:
+        parser.error("--replace-promoted-output requires --promote-to.")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -1292,13 +1705,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.output_path is None
         else args.output_path
     )
-    render_figure_2(
+    path = render_figure_2(
         payload,
         output_path=output_path,
         dpi=args.dpi,
-        decoding_n_permutations=args.decoding_n_permutations,
-        decoding_permutation_seed=args.decoding_permutation_seed,
     )
+    print(f"Saved current offline Spyglass Figure 2 to {path}")
+    if args.promote_to is not None:
+        promoted = promote_figure_2(
+            payload,
+            source_path=path,
+            destination_path=args.promote_to,
+            replace=args.replace_promoted_output,
+        )
+        print(f"Promoted validated Spyglass Figure 2 to {promoted}")
 
 
 if __name__ == "__main__":
@@ -1311,5 +1731,6 @@ __all__ = [
     "get_output_path",
     "load_figure_2_payload",
     "main",
+    "promote_figure_2",
     "render_figure_2",
 ]
