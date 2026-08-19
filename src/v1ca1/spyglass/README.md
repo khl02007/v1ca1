@@ -147,6 +147,58 @@ does not modify either canonical figure script, a database, NWBs, or legacy
 artifacts; only the explicit promotion step writes the requested canonical
 figure and receipt.
 
+## Database-free Supplementary Figures 1–5 validation
+
+Supplementary Figures 1 and 5 reuse the completed Figure 1 and Figure 3
+campaigns directly. Supplementary Figures 2–4 share one immutable extension
+campaign pinned to a completed Figure 2 run. For each manuscript session, the
+extension computes V1 cvPCA, dark and AB epoch-motor summaries, and the
+empirical dark/AB-to-BA swap-tuning comparison:
+
+```bash
+python -m v1ca1.spyglass.offline.supplementary_figures \
+  --run-id supplementary-figures-nwb-v1 \
+  --parent-run-id figure2-nwb-gpu-v1 \
+  --animal-name L14 --date 20240611
+```
+
+Add all four manuscript sessions with the same run ID before rendering
+Supplementary Figures 2–4. The Supplementary Figure 4 additive reference is
+the empirical pointwise construction retained by `SwapTuningCurveComparison`;
+it is not replaced by the fitted GLM additive model used in Figure 3.
+
+```bash
+python -m v1ca1.paper_figures.supplementary_figure_1_spyglass \
+  --run-id figure1d-nwb-v1 \
+  --promote-to paper_figures/output/supplementary_figure_1.svg \
+  --replace-promoted-output
+
+python -m v1ca1.paper_figures.supplementary_figure_2_spyglass \
+  --run-id supplementary-figures-nwb-v1 \
+  --promote-to paper_figures/output/supplementary_figure_2.svg \
+  --replace-promoted-output
+
+python -m v1ca1.paper_figures.supplementary_figure_3_spyglass \
+  --run-id supplementary-figures-nwb-v1 \
+  --promote-to paper_figures/output/supplementary_figure_3.svg \
+  --replace-promoted-output
+
+python -m v1ca1.paper_figures.supplementary_figure_4_spyglass \
+  --run-id supplementary-figures-nwb-v1 \
+  --promote-to paper_figures/output/supplementary_figure_4.svg \
+  --replace-promoted-output
+
+python -m v1ca1.paper_figures.supplementary_figure_5_spyglass \
+  --run-id figure3-nwb-gpu-v2 \
+  --promote-to paper_figures/output/supplementary_figure_5.svg \
+  --replace-promoted-output
+```
+
+Every adapter patches only the active canonical loader seams, renders first
+to its selected campaign, writes a checksum-bearing receipt, and promotes only
+when explicitly requested. Use a fresh run-local `--output-path` when retaining
+more than one render from the same immutable campaign.
+
 ## Database-free Figure 4 validation
 
 Figure 4 uses the completed Figure 2 campaign as a hash-pinned parent. Its
