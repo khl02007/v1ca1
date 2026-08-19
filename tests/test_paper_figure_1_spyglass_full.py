@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import json
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,16 @@ def _example(
 
 def _render_payload(run_dir: Path) -> dict[str, Any]:
     """Return the minimal payload consumed by the renderer injection layer."""
+    campaign = {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "analysis_parameters": {"pipeline": full.FULL_FIGURE_PIPELINE},
+        "sessions": [],
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(campaign),
+        encoding="utf-8",
+    )
     light_a = _example("L14", "20240611", "02_r1", 229)
     light_b = _example("L14", "20240611", "06_r3", 229)
     dark = _example("L14", "20240611", "08_r4", 229)
@@ -67,6 +79,8 @@ def _render_payload(run_dir: Path) -> dict[str, Any]:
     }
     return {
         "run_dir": run_dir,
+        "campaign": campaign,
+        "mode": "full",
         "datasets": full.EXPECTED_DATASETS,
         "regions": ("v1",),
         "panel_b_example": panel_b,
@@ -104,10 +118,15 @@ def test_cli_defaults_to_panel_d_and_accepts_full_figure_scope() -> None:
             "full",
             "--figure-scope",
             "full-figure",
+            "--promote-to",
+            "paper_figures/output/figure_1.svg",
+            "--replace-promoted-output",
         ]
     )
     assert complete.figure_scope == "full-figure"
     assert complete.asset_dir == command.DEFAULT_ASSET_DIR
+    assert complete.promote_to == Path("paper_figures/output/figure_1.svg")
+    assert complete.replace_promoted_output
 
     partial = command.parse_arguments(
         [
@@ -120,6 +139,86 @@ def test_cli_defaults_to_panel_d_and_accepts_full_figure_scope() -> None:
         ]
     )
     assert partial.mode == "l14-validation"
+
+    with pytest.raises(SystemExit):
+        command.parse_arguments(
+            [
+                "--run-id",
+                "panel-d-run",
+                "--mode",
+                "full",
+                "--promote-to",
+                "figure_1.svg",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        command.parse_arguments(
+            [
+                "--run-id",
+                "full-run",
+                "--mode",
+                "full",
+                "--replace-promoted-output",
+            ]
+        )
+
+
+def test_full_figure_cli_renders_then_promotes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs" / "full-run"
+    source = run_dir / "figures" / "current.svg"
+    destination_dir = tmp_path / "published"
+    destination_dir.mkdir()
+    destination = destination_dir / "figure_1.svg"
+    payload = {"run_dir": run_dir}
+    calls: list[tuple[Any, ...]] = []
+
+    def _load(**kwargs: Any) -> dict[str, Any]:
+        calls.append(("load", kwargs))
+        return payload
+
+    def _render(
+        observed: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> Path:
+        calls.append(("render", observed, kwargs))
+        return source
+
+    def _promote(
+        observed: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> Path:
+        calls.append(("promote", observed, kwargs))
+        return destination
+
+    monkeypatch.setattr(full, "load_full_figure_1_payload", _load)
+    monkeypatch.setattr(full, "render_full_figure_1", _render)
+    monkeypatch.setattr(full, "promote_full_figure_1", _promote)
+    command.main(
+        [
+            "--run-id",
+            "full-run",
+            "--mode",
+            "full",
+            "--figure-scope",
+            "full-figure",
+            "--output-path",
+            str(source),
+            "--promote-to",
+            str(destination),
+            "--replace-promoted-output",
+        ]
+    )
+
+    assert [call[0] for call in calls] == ["load", "render", "promote"]
+    assert calls[1][2]["output_path"] == source
+    assert calls[2][2] == {
+        "source_path": source,
+        "destination_path": destination,
+        "replace": True,
+    }
 
 
 def test_partial_session_selection_accepts_later_completed_sessions() -> None:
@@ -323,6 +422,15 @@ def test_renderer_injects_artifacts_restores_loaders_and_guards_output(
     returned = full.render_full_figure_1(payload, output_path=output)
 
     assert returned == output
+    provenance_path = full.get_full_figure_provenance_path(output)
+    provenance = full.load_json(provenance_path)
+    assert provenance["schema_version"] == (
+        full.FULL_FIGURE_PROVENANCE_SCHEMA_VERSION
+    )
+    assert provenance["run_id"] == "full-run"
+    assert provenance["mode"] == "full"
+    assert provenance["figure"]["run_relative_path"] == "figures/figure_1.svg"
+    assert provenance["figure"]["sha256"] == full.file_sha256(output)
     assert calls[0]["data_root"] == run_dir.resolve()
     assert calls[0]["decoding_n_permutations"] == (
         full.legacy.DECODING_PERMUTATION_COUNT
@@ -337,4 +445,80 @@ def test_renderer_injects_artifacts_restores_loaders_and_guards_output(
         full.render_full_figure_1(
             payload,
             output_path=tmp_path / "outside.svg",
+        )
+
+
+def test_promoter_validates_receipt_and_requires_explicit_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs" / "full-run"
+    run_dir.mkdir(parents=True)
+    payload = _render_payload(run_dir)
+    monkeypatch.setattr(
+        full,
+        "code_provenance",
+        lambda: {
+            "v1ca1_version": "test",
+            "v1ca1_git_commit": "a" * 40,
+            "v1ca1_git_dirty": False,
+        },
+    )
+
+    def _make_figure(**kwargs: Any) -> Path:
+        kwargs["output_path"].parent.mkdir(parents=True)
+        kwargs["output_path"].write_bytes(b"validated figure")
+        return kwargs["output_path"]
+
+    monkeypatch.setattr(full.legacy, "make_figure_1", _make_figure)
+    source = run_dir / "figures" / "figure_1.svg"
+    full.render_full_figure_1(payload, output_path=source)
+
+    publish_dir = tmp_path / "published"
+    publish_dir.mkdir()
+    destination = publish_dir / "figure_1.svg"
+    returned = full.promote_full_figure_1(
+        payload,
+        source_path=source,
+        destination_path=destination,
+    )
+    assert returned == destination
+    assert destination.read_bytes() == source.read_bytes()
+    published_provenance = full.load_json(
+        full.get_full_figure_provenance_path(destination)
+    )
+    assert published_provenance["promotion"]["destination_path"] == str(
+        destination.resolve()
+    )
+    assert published_provenance["promotion"]["sha256"] == full.file_sha256(
+        source
+    )
+
+    with pytest.raises(FileExistsError, match="Refusing to replace"):
+        full.promote_full_figure_1(
+            payload,
+            source_path=source,
+            destination_path=destination,
+        )
+    destination.write_bytes(b"stale")
+    full.promote_full_figure_1(
+        payload,
+        source_path=source,
+        destination_path=destination,
+        replace=True,
+    )
+    assert destination.read_bytes() == b"validated figure"
+
+    with pytest.raises(ValueError, match="outside its run"):
+        full.promote_full_figure_1(
+            payload,
+            source_path=source,
+            destination_path=run_dir / "figures" / "published.svg",
+        )
+    source.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="provenance"):
+        full.promote_full_figure_1(
+            payload,
+            source_path=source,
+            destination_path=publish_dir / "tampered.svg",
         )

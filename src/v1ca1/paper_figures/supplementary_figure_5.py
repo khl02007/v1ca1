@@ -1,4 +1,4 @@
-"""Compose ripple panels from Figure 3 and Supplementary Figure 4."""
+"""Generate Supplementary Figure 5 from existing ripple-analysis panels."""
 
 from __future__ import annotations
 
@@ -35,14 +35,10 @@ from v1ca1.paper_figures.style import (
     figure_size,
     save_figure,
 )
-from v1ca1.paper_figures.supplementary_figure_4 import (
-    PANEL_A_HISTOGRAM_BOTTOM,
-    PANEL_A_HISTOGRAM_HEIGHT,
-)
 
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
-DEFAULT_OUTPUT_NAME = "supplementary_figure_4_2"
+DEFAULT_OUTPUT_NAME = "supplementary_figure_5"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_FIGURE_WIDTH_MM = 165.0
 DEFAULT_FIGURE_HEIGHT_MM = 70.0
@@ -50,6 +46,8 @@ OUTPUT_BOTTOM_CROP_MM = 6.0
 PANEL_WIDTH_RATIOS = (1.0, 1.35, 1.0)
 PANEL_WSPACE = 0.08
 PANEL_LABEL_X_OFFSETS = (0.0, -0.08, -0.10)
+PANEL_A_HISTOGRAM_BOTTOM = 0.20
+PANEL_A_HISTOGRAM_HEIGHT = 0.70
 PANEL_A_HEATMAP_VERTICAL_BOUNDS = (
     PANEL_A_HISTOGRAM_BOTTOM,
     PANEL_A_HISTOGRAM_BOTTOM + PANEL_A_HISTOGRAM_HEIGHT,
@@ -67,7 +65,7 @@ def build_output_path(
     output_name: str,
     output_format: str,
 ) -> Path:
-    """Return the requested Supplementary Figure 4-2 output path."""
+    """Return the requested Supplementary Figure 5 output path."""
     if output_format not in FIGURE_FORMATS:
         raise ValueError(
             f"Unknown output format {output_format!r}. "
@@ -76,7 +74,7 @@ def build_output_path(
     return Path(output_dir) / f"{output_name}.{output_format}"
 
 
-def make_supplementary_figure_4_2(
+def make_supplementary_figure_5(
     *,
     data_root: Path,
     output_path: Path,
@@ -92,7 +90,7 @@ def make_supplementary_figure_4_2(
     ridge_strength: float,
     dpi: int,
 ) -> Path:
-    """Build Supplementary Figure 4-2 from three existing panel plotters."""
+    """Build Supplementary Figure 5 from three existing panel plotters."""
     import matplotlib.pyplot as plt
     from matplotlib.transforms import Bbox
 
@@ -184,7 +182,7 @@ def make_supplementary_figure_4_2(
 
     for missing in source_comparison_payload["missing_artifacts"]:
         print(
-            "Supplementary Figure 4-2 source-comparison missing "
+            "Supplementary Figure 5 source-comparison missing "
             f"{missing['artifact']} for {missing['animal_name']} "
             f"{missing['date']} {missing['epoch']} "
             f"({missing['source_predictor_mode']}): {missing['path']}"
@@ -193,21 +191,21 @@ def make_supplementary_figure_4_2(
         p_value = float(pooled_sign_test["p_value"])
         p_value_text = f"{p_value:.3g}" if np.isfinite(p_value) else "nan"
         print(
-            "Supplementary Figure 4-2 pooled one-sided paired sign test: "
+            "Supplementary Figure 5 pooled one-sided paired sign test: "
             f"{pooled_sign_test['n_vector_greater']}/"
             f"{pooled_sign_test['n_tested']} non-tied V1 units favor the "
             "CA1 vector model; "
             f"{pooled_sign_test['n_ties']} ties; p={p_value_text}"
         )
-    print(f"Saved Supplementary Figure 4-2 to {output_path}")
+    print(f"Saved Supplementary Figure 5 to {output_path}")
     return output_path
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse Supplementary Figure 4-2 command-line arguments."""
+    """Parse Supplementary Figure 5 command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate Supplementary Figure 4-2 ripple heatmap, modulation, "
+            "Generate Supplementary Figure 5 ripple heatmap, modulation, "
             "and CA1-source comparison panels."
         )
     )
@@ -294,7 +292,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Run Supplementary Figure 4-2 generation."""
+    """Run Supplementary Figure 5 generation."""
     args = parse_arguments(argv)
     datasets = args.dataset if args.dataset is not None else get_processed_datasets()
     regions = tuple(args.region) if args.region is not None else DEFAULT_REGIONS
@@ -303,7 +301,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.output_name,
         args.output_format,
     )
-    make_supplementary_figure_4_2(
+    make_supplementary_figure_5(
         data_root=args.data_root,
         output_path=output_path,
         datasets=datasets,

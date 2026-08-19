@@ -83,6 +83,24 @@ Add the remaining manuscript sessions to the same full run, then render with
 analysis artifacts, refuses to overwrite results, and writes all artifacts and
 figures below the selected run directory.
 
+After validating a new run-local render, publish it explicitly without
+weakening that immutability rule:
+
+```bash
+python -m v1ca1.paper_figures.figure_1_spyglass \
+  --figure-scope full-figure \
+  --run-id figure1-full-nwb-v2 --mode full \
+  --output-path \
+    /stelmo/kyu/analysis/spyglass/runs/figure1-full-nwb-v2/figures/figure_1_spyglass_current.svg \
+  --promote-to paper_figures/output/figure_1.svg \
+  --replace-promoted-output
+```
+
+Rendering creates a checksum-bearing provenance sidecar beside the run-local
+figure. Promotion validates that receipt and the campaign manifest, copies the
+figure atomically, and writes the corresponding receipt beside the published
+artifact. Omit `--replace-promoted-output` unless replacement is intentional.
+
 ## Database-free Figure 2 validation
 
 Figure 2 extends the completed Figure 1 campaign with AB/BA movement inputs,
@@ -103,12 +121,14 @@ Add all four manuscript sessions before rendering. The workflow writes only
 below its run directory and does not modify the canonical Figure 2 script, the
 standalone AB/gray/BA Figure 2A script, a database, NWBs, or legacy artifacts.
 
-## Database-free Figure 3 validation
+## Database-free Figure 4 validation
 
-Figure 3 uses the completed Figure 2 campaign as a hash-pinned parent. It
-computes light-epoch ripple modulation and both manuscript RippleGLM models
-for each session; L15 additionally supplies the ripple cross-correlation and
-an NWB-derived LFP/raster example. Run L14 first, using a GPU for the GLMs:
+Figure 4 uses the completed Figure 2 campaign as a hash-pinned parent. Its
+existing immutable analysis campaign retains the `figure_3` pipeline name for
+provenance compatibility. It computes light-epoch ripple modulation and both
+manuscript RippleGLM models for each session; L15 additionally supplies the
+ripple cross-correlation and an NWB-derived LFP/raster example. Run L14 first,
+using a GPU for the GLMs:
 
 ```bash
 python -m v1ca1.spyglass.offline.figure_3 \
@@ -120,7 +140,7 @@ After inspecting L14, add the other three manuscript sessions with the same
 run ID, then render the complete figure:
 
 ```bash
-python -m v1ca1.paper_figures.figure_3_spyglass \
+python -m v1ca1.paper_figures.figure_4_spyglass \
   --run-id figure3-nwb-gpu-v1
 ```
 
@@ -137,7 +157,7 @@ render into the supplement directory:
 ```bash
 python -m v1ca1.spyglass.offline.figure_3_schematic_supplement \
   --run-id figure3-schematic-v1 --base-run-id figure3-nwb-gpu-v2
-python -m v1ca1.paper_figures.figure_3_spyglass \
+python -m v1ca1.paper_figures.figure_4_spyglass \
   --run-id figure3-nwb-gpu-v2 --supplement-run-id figure3-schematic-v1
 ```
 

@@ -4,23 +4,25 @@ from pathlib import Path
 
 import pytest
 
-import v1ca1.paper_figures.supplementary_figure_4_2 as figure
+import v1ca1.paper_figures.supplementary_figure_5 as figure
 
 
 def test_defaults_and_output_path() -> None:
     args = figure.parse_arguments([])
 
-    assert figure.DEFAULT_OUTPUT_NAME == "supplementary_figure_4_2"
+    assert figure.DEFAULT_OUTPUT_NAME == "supplementary_figure_5"
     assert args.output_dir == Path("paper_figures/output")
     assert args.output_name == figure.DEFAULT_OUTPUT_NAME
     assert args.output_format == "pdf"
     assert args.ripple_selection == "single"
     assert args.region is None
+    assert figure.PANEL_A_HISTOGRAM_BOTTOM == pytest.approx(0.20)
+    assert figure.PANEL_A_HISTOGRAM_HEIGHT == pytest.approx(0.70)
     assert figure.build_output_path(
         Path("paper_figures/output"),
-        "supplementary_figure_4_2",
+        "supplementary_figure_5",
         "svg",
-    ) == Path("paper_figures/output/supplementary_figure_4_2.svg")
+    ) == Path("paper_figures/output/supplementary_figure_5.svg")
     with pytest.raises(ValueError, match="Unknown output format"):
         figure.build_output_path(Path("output"), "figure", "jpg")
 
@@ -127,8 +129,8 @@ def test_make_figure_reuses_the_three_requested_panel_plotters(
     )
     monkeypatch.setattr(figure, "save_figure", fake_save)
 
-    output_path = tmp_path / "supplementary_figure_4_2.svg"
-    saved_path = figure.make_supplementary_figure_4_2(
+    output_path = tmp_path / "supplementary_figure_5.svg"
+    saved_path = figure.make_supplementary_figure_5(
         data_root=Path("/analysis"),
         output_path=output_path,
         datasets=[("L14", "20240611", "08_r4")],

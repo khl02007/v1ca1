@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+import json
+import os
 from pathlib import Path
+import shutil
 from typing import Any
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -27,8 +31,14 @@ from v1ca1.spyglass.offline.figure_1_full import (
 )
 from v1ca1.spyglass.offline.manifests import (
     DEFAULT_SCRATCH_ROOT,
+    code_provenance,
+    file_sha256,
+    load_json,
     nwb_fingerprint,
+    relative_run_path,
     resolve_run_path,
+    utc_now,
+    write_json_once,
 )
 from v1ca1.spyglass.offline.sources import validate_nwb_session_identity
 from v1ca1.spyglass.selection import canonical_json
@@ -36,6 +46,8 @@ from v1ca1.spyglass.selection import canonical_json
 
 DEFAULT_FULL_FIGURE_OUTPUT_NAME = "figure_1_spyglass"
 DEFAULT_L14_FIGURE_OUTPUT_NAME = "figure_1_l14_spyglass_validation"
+FULL_FIGURE_PROVENANCE_SCHEMA_VERSION = 1
+FULL_FIGURE_PROVENANCE_SUFFIX = ".spyglass-provenance.json"
 FIGURE_MODES = ("l14-validation", "full")
 EXPECTED_DATASETS = tuple(get_processed_datasets())
 L14_DATASET = next(
@@ -700,6 +712,216 @@ def get_full_figure_output_path(
     )
 
 
+def get_full_figure_provenance_path(figure_path: Path) -> Path:
+    """Return the provenance sidecar path for one complete Figure 1 artifact."""
+    figure_path = Path(figure_path)
+    return figure_path.with_name(
+        f"{figure_path.name}{FULL_FIGURE_PROVENANCE_SUFFIX}"
+    )
+
+
+def _validated_campaign_manifest(
+    payload: Mapping[str, Any],
+    *,
+    run_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Return the on-disk campaign manifest matching the loaded payload."""
+    campaign = payload.get("campaign")
+    if not isinstance(campaign, Mapping):
+        raise ValueError("Complete Figure 1 payload has no campaign snapshot.")
+    manifest_path = run_dir / "manifest.json"
+    manifest = load_json(manifest_path)
+    if canonical_json(manifest) != canonical_json(dict(campaign)):
+        raise ValueError(
+            "Complete Figure 1 payload and campaign manifest disagree."
+        )
+    return manifest_path, manifest
+
+
+def _build_full_figure_provenance(
+    payload: Mapping[str, Any],
+    *,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Build one checksum-bearing receipt for a run-local Figure 1 render."""
+    run_dir = Path(payload["run_dir"]).resolve(strict=True)
+    output_path = Path(output_path).resolve(strict=True)
+    if not output_path.is_relative_to(run_dir):
+        raise ValueError("Complete Figure 1 output must remain inside its run.")
+    manifest_path, campaign = _validated_campaign_manifest(
+        payload,
+        run_dir=run_dir,
+    )
+    return {
+        "schema_version": FULL_FIGURE_PROVENANCE_SCHEMA_VERSION,
+        "artifact_kind": "complete_spyglass_figure_1",
+        "created_at_utc": utc_now(),
+        "run_id": str(campaign["run_id"]),
+        "mode": str(payload["mode"]),
+        "datasets": [list(dataset) for dataset in payload["datasets"]],
+        "regions": [str(region) for region in payload["regions"]],
+        "campaign_manifest": {
+            "run_relative_path": relative_run_path(
+                manifest_path,
+                run_dir=run_dir,
+            ),
+            "sha256": file_sha256(manifest_path),
+        },
+        "figure": {
+            "run_relative_path": relative_run_path(
+                output_path,
+                run_dir=run_dir,
+            ),
+            "format": output_path.suffix.lower().lstrip("."),
+            "size_bytes": int(output_path.stat().st_size),
+            "sha256": file_sha256(output_path),
+        },
+        "render_code_provenance": code_provenance(),
+    }
+
+
+def _load_validated_full_figure_provenance(
+    payload: Mapping[str, Any],
+    *,
+    figure_path: Path,
+) -> dict[str, Any]:
+    """Load and validate the receipt for one run-local Figure 1 artifact."""
+    run_dir = Path(payload["run_dir"]).resolve(strict=True)
+    figure_path = Path(figure_path).resolve(strict=True)
+    if not figure_path.is_relative_to(run_dir):
+        raise ValueError("Promoted Figure 1 source must remain inside its run.")
+    provenance_path = get_full_figure_provenance_path(figure_path)
+    provenance = load_json(provenance_path)
+    if provenance.get("schema_version") != (
+        FULL_FIGURE_PROVENANCE_SCHEMA_VERSION
+    ):
+        raise ValueError("Unsupported complete Figure 1 provenance schema.")
+    if provenance.get("artifact_kind") != "complete_spyglass_figure_1":
+        raise ValueError("Provenance sidecar is not for complete Figure 1.")
+
+    manifest_path, campaign = _validated_campaign_manifest(
+        payload,
+        run_dir=run_dir,
+    )
+    expected_fields = {
+        "run_id": str(campaign["run_id"]),
+        "mode": str(payload["mode"]),
+    }
+    for field, expected in expected_fields.items():
+        if str(provenance.get(field)) != expected:
+            raise ValueError(f"Figure provenance {field!r} does not match.")
+    manifest_record = provenance.get("campaign_manifest")
+    figure_record = provenance.get("figure")
+    if not isinstance(manifest_record, Mapping) or not isinstance(
+        figure_record,
+        Mapping,
+    ):
+        raise ValueError("Figure provenance is missing artifact records.")
+    if str(manifest_record.get("run_relative_path")) != relative_run_path(
+        manifest_path,
+        run_dir=run_dir,
+    ) or str(manifest_record.get("sha256")) != file_sha256(manifest_path):
+        raise ValueError("Campaign manifest changed after Figure 1 rendering.")
+    if str(figure_record.get("run_relative_path")) != relative_run_path(
+        figure_path,
+        run_dir=run_dir,
+    ):
+        raise ValueError("Figure provenance points to a different artifact.")
+    if str(figure_record.get("format")) != figure_path.suffix.lower().lstrip(
+        "."
+    ):
+        raise ValueError("Figure provenance has the wrong output format.")
+    if int(figure_record.get("size_bytes", -1)) != figure_path.stat().st_size:
+        raise ValueError("Figure 1 size no longer matches its provenance.")
+    if str(figure_record.get("sha256")) != file_sha256(figure_path):
+        raise ValueError("Figure 1 checksum no longer matches its provenance.")
+    return provenance
+
+
+def promote_full_figure_1(
+    payload: Mapping[str, Any],
+    *,
+    source_path: Path,
+    destination_path: Path,
+    replace: bool = False,
+) -> Path:
+    """Atomically publish one validated run-local Figure 1 with a receipt."""
+    run_dir = Path(payload["run_dir"]).resolve(strict=True)
+    source_path = Path(source_path).resolve(strict=True)
+    destination_path = Path(destination_path).resolve(strict=False)
+    if destination_path.is_relative_to(run_dir):
+        raise ValueError("Figure 1 promotion destination must be outside its run.")
+    if source_path.suffix.lower() != destination_path.suffix.lower():
+        raise ValueError("Promoted Figure 1 must retain its source format.")
+    if not destination_path.parent.is_dir():
+        raise FileNotFoundError(
+            "Figure 1 promotion destination directory does not exist: "
+            f"{destination_path.parent}"
+        )
+    provenance = _load_validated_full_figure_provenance(
+        payload,
+        figure_path=source_path,
+    )
+    destination_provenance_path = get_full_figure_provenance_path(
+        destination_path
+    )
+    existing = [
+        path
+        for path in (destination_path, destination_provenance_path)
+        if path.exists()
+    ]
+    if existing and not replace:
+        raise FileExistsError(
+            "Refusing to replace promoted Figure 1 artifact(s): "
+            + ", ".join(str(path) for path in existing)
+        )
+
+    token = uuid.uuid4().hex
+    staged_figure = destination_path.with_name(
+        f".{destination_path.name}.{token}.tmp"
+    )
+    staged_provenance = destination_provenance_path.with_name(
+        f".{destination_provenance_path.name}.{token}.tmp"
+    )
+    try:
+        shutil.copyfile(source_path, staged_figure)
+        source_sha256 = str(provenance["figure"]["sha256"])
+        if file_sha256(staged_figure) != source_sha256:
+            raise ValueError("Staged Figure 1 checksum differs from its source.")
+        published_provenance = {
+            **provenance,
+            "promotion": {
+                "promoted_at_utc": utc_now(),
+                "destination_path": str(destination_path),
+                "sha256": source_sha256,
+                "promotion_code_provenance": code_provenance(),
+            },
+        }
+        staged_provenance.write_text(
+            json.dumps(
+                json.loads(canonical_json(published_provenance)),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if replace:
+            os.replace(staged_figure, destination_path)
+            os.replace(staged_provenance, destination_provenance_path)
+        else:
+            os.link(staged_figure, destination_path)
+            staged_figure.unlink()
+            os.link(staged_provenance, destination_provenance_path)
+            staged_provenance.unlink()
+    finally:
+        staged_figure.unlink(missing_ok=True)
+        staged_provenance.unlink(missing_ok=True)
+    if file_sha256(destination_path) != str(provenance["figure"]["sha256"]):
+        raise ValueError("Promoted Figure 1 checksum verification failed.")
+    return destination_path
+
+
 def render_full_figure_1(
     payload: Mapping[str, Any],
     *,
@@ -715,6 +937,12 @@ def render_full_figure_1(
     if output_path.exists():
         raise FileExistsError(
             f"Refusing to overwrite complete Figure 1 output: {output_path}"
+        )
+    provenance_path = get_full_figure_provenance_path(output_path)
+    if provenance_path.exists():
+        raise FileExistsError(
+            "Refusing to overwrite complete Figure 1 provenance: "
+            f"{provenance_path}"
         )
     if output_path.suffix.lower().lstrip(".") not in legacy.FIGURE_FORMATS:
         raise ValueError(
@@ -746,6 +974,17 @@ def render_full_figure_1(
         )
     if Path(rendered).resolve(strict=True) != output_path:
         raise ValueError("Figure renderer returned an unexpected output path.")
+    try:
+        write_json_once(
+            _build_full_figure_provenance(
+                payload,
+                output_path=output_path,
+            ),
+            provenance_path,
+        )
+    except BaseException:
+        output_path.unlink(missing_ok=True)
+        raise
     return output_path
 
 
@@ -753,7 +992,10 @@ __all__ = [
     "DEFAULT_FULL_FIGURE_OUTPUT_NAME",
     "DEFAULT_L14_FIGURE_OUTPUT_NAME",
     "EXPECTED_DATASETS",
+    "FULL_FIGURE_PROVENANCE_SCHEMA_VERSION",
     "get_full_figure_output_path",
+    "get_full_figure_provenance_path",
     "load_full_figure_1_payload",
+    "promote_full_figure_1",
     "render_full_figure_1",
 ]

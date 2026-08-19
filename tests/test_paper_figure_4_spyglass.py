@@ -1,7 +1,9 @@
-"""Tests for the database-free Figure 3 artifact adapter."""
+"""Tests for the database-free Figure 4 artifact adapter."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +11,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from v1ca1.paper_figures import figure_3_spyglass as figure
+from v1ca1.paper_figures import figure_4_spyglass as figure
+
+
+def test_figure_4_adapter_is_promoted_and_uses_canonical_renderer() -> None:
+    code = (
+        "import importlib.util; "
+        "from v1ca1.paper_figures import figure_4_spyglass; "
+        "assert figure_4_spyglass.DEFAULT_OUTPUT_NAME == 'figure_4_spyglass'; "
+        "assert figure_4_spyglass.canonical.DEFAULT_OUTPUT_NAME == 'figure_4'; "
+        "assert importlib.util.find_spec("
+        "'v1ca1.paper_figures.figure_3_spyglass') is None"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def _sessions() -> list[dict[str, Any]]:
@@ -67,7 +81,7 @@ def _sessions() -> list[dict[str, Any]]:
 
 
 def _payload(run_dir: Path) -> dict[str, Any]:
-    """Return a minimal already-adapted Figure 3 payload."""
+    """Return a minimal already-adapted Figure 4 payload."""
     return {
         "run_dir": run_dir,
         "datasets": figure.EXPECTED_DATASETS,
@@ -117,7 +131,7 @@ def test_session_order_and_exact_campaign_artifact_multiplicity() -> None:
         figure._ordered_sessions(sessions[:-1])
     changed = [dict(row) for row in sessions]
     changed[0] = {**changed[0], "epochs": {"light": "06_r3"}}
-    with pytest.raises(ValueError, match="noncanonical Figure 3 epochs"):
+    with pytest.raises(ValueError, match="noncanonical Figure 4 epochs"):
         figure._ordered_sessions(changed)
 
 
@@ -541,29 +555,33 @@ def test_renderer_is_run_local_atomic_and_refuses_overwrite(
 
     monkeypatch.setattr(
         figure.legacy,
-        "load_pooled_ripple_heatmap_epoch_tables",
+        "load_glm_epoch_summary_tables",
         legacy_file_access,
     )
 
     def make_figure(**kwargs: Any) -> Path:
         calls.append(kwargs)
-        assert figure.legacy.load_pooled_ripple_heatmap_epoch_tables(
+        assert figure.legacy.load_glm_epoch_summary_tables(
             kwargs["data_root"],
             kwargs["datasets"],
             light_epoch=kwargs["light_epoch"],
             dark_epoch=kwargs["dark_epoch"],
             sleep_epoch=kwargs["sleep_epoch"],
-            ripple_threshold_zscore=kwargs["ripple_threshold_zscore"],
-        ) is payload["heatmap_epoch_tables"]
+            epoch_types=figure.legacy.PANEL_C_EPOCH_ORDER,
+            ripple_window_s=kwargs["ripple_window_s"],
+            ripple_window_offset_s=kwargs["ripple_window_offset_s"],
+            ripple_selection=kwargs["ripple_selection"],
+            ridge_strength=kwargs["ridge_strength"],
+        ) is payload["glm_epoch_tables"]
         output_path = Path(kwargs["output_path"])
         output_path.parent.mkdir(parents=True)
         output_path.write_text("figure", encoding="utf-8")
         return output_path
 
-    monkeypatch.setattr(figure.legacy, "make_figure_3", make_figure)
+    monkeypatch.setattr(figure.canonical, "make_figure_4", make_figure)
     output = figure.get_output_path(run_dir=run_dir, output_format="svg")
 
-    returned = figure.render_figure_3(payload, output_path=output)
+    returned = figure.render_figure_4(payload, output_path=output)
 
     assert returned == output.resolve()
     assert output.read_text(encoding="utf-8") == "figure"
@@ -572,24 +590,20 @@ def test_renderer_is_run_local_atomic_and_refuses_overwrite(
     assert calls[0]["light_epoch"] == "02_r1"
     assert calls[0]["dark_epoch"] is None
     assert calls[0]["sleep_epoch"] is None
-    assert calls[0]["regions"] == tuple(figure.legacy.DEFAULT_REGIONS)
-    assert calls[0]["regions"] == figure.DISPLAY_REGIONS
+    assert "regions" not in calls[0]
     assert payload["regions"] == figure.REGIONS
     assert calls[0]["ripple_threshold_zscore"] is None
-    assert (
-        figure.legacy.load_pooled_ripple_heatmap_epoch_tables
-        is legacy_file_access
-    )
+    assert figure.legacy.load_glm_epoch_summary_tables is legacy_file_access
     assert not list(output.parent.glob(".*.tmp.svg"))
     with pytest.raises(FileExistsError, match="overwrite"):
-        figure.render_figure_3(payload, output_path=output)
+        figure.render_figure_4(payload, output_path=output)
     with pytest.raises(ValueError, match="inside its campaign run"):
-        figure.render_figure_3(
+        figure.render_figure_4(
             payload,
             output_path=tmp_path / "outside.svg",
         )
     with pytest.raises(ValueError, match="unsupported format"):
-        figure.render_figure_3(
+        figure.render_figure_4(
             payload,
             output_path=run_dir / "figures" / "figure.txt",
         )
@@ -609,11 +623,15 @@ def test_failed_renderer_removes_only_its_temporary_output(
         output_path.write_text("partial", encoding="utf-8")
         raise RuntimeError("synthetic save failure")
 
-    monkeypatch.setattr(figure.legacy, "make_figure_3", fail_after_partial_write)
-    output = run_dir / "figures" / "figure_3_spyglass.svg"
+    monkeypatch.setattr(
+        figure.canonical,
+        "make_figure_4",
+        fail_after_partial_write,
+    )
+    output = run_dir / "figures" / "figure_4_spyglass.svg"
 
     with pytest.raises(RuntimeError, match="synthetic save failure"):
-        figure.render_figure_3(payload, output_path=output)
+        figure.render_figure_4(payload, output_path=output)
 
     assert not output.exists()
     assert not list(output.parent.glob(".*.tmp.svg"))
@@ -706,7 +724,7 @@ def test_supplement_replaces_only_schematic_and_moves_output_root(
         load_supplement,
     )
 
-    payload = figure.load_figure_3_payload(
+    payload = figure.load_figure_4_payload(
         run_id="base",
         supplement_run_id="supplement",
         scratch_root=tmp_path,
@@ -739,10 +757,10 @@ def test_renderer_cli_forwards_optional_supplement_run_id(
         return {"run_dir": supplement_run_dir}
 
     rendered: list[Path] = []
-    monkeypatch.setattr(figure, "load_figure_3_payload", load_payload)
+    monkeypatch.setattr(figure, "load_figure_4_payload", load_payload)
     monkeypatch.setattr(
         figure,
-        "render_figure_3",
+        "render_figure_4",
         lambda _payload, *, output_path, dpi: rendered.append(Path(output_path)),
     )
 
@@ -759,4 +777,4 @@ def test_renderer_cli_forwards_optional_supplement_run_id(
 
     assert calls[0]["run_id"] == "base"
     assert calls[0]["supplement_run_id"] == "supplement"
-    assert rendered == [supplement_run_dir / "figures" / "figure_3_spyglass.svg"]
+    assert rendered == [supplement_run_dir / "figures" / "figure_4_spyglass.svg"]

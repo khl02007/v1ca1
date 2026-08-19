@@ -1035,6 +1035,23 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--promote-to",
+        type=Path,
+        default=None,
+        help=(
+            "After a complete full-figure render, atomically copy the "
+            "validated artifact and its provenance receipt to this path."
+        ),
+    )
+    parser.add_argument(
+        "--replace-promoted-output",
+        action="store_true",
+        help=(
+            "Explicitly replace an existing promoted artifact and receipt. "
+            "Run-local artifacts remain immutable."
+        ),
+    )
+    parser.add_argument(
         "--asset-dir",
         type=Path,
         default=DEFAULT_ASSET_DIR,
@@ -1049,7 +1066,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_DPI,
         help=f"Rasterization dpi. Default: {DEFAULT_DPI}",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.promote_to is not None and args.figure_scope != "full-figure":
+        parser.error("--promote-to requires --figure-scope full-figure.")
+    if args.replace_promoted_output and args.promote_to is None:
+        parser.error("--replace-promoted-output requires --promote-to.")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -1059,6 +1081,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         from v1ca1.paper_figures._figure_1_spyglass_full import (
             get_full_figure_output_path,
             load_full_figure_1_payload,
+            promote_full_figure_1,
             render_full_figure_1,
         )
 
@@ -1088,6 +1111,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             dpi=args.dpi,
         )
         print(f"Saved complete offline Spyglass Figure 1 to {path}")
+        if args.promote_to is not None:
+            promoted = promote_full_figure_1(
+                payload,
+                source_path=path,
+                destination_path=args.promote_to,
+                replace=args.replace_promoted_output,
+            )
+            print(f"Promoted validated Spyglass Figure 1 to {promoted}")
         return
 
     payload = load_figure_1d_payload(

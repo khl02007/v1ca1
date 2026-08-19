@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Generate Supplementary Figure 3 cvPCA and motor-control panels."""
+"""Generate Supplementary Figure 3 motor-control panels."""
 
 import argparse
 import hashlib
@@ -11,14 +11,8 @@ from typing import Any
 
 import numpy as np
 
-from v1ca1.helper.session import (
-    DEFAULT_DATA_ROOT,
-    DEFAULT_POSITION_OFFSET,
-    DEFAULT_SPEED_THRESHOLD_CM_S,
-    REGIONS,
-)
+from v1ca1.helper.session import DEFAULT_DATA_ROOT
 from v1ca1.paper_figures.datasets import (
-    DEFAULT_LIGHT_EPOCH,
     DatasetId,
     get_processed_datasets,
     normalize_dataset_id,
@@ -41,9 +35,6 @@ from v1ca1.paper_figures.figure_1 import (
 from v1ca1.paper_figures._dark_light import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_FORMAT,
-    DEFAULT_POSITION_BIN_COUNT,
-    DEFAULT_REGIONS,
-    DEFAULT_SIGMA_BINS,
     FIGURE_FORMATS,
     PANEL_B_LINEAR_POSITION_ORIENTATION,
     PANEL_B_TRAJECTORY_TYPES,
@@ -88,9 +79,7 @@ DEFAULT_REORDERED_HEATMAP_HEIGHT_MM = (
 DEFAULT_MOTOR_GRID_HEIGHT_MM = 121.1
 DEFAULT_MOTOR_SUMMARY_HEIGHT_MM = 35.0
 DEFAULT_FIGURE_HEIGHT_MM = (
-    DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
-    + DEFAULT_SECTION_SPACER_MM
-    + DEFAULT_MOTOR_GRID_HEIGHT_MM
+    DEFAULT_MOTOR_GRID_HEIGHT_MM
     + DEFAULT_BOTTOM_SECTION_SPACER_MM
     + DEFAULT_MOTOR_SUMMARY_HEIGHT_MM
 )
@@ -2355,29 +2344,19 @@ def make_supplementary_figure_3(
     data_root: Path,
     output_path: Path,
     datasets: Sequence[DatasetId],
-    region: str,
-    light_epoch: str | None,
-    dark_epoch: str | None,
     dpi: int,
-    position_bin_count: int = DEFAULT_POSITION_BIN_COUNT,
-    position_offset: int = DEFAULT_POSITION_OFFSET,
-    speed_threshold_cm_s: float = DEFAULT_SPEED_THRESHOLD_CM_S,
-    sigma_bins: float = DEFAULT_SIGMA_BINS,
-    figure_1d_cache_dir: Path | None = None,
-    panel_a_cache_dir: Path | None = None,
-    refresh_panel_a_cache: bool = False,
 ) -> Path:
-    """Build and save Supplementary Figure 3."""
+    """Build and save Supplementary Figure 3 panels A and B."""
     import matplotlib.pyplot as plt
 
-    datasets = [normalize_dataset_id(dataset) for dataset in datasets]
+    dataset_ids = [normalize_dataset_id(dataset) for dataset in datasets]
 
     apply_paper_style()
     fig = plt.figure(
         figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
         constrained_layout=False,
     )
-    if not datasets:
+    if not dataset_ids:
         ax = fig.add_subplot(1, 1, 1)
         ax.text(0.5, 0.5, "No datasets", ha="center", va="center", fontsize=6.0)
         ax.axis("off")
@@ -2387,11 +2366,9 @@ def make_supplementary_figure_3(
         return output_path
 
     outer_grid = fig.add_gridspec(
-        nrows=5,
+        nrows=3,
         ncols=1,
         height_ratios=[
-            DEFAULT_REORDERED_HEATMAP_HEIGHT_MM,
-            DEFAULT_SECTION_SPACER_MM,
             DEFAULT_MOTOR_GRID_HEIGHT_MM,
             DEFAULT_BOTTOM_SECTION_SPACER_MM,
             DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
@@ -2402,40 +2379,20 @@ def make_supplementary_figure_3(
         top=PANEL_A_GRID_TOP,
         bottom=PANEL_A_GRID_BOTTOM,
     )
-    panel_a_grid = outer_grid[0, 0].subgridspec(
-        nrows=1,
-        ncols=3,
-        width_ratios=[
-            (1.0 - PANEL_A_CV_PCA_SIZE_FRACTION) / 2.0,
-            PANEL_A_CV_PCA_SIZE_FRACTION,
-            (1.0 - PANEL_A_CV_PCA_SIZE_FRACTION) / 2.0,
-        ],
-        wspace=0.0,
-    )
-    panel_a_axis = fig.add_subplot(panel_a_grid[0, 1])
-    panel_a_cv_pca_table = load_panel_a_cv_pca_participation_ratio_table(
-        data_root=data_root,
-        datasets=datasets,
-    )
-    plot_panel_a_cv_pca_participation_ratios(panel_a_axis, panel_a_cv_pca_table)
-
-    spacer_axis = fig.add_subplot(outer_grid[1, 0])
-    spacer_axis.axis("off")
-
-    add_supplementary_figure_3_bc_panels(
+    motor_axes, motor_summary_axes = add_supplementary_figure_3_bc_panels(
         fig,
+        outer_grid[0, 0],
+        outer_grid[1, 0],
         outer_grid[2, 0],
-        outer_grid[3, 0],
-        outer_grid[4, 0],
         data_root=data_root,
-        datasets=datasets,
+        datasets=dataset_ids,
+        panel_b_label="A",
+        panel_c_label="B",
     )
-    label_axis(
-        panel_a_axis,
-        "A",
-        x=-0.035,
-        y=1.05,
-    )
+    for ax in motor_axes[-1, :]:
+        ax.xaxis.label.set_text("Norm. path progression")
+    for ax in motor_summary_axes:
+        ax.xaxis.label.set_text("Dark-light correlation")
 
     save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
     plt.close(fig)
@@ -2446,10 +2403,7 @@ def make_supplementary_figure_3(
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for Supplementary Figure 3 generation."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Generate Supplementary Figure 3 cvPCA and per-animal "
-            "Figure 3C-E panels."
-        )
+        description="Generate Supplementary Figure 3 motor-control panels."
     )
     parser.add_argument(
         "--data-root",
@@ -2480,77 +2434,9 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="append",
         type=parse_dataset_id,
         help=(
-            "Animal/date data set to include as animal:date. May be repeated. "
+            "Animal/date data set to include as animal:date[:dark_epoch]. "
+            "May be repeated. "
             "Default: use v1ca1.paper_figures.datasets."
-        ),
-    )
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        default=DEFAULT_REGIONS[0],
-        help=f"Region to include. Default: {DEFAULT_REGIONS[0]}.",
-    )
-    parser.add_argument(
-        "--light-epoch",
-        default=None,
-        help=(
-            "Light run epoch for the reordered heatmap and Figure 3D-F panels. "
-            f"Default: registry value, currently {DEFAULT_LIGHT_EPOCH} unless overridden."
-        ),
-    )
-    parser.add_argument(
-        "--dark-epoch",
-        default=None,
-        help="Dark run epoch. Default: registry value for each animal.",
-    )
-    parser.add_argument(
-        "--position-bin-count",
-        type=int,
-        default=DEFAULT_POSITION_BIN_COUNT,
-        help=(
-            "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {DEFAULT_POSITION_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore. "
-            f"Default: {DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {DEFAULT_SIGMA_BINS}",
-    )
-    parser.add_argument(
-        "--panel-a-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Deprecated compatibility option; current Supplementary Figure 3A "
-            "reads cvPCA parquet summaries."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-a-cache",
-        action="store_true",
-        help=(
-            "Deprecated compatibility option; current Supplementary Figure 3A "
-            "does not use cached panel data."
         ),
     )
     parser.add_argument(
@@ -2575,15 +2461,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         data_root=args.data_root,
         output_path=output_path,
         datasets=datasets,
-        region=args.region,
-        light_epoch=args.light_epoch,
-        dark_epoch=args.dark_epoch,
-        position_bin_count=args.position_bin_count,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
-        sigma_bins=args.sigma_bins,
-        panel_a_cache_dir=args.panel_a_cache_dir,
-        refresh_panel_a_cache=args.refresh_panel_a_cache,
         dpi=args.dpi,
     )
 

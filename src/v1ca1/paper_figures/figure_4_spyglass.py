@@ -1,4 +1,4 @@
-"""Render Figure 3 from a completed database-free Spyglass campaign."""
+"""Render Figure 4 from a completed database-free Spyglass campaign."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import uuid
 import numpy as np
 import pandas as pd
 
+from v1ca1.paper_figures import figure_4 as canonical
 from v1ca1.paper_figures import figure_3_old as legacy
 from v1ca1.paper_figures.datasets import get_processed_datasets, normalize_dataset_id
 from v1ca1.spyglass import (
@@ -31,13 +32,12 @@ from v1ca1.spyglass.offline.sources import validate_nwb_session_identity
 from v1ca1.spyglass.selection import canonical_json
 
 
-DEFAULT_OUTPUT_NAME = "figure_3_spyglass"
+DEFAULT_OUTPUT_NAME = "figure_4_spyglass"
 DEFAULT_OUTPUT_FORMAT = "svg"
 DEFAULT_DPI = 300
 EXPECTED_DATASETS = tuple(get_processed_datasets())
 LIGHT_EPOCH = "02_r1"
 REGIONS = ("ca1", "v1")
-DISPLAY_REGIONS = tuple(legacy.DEFAULT_REGIONS)
 GLM_SOURCE_MODES = (
     ripple_glm.DEFAULT_SOURCE_PREDICTOR_MODE,
     "mean_activity",
@@ -100,14 +100,14 @@ def _ordered_sessions(
         session = dict(raw_session)
         key = (str(session.get("animal_name")), str(session.get("date")))
         if key in by_key:
-            raise ValueError(f"Figure 3 campaign duplicates session {key!r}.")
+            raise ValueError(f"Figure 4 campaign duplicates session {key!r}.")
         by_key[key] = session
     expected = {
         (animal_name, date) for animal_name, date, _dark_epoch in EXPECTED_DATASETS
     }
     if set(by_key) != expected:
         raise ValueError(
-            "Figure 3 requires exactly the four manuscript sessions; "
+            "Figure 4 requires exactly the four manuscript sessions; "
             f"expected {sorted(expected)!r}, got {sorted(by_key)!r}."
         )
 
@@ -116,11 +116,11 @@ def _ordered_sessions(
         session = by_key[(animal_name, date)]
         if session.get("epochs") != {"light": LIGHT_EPOCH}:
             raise ValueError(
-                f"Session {animal_name} {date} has noncanonical Figure 3 epochs."
+                f"Session {animal_name} {date} has noncanonical Figure 4 epochs."
             )
         if tuple(session.get("regions", ())) != REGIONS:
             raise ValueError(
-                f"Session {animal_name} {date} has noncanonical Figure 3 regions."
+                f"Session {animal_name} {date} has noncanonical Figure 4 regions."
             )
         ordered.append(session)
     return ordered
@@ -149,7 +149,7 @@ def _load_nwb_sorting_unit_maps(
         if canonical_json(nwb_fingerprint(nwb_path, nwbfile)) != canonical_json(
             session["nwb_fingerprint"]
         ):
-            raise ValueError("Source NWB changed after Figure 3 computation.")
+            raise ValueError("Source NWB changed after Figure 4 computation.")
         units = getattr(nwbfile, "units", None)
         if units is None:
             raise ValueError("Augmented NWB has no Units table.")
@@ -588,11 +588,11 @@ def _build_source_comparison_payload(
 def _build_prediction_examples(
     glm_results: Mapping[tuple[str, str, str], Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Extract the fixed Figure 3 observed/predicted V1 examples."""
+    """Extract the fixed Figure 4 observed/predicted V1 examples."""
     output = []
     for animal_name, date, epoch, unit_id in legacy.DEFAULT_PANEL_B_PREDICTION_EXAMPLES:
         if str(epoch) != LIGHT_EPOCH:
-            raise ValueError("Figure 3 prediction examples must use the light epoch.")
+            raise ValueError("Figure 4 prediction examples must use the light epoch.")
         loaded = glm_results[(str(animal_name), str(date), "unit_vector")]
         dataset = loaded["dataset"]
         units = np.asarray(dataset.coords["unit"].values, dtype=int)
@@ -660,7 +660,7 @@ def _load_dark_movement_table(
     parent = session["parent_artifacts"]
     record = dict(parent["dark_movement_firing_rate"])
     # The initial Figure 1 manifest predates per-record artifact_origin fields.
-    # The Figure 3 campaign loader validates the complete, computed parent chain
+    # The Figure 4 campaign loader validates the complete, computed parent chain
     # and the exact parent session/artifact checksums before returning this row.
     source_root = _parent_run_dir(
         session,
@@ -1031,13 +1031,13 @@ def _load_schematic_payload(
     )
 
 
-def load_figure_3_payload(
+def load_figure_4_payload(
     *,
     run_id: str,
     supplement_run_id: str | None = None,
     scratch_root: Path = DEFAULT_SCRATCH_ROOT,
 ) -> dict[str, Any]:
-    """Load every artifact needed by canonical Figure 3 without legacy paths."""
+    """Load every artifact needed by canonical Figure 4 without legacy paths."""
     from v1ca1.spyglass.offline.figure_3 import (
         FIGURE_3_PIPELINE,
         load_figure_3_campaign,
@@ -1050,7 +1050,10 @@ def load_figure_3_payload(
     if str(campaign.get("analysis_parameters", {}).get("pipeline")) != (
         FIGURE_3_PIPELINE
     ):
-        raise ValueError("Selected campaign is not a Figure 3 offline run.")
+        raise ValueError(
+            "Selected campaign is not the retained offline Figure 3 run "
+            "required by Figure 4."
+        )
     sessions = _ordered_sessions(unordered_sessions)
     unit_maps = {
         (str(session["animal_name"]), str(session["date"])): (
@@ -1119,13 +1122,13 @@ def _require_common_request(
     if Path(data_root).resolve(strict=True) != Path(payload["run_dir"]).resolve(
         strict=True
     ):
-        raise _UnexpectedLegacyRequest("Canonical Figure 3 requested a foreign root.")
+        raise _UnexpectedLegacyRequest("Canonical Figure 4 requested a foreign root.")
     observed = tuple(normalize_dataset_id(value) for value in datasets)
     if observed != tuple(payload["datasets"]):
-        raise _UnexpectedLegacyRequest("Canonical Figure 3 requested foreign sessions.")
+        raise _UnexpectedLegacyRequest("Canonical Figure 4 requested foreign sessions.")
     expected_epochs = {"light_epoch": LIGHT_EPOCH, "dark_epoch": None, "sleep_epoch": None}
     if any(kwargs.get(name) != value for name, value in expected_epochs.items()):
-        raise _UnexpectedLegacyRequest("Canonical Figure 3 requested foreign epochs.")
+        raise _UnexpectedLegacyRequest("Canonical Figure 4 requested foreign epochs.")
 
 
 def _require_glm_settings(kwargs: Mapping[str, Any]) -> None:
@@ -1146,7 +1149,7 @@ def _require_glm_settings(kwargs: Mapping[str, Any]) -> None:
     ) or str(kwargs.get("ripple_selection")) != (
         legacy.DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION
     ):
-        raise _UnexpectedLegacyRequest("Canonical Figure 3 requested foreign GLM settings.")
+        raise _UnexpectedLegacyRequest("Canonical Figure 4 requested foreign GLM settings.")
 
 
 @contextmanager
@@ -1161,32 +1164,32 @@ def _offline_sources(payload: Mapping[str, Any]):
     def load_heatmaps(data_root: Path, datasets: Sequence[Any], **kwargs: Any) -> Any:
         _require_common_request(data_root, datasets, kwargs, payload=payload)
         if kwargs.get("ripple_threshold_zscore") is not None:
-            raise _UnexpectedLegacyRequest("Figure 3 cannot rethreshold NWB ripples.")
+            raise _UnexpectedLegacyRequest("Figure 4 cannot rethreshold NWB ripples.")
         return payload["heatmap_epoch_tables"]
 
     def load_glm_epochs(data_root: Path, datasets: Sequence[Any], **kwargs: Any) -> Any:
         _require_common_request(data_root, datasets, kwargs, payload=payload)
         _require_glm_settings(kwargs)
         if tuple(kwargs.get("epoch_types", ())) != legacy.PANEL_C_EPOCH_ORDER:
-            raise _UnexpectedLegacyRequest("Figure 3 requested foreign GLM epochs.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested foreign GLM epochs.")
         return payload["glm_epoch_tables"]
 
     def load_schematic(data_root: Path, **kwargs: Any) -> Any:
         if Path(data_root).resolve(strict=True) != Path(payload["run_dir"]).resolve(
             strict=True
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested a foreign schematic root.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested a foreign schematic root.")
         expected = legacy.DEFAULT_PANEL_B_SCHEMATIC_DATASET
         observed = tuple(str(kwargs[name]) for name in ("animal_name", "date", "epoch"))
         if observed != expected or kwargs.get("ripple_threshold_zscore") is not None:
-            raise _UnexpectedLegacyRequest("Figure 3 requested a foreign schematic.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested a foreign schematic.")
         return payload["schematic_payload"]
 
     def load_predictions(data_root: Path, **kwargs: Any) -> Any:
         if Path(data_root).resolve(strict=True) != Path(payload["run_dir"]).resolve(
             strict=True
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested foreign predictions.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested foreign predictions.")
         _require_glm_settings(kwargs)
         return payload["prediction_examples"]
 
@@ -1206,7 +1209,7 @@ def _offline_sources(payload: Mapping[str, Any]):
             )
             != legacy.DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested foreign Panel E inputs.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested foreign Panel E inputs.")
         return payload["behavior_payload"]
 
     def load_source_comparison(
@@ -1219,14 +1222,14 @@ def _offline_sources(payload: Mapping[str, Any]):
         if tuple(kwargs.get("epoch_types", legacy.PANEL_E_GLM_EPOCH_ORDER)) != (
             legacy.PANEL_E_GLM_EPOCH_ORDER
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested foreign Panel D epochs.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested foreign Panel D epochs.")
         return payload["source_comparison_payload"]
 
     def load_xcorr(data_root: Path, **kwargs: Any) -> Any:
         if Path(data_root).resolve(strict=True) != Path(payload["run_dir"]).resolve(
             strict=True
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested a foreign XCorr root.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested a foreign XCorr root.")
         expected_identity = legacy.DEFAULT_XCORR_DATASET
         observed_identity = tuple(
             str(kwargs.get(name)) for name in ("animal_name", "date", "epoch")
@@ -1251,11 +1254,11 @@ def _offline_sources(payload: Mapping[str, Any]):
                 for name, value in expected_numbers.items()
             )
         ):
-            raise _UnexpectedLegacyRequest("Figure 3 requested a foreign XCorr result.")
+            raise _UnexpectedLegacyRequest("Figure 4 requested a foreign XCorr result.")
         return _legacy_xcorr_display_precision(payload["xcorr_payload"])
 
     def forbid_fallback(*_args: Any, **_kwargs: Any) -> Any:
-        raise _UnexpectedLegacyRequest("Synthetic or legacy Figure 3 fallback is disabled.")
+        raise _UnexpectedLegacyRequest("Synthetic or legacy Figure 4 fallback is disabled.")
 
     replace("load_pooled_ripple_heatmap_epoch_tables", load_heatmaps)
     replace("load_glm_epoch_summary_tables", load_glm_epochs)
@@ -1279,14 +1282,16 @@ def get_output_path(
     run_dir: Path,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
 ) -> Path:
-    """Return the canonical run-local Figure 3 output path."""
+    """Return the canonical run-local Figure 4 output path."""
     output_format = str(output_format).lower()
-    if output_format not in legacy.FIGURE_FORMATS:
-        raise ValueError(f"output_format must be one of {legacy.FIGURE_FORMATS!r}.")
+    if output_format not in canonical.FIGURE_FORMATS:
+        raise ValueError(
+            f"output_format must be one of {canonical.FIGURE_FORMATS!r}."
+        )
     return Path(run_dir) / "figures" / f"{DEFAULT_OUTPUT_NAME}.{output_format}"
 
 
-def render_figure_3(
+def render_figure_4(
     payload: Mapping[str, Any],
     *,
     output_path: Path,
@@ -1296,17 +1301,17 @@ def render_figure_3(
     run_dir = Path(payload["run_dir"]).resolve(strict=True)
     output_path = Path(output_path).resolve(strict=False)
     if not output_path.is_relative_to(run_dir):
-        raise ValueError("Figure 3 output must remain inside its campaign run.")
+        raise ValueError("Figure 4 output must remain inside its campaign run.")
     if output_path.exists():
-        raise FileExistsError(f"Refusing to overwrite Figure 3 output: {output_path}")
-    if output_path.suffix.lower().lstrip(".") not in legacy.FIGURE_FORMATS:
-        raise ValueError("Figure 3 output has an unsupported format.")
+        raise FileExistsError(f"Refusing to overwrite Figure 4 output: {output_path}")
+    if output_path.suffix.lower().lstrip(".") not in canonical.FIGURE_FORMATS:
+        raise ValueError("Figure 4 output has an unsupported format.")
     temporary_path = output_path.with_name(
         f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
     )
     try:
         with _offline_sources(payload):
-            rendered = legacy.make_figure_3(
+            rendered = canonical.make_figure_4(
                 data_root=run_dir,
                 output_path=temporary_path,
                 datasets=payload["datasets"],
@@ -1314,7 +1319,6 @@ def render_figure_3(
                 light_epoch=LIGHT_EPOCH,
                 dark_epoch=None,
                 sleep_epoch=None,
-                regions=DISPLAY_REGIONS,
                 ripple_threshold_zscore=None,
                 ripple_window_s=legacy.DEFAULT_RIPPLE_WINDOW_S,
                 ripple_window_offset_s=legacy.DEFAULT_RIPPLE_WINDOW_OFFSET_S,
@@ -1329,7 +1333,7 @@ def render_figure_3(
                 ),
             )
         if Path(rendered).resolve(strict=True) != temporary_path:
-            raise ValueError("Figure 3 renderer returned an unexpected output path.")
+            raise ValueError("Figure 4 renderer returned an unexpected output path.")
         os.link(temporary_path, output_path)
         temporary_path.unlink()
     except BaseException:
@@ -1339,7 +1343,7 @@ def render_figure_3(
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the database-free Figure 3 renderer arguments."""
+    """Parse the database-free Figure 4 renderer arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--supplement-run-id")
@@ -1350,7 +1354,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-format",
-        choices=legacy.FIGURE_FORMATS,
+        choices=canonical.FIGURE_FORMATS,
         default=DEFAULT_OUTPUT_FORMAT,
     )
     parser.add_argument("--output-path", type=Path)
@@ -1359,9 +1363,9 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Load a complete campaign and render Figure 3 without DataJoint."""
+    """Load a complete campaign and render Figure 4 without DataJoint."""
     args = parse_arguments(argv)
-    payload = load_figure_3_payload(
+    payload = load_figure_4_payload(
         run_id=args.run_id,
         supplement_run_id=args.supplement_run_id,
         scratch_root=args.scratch_root,
@@ -1374,7 +1378,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.output_path is None
         else args.output_path
     )
-    render_figure_3(payload, output_path=output_path, dpi=args.dpi)
+    render_figure_4(payload, output_path=output_path, dpi=args.dpi)
 
 
 if __name__ == "__main__":
@@ -1385,7 +1389,7 @@ __all__ = [
     "DEFAULT_OUTPUT_NAME",
     "EXPECTED_DATASETS",
     "get_output_path",
-    "load_figure_3_payload",
+    "load_figure_4_payload",
     "main",
-    "render_figure_3",
+    "render_figure_4",
 ]

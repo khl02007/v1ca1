@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +18,6 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
     DEFAULT_MOTOR_GRID_HEIGHT_MM,
     DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
     DEFAULT_REORDERED_HEATMAP_HEIGHT_MM,
-    DEFAULT_SECTION_SPACER_MM,
     DARK_LIGHT_CORRELATION_MIN_MOVEMENT_FIRING_RATE_HZ,
     MOTOR_PANEL_ANIMAL_NAME,
     MOTOR_PANEL_LIGHT_EPOCH,
@@ -62,28 +63,28 @@ from v1ca1.paper_figures.supplementary_figure_3 import (
 )
 
 
-def test_default_cli_matches_figure_3_size_and_region() -> None:
+def test_default_cli_keeps_only_motor_control_panels() -> None:
     args = parse_arguments([])
 
+    assert args.output_dir == supp_figure_3_module.DEFAULT_OUTPUT_DIR
     assert DEFAULT_OUTPUT_NAME == "supplementary_figure_3"
+    assert args.output_name == DEFAULT_OUTPUT_NAME
+    assert args.output_format == supp_figure_3_module.DEFAULT_OUTPUT_FORMAT
     assert DEFAULT_FIGURE_WIDTH_MM == pytest.approx(
         figure_1_module.DEFAULT_FIGURE_WIDTH_MM
     )
     assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(
-        DEFAULT_REORDERED_HEATMAP_HEIGHT_MM
-        + DEFAULT_SECTION_SPACER_MM
-        + DEFAULT_MOTOR_GRID_HEIGHT_MM
+        DEFAULT_MOTOR_GRID_HEIGHT_MM
         + DEFAULT_BOTTOM_SECTION_SPACER_MM
         + DEFAULT_MOTOR_SUMMARY_HEIGHT_MM
     )
-    assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(221.7)
-    assert args.region == dark_light_module.DEFAULT_REGIONS[0]
-    assert args.light_epoch is None
-    assert args.dark_epoch is None
-    assert args.position_bin_count == dark_light_module.DEFAULT_POSITION_BIN_COUNT
-    assert args.sigma_bins == dark_light_module.DEFAULT_SIGMA_BINS
-    assert args.panel_a_cache_dir is None
-    assert args.refresh_panel_a_cache is False
+    assert DEFAULT_FIGURE_HEIGHT_MM == pytest.approx(178.1)
+    assert not hasattr(args, "region")
+    assert not hasattr(args, "light_epoch")
+    assert not hasattr(args, "dark_epoch")
+    assert not hasattr(args, "position_bin_count")
+    assert not hasattr(args, "panel_a_cache_dir")
+    assert not hasattr(args, "refresh_panel_a_cache")
     assert REORDERED_HEATMAP_CMAP == supp_figure_3_module.PANEL_D_HEATMAP_CMAP
     assert REORDERED_HEATMAP_VMAX == pytest.approx(1.0)
     assert REORDERED_HEATMAP_MIN_LIGHT_STABILITY_CORRELATION == pytest.approx(0.5)
@@ -91,6 +92,57 @@ def test_default_cli_matches_figure_3_size_and_region() -> None:
     assert DEFAULT_REORDERED_HEATMAP_HEIGHT_MM == pytest.approx(
         figure_1_module.DEFAULT_HEATMAP_HEIGHT_MM * PANEL_A_CV_PCA_SIZE_FRACTION
     )
+
+
+def test_main_builds_named_output_and_forwards_relevant_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_make_supplementary_figure_3(**kwargs: object) -> Path:
+        calls.update(kwargs)
+        return Path(kwargs["output_path"])
+
+    monkeypatch.setattr(
+        supp_figure_3_module,
+        "make_supplementary_figure_3",
+        fake_make_supplementary_figure_3,
+    )
+    supp_figure_3_module.main(
+        [
+            "--data-root",
+            "/analysis",
+            "--output-dir",
+            str(tmp_path),
+            "--format",
+            "svg",
+            "--dataset",
+            "L14:20240611:08_r4",
+            "--dpi",
+            "144",
+        ]
+    )
+
+    assert calls == {
+        "data_root": Path("/analysis"),
+        "output_path": tmp_path / "supplementary_figure_3.svg",
+        "datasets": [("L14", "20240611", "08_r4")],
+        "dpi": 144,
+    }
+
+
+def test_canonical_supplementary_figure_3_is_promoted_and_independent() -> None:
+    code = (
+        "import importlib.util; "
+        "from v1ca1.paper_figures import supplementary_figure_3; "
+        "assert supplementary_figure_3.DEFAULT_OUTPUT_NAME == "
+        "'supplementary_figure_3'; "
+        "assert supplementary_figure_3.DEFAULT_FIGURE_HEIGHT_MM == 178.1; "
+        "assert importlib.util.find_spec("
+        "'v1ca1.paper_figures.supplementary_figure_3_3') is None"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def test_panel_a_cache_path_and_roundtrip(tmp_path: Path) -> None:
@@ -989,7 +1041,7 @@ def test_plot_dark_light_with_light_stability_histograms_overlays_step() -> None
     plt.close(fig)
 
 
-def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
+def test_make_supplementary_figure_3_relabels_motor_control_panels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -998,27 +1050,14 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     matplotlib.use("Agg")
 
     calls: dict[str, object] = {}
-    panel_a_cv_pca_load_calls = []
-    panel_a_cv_pca_plot_tables = []
     motor_load_calls = []
     motor_plot_calls = []
     motor_summary_build_calls = []
     motor_summary_plot_calls = []
 
-    def fake_load_panel_a_cv_pca_participation_ratio_table(**kwargs: object):
-        panel_a_cv_pca_load_calls.append(kwargs)
-        return pandas.DataFrame(
-            {
-                "animal_name": ["L14", "L14", "L15", "L15"],
-                "date": ["20240611", "20240611", "20241121", "20241121"],
-                "condition": ["dark", "light", "dark", "light"],
-                "participation_ratio": [4.0, 6.0, 5.0, 7.0],
-            }
-        )
-
-    def fake_plot_panel_a_cv_pca_participation_ratios(ax, table):
-        panel_a_cv_pca_plot_tables.append(table)
-        ax.text(0.5, 0.5, "A")
+    def fail_if_panel_a_is_used(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("Supplementary Figure 3 used the omitted cvPCA panel")
 
     def fake_load_panel_b_motor_progression_table(**kwargs: object):
         motor_load_calls.append(kwargs)
@@ -1072,17 +1111,21 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
             for text in ax.texts
             if text.get_fontweight() == "bold"
         ]
+        calls["figure_titles"] = [text.get_text() for text in figure.texts]
+        calls["axis_count"] = len(figure.axes)
+        calls["axis_off_count"] = sum(not ax.axison for ax in figure.axes)
         return output_path
 
+    monkeypatch.setattr(supp_figure_3_module, "apply_paper_style", lambda: None)
     monkeypatch.setattr(
         supp_figure_3_module,
         "load_panel_a_cv_pca_participation_ratio_table",
-        fake_load_panel_a_cv_pca_participation_ratio_table,
+        fail_if_panel_a_is_used,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
         "plot_panel_a_cv_pca_participation_ratios",
-        fake_plot_panel_a_cv_pca_participation_ratios,
+        fail_if_panel_a_is_used,
     )
     monkeypatch.setattr(
         supp_figure_3_module,
@@ -1112,9 +1155,6 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
         data_root=Path("/analysis"),
         output_path=output_path,
         datasets=datasets,
-        region="v1",
-        light_epoch=None,
-        dark_epoch=None,
         dpi=300,
     )
 
@@ -1124,16 +1164,17 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     assert calls["output_path"] == output_path
     assert calls["dpi"] == 300
     assert calls["save_kwargs"] == {"bbox_inches": None}
-    assert calls["panel_labels"] == ["A", "B", "C"]
-    assert panel_a_cv_pca_load_calls == [
-        {"data_root": Path("/analysis"), "datasets": datasets}
+    assert calls["panel_labels"] == ["A", "B"]
+    assert calls["figure_titles"] == [
+        supp_figure_3_module.PANEL_C_TITLE,
+        supp_figure_3_module.PANEL_B_TITLE,
     ]
-    assert panel_a_cv_pca_plot_tables[0]["participation_ratio"].tolist() == [
-        4.0,
-        6.0,
-        5.0,
-        7.0,
-    ]
+    assert calls["axis_count"] == (
+        len(MOTOR_VARIABLES) * len(dark_light_module.PANEL_B_TRAJECTORY_TYPES)
+        + 1
+        + len(dark_light_module.PANEL_B_TRAJECTORY_TYPES)
+    )
+    assert calls["axis_off_count"] == 1
     assert motor_load_calls == [
         {"data_root": Path("/analysis"), "datasets": datasets}
     ]
@@ -1149,3 +1190,70 @@ def test_make_supplementary_figure_3_plots_cv_pca_motor_and_bottom_panels(
     )
     assert motor_summary_plot_calls[0]["datasets"] == datasets
     assert motor_summary_plot_calls[0]["table"]["correlation"].tolist() == [0.95]
+
+    motor_axes = motor_plot_calls[0]["axes"]
+    summary_axes = motor_summary_plot_calls[0]["axes"]
+    assert [ax.get_xlabel() for ax in motor_axes[-1, :]] == [
+        "Norm. path progression"
+    ] * len(dark_light_module.PANEL_B_TRAJECTORY_TYPES)
+    assert all(not ax.get_xlabel() for ax in motor_axes[:-1, :].ravel())
+    assert [ax.get_xlabel() for ax in summary_axes] == [
+        "Dark-light correlation"
+    ] * len(dark_light_module.PANEL_B_TRAJECTORY_TYPES)
+    assert motor_axes[0, 0].texts[-1].get_position() == pytest.approx(
+        (-0.28, 1.05)
+    )
+    assert summary_axes[0].texts[-1].get_position() == pytest.approx(
+        (-0.30, 1.05)
+    )
+
+    motor_grid = motor_axes[0, 0].get_subplotspec().get_gridspec()
+    summary_grid = summary_axes[0].get_subplotspec().get_gridspec()
+    motor_grid_params = motor_grid.get_subplot_params()
+    summary_grid_params = summary_grid.get_subplot_params()
+    assert motor_grid.get_geometry() == (
+        len(MOTOR_VARIABLES),
+        len(dark_light_module.PANEL_B_TRAJECTORY_TYPES),
+    )
+    assert motor_grid_params.hspace == pytest.approx(
+        supp_figure_3_module.MOTOR_GRID_HSPACE
+    )
+    assert motor_grid_params.wspace == pytest.approx(
+        supp_figure_3_module.MOTOR_GRID_WSPACE
+    )
+    assert summary_grid.get_geometry() == (
+        1,
+        len(dark_light_module.PANEL_B_TRAJECTORY_TYPES),
+    )
+    assert summary_grid_params.wspace == pytest.approx(
+        supp_figure_3_module.MOTOR_SUMMARY_GRID_WSPACE
+    )
+
+    motor_outer_spec = motor_axes[0, 0].get_subplotspec().get_topmost_subplotspec()
+    summary_outer_spec = summary_axes[0].get_subplotspec().get_topmost_subplotspec()
+    outer_grid = motor_outer_spec.get_gridspec()
+    outer_grid_params = outer_grid.get_subplot_params()
+    assert motor_outer_spec.rowspan.start == 0
+    assert summary_outer_spec.rowspan.start == 2
+    assert outer_grid.get_height_ratios() == pytest.approx(
+        [
+            DEFAULT_MOTOR_GRID_HEIGHT_MM,
+            DEFAULT_BOTTOM_SECTION_SPACER_MM,
+            DEFAULT_MOTOR_SUMMARY_HEIGHT_MM,
+        ]
+    )
+    assert outer_grid_params.hspace == pytest.approx(
+        supp_figure_3_module.PANEL_GRID_HSPACE
+    )
+    assert outer_grid_params.left == pytest.approx(
+        supp_figure_3_module.PANEL_A_GRID_LEFT
+    )
+    assert outer_grid_params.right == pytest.approx(
+        supp_figure_3_module.PANEL_A_GRID_RIGHT
+    )
+    assert outer_grid_params.top == pytest.approx(
+        supp_figure_3_module.PANEL_A_GRID_TOP
+    )
+    assert outer_grid_params.bottom == pytest.approx(
+        supp_figure_3_module.PANEL_A_GRID_BOTTOM
+    )
