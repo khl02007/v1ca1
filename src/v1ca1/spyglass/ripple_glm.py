@@ -24,6 +24,14 @@ SUMMARY_FILENAME = "summary.parquet"
 RESULT_FILENAME = "ripple_glm.nc"
 BUNDLE_SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "1"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+
+NWB_SELECTED_UNITS_TABLE_NAME = "ripple_glm_selected_units"
+NWB_SUMMARY_TABLE_NAME = "ripple_glm_summary"
+NWB_EVENTS_TABLE_NAME = "ripple_glm_events"
+NWB_SOURCE_FEATURES_TABLE_NAME = "ripple_glm_source_features"
+NWB_TARGET_RESULTS_TABLE_NAME = "ripple_glm_target_results"
+NWB_PROVENANCE_TABLE_NAME = "ripple_glm_provenance"
 
 SOURCE_REGION = "ca1"
 TARGET_REGION = "v1"
@@ -141,6 +149,51 @@ SUMMARY_COLUMNS = (
         for metric in METRIC_NAMES
         for suffix in ("mean", "sem", "shuffle_mean", "shuffle_sd", "p_value")
     ),
+)
+EVENT_COLUMNS = (
+    "sample_index",
+    "ripple_start_time_s",
+    "ripple_window_start_s",
+    "ripple_window_end_s",
+    "source_window_start_s",
+    "source_window_end_s",
+    "target_window_start_s",
+    "target_window_end_s",
+    "fold_index",
+)
+SOURCE_FEATURE_COLUMNS = (
+    "feature_index",
+    "coef_source_unit",
+    "coef_source_group_unit_id",
+    "coef_ca1_unit_id",
+    "coef_source_feature_name",
+)
+TARGET_RESULT_VECTOR_COLUMNS = (
+    "coef_ca1_full_all",
+    "ripple_observed_count_oof",
+    "ripple_predicted_count_oof",
+    *tuple(f"{metric}_ripple_folds" for metric in METRIC_NAMES),
+    *tuple(f"{metric}_ripple_shuff_folds" for metric in METRIC_NAMES),
+)
+TARGET_RESULT_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "target_index",
+    "coef_intercept_full_all",
+    *TARGET_RESULT_VECTOR_COLUMNS,
+)
+PROVENANCE_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "upstream_provenance_json",
+    "dataset_attrs_json",
+    "selected_ripple_events_sha256",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "fold_values",
+    "shuffle_values",
+    "has_ripple_window_aliases",
+    "artifact_schema_version",
 )
 MANIFEST_COLUMNS = (
     "artifact_key",
@@ -2444,7 +2497,7 @@ def _validate_legacy_against_inputs(
 def register_existing_ripple_glm_artifact(
     *,
     source_result_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     ripple_glm_id: Any,
     animal_name: str,
     date: str,
@@ -2593,10 +2646,1119 @@ def register_existing_ripple_glm_artifact(
             legacy_artifact_provenance=legacy_provenance,
         )
     )
+    if destination_path is None:
+        return result
     paths = write_ripple_glm_artifact(
         result, Path(destination_path), overwrite=overwrite
     )
     return {**result, "artifact_paths": paths}
+
+
+_SELECTED_UNIT_TEXT_COLUMNS = (
+    "role",
+    "region",
+    *IDENTITY_COLUMNS,
+    "unit_qc_status",
+)
+_SELECTED_UNIT_INTEGER_COLUMNS = ("input_unit_index",)
+_SELECTED_UNIT_BOOLEAN_COLUMNS = (
+    "passes_spike_threshold",
+    "included_in_fit",
+    "included_in_full_coefficient",
+    "valid_glm_metrics",
+)
+_SUMMARY_TEXT_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "ripple_glm_id",
+    "animal_name",
+    "date",
+    "epoch",
+    "source_region",
+    "target_region",
+    "unit_qc_status",
+)
+_SUMMARY_INTEGER_COLUMNS = ("n_ripples",)
+_SUMMARY_BOOLEAN_COLUMNS = ("valid_glm_metrics",)
+_EVENT_INTEGER_COLUMNS = ("sample_index", "fold_index")
+_SOURCE_FEATURE_TEXT_COLUMNS = SOURCE_FEATURE_COLUMNS[1:]
+_SOURCE_FEATURE_INTEGER_COLUMNS = ("feature_index",)
+_TARGET_RESULT_TEXT_COLUMNS = IDENTITY_COLUMNS
+_TARGET_RESULT_INTEGER_COLUMNS = ("target_index",)
+_PROVENANCE_TEXT_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "upstream_provenance_json",
+    "dataset_attrs_json",
+    "selected_ripple_events_sha256",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
+)
+_PROVENANCE_BOOLEAN_COLUMNS = ("has_ripple_window_aliases",)
+_PROVENANCE_VECTOR_COLUMNS = ("fold_values", "shuffle_values")
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one self-describing scratch column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    ragged_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed zero-row DynamicTable without HDMF row inference."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    output_columns = []
+    for column in columns:
+        if column in ragged_columns:
+            data = VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=np.asarray([], dtype=float),
+            )
+            index = VectorIndex(
+                name=f"{column}_index",
+                data=np.asarray([], dtype=np.int64),
+                target=data,
+            )
+            output_columns.extend((data, index))
+            continue
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return a canonical typed frame for one RippleGLM NWB object."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(
+        columns
+    ):
+        raise ValueError(
+            "RippleGLM NWB table does not have its canonical schema."
+        )
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(np.int64)
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(
+                f"RippleGLM NWB column {column!r} must be boolean."
+            )
+        output[column] = np.asarray(values, dtype=bool)
+    for column in vector_columns:
+        vectors = [np.asarray(value, dtype=float) for value in output[column]]
+        if any(vector.ndim != 1 or np.isinf(vector).any() for vector in vectors):
+            raise ValueError(
+                f"RippleGLM NWB vector column {column!r} is invalid."
+            )
+        output[column] = vectors
+    typed_columns = {
+        *text_columns,
+        *integer_columns,
+        *boolean_columns,
+        *vector_columns,
+    }
+    for column in columns:
+        if column in typed_columns:
+            continue
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"RippleGLM NWB numeric column {column!r} contains infinity."
+            )
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert a scalar frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in columns
+        ],
+    )
+
+
+def _ragged_dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert scalar keys and aligned numeric vectors to a DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            ragged_columns=vector_columns,
+        )
+    scalar_columns = tuple(
+        column for column in columns if column not in vector_columns
+    )
+    output = DynamicTable.from_dataframe(
+        name=name,
+        df=canonical.loc[:, list(scalar_columns)],
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in scalar_columns
+        ],
+    )
+    for column in vector_columns:
+        vectors = canonical[column].tolist()
+        if all(vector.size == 0 for vector in vectors):
+            vectors = [np.asarray([np.nan], dtype=float) for _ in vectors]
+        output.add_column(
+            name=column,
+            description=_nwb_column_description(column),
+            data=vectors,
+            index=True,
+        )
+    return output
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Return text after an HDF5-backed DynamicTable round trip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one RippleGLM DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected RippleGLM NWB object {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("RippleGLM NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(columns) or len(observed) != len(columns):
+        raise ValueError("RippleGLM NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    for column in vector_columns:
+        table[column] = [
+            np.asarray(value, dtype=float) for value in table[column]
+        ]
+        if table[column].map(
+            lambda value: value.shape == (1,) and np.isnan(value[0])
+        ).all():
+            table[column] = [
+                np.asarray([], dtype=float) for _ in table[column]
+            ]
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+
+
+def _current_nwb_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one canonical RippleGLM result suitable for NWB storage."""
+    canonical = validate_ripple_glm_result(result)
+    if str(
+        canonical["dataset"].attrs.get(
+            "ripple_glm_result_schema_version", ""
+        )
+    ) != RESULT_SCHEMA_VERSION:
+        raise ValueError(
+            "RippleGLM NWB storage requires the current result schema."
+        )
+    return canonical
+
+
+def _events_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return one row per retained ripple with both effective windows."""
+    dataset = _current_nwb_result(result)["dataset"]
+    n_samples = int(dataset.sizes["sample"])
+    target_start = np.asarray(dataset["target_window_start_s"], dtype=float)
+    target_end = np.asarray(dataset["target_window_end_s"], dtype=float)
+    values = {
+        "sample_index": np.asarray(dataset.coords["sample"], dtype=int),
+        "ripple_start_time_s": np.asarray(
+            dataset["ripple_start_time_s"], dtype=float
+        ),
+        "ripple_window_start_s": np.asarray(
+            dataset.get("ripple_window_start_s", target_start), dtype=float
+        ),
+        "ripple_window_end_s": np.asarray(
+            dataset.get("ripple_window_end_s", target_end), dtype=float
+        ),
+        "source_window_start_s": np.asarray(
+            dataset["source_window_start_s"], dtype=float
+        ),
+        "source_window_end_s": np.asarray(
+            dataset["source_window_end_s"], dtype=float
+        ),
+        "target_window_start_s": target_start,
+        "target_window_end_s": target_end,
+        "fold_index": (
+            np.asarray(dataset["ripple_fold_index"], dtype=int)
+            if "ripple_fold_index" in dataset
+            else np.full(n_samples, -1, dtype=int)
+        ),
+    }
+    return pd.DataFrame(values, columns=EVENT_COLUMNS)
+
+
+def _source_features_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return the ordered full-refit source-coefficient axis."""
+    canonical = _current_nwb_result(result)
+    dataset = canonical["dataset"]
+    if canonical["analysis_status"] not in FITTED_ANALYSIS_STATUSES:
+        return pd.DataFrame(columns=SOURCE_FEATURE_COLUMNS)
+    n_features = int(dataset.sizes["coef_source_unit"])
+    return pd.DataFrame(
+        {
+            "feature_index": np.arange(n_features, dtype=int),
+            "coef_source_unit": np.asarray(
+                dataset.coords["coef_source_unit"], dtype=str
+            ),
+            "coef_source_group_unit_id": np.asarray(
+                dataset.coords["coef_source_group_unit_id"], dtype=str
+            ),
+            "coef_ca1_unit_id": np.asarray(
+                dataset["coef_ca1_unit_id"], dtype=str
+            ),
+            "coef_source_feature_name": np.asarray(
+                dataset["coef_source_feature_name"], dtype=str
+            ),
+        },
+        columns=SOURCE_FEATURE_COLUMNS,
+    )
+
+
+def _target_results_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return every fitted target result keyed by persistent unit identity."""
+    canonical = _current_nwb_result(result)
+    dataset = canonical["dataset"]
+    if canonical["analysis_status"] not in FITTED_ANALYSIS_STATUSES:
+        return pd.DataFrame(columns=TARGET_RESULT_COLUMNS)
+    target = canonical["selected_units"].loc[
+        (canonical["selected_units"]["role"] == TARGET_ROLE)
+        & canonical["selected_units"]["included_in_fit"]
+    ].reset_index(drop=True)
+    rows = []
+    for target_index, unit in target.iterrows():
+        rows.append(
+            {
+                **{name: str(unit[name]) for name in IDENTITY_COLUMNS},
+                "target_index": int(target_index),
+                "coef_intercept_full_all": float(
+                    dataset["coef_intercept_full_all"].values[target_index]
+                ),
+                "coef_ca1_full_all": np.asarray(
+                    dataset["coef_ca1_full_all"].values[:, target_index],
+                    dtype=float,
+                ),
+                "ripple_observed_count_oof": np.asarray(
+                    dataset["ripple_observed_count_oof"].values[
+                        :, target_index
+                    ],
+                    dtype=float,
+                ),
+                "ripple_predicted_count_oof": np.asarray(
+                    dataset["ripple_predicted_count_oof"].values[
+                        :, target_index
+                    ],
+                    dtype=float,
+                ),
+                **{
+                    f"{metric}_ripple_folds": np.asarray(
+                        dataset[f"{metric}_ripple_folds"].values[
+                            :, target_index
+                        ],
+                        dtype=float,
+                    )
+                    for metric in METRIC_NAMES
+                },
+                **{
+                    f"{metric}_ripple_shuff_folds": np.asarray(
+                        dataset[f"{metric}_ripple_shuff_folds"].values[
+                            :, :, target_index
+                        ],
+                        dtype=float,
+                    ).reshape(-1)
+                    for metric in METRIC_NAMES
+                },
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=TARGET_RESULT_COLUMNS)
+
+
+def _json_ready(value: Any) -> Any:
+    """Return nested provenance using JSON-native scalar types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _provenance_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return one detached, self-describing RippleGLM provenance row."""
+    canonical = _current_nwb_result(result)
+    dataset = canonical["dataset"]
+    metadata = {
+        name: canonical[name]
+        for name in (
+            "ripple_glm_id",
+            "animal_name",
+            "date",
+            "epoch",
+            "source_region",
+            "target_region",
+        )
+    }
+    record = {
+        "metadata_json": json.dumps(
+            _json_ready(metadata), sort_keys=True, separators=(",", ":")
+        ),
+        "parameters_json": json.dumps(
+            _json_ready(canonical["parameters"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "upstream_provenance_json": json.dumps(
+            _json_ready(canonical["upstream_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "dataset_attrs_json": json.dumps(
+            _json_ready(dict(dataset.attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "selected_ripple_events_sha256": str(
+            canonical["selected_ripple_events_sha256"]
+        ),
+        "analysis_status": str(canonical["analysis_status"]),
+        "artifact_origin": str(canonical["artifact_origin"]),
+        "legacy_artifact_provenance_json": json.dumps(
+            _json_ready(canonical["legacy_artifact_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "fold_values": np.asarray(
+            dataset.coords.get("fold", np.asarray([], dtype=int)), dtype=float
+        ),
+        "shuffle_values": np.asarray(
+            dataset.coords.get("shuffle", np.asarray([], dtype=int)),
+            dtype=float,
+        ),
+        "has_ripple_window_aliases": bool(
+            "ripple_window_start_s" in dataset
+            and "ripple_window_end_s" in dataset
+        ),
+        "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+    return pd.DataFrame.from_records([record], columns=PROVENANCE_COLUMNS)
+
+
+def _selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the complete source/target audit to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SELECTED_UNITS_TABLE_NAME,
+        description="Complete CA1/V1 RippleGLM unit audit.",
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def _selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the complete source/target audit from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def _summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert figure-facing target metrics to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SUMMARY_TABLE_NAME,
+        description="Per-target RippleGLM metrics and shuffle summaries.",
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+        boolean_columns=_SUMMARY_BOOLEAN_COLUMNS,
+    )
+
+
+def _summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load figure-facing target metrics from their NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SUMMARY_TABLE_NAME,
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+        boolean_columns=_SUMMARY_BOOLEAN_COLUMNS,
+    )
+
+
+def _events_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store retained ripple anchors, windows, and fold assignments."""
+    return _dynamic_table_from_frame(
+        _events_frame(result),
+        name=NWB_EVENTS_TABLE_NAME,
+        description="Ripple anchors and effective source/target windows.",
+        columns=EVENT_COLUMNS,
+        integer_columns=_EVENT_INTEGER_COLUMNS,
+    )
+
+
+def _events_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load ripple anchors, windows, and fold assignments."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_EVENTS_TABLE_NAME,
+        columns=EVENT_COLUMNS,
+        integer_columns=_EVENT_INTEGER_COLUMNS,
+    )
+
+
+def _source_features_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store the ordered full-refit source-feature axis."""
+    return _dynamic_table_from_frame(
+        _source_features_frame(result),
+        name=NWB_SOURCE_FEATURES_TABLE_NAME,
+        description="Ordered CA1 or mean-activity coefficient features.",
+        columns=SOURCE_FEATURE_COLUMNS,
+        text_columns=_SOURCE_FEATURE_TEXT_COLUMNS,
+        integer_columns=_SOURCE_FEATURE_INTEGER_COLUMNS,
+    )
+
+
+def _source_features_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the ordered full-refit source-feature axis."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SOURCE_FEATURES_TABLE_NAME,
+        columns=SOURCE_FEATURE_COLUMNS,
+        text_columns=_SOURCE_FEATURE_TEXT_COLUMNS,
+        integer_columns=_SOURCE_FEATURE_INTEGER_COLUMNS,
+    )
+
+
+def _target_results_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store complete fitted results as one ragged row per V1 unit."""
+    return _ragged_dynamic_table_from_frame(
+        _target_results_frame(result),
+        name=NWB_TARGET_RESULTS_TABLE_NAME,
+        description=(
+            "Per-target coefficients, OOF counts, fold metrics, and shuffle "
+            "metrics."
+        ),
+        columns=TARGET_RESULT_COLUMNS,
+        vector_columns=TARGET_RESULT_VECTOR_COLUMNS,
+        text_columns=_TARGET_RESULT_TEXT_COLUMNS,
+        integer_columns=_TARGET_RESULT_INTEGER_COLUMNS,
+    )
+
+
+def _target_results_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load complete fitted results keyed by persistent V1 identity."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_TARGET_RESULTS_TABLE_NAME,
+        columns=TARGET_RESULT_COLUMNS,
+        vector_columns=TARGET_RESULT_VECTOR_COLUMNS,
+        text_columns=_TARGET_RESULT_TEXT_COLUMNS,
+        integer_columns=_TARGET_RESULT_INTEGER_COLUMNS,
+    )
+
+
+def _provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store detached parameters, attributes, axes, and provenance."""
+    return _ragged_dynamic_table_from_frame(
+        _provenance_frame(result),
+        name=NWB_PROVENANCE_TABLE_NAME,
+        description="Detached self-describing RippleGLM provenance.",
+        columns=PROVENANCE_COLUMNS,
+        vector_columns=_PROVENANCE_VECTOR_COLUMNS,
+        text_columns=_PROVENANCE_TEXT_COLUMNS,
+        boolean_columns=_PROVENANCE_BOOLEAN_COLUMNS,
+    )
+
+
+def _parse_json_mapping(value: str, *, name: str) -> dict[str, Any]:
+    """Parse one JSON mapping with a field-specific error."""
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"RippleGLM {name} contains malformed JSON.") from exc
+    if not isinstance(decoded, Mapping):
+        raise ValueError(f"RippleGLM {name} must encode a mapping.")
+    return dict(decoded)
+
+
+def _provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Load and parse the one-row detached provenance object."""
+    table = _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=PROVENANCE_COLUMNS,
+        vector_columns=_PROVENANCE_VECTOR_COLUMNS,
+        text_columns=_PROVENANCE_TEXT_COLUMNS,
+        boolean_columns=_PROVENANCE_BOOLEAN_COLUMNS,
+    )
+    if len(table) != 1:
+        raise ValueError("RippleGLM provenance must contain exactly one row.")
+    record = table.iloc[0].to_dict()
+    if record["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("RippleGLM NWB artifact schema version is unsupported.")
+    for field in (
+        "metadata_json",
+        "parameters_json",
+        "upstream_provenance_json",
+        "dataset_attrs_json",
+        "legacy_artifact_provenance_json",
+    ):
+        record[field] = _parse_json_mapping(record[field], name=field)
+    return record
+
+
+def ripple_glm_result_to_nwb_objects(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one RippleGLM result to six NWB scratch objects."""
+    canonical = _current_nwb_result(result)
+    return {
+        "selected_units": _selected_units_to_dynamic_table(
+            canonical["selected_units"]
+        ),
+        "summary": _summary_to_dynamic_table(canonical["summary"]),
+        "events": _events_to_dynamic_table(canonical),
+        "source_features": _source_features_to_dynamic_table(canonical),
+        "target_results": _target_results_to_dynamic_table(canonical),
+        "provenance": _provenance_to_dynamic_table(canonical),
+    }
+
+
+def _require_row_order(
+    observed: Sequence[Any],
+    expected: Sequence[Any],
+    *,
+    name: str,
+) -> None:
+    """Require deterministic complete keyed rows in canonical order."""
+    if list(observed) != list(expected):
+        raise ValueError(
+            f"RippleGLM NWB {name} rows are incomplete or reordered."
+        )
+
+
+def ripple_glm_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    summary: Any,
+    events: Any,
+    source_features: Any,
+    target_results: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one RippleGLM result from six NWB objects."""
+    import xarray as xr
+
+    selected = _selected_units_from_dynamic_table(selected_units)
+    summary_table = _summary_from_dynamic_table(summary)
+    event_table = _events_from_dynamic_table(events)
+    feature_table = _source_features_from_dynamic_table(source_features)
+    target_table = _target_results_from_dynamic_table(target_results)
+    source = _provenance_from_dynamic_table(provenance)
+    metadata = source["metadata_json"]
+    parameters = source["parameters_json"]
+    upstream = source["upstream_provenance_json"]
+    attrs = source["dataset_attrs_json"]
+    status = str(source["analysis_status"])
+    origin = str(source["artifact_origin"])
+    legacy = source["legacy_artifact_provenance_json"]
+    n_samples = len(event_table)
+    _require_row_order(
+        event_table["sample_index"].astype(int).tolist(),
+        range(n_samples),
+        name="event",
+    )
+    event_variables = {
+        name: ("sample", event_table[name].to_numpy(dtype=float))
+        for name in (
+            "ripple_start_time_s",
+            "source_window_start_s",
+            "source_window_end_s",
+            "target_window_start_s",
+            "target_window_end_s",
+        )
+    }
+    if bool(source["has_ripple_window_aliases"]):
+        event_variables.update(
+            {
+                name: ("sample", event_table[name].to_numpy(dtype=float))
+                for name in (
+                    "ripple_window_start_s",
+                    "ripple_window_end_s",
+                )
+            }
+        )
+    fitted = status in FITTED_ANALYSIS_STATUSES
+    if fitted:
+        target = selected.loc[
+            (selected["role"] == TARGET_ROLE)
+            & selected["included_in_fit"]
+        ].reset_index(drop=True)
+        source_units = selected.loc[
+            (selected["role"] == SOURCE_ROLE)
+            & selected["included_in_fit"]
+        ].reset_index(drop=True)
+        _require_row_order(
+            target_table["target_index"].astype(int).tolist(),
+            range(len(target)),
+            name="target-result",
+        )
+        for name in IDENTITY_COLUMNS:
+            _require_row_order(
+                target_table[name].astype(str).tolist(),
+                target[name].astype(str).tolist(),
+                name=f"target {name}",
+            )
+        _require_row_order(
+            summary_table["stable_unit_id"].astype(str).tolist(),
+            target["stable_unit_id"].astype(str).tolist(),
+            name="summary",
+        )
+        n_units = len(target)
+        n_folds = len(source["fold_values"])
+        n_shuffles = len(source["shuffle_values"])
+        if n_units == 0 or n_folds == 0 or n_shuffles == 0:
+            raise ValueError("Fitted RippleGLM NWB axes cannot be empty.")
+        for name in (
+            "ripple_observed_count_oof",
+            "ripple_predicted_count_oof",
+        ):
+            vectors = [np.asarray(value, dtype=float) for value in target_table[name]]
+            if any(value.shape != (n_samples,) for value in vectors):
+                raise ValueError(
+                    f"RippleGLM NWB target vector {name!r} has a wrong length."
+                )
+            event_variables[name] = (
+                ("sample", "unit"),
+                np.stack(vectors, axis=1),
+            )
+        event_variables["ripple_fold_index"] = (
+            "sample",
+            event_table["fold_index"].to_numpy(dtype=int),
+        )
+        data_vars: dict[str, Any] = {
+            **event_variables,
+            "ca1_unit_id": (
+                "source_unit",
+                source_units["stable_unit_id"].astype(str).to_numpy(),
+            ),
+            "coef_ca1_unit_id": (
+                "coef_source_unit",
+                feature_table["coef_ca1_unit_id"].astype(str).to_numpy(),
+            ),
+            "coef_source_feature_name": (
+                "coef_source_unit",
+                feature_table["coef_source_feature_name"].astype(str).to_numpy(),
+            ),
+            "coef_intercept_full_all": (
+                "unit",
+                target_table["coef_intercept_full_all"].to_numpy(dtype=float),
+            ),
+        }
+        coefficients = [
+            np.asarray(value, dtype=float)
+            for value in target_table.get(
+                "coef_ca1_full_all",
+                pd.Series(
+                    [np.asarray([], dtype=float)] * n_units, dtype=object
+                ),
+            )
+        ]
+        n_features = len(feature_table)
+        if any(value.shape != (n_features,) for value in coefficients):
+            raise ValueError(
+                "RippleGLM NWB coefficient vectors have a wrong length."
+            )
+        data_vars["coef_ca1_full_all"] = (
+            ("coef_source_unit", "unit"),
+            np.stack(coefficients, axis=1),
+        )
+        for metric in METRIC_NAMES:
+            summary_prefix = f"ripple_{metric}_"
+            for suffix in (
+                "mean",
+                "sem",
+                "shuffle_mean",
+                "shuffle_sd",
+                "p_value",
+            ):
+                variable = summary_prefix + suffix
+                data_vars[variable] = (
+                    "unit",
+                    summary_table[variable].to_numpy(dtype=float),
+                )
+            fold_name = f"{metric}_ripple_folds"
+            fold_vectors = [
+                np.asarray(value, dtype=float) for value in target_table[fold_name]
+            ]
+            if any(value.shape != (n_folds,) for value in fold_vectors):
+                raise ValueError(
+                    f"RippleGLM NWB fold vectors for {metric!r} are invalid."
+                )
+            data_vars[fold_name] = (
+                ("fold", "unit"),
+                np.stack(fold_vectors, axis=1),
+            )
+            shuffle_name = f"{metric}_ripple_shuff_folds"
+            shuffle_vectors = [
+                np.asarray(value, dtype=float)
+                for value in target_table[shuffle_name]
+            ]
+            expected_size = n_folds * n_shuffles
+            if any(value.shape != (expected_size,) for value in shuffle_vectors):
+                raise ValueError(
+                    f"RippleGLM NWB shuffle vectors for {metric!r} are invalid."
+                )
+            data_vars[shuffle_name] = (
+                ("fold", "shuffle", "unit"),
+                np.stack(
+                    [
+                        value.reshape(n_folds, n_shuffles)
+                        for value in shuffle_vectors
+                    ],
+                    axis=2,
+                ),
+            )
+        dataset = xr.Dataset(
+            data_vars=data_vars,
+            coords={
+                "sample": event_table["sample_index"].to_numpy(dtype=int),
+                "unit": target["stable_unit_id"].astype(str).to_numpy(),
+                "stable_unit_id": (
+                    "unit", target["stable_unit_id"].astype(str).to_numpy()
+                ),
+                "spikesorting_merge_id": (
+                    "unit",
+                    target["spikesorting_merge_id"].astype(str).to_numpy(),
+                ),
+                "unit_id": ("unit", target["unit_id"].astype(str).to_numpy()),
+                "group_unit_id": (
+                    "unit", target["group_unit_id"].astype(str).to_numpy()
+                ),
+                "source_unit": source_units["stable_unit_id"].astype(str).to_numpy(),
+                "source_stable_unit_id": (
+                    "source_unit",
+                    source_units["stable_unit_id"].astype(str).to_numpy(),
+                ),
+                "source_spikesorting_merge_id": (
+                    "source_unit",
+                    source_units["spikesorting_merge_id"].astype(str).to_numpy(),
+                ),
+                "source_unit_id": (
+                    "source_unit", source_units["unit_id"].astype(str).to_numpy()
+                ),
+                "source_group_unit_id": (
+                    "source_unit",
+                    source_units["group_unit_id"].astype(str).to_numpy(),
+                ),
+                "coef_source_unit": feature_table["coef_source_unit"]
+                .astype(str)
+                .to_numpy(),
+                "coef_source_group_unit_id": (
+                    "coef_source_unit",
+                    feature_table["coef_source_group_unit_id"]
+                    .astype(str)
+                    .to_numpy(),
+                ),
+                "fold": np.asarray(source["fold_values"], dtype=int),
+                "shuffle": np.asarray(source["shuffle_values"], dtype=int),
+            },
+            attrs=attrs,
+        )
+    else:
+        if not summary_table.empty or not feature_table.empty or not target_table.empty:
+            raise ValueError("Terminal RippleGLM NWB objects contain fit results.")
+        dataset = xr.Dataset(
+            data_vars=event_variables,
+            coords={
+                "sample": event_table["sample_index"].to_numpy(dtype=int),
+                "unit": np.asarray([], dtype=str),
+                "source_unit": np.asarray([], dtype=str),
+                "coef_source_unit": np.asarray([], dtype=str),
+                "fold": np.asarray(source["fold_values"], dtype=int),
+                "shuffle": np.asarray(source["shuffle_values"], dtype=int),
+            },
+            attrs=attrs,
+        )
+    return validate_ripple_glm_result(
+        {
+            **metadata,
+            "parameters": parameters,
+            "upstream_provenance": upstream,
+            "selected_ripple_events_sha256": str(
+                source["selected_ripple_events_sha256"]
+            ),
+            "selected_units": selected,
+            "summary": summary_table,
+            "dataset": dataset,
+            "analysis_status": status,
+            "artifact_origin": origin,
+            "legacy_artifact_provenance": legacy,
+        }
+    )
+
+
+def _semantic_frame_sha256(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> str:
+    """Hash one canonical frame independent of NWB object identifiers."""
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(columns), separators=(",", ":")).encode())
+    digest.update(np.asarray([len(canonical)], dtype="<i8").tobytes())
+    for row in canonical.to_dict("records"):
+        for column in columns:
+            value = row[column]
+            if column in text_columns:
+                encoded = str(value).encode("utf-8")
+                digest.update(np.asarray([len(encoded)], dtype="<i8").tobytes())
+                digest.update(encoded)
+            elif column in integer_columns:
+                digest.update(np.asarray([value], dtype="<i8").tobytes())
+            elif column in boolean_columns:
+                digest.update(np.asarray([value], dtype=np.uint8).tobytes())
+            elif column in vector_columns:
+                array = np.ascontiguousarray(np.asarray(value, dtype="<f8"))
+                if np.isnan(array).any():
+                    array = array.copy()
+                    array[np.isnan(array)] = np.nan
+                digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+                digest.update(array.tobytes())
+            else:
+                array = np.asarray([value], dtype="<f8")
+                if np.isnan(array[0]):
+                    array[0] = np.nan
+                digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def ripple_glm_nwb_hashes(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return semantic hashes for all six NWB objects and the result."""
+    canonical = _current_nwb_result(result)
+    frames = {
+        "selected_units_table_sha256": (
+            canonical["selected_units"],
+            SELECTED_UNIT_COLUMNS,
+            _SELECTED_UNIT_TEXT_COLUMNS,
+            _SELECTED_UNIT_INTEGER_COLUMNS,
+            _SELECTED_UNIT_BOOLEAN_COLUMNS,
+            (),
+        ),
+        "summary_table_sha256": (
+            canonical["summary"],
+            SUMMARY_COLUMNS,
+            _SUMMARY_TEXT_COLUMNS,
+            _SUMMARY_INTEGER_COLUMNS,
+            _SUMMARY_BOOLEAN_COLUMNS,
+            (),
+        ),
+        "events_sha256": (
+            _events_frame(canonical),
+            EVENT_COLUMNS,
+            (),
+            _EVENT_INTEGER_COLUMNS,
+            (),
+            (),
+        ),
+        "source_features_sha256": (
+            _source_features_frame(canonical),
+            SOURCE_FEATURE_COLUMNS,
+            _SOURCE_FEATURE_TEXT_COLUMNS,
+            _SOURCE_FEATURE_INTEGER_COLUMNS,
+            (),
+            (),
+        ),
+        "target_results_sha256": (
+            _target_results_frame(canonical),
+            TARGET_RESULT_COLUMNS,
+            _TARGET_RESULT_TEXT_COLUMNS,
+            _TARGET_RESULT_INTEGER_COLUMNS,
+            (),
+            TARGET_RESULT_VECTOR_COLUMNS,
+        ),
+        "provenance_sha256": (
+            _provenance_frame(canonical),
+            PROVENANCE_COLUMNS,
+            _PROVENANCE_TEXT_COLUMNS,
+            (),
+            _PROVENANCE_BOOLEAN_COLUMNS,
+            _PROVENANCE_VECTOR_COLUMNS,
+        ),
+    }
+    hashes = {
+        field_name: _semantic_frame_sha256(
+            table,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            vector_columns=vector_columns,
+        )
+        for field_name, (
+            table,
+            columns,
+            text_columns,
+            integer_columns,
+            boolean_columns,
+            vector_columns,
+        ) in frames.items()
+    }
+    hashes["ripple_glm_sha256"] = hashlib.sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return hashes
 
 
 __all__ = [
@@ -2608,6 +3770,7 @@ __all__ = [
     "DEFAULT_N_SHUFFLES_RIPPLE",
     "DEFAULT_REQUIRE_SPEED_GATED",
     "MANIFEST_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
     "OUTPUT_RULE",
     "OUTPUT_RULE_SHA256",
     "RESULT_SCHEMA_VERSION",
@@ -2618,6 +3781,9 @@ __all__ = [
     "load_ripple_glm_artifact",
     "prepare_ripple_glm_event_selection",
     "register_existing_ripple_glm_artifact",
+    "ripple_glm_nwb_hashes",
+    "ripple_glm_result_from_nwb_objects",
+    "ripple_glm_result_to_nwb_objects",
     "validate_ripple_glm_parameters",
     "validate_ripple_glm_result",
     "write_ripple_glm_artifact",

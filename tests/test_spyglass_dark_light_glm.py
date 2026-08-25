@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import uuid
@@ -574,6 +575,68 @@ def test_terminal_bundle_roundtrip_has_real_selected_files(tmp_path: Path) -> No
     assert loaded["candidate_datasets"] == {}
     assert loaded["selected_units"].empty
     assert all(path.is_file() for path in paths["selected_model_paths"].values())
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_analysis_nwb_objects_preserve_search_and_selected_models(
+    tmp_path: Path,
+    terminal: bool,
+) -> None:
+    """All seven DarkLightGLM scratch objects survive an HDF5 round trip."""
+    pynwb = pytest.importorskip("pynwb")
+    result_id = uuid.uuid4()
+    result = _result(result_id)
+    if terminal:
+        result = module._terminal_result(
+            metadata=result["metadata"],
+            parameters=result["parameters"],
+            trajectory_length_cm=result["trajectory_length_cm"],
+            segment_edges=result["segment_edges"],
+            analysis_status="no_eligible_units",
+        )
+    expected_hashes = module.dark_light_glm_nwb_hashes(result)
+    expected_model_hashes = module.dark_light_glm_selected_model_sha256s(
+        result
+    )
+    objects = module.dark_light_glm_result_to_nwb_objects(result)
+    assert set(objects) == {
+        "selected_units",
+        "dataset_index",
+        "axes",
+        "candidate_results",
+        "selected_results",
+        "selection_summary",
+        "provenance",
+    }
+    assert len({value.object_id for value in objects.values()}) == 7
+    nwbfile = pynwb.NWBFile(
+        session_description="DarkLightGLM NWB round-trip",
+        identifier=f"dark-light-glm-{terminal}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    for value in objects.values():
+        nwbfile.add_scratch(value)
+    path = tmp_path / f"dark_light_glm_{terminal}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=path) == []
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = module.dark_light_glm_result_from_nwb_objects(
+            **{
+                name: stored.objects[value.object_id]
+                for name, value in objects.items()
+            }
+        )
+    assert loaded["analysis_status"] == result["analysis_status"]
+    assert set(loaded["candidate_datasets"]) == set(
+        result["candidate_datasets"]
+    )
+    assert module.dark_light_glm_nwb_hashes(loaded) == expected_hashes
+    assert (
+        module.dark_light_glm_selected_model_sha256s(loaded)
+        == expected_model_hashes
+    )
 
 
 def test_speed_derivation_uses_frozen_smoothing_sigma(

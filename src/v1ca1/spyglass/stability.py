@@ -1,10 +1,10 @@
-"""Database-free path-specific place-stability adapter and Parquet artifacts."""
+"""Path-specific place-stability computation and Parquet/NWB adapters."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import json
-from numbers import Real
+from numbers import Integral, Real
 import os
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,139 @@ MOVEMENT_RATE_COLUMNS = (
     "firing_rate_status",
 )
 MOVEMENT_RATE_STATUSES = ("valid", "no_valid_position", "no_movement")
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_STABILITY_TABLE_NAME = "path_specific_place_stability"
+STABILITY_TABLE_COLUMNS = (
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "group_unit_id",
+    "animal_name",
+    "date",
+    "region",
+    "epoch",
+    "trajectory_type",
+    "firing_rate_hz",
+    "stability_correlation",
+    "n_odd_trials",
+    "n_even_trials",
+    "odd_duration_s",
+    "even_duration_s",
+    "n_odd_feature_samples",
+    "n_even_feature_samples",
+    "n_odd_spikes",
+    "n_even_spikes",
+    "n_odd_finite_bins",
+    "n_even_finite_bins",
+    "n_paired_finite_bins",
+    "stability_status",
+    "stability_shape_overlap",
+    "odd_tuning_curve_area",
+    "even_tuning_curve_area",
+    "shape_overlap_status",
+    "stability_segmented_shape_overlap",
+    "segment_stability_shape_overlaps",
+    "segment_shape_overlap_statuses",
+    "odd_segment_mean_firing_rates_hz",
+    "even_segment_mean_firing_rates_hz",
+    "odd_segment_tuning_curve_areas",
+    "even_segment_tuning_curve_areas",
+    "segment_edges_normalized",
+    "segmented_shape_overlap_status",
+)
+_STRING_COLUMNS = (
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "animal_name",
+    "date",
+    "region",
+    "epoch",
+    "trajectory_type",
+    "stability_status",
+    "shape_overlap_status",
+    "segment_stability_shape_overlaps",
+    "segment_shape_overlap_statuses",
+    "odd_segment_mean_firing_rates_hz",
+    "even_segment_mean_firing_rates_hz",
+    "odd_segment_tuning_curve_areas",
+    "even_segment_tuning_curve_areas",
+    "segment_edges_normalized",
+    "segmented_shape_overlap_status",
+)
+_INTEGER_COLUMNS = (
+    "n_odd_trials",
+    "n_even_trials",
+    "n_odd_feature_samples",
+    "n_even_feature_samples",
+    "n_odd_spikes",
+    "n_even_spikes",
+    "n_odd_finite_bins",
+    "n_even_finite_bins",
+    "n_paired_finite_bins",
+)
+_FLOAT_COLUMNS = (
+    "firing_rate_hz",
+    "stability_correlation",
+    "odd_duration_s",
+    "even_duration_s",
+    "stability_shape_overlap",
+    "odd_tuning_curve_area",
+    "even_tuning_curve_area",
+    "stability_segmented_shape_overlap",
+)
+_STABILITY_COLUMN_DESCRIPTIONS = {
+    "spikesorting_merge_id": "Persistent Spyglass spike-sorting merge identifier.",
+    "unit_id": "Unit identifier within the spike-sorting merge.",
+    "stable_unit_id": "Composite persistent unit identifier, merge_id:unit_id.",
+    "group_unit_id": "Ephemeral unit key in the selected Pynapple TsGroup.",
+    "animal_name": "Subject identifier used by the analysis.",
+    "date": "Session date formatted as YYYYMMDD.",
+    "region": "Canonical analyzed brain region.",
+    "epoch": "Selected epoch name.",
+    "trajectory_type": "Selected physical path through the W-track.",
+    "firing_rate_hz": "Whole-epoch movement firing rate in hertz.",
+    "stability_correlation": "Odd-even tuning-curve Pearson correlation.",
+    "n_odd_trials": "Number of odd-indexed path trials.",
+    "n_even_trials": "Number of even-indexed path trials.",
+    "odd_duration_s": "Odd-trial movement support duration in seconds.",
+    "even_duration_s": "Even-trial movement support duration in seconds.",
+    "n_odd_feature_samples": "Valid odd-trial progression samples.",
+    "n_even_feature_samples": "Valid even-trial progression samples.",
+    "n_odd_spikes": "Odd-trial movement spike count.",
+    "n_even_spikes": "Even-trial movement spike count.",
+    "n_odd_finite_bins": "Finite odd tuning-curve bins.",
+    "n_even_finite_bins": "Finite even tuning-curve bins.",
+    "n_paired_finite_bins": "Bins finite in both odd and even curves.",
+    "stability_status": "Correlation QC status.",
+    "stability_shape_overlap": "Unit-area odd-even tuning-curve overlap.",
+    "odd_tuning_curve_area": "Area under the odd raw-rate tuning curve.",
+    "even_tuning_curve_area": "Area under the even raw-rate tuning curve.",
+    "shape_overlap_status": "Whole-path shape-overlap QC status.",
+    "stability_segmented_shape_overlap": (
+        "Aggregate odd-even shape overlap across physical path segments."
+    ),
+    "segment_stability_shape_overlaps": (
+        "JSON array of per-segment odd-even shape overlaps."
+    ),
+    "segment_shape_overlap_statuses": (
+        "JSON array of per-segment overlap QC statuses."
+    ),
+    "odd_segment_mean_firing_rates_hz": (
+        "JSON array of odd-trial segment mean firing rates in hertz."
+    ),
+    "even_segment_mean_firing_rates_hz": (
+        "JSON array of even-trial segment mean firing rates in hertz."
+    ),
+    "odd_segment_tuning_curve_areas": (
+        "JSON array of odd-trial segment tuning-curve areas."
+    ),
+    "even_segment_tuning_curve_areas": (
+        "JSON array of even-trial segment tuning-curve areas."
+    ),
+    "segment_edges_normalized": "JSON array of normalized path-segment edges.",
+    "segmented_shape_overlap_status": "Aggregate segmented-overlap QC status.",
+}
 
 
 def _path_component(value: Any, *, name: str) -> str:
@@ -408,10 +541,234 @@ def empty_stability_table() -> pd.DataFrame:
     """Return an empty Spyglass stability table with persistent identity columns."""
     from v1ca1.task_progression.stability import _empty_stability_table
 
-    return _attach_unit_identity(
+    table = _attach_unit_identity(
         _empty_stability_table(),
         spikes={},
         stable_unit_ids=[],
+    )
+    if tuple(table.columns) != STABILITY_TABLE_COLUMNS:
+        raise RuntimeError("The canonical stability-table schema changed unexpectedly.")
+    return table
+
+
+def _decode_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as UTF-8 text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"Stability table column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _canonical_group_unit_ids(values: Sequence[Any]) -> pd.Series:
+    """Return one homogeneous, NWB-compatible ephemeral unit-id column."""
+    normalized: list[Any] = []
+    kinds: set[str] = set()
+    for value in values:
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("group_unit_id contains invalid UTF-8.") from exc
+        if isinstance(value, Integral) and not isinstance(value, (bool, np.bool_)):
+            integer = int(value)
+            if not np.iinfo(np.int64).min <= integer <= np.iinfo(np.int64).max:
+                raise ValueError("Integer group_unit_id values must fit in int64.")
+            normalized.append(integer)
+            kinds.add("integer")
+        elif isinstance(value, str) and value:
+            normalized.append(value)
+            kinds.add("string")
+        else:
+            raise TypeError(
+                "group_unit_id values must be non-empty strings or integers."
+            )
+    if len(kinds) > 1:
+        raise TypeError("group_unit_id values must have one homogeneous type.")
+    dtype: Any = np.int64 if kinds == {"integer"} else object
+    return pd.Series(normalized, dtype=dtype, name="group_unit_id")
+
+
+def validate_stability_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return one canonical stability table with deterministic dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Stability artifact must be a pandas DataFrame.")
+    actual_columns = tuple(str(column) for column in table.columns)
+    if set(actual_columns) != set(STABILITY_TABLE_COLUMNS):
+        missing = [column for column in STABILITY_TABLE_COLUMNS if column not in table]
+        unexpected = [
+            column for column in table if column not in STABILITY_TABLE_COLUMNS
+        ]
+        raise ValueError(
+            "Stability NWB table has non-canonical columns: "
+            f"missing={missing!r}, unexpected={unexpected!r}."
+        )
+    if table.empty:
+        return empty_stability_table()
+
+    output = table.loc[:, list(STABILITY_TABLE_COLUMNS)].copy().reset_index(drop=True)
+    for column in _STRING_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_text(value, column=column)
+        )
+        if output[column].eq("").any():
+            raise ValueError(f"Stability table column {column!r} cannot be empty.")
+    output["group_unit_id"] = _canonical_group_unit_ids(
+        output["group_unit_id"].tolist()
+    )
+    for column in _INTEGER_COLUMNS:
+        numeric = pd.to_numeric(output[column], errors="raise").to_numpy(dtype=float)
+        if not np.all(np.isfinite(numeric)) or not np.allclose(
+            numeric,
+            np.rint(numeric),
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            raise ValueError(f"Stability table column {column!r} must contain integers.")
+        if np.any(numeric < 0.0):
+            raise ValueError(
+                f"Stability table column {column!r} must be non-negative."
+            )
+        output[column] = np.rint(numeric).astype(np.int64)
+    for column in _FLOAT_COLUMNS:
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"Stability table column {column!r} may be finite or NaN, not infinite."
+            )
+
+    nonnegative_float_columns = (
+        "firing_rate_hz",
+        "odd_duration_s",
+        "even_duration_s",
+        "odd_tuning_curve_area",
+        "even_tuning_curve_area",
+    )
+    for column in nonnegative_float_columns:
+        finite = output[column].dropna().to_numpy(dtype=float)
+        if np.any(finite < 0.0):
+            raise ValueError(
+                f"Stability table column {column!r} must be non-negative."
+            )
+    bounded_columns = (
+        ("stability_correlation", -1.0, 1.0),
+        ("stability_shape_overlap", 0.0, 1.0),
+        ("stability_segmented_shape_overlap", 0.0, 1.0),
+    )
+    for column, lower, upper in bounded_columns:
+        finite = output[column].dropna().to_numpy(dtype=float)
+        if np.any(finite < lower - 1e-9) or np.any(finite > upper + 1e-9):
+            raise ValueError(
+                f"Stability table column {column!r} must lie in [{lower}, {upper}]."
+            )
+
+    if output["stable_unit_id"].duplicated().any():
+        raise ValueError("Stability table stable_unit_id values must be unique.")
+    if output["group_unit_id"].duplicated().any():
+        raise ValueError("Stability table group_unit_id values must be unique.")
+    expected_stable_ids = (
+        output["spikesorting_merge_id"].astype(str)
+        + ":"
+        + output["unit_id"].astype(str)
+    )
+    if not output["stable_unit_id"].astype(str).equals(expected_stable_ids):
+        raise ValueError(
+            "Stability table stable_unit_id must equal merge_id:unit_id."
+        )
+    return output
+
+
+def stability_table_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical stability DataFrame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = validate_stability_table(table)
+    description = (
+        "All-unit odd-even path-specific tuning stability and QC; "
+        f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        columns = []
+        for name in STABILITY_TABLE_COLUMNS:
+            if name in _STRING_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif name in _INTEGER_COLUMNS or name == "group_unit_id":
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=_STABILITY_COLUMN_DESCRIPTIONS[name],
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_STABILITY_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    column_specs = [
+        {
+            "name": name,
+            "description": _STABILITY_COLUMN_DESCRIPTIONS[name],
+        }
+        for name in STABILITY_TABLE_COLUMNS
+    ]
+    return DynamicTable.from_dataframe(
+        name=NWB_STABILITY_TABLE_NAME,
+        df=canonical,
+        table_description=description,
+        columns=column_specs,
+    )
+
+
+def stability_table_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical DataFrame from a DynamicTable or fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_STABILITY_TABLE_NAME:
+            raise ValueError(
+                f"Unexpected stability NWB object name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Stability NWB object must be a DynamicTable or DataFrame.")
+    return validate_stability_table(table.reset_index(drop=True))
+
+
+def stability_table_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical stability table independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = validate_stability_table(table)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in STABILITY_TABLE_COLUMNS:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            elif isinstance(value, float) and np.isposinf(value):
+                value = "Infinity"
+            elif isinstance(value, float) and np.isneginf(value):
+                value = "-Infinity"
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "columns": list(STABILITY_TABLE_COLUMNS),
+            "records": records,
+        }
     )
 
 
@@ -957,10 +1314,17 @@ __all__ = [
     "ARTIFACT_FILENAME",
     "DEFAULT_ARTIFACT_ROOT",
     "MOVEMENT_RATE_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_STABILITY_TABLE_NAME",
+    "STABILITY_TABLE_COLUMNS",
     "build_task_progression_from_graph",
     "compute_selected_stability",
     "compute_selected_stability_from_tuning_curves",
     "empty_stability_table",
     "get_stability_artifact_path",
+    "stability_table_from_dynamic_table",
+    "stability_table_sha256",
+    "stability_table_to_dynamic_table",
+    "validate_stability_table",
     "write_stability_artifact",
 ]

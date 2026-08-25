@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -26,6 +27,18 @@ SUMMARY_FILENAME = "decoding_summary.parquet"
 BINNED_ERROR_FILENAME = "decoding_error_by_position.parquet"
 TRUE_FILENAME = "true_place.npz"
 DECODED_FILENAME = "decoded_place.npz"
+
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_SELECTED_UNITS_TABLE_NAME = "path_specific_place_decoding_selected_units"
+NWB_FOLD_QC_TABLE_NAME = "path_specific_place_decoding_fold_qc"
+NWB_SUMMARY_TABLE_NAME = "path_specific_place_decoding_summary"
+NWB_BINNED_ERROR_TABLE_NAME = "path_specific_place_decoding_error_by_position"
+NWB_TRUE_POSITION_TIMESERIES_NAME = "path_specific_place_decoding_true_position"
+NWB_DECODED_POSITION_TIMESERIES_NAME = (
+    "path_specific_place_decoding_decoded_position"
+)
+NWB_DECODING_SUPPORT_NAME = "path_specific_place_decoding_support"
+NWB_PROVENANCE_TABLE_NAME = "path_specific_place_decoding_provenance"
 
 DEFAULT_N_FOLDS = 5
 DEFAULT_DECODING_BIN_SIZE_S = 0.02
@@ -820,6 +833,635 @@ def validate_path_specific_decoding_result(
     return copied
 
 
+_NWB_TABLE_COLUMNS = {
+    "selected_units": SELECTED_UNIT_COLUMNS,
+    "fold_qc": FOLD_QC_COLUMNS,
+    "summary": SUMMARY_COLUMNS,
+    "binned_error": BINNED_ERROR_COLUMNS,
+}
+_NWB_TABLE_NAMES = {
+    "selected_units": NWB_SELECTED_UNITS_TABLE_NAME,
+    "fold_qc": NWB_FOLD_QC_TABLE_NAME,
+    "summary": NWB_SUMMARY_TABLE_NAME,
+    "binned_error": NWB_BINNED_ERROR_TABLE_NAME,
+}
+_NWB_TABLE_TEXT_COLUMNS = {
+    "selected_units": {
+        "spikesorting_merge_id",
+        "unit_id",
+        "stable_unit_id",
+        "group_unit_id",
+    },
+    "fold_qc": {
+        "path_specific_place_decoding_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "qc_status",
+        "qc_message",
+    },
+    "summary": {
+        "path_specific_place_decoding_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "model",
+        "coordinate_unit",
+        "analysis_status",
+    },
+    "binned_error": {
+        "path_specific_place_decoding_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "coordinate_unit",
+    },
+}
+_NWB_TABLE_INTEGER_COLUMNS = {
+    "selected_units": {"selection_index"},
+    "fold_qc": {
+        "fold",
+        "n_train_laps",
+        "n_test_laps",
+        "n_decoded_samples",
+    },
+    "summary": {
+        "n_units",
+        "n_folds_expected",
+        "n_folds_valid",
+        "n_samples",
+    },
+    "binned_error": {"n"},
+}
+_NWB_PROVENANCE_COLUMNS = (
+    "artifact_schema_version",
+    "metadata_json",
+)
+
+
+def _decoded_nwb_text(value: Any, *, name: str, allow_empty: bool = False) -> str:
+    """Return one UTF-8 string fetched from an NWB object."""
+    if isinstance(value, (bytes, np.bytes_)):
+        try:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{name} is not valid UTF-8.") from exc
+    value = str(value)
+    if not value and not allow_empty:
+        raise ValueError(f"{name} must be non-empty.")
+    return value
+
+
+def _canonical_nwb_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one exact-schema decoding table with deterministic dtypes."""
+    if artifact_name not in _NWB_TABLE_COLUMNS:
+        raise ValueError(f"Unknown decoding table {artifact_name!r}.")
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Path-specific decoding tables must be pandas DataFrames.")
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    observed = tuple(str(column) for column in table.columns)
+    if len(observed) != len(columns) or set(observed) != set(columns):
+        raise ValueError(
+            f"{artifact_name} must contain exactly columns {tuple(columns)!r}."
+        )
+    output = table.loc[:, list(columns)].copy().reset_index(drop=True)
+    text_columns = _NWB_TABLE_TEXT_COLUMNS[artifact_name]
+    integer_columns = _NWB_TABLE_INTEGER_COLUMNS[artifact_name]
+    for column in columns:
+        if column in text_columns:
+            output[column] = output[column].map(
+                lambda value, column=column: _decoded_nwb_text(
+                    value,
+                    name=f"{artifact_name}.{column}",
+                    allow_empty=(column == "qc_message"),
+                )
+            )
+        elif column in integer_columns:
+            values = pd.to_numeric(output[column], errors="raise").to_numpy(
+                dtype=float
+            )
+            if not np.all(np.isfinite(values)) or not np.allclose(
+                values,
+                np.rint(values),
+                rtol=0.0,
+                atol=1e-9,
+            ):
+                raise ValueError(
+                    f"{artifact_name}.{column} must contain finite integers."
+                )
+            output[column] = np.rint(values).astype(np.int64)
+        else:
+            values = pd.to_numeric(output[column], errors="raise").to_numpy(
+                dtype=float
+            )
+            if np.any(np.isinf(values)):
+                raise ValueError(f"{artifact_name}.{column} cannot contain infinity.")
+            output[column] = values.astype(float)
+    return output
+
+
+def _decoding_table_to_dynamic_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> Any:
+    """Convert one canonical decoding DataFrame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    description = (
+        f"PathSpecificPlaceDecoding {artifact_name.replace('_', ' ')}; "
+        f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        vector_columns = []
+        for column in columns:
+            if column in _NWB_TABLE_TEXT_COLUMNS[artifact_name]:
+                data = np.asarray([], dtype="S1")
+            elif column in _NWB_TABLE_INTEGER_COLUMNS[artifact_name]:
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            vector_columns.append(
+                VectorData(
+                    name=column,
+                    description=f"Canonical {artifact_name} field {column!r}.",
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=_NWB_TABLE_NAMES[artifact_name],
+            description=description,
+            columns=vector_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=_NWB_TABLE_NAMES[artifact_name],
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": column,
+                "description": f"Canonical {artifact_name} field {column!r}.",
+            }
+            for column in columns
+        ],
+    )
+
+
+def _decoding_table_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one canonical decoding table from a fetched NWB object."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        expected_name = _NWB_TABLE_NAMES[artifact_name]
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected decoding NWB object name {nwb_table.name!r}; "
+                f"expected {expected_name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Decoding tabular NWB objects must be DynamicTables.")
+    return _canonical_nwb_table(table, artifact_name=artifact_name)
+
+
+def selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert selected decoding units to an NWB DynamicTable."""
+    return _decoding_table_to_dynamic_table(table, artifact_name="selected_units")
+
+
+def selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return selected decoding units from a fetched NWB object."""
+    return _decoding_table_from_dynamic_table(
+        nwb_table,
+        artifact_name="selected_units",
+    )
+
+
+def fold_qc_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert fold-level decoding QC to an NWB DynamicTable."""
+    return _decoding_table_to_dynamic_table(table, artifact_name="fold_qc")
+
+
+def fold_qc_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return fold-level decoding QC from a fetched NWB object."""
+    return _decoding_table_from_dynamic_table(nwb_table, artifact_name="fold_qc")
+
+
+def decoding_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the decoding summary to an NWB DynamicTable."""
+    return _decoding_table_to_dynamic_table(table, artifact_name="summary")
+
+
+def decoding_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return the decoding summary from a fetched NWB object."""
+    return _decoding_table_from_dynamic_table(nwb_table, artifact_name="summary")
+
+
+def binned_error_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert position-binned decoding error to an NWB DynamicTable."""
+    return _decoding_table_to_dynamic_table(table, artifact_name="binned_error")
+
+
+def binned_error_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return position-binned decoding error from a fetched NWB object."""
+    return _decoding_table_from_dynamic_table(
+        nwb_table,
+        artifact_name="binned_error",
+    )
+
+
+def _position_to_time_series(tsd: Any, *, kind: str) -> Any:
+    """Convert one true or decoded position Tsd to an NWB TimeSeries."""
+    from pynwb import TimeSeries
+
+    if kind not in {"true", "decoded"}:
+        raise ValueError("Position TimeSeries kind must be 'true' or 'decoded'.")
+    _validate_tsd(tsd, name=kind, allow_empty=True)
+    name = (
+        NWB_TRUE_POSITION_TIMESERIES_NAME
+        if kind == "true"
+        else NWB_DECODED_POSITION_TIMESERIES_NAME
+    )
+    return TimeSeries(
+        name=name,
+        data=np.asarray(tsd.d, dtype=float).reshape(-1),
+        unit="cm",
+        timestamps=np.asarray(tsd.t, dtype=float).reshape(-1),
+        description=(
+            f"{kind.capitalize()} concatenated path-specific position in "
+            "ephys-reference time; "
+            f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+    )
+
+
+def true_position_to_time_series(tsd: Any) -> Any:
+    """Convert measured path-specific position to an NWB TimeSeries."""
+    return _position_to_time_series(tsd, kind="true")
+
+
+def decoded_position_to_time_series(tsd: Any) -> Any:
+    """Convert decoded path-specific position to an NWB TimeSeries."""
+    return _position_to_time_series(tsd, kind="decoded")
+
+
+def _time_series_arrays(nwb_series: Any, *, kind: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated timestamps and values from one decoding TimeSeries."""
+    from pynwb import TimeSeries
+
+    if not isinstance(nwb_series, TimeSeries):
+        raise TypeError("Decoded-position NWB objects must be TimeSeries objects.")
+    expected_name = (
+        NWB_TRUE_POSITION_TIMESERIES_NAME
+        if kind == "true"
+        else NWB_DECODED_POSITION_TIMESERIES_NAME
+    )
+    if str(nwb_series.name) != expected_name:
+        raise ValueError(
+            f"Unexpected {kind} position TimeSeries name {nwb_series.name!r}."
+        )
+    if str(nwb_series.unit) != "cm":
+        raise ValueError(f"{kind} position TimeSeries must use centimeters.")
+    if nwb_series.timestamps is None:
+        raise ValueError(f"{kind} position TimeSeries must use explicit timestamps.")
+    times = np.asarray(nwb_series.timestamps[:], dtype=float).reshape(-1)
+    values = np.asarray(nwb_series.data[:], dtype=float).reshape(-1)
+    if times.shape != values.shape:
+        raise ValueError(f"{kind} position timestamps and values must align.")
+    if not np.all(np.isfinite(times)) or (
+        times.size > 1 and np.any(np.diff(times) <= 0.0)
+    ):
+        raise ValueError(f"{kind} position timestamps must be finite and increasing.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{kind} position values must be finite.")
+    return times, values
+
+
+def _support_bounds(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated ordered support bounds in seconds."""
+    starts = np.asarray(intervals.start, dtype=float).reshape(-1)
+    ends = np.asarray(intervals.end, dtype=float).reshape(-1)
+    if starts.shape != ends.shape or not np.all(np.isfinite(starts)) or (
+        not np.all(np.isfinite(ends))
+    ):
+        raise ValueError("Decoding support bounds must be aligned and finite.")
+    if np.any(ends < starts) or (
+        starts.size > 1 and np.any(starts[1:] < ends[:-1])
+    ):
+        raise ValueError("Decoding support intervals must be ordered and disjoint.")
+    return starts, ends
+
+
+def decoding_support_to_time_intervals(true: Any, decoded: Any) -> Any:
+    """Return one native TimeIntervals object for the shared Tsd support."""
+    from pynwb.epoch import TimeIntervals
+
+    true_starts, true_ends = _support_bounds(true.time_support)
+    decoded_starts, decoded_ends = _support_bounds(decoded.time_support)
+    if not np.array_equal(true_starts, decoded_starts) or not np.array_equal(
+        true_ends,
+        decoded_ends,
+    ):
+        raise ValueError("True and decoded positions must share exact time support.")
+    output = TimeIntervals(
+        name=NWB_DECODING_SUPPORT_NAME,
+        description=(
+            "Shared true/decoded support in ephys-reference seconds; "
+            f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+    )
+    for start, end in zip(true_starts, true_ends, strict=True):
+        output.add_interval(start_time=float(start), stop_time=float(end))
+    return output
+
+
+def decoding_support_from_time_intervals(nwb_intervals: Any) -> Any:
+    """Return a seconds-based IntervalSet from a fetched TimeIntervals object."""
+    from pynwb.epoch import TimeIntervals
+
+    if isinstance(nwb_intervals, pd.DataFrame):
+        table = nwb_intervals
+    elif isinstance(nwb_intervals, TimeIntervals):
+        if str(nwb_intervals.name) != NWB_DECODING_SUPPORT_NAME:
+            raise ValueError(
+                f"Unexpected decoding support name {nwb_intervals.name!r}."
+            )
+        table = nwb_intervals.to_dataframe()
+    else:
+        raise TypeError("Decoding support must be TimeIntervals or a DataFrame.")
+    if tuple(str(column) for column in table.columns) != (
+        "start_time",
+        "stop_time",
+    ):
+        raise ValueError(
+            "Decoding TimeIntervals must contain only start_time and stop_time."
+        )
+    import pynapple as nap
+
+    support = nap.IntervalSet(
+        start=np.asarray(table["start_time"], dtype=float),
+        end=np.asarray(table["stop_time"], dtype=float),
+        time_units="s",
+    )
+    _support_bounds(support)
+    return support
+
+
+def position_from_time_series(nwb_series: Any, support: Any, *, kind: str) -> Any:
+    """Reconstruct one true or decoded Pynapple Tsd from fetched NWB objects."""
+    times, values = _time_series_arrays(nwb_series, kind=kind)
+    return _make_tsd(times, values, support)
+
+
+def _provenance_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return storage-independent scalar provenance for one decoding result."""
+    validated = validate_path_specific_decoding_result(result)
+    path_length_cm = float(validated["path_length_cm"])
+    return {
+        "metadata": dict(validated["metadata"]),
+        "parameters": dict(validated["parameters"]),
+        "path_length_cm": (
+            path_length_cm if np.isfinite(path_length_cm) else None
+        ),
+        "n_units": int(validated["n_units"]),
+        "n_folds_expected": int(validated["n_folds_expected"]),
+        "n_folds_valid": int(validated["n_folds_valid"]),
+        "n_decoded_samples": int(validated["n_decoded_samples"]),
+        "selected_units_sha256": str(validated["selected_units_sha256"]),
+        "analysis_status": str(validated["analysis_status"]),
+        "artifact_origin": str(validated["artifact_origin"]),
+        "legacy_artifact_provenance": validated[
+            "legacy_artifact_provenance"
+        ],
+    }
+
+
+def decoding_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store one canonical JSON provenance record for a decoding result."""
+    from hdmf.common import DynamicTable
+
+    from v1ca1.spyglass.selection import canonical_json
+
+    table = pd.DataFrame(
+        [
+            {
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+                "metadata_json": canonical_json(_provenance_payload(result)),
+            }
+        ],
+        columns=list(_NWB_PROVENANCE_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_PROVENANCE_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One provenance record for PathSpecificPlaceDecoding; "
+            f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": "artifact_schema_version",
+                "description": "v1ca1 NWB artifact schema version.",
+            },
+            {
+                "name": "metadata_json",
+                "description": "Canonical JSON result metadata and parameters.",
+            },
+        ],
+    )
+
+
+def _provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Return and validate the scalar payload from a provenance table."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_PROVENANCE_TABLE_NAME:
+            raise ValueError(
+                f"Unexpected decoding provenance name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Decoding provenance must be a DynamicTable or DataFrame.")
+    if len(table) != 1 or set(table.columns) != set(_NWB_PROVENANCE_COLUMNS):
+        raise ValueError("Decoding provenance must contain one canonical row.")
+    version = _decoded_nwb_text(
+        table.iloc[0]["artifact_schema_version"],
+        name="artifact_schema_version",
+    )
+    if version != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("Decoding NWB artifact schema version is unsupported.")
+    payload_text = _decoded_nwb_text(
+        table.iloc[0]["metadata_json"],
+        name="metadata_json",
+    )
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Decoding provenance is not valid JSON.") from exc
+    expected = {
+        "metadata",
+        "parameters",
+        "path_length_cm",
+        "n_units",
+        "n_folds_expected",
+        "n_folds_valid",
+        "n_decoded_samples",
+        "selected_units_sha256",
+        "analysis_status",
+        "artifact_origin",
+        "legacy_artifact_provenance",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise ValueError("Decoding provenance has an invalid schema.")
+    return dict(payload)
+
+
+def path_specific_place_decoding_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    fold_qc: Any,
+    summary: Any,
+    binned_error: Any,
+    true_position: Any,
+    decoded_position: Any,
+    decoding_support: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from its eight fetched objects."""
+    payload = _provenance_from_dynamic_table(provenance)
+    support = decoding_support_from_time_intervals(decoding_support)
+    result = {
+        "metadata": dict(payload["metadata"]),
+        "parameters": dict(payload["parameters"]),
+        "selected_units": selected_units_from_dynamic_table(selected_units),
+        "fold_qc": fold_qc_from_dynamic_table(fold_qc),
+        "summary": decoding_summary_from_dynamic_table(summary),
+        "binned_error": binned_error_from_dynamic_table(binned_error),
+        "true": position_from_time_series(true_position, support, kind="true"),
+        "decoded": position_from_time_series(
+            decoded_position,
+            support,
+            kind="decoded",
+        ),
+        "path_length_cm": (
+            np.nan
+            if payload["path_length_cm"] is None
+            else float(payload["path_length_cm"])
+        ),
+        "n_units": int(payload["n_units"]),
+        "n_folds_expected": int(payload["n_folds_expected"]),
+        "n_folds_valid": int(payload["n_folds_valid"]),
+        "n_decoded_samples": int(payload["n_decoded_samples"]),
+        "selected_units_sha256": str(payload["selected_units_sha256"]),
+        "analysis_status": str(payload["analysis_status"]),
+        "artifact_origin": str(payload["artifact_origin"]),
+        "legacy_artifact_provenance": payload["legacy_artifact_provenance"],
+    }
+    return validate_path_specific_decoding_result(result)
+
+
+def _table_sha256(table: pd.DataFrame, *, artifact_name: str) -> str:
+    """Digest one canonical decoding table independently of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in _NWB_TABLE_COLUMNS[artifact_name]:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "columns": list(_NWB_TABLE_COLUMNS[artifact_name]),
+            "records": records,
+        }
+    )
+
+
+def selected_units_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete selected-unit table."""
+    return _table_sha256(table, artifact_name="selected_units")
+
+
+def fold_qc_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete fold-QC table."""
+    return _table_sha256(table, artifact_name="fold_qc")
+
+
+def decoding_summary_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete decoding-summary table."""
+    return _table_sha256(table, artifact_name="summary")
+
+
+def binned_error_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete binned-error table."""
+    return _table_sha256(table, artifact_name="binned_error")
+
+
+def position_time_series_sha256(tsd: Any, *, kind: str) -> str:
+    """Digest one true or decoded position series independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    _validate_tsd(tsd, name=kind, allow_empty=True)
+    return provenance_sha256(
+        {
+            "kind": kind,
+            "timestamps_s": np.asarray(tsd.t, dtype=float).reshape(-1).tolist(),
+            "position_cm": np.asarray(tsd.d, dtype=float).reshape(-1).tolist(),
+        }
+    )
+
+
+def decoding_support_sha256(true: Any, decoded: Any) -> str:
+    """Digest the exact shared true/decoded support bounds."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    true_starts, true_ends = _support_bounds(true.time_support)
+    decoded_starts, decoded_ends = _support_bounds(decoded.time_support)
+    if not np.array_equal(true_starts, decoded_starts) or not np.array_equal(
+        true_ends,
+        decoded_ends,
+    ):
+        raise ValueError("True and decoded positions must share exact time support.")
+    return provenance_sha256(
+        {
+            "start_time_s": true_starts.tolist(),
+            "stop_time_s": true_ends.tolist(),
+        }
+    )
+
+
+def decoding_provenance_sha256(result: Mapping[str, Any]) -> str:
+    """Digest scalar result provenance independently of physical storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(_provenance_payload(result))
+
+
 def write_path_specific_decoding_artifact(
     result: Mapping[str, Any],
     path: Path,
@@ -1023,7 +1665,7 @@ def register_existing_path_specific_decoding_artifact(
     *,
     source_true_path: Path,
     source_decoded_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     animal_name: str,
     date: str,
     region: str,
@@ -1044,7 +1686,7 @@ def register_existing_path_specific_decoding_artifact(
     random_seed: int = DEFAULT_RANDOM_SEED,
     source_v1ca1_git_commit: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and register legacy within-epoch place-decoding Tsds."""
+    """Validate legacy Tsds and optionally write the offline artifact bundle."""
     from v1ca1.spyglass.selection import provenance_sha256, unit_identity_sha256
     from v1ca1.task_progression.decoding_comparison import (
         build_train_test_folds,
@@ -1233,6 +1875,8 @@ def register_existing_path_specific_decoding_artifact(
         "artifact_origin": "registered_existing",
         "legacy_artifact_provenance": provenance,
     }
+    if destination_path is None:
+        return validate_path_specific_decoding_result(result)
     write_path_specific_decoding_artifact(result, destination_path)
     return {
         **result,
@@ -1254,12 +1898,43 @@ __all__ = [
     "ARTIFACT_DIRNAME",
     "DEFAULT_ARTIFACT_ROOT",
     "MANUSCRIPT_PARAMETERS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_BINNED_ERROR_TABLE_NAME",
+    "NWB_DECODING_SUPPORT_NAME",
+    "NWB_DECODED_POSITION_TIMESERIES_NAME",
+    "NWB_FOLD_QC_TABLE_NAME",
+    "NWB_PROVENANCE_TABLE_NAME",
+    "NWB_SELECTED_UNITS_TABLE_NAME",
+    "NWB_SUMMARY_TABLE_NAME",
+    "NWB_TRUE_POSITION_TIMESERIES_NAME",
     "OUTPUT_RULE",
+    "binned_error_from_dynamic_table",
+    "binned_error_sha256",
+    "binned_error_to_dynamic_table",
     "build_concatenated_path_specific_position",
     "compute_path_specific_place_decoding",
+    "decoded_position_to_time_series",
+    "decoding_provenance_sha256",
+    "decoding_provenance_to_dynamic_table",
+    "decoding_summary_from_dynamic_table",
+    "decoding_summary_sha256",
+    "decoding_summary_to_dynamic_table",
+    "decoding_support_from_time_intervals",
+    "decoding_support_sha256",
+    "decoding_support_to_time_intervals",
+    "fold_qc_from_dynamic_table",
+    "fold_qc_sha256",
+    "fold_qc_to_dynamic_table",
     "get_path_specific_decoding_artifact_paths",
     "load_path_specific_decoding_artifact",
+    "path_specific_place_decoding_result_from_nwb_objects",
+    "position_from_time_series",
+    "position_time_series_sha256",
     "register_existing_path_specific_decoding_artifact",
+    "selected_units_from_dynamic_table",
+    "selected_units_sha256",
+    "selected_units_to_dynamic_table",
+    "true_position_to_time_series",
     "validate_path_specific_decoding_parameters",
     "validate_path_specific_decoding_result",
     "write_path_specific_decoding_artifact",

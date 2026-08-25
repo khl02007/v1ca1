@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-"""Database-free RippleModulation computation and artifact planning.
+"""Database-free RippleModulation computation and Parquet/NWB adapters.
 
 This module adapts the existing ripple-modulation analysis to one explicit
 epoch and region.  It contains no DataJoint table declarations or inserts, and
-all filesystem mutations require a separate, explicit write/copy call.
+all filesystem mutations require a separate, explicit write/copy call. Legacy
+and offline workflows retain their Parquet pair; live result tables can store
+the same canonical tables as NWB DynamicTables.
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from numbers import Integral
 import os
 from pathlib import Path
 from typing import Any
 import uuid
 
 import numpy as np
+import pandas as pd
 
 
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
@@ -23,6 +27,93 @@ STABLE_UNIT_COLUMNS = (
     "spikesorting_merge_id",
     "unit_id",
 )
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_SUMMARY_TABLE_NAME = "ripple_modulation_summary"
+NWB_PERI_RIPPLE_FIRING_RATE_TABLE_NAME = "peri_ripple_firing_rate"
+SUMMARY_TABLE_COLUMNS = (
+    "animal_name",
+    "date",
+    "epoch",
+    "region",
+    "unit_id",
+    "n_ripples",
+    "bin_size_s",
+    "time_before_s",
+    "time_after_s",
+    "baseline_mean_hz",
+    "baseline_std_hz",
+    "response_mean_hz",
+    "ripple_modulation_index",
+    "response_zscore",
+    "invalid_reason",
+    "group_unit_id",
+    "spikesorting_merge_id",
+    "stable_unit_id",
+)
+PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS = (
+    "animal_name",
+    "date",
+    "epoch",
+    "region",
+    "unit_id",
+    "n_ripples",
+    "bin_size_s",
+    "time_before_s",
+    "time_after_s",
+    "time_s",
+    "mean_rate_hz",
+    "group_unit_id",
+    "spikesorting_merge_id",
+    "stable_unit_id",
+)
+_TEXT_COLUMNS = (
+    "animal_name",
+    "date",
+    "epoch",
+    "region",
+    "unit_id",
+    "spikesorting_merge_id",
+    "stable_unit_id",
+)
+_SUMMARY_FLOAT_COLUMNS = (
+    "bin_size_s",
+    "time_before_s",
+    "time_after_s",
+    "baseline_mean_hz",
+    "baseline_std_hz",
+    "response_mean_hz",
+    "ripple_modulation_index",
+    "response_zscore",
+)
+_PERI_FLOAT_COLUMNS = (
+    "bin_size_s",
+    "time_before_s",
+    "time_after_s",
+    "time_s",
+    "mean_rate_hz",
+)
+_COLUMN_DESCRIPTIONS = {
+    "animal_name": "Subject identifier used by the analysis.",
+    "date": "Session date formatted as YYYYMMDD.",
+    "epoch": "Selected epoch name.",
+    "region": "Canonical analyzed brain region.",
+    "unit_id": "Unit identifier within the spike-sorting merge.",
+    "n_ripples": "Number of selected ripple events.",
+    "bin_size_s": "Peri-event firing-rate bin width in seconds.",
+    "time_before_s": "Seconds represented before ripple onset.",
+    "time_after_s": "Seconds represented after ripple onset.",
+    "baseline_mean_hz": "Mean firing rate in the baseline window.",
+    "baseline_std_hz": "Firing-rate standard deviation in the baseline window.",
+    "response_mean_hz": "Mean firing rate in the response window.",
+    "ripple_modulation_index": "Baseline-relative ripple modulation index.",
+    "response_zscore": "Response-window firing-rate z score.",
+    "invalid_reason": "QC reason for an invalid response, empty when valid.",
+    "time_s": "Peri-ripple bin center relative to onset in seconds.",
+    "mean_rate_hz": "Mean peri-ripple firing rate in hertz.",
+    "group_unit_id": "Ephemeral unit key in the selected Pynapple TsGroup.",
+    "spikesorting_merge_id": "Persistent Spyglass spike-sorting merge identifier.",
+    "stable_unit_id": "Composite persistent unit identifier, merge_id:unit_id.",
+}
 
 
 def _ripple_plot_module() -> Any:
@@ -393,6 +484,455 @@ def compute_epoch_region_ripple_modulation(
         ),
         "parameters": parameters,
     }
+
+
+def _decode_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as UTF-8 text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"RippleModulation column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _canonical_group_unit_ids(values: Sequence[Any]) -> pd.Series:
+    """Return one homogeneous, NWB-compatible ephemeral unit-id column."""
+    normalized: list[Any] = []
+    kinds: set[str] = set()
+    for value in values:
+        if isinstance(value, bytes):
+            value = _decode_text(value, column="group_unit_id")
+        if isinstance(value, Integral) and not isinstance(value, (bool, np.bool_)):
+            integer = int(value)
+            if not np.iinfo(np.int64).min <= integer <= np.iinfo(np.int64).max:
+                raise ValueError("Integer group_unit_id values must fit in int64.")
+            normalized.append(integer)
+            kinds.add("integer")
+        elif isinstance(value, str) and value:
+            normalized.append(value)
+            kinds.add("string")
+        else:
+            raise TypeError(
+                "group_unit_id values must be non-empty strings or integers."
+            )
+    if len(kinds) > 1:
+        raise TypeError("group_unit_id values must have one homogeneous type.")
+    dtype: Any = np.int64 if kinds == {"integer"} else object
+    return pd.Series(normalized, dtype=dtype, name="group_unit_id")
+
+
+def _empty_nwb_table(*, artifact_name: str) -> pd.DataFrame:
+    """Return one typed empty RippleModulation NWB table."""
+    if artifact_name == "summary":
+        columns = SUMMARY_TABLE_COLUMNS
+        float_columns = _SUMMARY_FLOAT_COLUMNS
+    elif artifact_name == "peri_ripple_firing_rate":
+        columns = PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS
+        float_columns = _PERI_FLOAT_COLUMNS
+    else:
+        raise ValueError(f"Unknown RippleModulation artifact {artifact_name!r}.")
+    output: dict[str, pd.Series] = {}
+    for column in columns:
+        if column in _TEXT_COLUMNS or column == "invalid_reason":
+            output[column] = pd.Series(dtype=object)
+        elif column == "group_unit_id" or column == "n_ripples":
+            output[column] = pd.Series(dtype=np.int64)
+        elif column in float_columns:
+            output[column] = pd.Series(dtype=float)
+        else:
+            raise AssertionError(
+                f"Missing dtype for RippleModulation column {column!r}."
+            )
+    return pd.DataFrame(output, columns=columns)
+
+
+def _canonical_ripple_modulation_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one validated result table with deterministic NWB dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("RippleModulation artifacts must be pandas DataFrames.")
+    if artifact_name == "summary":
+        columns = SUMMARY_TABLE_COLUMNS
+        float_columns = _SUMMARY_FLOAT_COLUMNS
+    elif artifact_name == "peri_ripple_firing_rate":
+        columns = PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS
+        float_columns = _PERI_FLOAT_COLUMNS
+    else:
+        raise ValueError(f"Unknown RippleModulation artifact {artifact_name!r}.")
+    actual_columns = tuple(str(column) for column in table.columns)
+    if set(actual_columns) != set(columns):
+        missing = [column for column in columns if column not in table]
+        unexpected = [column for column in table if column not in columns]
+        raise ValueError(
+            f"RippleModulation {artifact_name} table has non-canonical columns: "
+            f"missing={missing!r}, unexpected={unexpected!r}."
+        )
+    if table.empty:
+        return _empty_nwb_table(artifact_name=artifact_name)
+
+    output = table.loc[:, list(columns)].copy().reset_index(drop=True)
+    for column in _TEXT_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_text(value, column=column)
+        )
+        if output[column].eq("").any():
+            raise ValueError(
+                f"RippleModulation column {column!r} cannot be empty."
+            )
+    if artifact_name == "summary":
+        output["invalid_reason"] = output["invalid_reason"].map(
+            lambda value: (
+                None
+                if value is None or bool(pd.isna(value))
+                else (_decode_text(value, column="invalid_reason") or None)
+            )
+        )
+    output["group_unit_id"] = _canonical_group_unit_ids(
+        output["group_unit_id"].tolist()
+    )
+    ripple_counts = pd.to_numeric(output["n_ripples"], errors="raise").to_numpy(
+        dtype=float
+    )
+    if not np.all(np.isfinite(ripple_counts)) or not np.allclose(
+        ripple_counts,
+        np.rint(ripple_counts),
+        rtol=0.0,
+        atol=1e-9,
+    ):
+        raise ValueError("RippleModulation n_ripples must contain integers.")
+    if np.any(ripple_counts <= 0.0):
+        raise ValueError(
+            "Nonempty RippleModulation tables require a positive n_ripples."
+        )
+    output["n_ripples"] = np.rint(ripple_counts).astype(np.int64)
+    for column in float_columns:
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(float)
+        values = output[column].to_numpy(dtype=float)
+        if np.isinf(values).any():
+            raise ValueError(
+                f"RippleModulation column {column!r} may be finite or NaN, "
+                "not infinite."
+            )
+
+    for column in ("bin_size_s", "time_before_s", "time_after_s"):
+        values = output[column].to_numpy(dtype=float)
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError(
+                f"RippleModulation column {column!r} must be positive and finite."
+            )
+    if artifact_name == "peri_ripple_firing_rate":
+        for column in ("time_s", "mean_rate_hz"):
+            values = output[column].to_numpy(dtype=float)
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"RippleModulation peri-ripple {column} must be finite."
+                )
+        if np.any(output["mean_rate_hz"].to_numpy(dtype=float) < 0.0):
+            raise ValueError("Peri-ripple mean_rate_hz must be non-negative.")
+    else:
+        for column in (
+            "baseline_mean_hz",
+            "baseline_std_hz",
+            "response_mean_hz",
+        ):
+            finite = output[column].dropna().to_numpy(dtype=float)
+            if np.any(finite < 0.0):
+                raise ValueError(
+                    f"RippleModulation summary {column} must be non-negative."
+                )
+
+    expected_stable_ids = (
+        output["spikesorting_merge_id"].astype(str)
+        + ":"
+        + output["unit_id"].astype(str)
+    )
+    if not output["stable_unit_id"].astype(str).equals(expected_stable_ids):
+        raise ValueError(
+            "RippleModulation stable_unit_id must equal merge_id:unit_id."
+        )
+    identity = output.loc[
+        :, ["stable_unit_id", "group_unit_id"]
+    ].drop_duplicates()
+    if identity["stable_unit_id"].duplicated().any() or identity[
+        "group_unit_id"
+    ].duplicated().any():
+        raise ValueError(
+            "RippleModulation stable and group unit identities must map one-to-one."
+        )
+    if artifact_name == "summary" and output["stable_unit_id"].duplicated().any():
+        raise ValueError(
+            "RippleModulation summary must contain one row per stable unit."
+        )
+    if artifact_name == "peri_ripple_firing_rate" and output.duplicated(
+        ["stable_unit_id", "time_s"]
+    ).any():
+        raise ValueError(
+            "RippleModulation peri-ripple table has duplicate unit/time rows."
+        )
+    return output
+
+
+def validate_ripple_modulation_tables(
+    summary: pd.DataFrame,
+    peri_ripple_firing_rate: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Canonicalize and cross-check one summary/peri-ripple table pair."""
+    summary = _canonical_ripple_modulation_table(
+        summary,
+        artifact_name="summary",
+    )
+    peri = _canonical_ripple_modulation_table(
+        peri_ripple_firing_rate,
+        artifact_name="peri_ripple_firing_rate",
+    )
+    if summary.empty or peri.empty:
+        if not summary.empty or not peri.empty:
+            raise ValueError(
+                "RippleModulation summary and peri-ripple tables must both be empty."
+            )
+        return summary, peri
+
+    summary_units = summary["stable_unit_id"].astype(str).tolist()
+    peri_units = peri["stable_unit_id"].astype(str).unique().tolist()
+    if set(summary_units) != set(peri_units):
+        raise ValueError(
+            "RippleModulation summary and peri-ripple tables must contain "
+            "the same units."
+        )
+    shared_columns = (
+        "animal_name",
+        "date",
+        "epoch",
+        "region",
+        "n_ripples",
+        "bin_size_s",
+        "time_before_s",
+        "time_after_s",
+    )
+    for column in shared_columns:
+        summary_values = summary[column].drop_duplicates().tolist()
+        peri_values = peri[column].drop_duplicates().tolist()
+        if len(summary_values) != 1 or len(peri_values) != 1:
+            raise ValueError(
+                f"RippleModulation {column} must be constant within each artifact."
+            )
+        summary_value = summary_values[0]
+        peri_value = peri_values[0]
+        if isinstance(summary_value, (float, np.floating)):
+            matches = np.isclose(
+                float(summary_value),
+                float(peri_value),
+                rtol=1e-10,
+                atol=1e-12,
+            )
+        else:
+            matches = str(summary_value) == str(peri_value)
+        if not bool(matches):
+            raise ValueError(
+                f"RippleModulation artifacts disagree on {column}."
+            )
+
+    identity_columns = (
+        "stable_unit_id",
+        "spikesorting_merge_id",
+        "unit_id",
+        "group_unit_id",
+    )
+    summary_identity = summary.loc[:, identity_columns].copy()
+    peri_identity = peri.loc[:, identity_columns].drop_duplicates().copy()
+    summary_identity["group_unit_id"] = summary_identity["group_unit_id"].astype(str)
+    peri_identity["group_unit_id"] = peri_identity["group_unit_id"].astype(str)
+    summary_identity = summary_identity.sort_values("stable_unit_id").reset_index(
+        drop=True
+    )
+    peri_identity = peri_identity.sort_values("stable_unit_id").reset_index(drop=True)
+    if not summary_identity.astype(str).equals(peri_identity.astype(str)):
+        raise ValueError(
+            "RippleModulation artifacts disagree on persistent unit identity."
+        )
+
+    bin_size_s = float(summary["bin_size_s"].iloc[0])
+    expected_grid = np.arange(
+        -float(summary["time_before_s"].iloc[0]) + bin_size_s / 2.0,
+        float(summary["time_after_s"].iloc[0]),
+        bin_size_s,
+        dtype=float,
+    )
+    for stable_unit_id, unit_table in peri.groupby("stable_unit_id", sort=False):
+        observed = np.sort(unit_table["time_s"].to_numpy(dtype=float))
+        if observed.size != expected_grid.size or not np.allclose(
+            observed,
+            expected_grid,
+            rtol=1e-7,
+            atol=max(1e-12, bin_size_s * 1e-7),
+        ):
+            raise ValueError(
+                "RippleModulation peri-ripple table has an incomplete or shifted "
+                f"time grid for unit {stable_unit_id!r}."
+            )
+    return summary, peri
+
+
+def _table_to_dynamic_table(table: pd.DataFrame, *, artifact_name: str) -> Any:
+    """Convert one canonical RippleModulation table to a DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_ripple_modulation_table(
+        table,
+        artifact_name=artifact_name,
+    )
+    if artifact_name == "summary":
+        columns = SUMMARY_TABLE_COLUMNS
+        table_name = NWB_SUMMARY_TABLE_NAME
+        description = (
+            "Per-unit ripple modulation summary and QC; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        )
+        float_columns = _SUMMARY_FLOAT_COLUMNS
+    else:
+        columns = PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS
+        table_name = NWB_PERI_RIPPLE_FIRING_RATE_TABLE_NAME
+        description = (
+            "Per-unit mean peri-ripple firing-rate traces; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        )
+        float_columns = _PERI_FLOAT_COLUMNS
+    if canonical.empty:
+        vector_columns = []
+        for name in columns:
+            if name in _TEXT_COLUMNS or name == "invalid_reason":
+                data = np.asarray([], dtype="S1")
+            elif name == "group_unit_id" or name == "n_ripples":
+                data = np.asarray([], dtype=np.int64)
+            elif name in float_columns:
+                data = np.asarray([], dtype=float)
+            else:
+                raise AssertionError(
+                    f"Missing dtype for RippleModulation column {name!r}."
+                )
+            vector_columns.append(
+                VectorData(
+                    name=name,
+                    description=_COLUMN_DESCRIPTIONS[name],
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=table_name,
+            description=description,
+            columns=vector_columns,
+        )
+
+    storage_table = canonical.copy()
+    if artifact_name == "summary":
+        storage_table["invalid_reason"] = storage_table[
+            "invalid_reason"
+        ].fillna("")
+    return DynamicTable.from_dataframe(
+        name=table_name,
+        df=storage_table,
+        table_description=description,
+        columns=[
+            {"name": name, "description": _COLUMN_DESCRIPTIONS[name]}
+            for name in columns
+        ],
+    )
+
+
+def ripple_modulation_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical RippleModulation summary to a DynamicTable."""
+    return _table_to_dynamic_table(table, artifact_name="summary")
+
+
+def peri_ripple_firing_rate_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical peri-ripple firing-rate table to a DynamicTable."""
+    return _table_to_dynamic_table(
+        table,
+        artifact_name="peri_ripple_firing_rate",
+    )
+
+
+def _table_from_dynamic_table(nwb_table: Any, *, artifact_name: str) -> pd.DataFrame:
+    """Return one canonical DataFrame from a DynamicTable or fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    expected_name = (
+        NWB_SUMMARY_TABLE_NAME
+        if artifact_name == "summary"
+        else NWB_PERI_RIPPLE_FIRING_RATE_TABLE_NAME
+    )
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected RippleModulation NWB object name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "RippleModulation NWB objects must be DynamicTables or DataFrames."
+        )
+    return _canonical_ripple_modulation_table(
+        table.reset_index(drop=True),
+        artifact_name=artifact_name,
+    )
+
+
+def ripple_modulation_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return one canonical summary from an NWB object or fetched DataFrame."""
+    return _table_from_dynamic_table(nwb_table, artifact_name="summary")
+
+
+def peri_ripple_firing_rate_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return one canonical peri-ripple table from an NWB object or DataFrame."""
+    return _table_from_dynamic_table(
+        nwb_table,
+        artifact_name="peri_ripple_firing_rate",
+    )
+
+
+def _table_sha256(table: pd.DataFrame, *, artifact_name: str) -> str:
+    """Digest one canonical table independently of its physical storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_ripple_modulation_table(
+        table,
+        artifact_name=artifact_name,
+    )
+    columns = (
+        SUMMARY_TABLE_COLUMNS
+        if artifact_name == "summary"
+        else PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS
+    )
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in columns:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256({"columns": list(columns), "records": records})
+
+
+def ripple_modulation_summary_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical RippleModulation summary table."""
+    return _table_sha256(table, artifact_name="summary")
+
+
+def peri_ripple_firing_rate_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical peri-ripple firing-rate table."""
+    return _table_sha256(table, artifact_name="peri_ripple_firing_rate")
 
 
 def _validate_path_component(value: str, *, name: str) -> str:

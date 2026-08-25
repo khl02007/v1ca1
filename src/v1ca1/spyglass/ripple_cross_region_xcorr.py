@@ -25,6 +25,15 @@ SUMMARY_FILENAME = "summary.parquet"
 RESULT_FILENAME = "ripple_cross_region_xcorr.nc"
 BUNDLE_SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "1"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+
+NWB_CA1_UNITS_TABLE_NAME = "ripple_cross_region_ca1_units"
+NWB_V1_UNITS_TABLE_NAME = "ripple_cross_region_v1_units"
+NWB_PAIR_XCORR_TABLE_NAME = "ripple_cross_region_pair_xcorr"
+NWB_LAG_AXIS_TABLE_NAME = "ripple_cross_region_lag_axis"
+NWB_RIPPLE_SUPPORT_NAME = "ripple_cross_region_support"
+NWB_PROVENANCE_TABLE_NAME = "ripple_cross_region_provenance"
+NWB_XCORR_PROFILE_COLUMN = "normalized_xcorr_by_lag"
 
 SOURCE_REGION = "ca1"
 TARGET_REGION = "v1"
@@ -146,6 +155,60 @@ MANIFEST_COLUMNS = (
     "legacy_artifact_provenance_json",
     "bundle_schema_version",
 )
+
+_UNIT_TEXT_COLUMNS = (*IDENTITY_COLUMNS, "region", "unit_qc_status")
+_UNIT_INTEGER_COLUMNS = (
+    "input_unit_index",
+    "ripple_spike_count",
+    "minimum_ripple_spikes",
+    "n_valid_pairs",
+)
+_UNIT_BOOLEAN_COLUMNS = (
+    "passes_ripple_spike_threshold",
+    "included_in_xcorr",
+)
+_PAIR_TEXT_COLUMNS = (
+    "ripple_cross_region_xcorr_id",
+    "animal_name",
+    "date",
+    "epoch",
+    "ca1_spikesorting_merge_id",
+    "ca1_unit_id",
+    "ca1_stable_unit_id",
+    "ca1_group_unit_id",
+    "v1_spikesorting_merge_id",
+    "v1_unit_id",
+    "v1_stable_unit_id",
+    "v1_group_unit_id",
+    "status",
+)
+_PAIR_INTEGER_COLUMNS = ("n_ca1_ripple_spikes", "n_v1_ripple_spikes")
+_PAIR_FLOAT_COLUMNS = ("peak_lag_s", "peak_norm_xcorr")
+_PROVENANCE_COLUMNS = (
+    "ripple_cross_region_xcorr_id",
+    "animal_name",
+    "date",
+    "epoch",
+    "parameters_json",
+    "upstream_provenance_json",
+    "selected_ripple_intervals_sha256",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
+)
+
+_NWB_COLUMN_DESCRIPTIONS = {
+    **{name: f"Canonical RippleCrossRegionXCorr field {name}." for name in UNIT_AUDIT_COLUMNS},
+    **{name: f"Canonical RippleCrossRegionXCorr pair field {name}." for name in PAIR_SUMMARY_COLUMNS},
+    "lag_index": "Zero-based index into every stored cross-correlation profile.",
+    "lag_s": "Relative CA1-to-V1 lag in seconds.",
+    NWB_XCORR_PROFILE_COLUMN: (
+        "Normalized CA1-to-V1 cross-correlation values aligned to the shared "
+        "lag-axis table."
+    ),
+    **{name: f"RippleCrossRegionXCorr provenance field {name}." for name in _PROVENANCE_COLUMNS},
+}
 
 
 def _screen_module() -> Any:
@@ -1398,6 +1461,755 @@ def validate_ripple_cross_region_xcorr_result(result: Mapping[str, Any]) -> dict
     }
 
 
+def _decode_nwb_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as UTF-8 text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"RippleCrossRegionXCorr column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _empty_unit_audit_table() -> pd.DataFrame:
+    """Return one typed empty unit-audit table for NWB round trips."""
+    output: dict[str, pd.Series] = {}
+    for column in UNIT_AUDIT_COLUMNS:
+        if column in _UNIT_TEXT_COLUMNS:
+            output[column] = pd.Series(dtype=object)
+        elif column in _UNIT_INTEGER_COLUMNS:
+            output[column] = pd.Series(dtype=np.int64)
+        elif column in _UNIT_BOOLEAN_COLUMNS:
+            output[column] = pd.Series(dtype=bool)
+        else:
+            raise AssertionError(f"Missing unit-audit dtype for {column!r}.")
+    return pd.DataFrame(output, columns=UNIT_AUDIT_COLUMNS)
+
+
+def _canonical_unit_audit_for_nwb(
+    table: Any,
+    *,
+    region: str,
+    min_ripple_spikes: int,
+) -> pd.DataFrame:
+    """Return one unit audit with deterministic NWB-compatible dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("RippleCrossRegionXCorr unit audits must be DataFrames.")
+    if set(str(column) for column in table.columns) != set(UNIT_AUDIT_COLUMNS):
+        raise ValueError(f"{region} unit audit does not match its canonical schema.")
+    if table.empty:
+        return _empty_unit_audit_table()
+    normalized = table.loc[:, list(UNIT_AUDIT_COLUMNS)].copy().reset_index(
+        drop=True
+    )
+    for column in _UNIT_TEXT_COLUMNS:
+        normalized[column] = normalized[column].map(
+            lambda value, column=column: _decode_nwb_text(value, column=column)
+        )
+    return _validate_unit_audit(
+        normalized,
+        region=region,
+        parameters={"min_ripple_spikes": int(min_ripple_spikes)},
+    )
+
+
+def _empty_pair_summary_table() -> pd.DataFrame:
+    """Return one typed empty pair-summary table for NWB round trips."""
+    output: dict[str, pd.Series] = {}
+    for column in PAIR_SUMMARY_COLUMNS:
+        if column in _PAIR_TEXT_COLUMNS:
+            output[column] = pd.Series(dtype=object)
+        elif column in _PAIR_INTEGER_COLUMNS:
+            output[column] = pd.Series(dtype=np.int64)
+        elif column in _PAIR_FLOAT_COLUMNS:
+            output[column] = pd.Series(dtype=float)
+        else:
+            raise AssertionError(f"Missing pair-summary dtype for {column!r}.")
+    return pd.DataFrame(output, columns=PAIR_SUMMARY_COLUMNS)
+
+
+def _canonical_pair_summary_for_nwb(table: Any) -> pd.DataFrame:
+    """Return one pair summary with deterministic NWB-compatible dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("RippleCrossRegionXCorr pair summaries must be DataFrames.")
+    if set(str(column) for column in table.columns) != set(PAIR_SUMMARY_COLUMNS):
+        raise ValueError("RippleCrossRegionXCorr pair summary has a noncanonical schema.")
+    if table.empty:
+        return _empty_pair_summary_table()
+    output = table.copy().reset_index(drop=True)
+    for column in _PAIR_TEXT_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_nwb_text(value, column=column)
+        )
+        if output[column].eq("").any():
+            raise ValueError(
+                f"RippleCrossRegionXCorr pair column {column!r} cannot be empty."
+            )
+    for column in _PAIR_INTEGER_COLUMNS:
+        values = pd.to_numeric(output[column], errors="raise").to_numpy(dtype=float)
+        if (
+            not np.all(np.isfinite(values))
+            or np.any(values < 0.0)
+            or not np.allclose(values, np.rint(values), rtol=0.0, atol=1e-12)
+        ):
+            raise ValueError(
+                f"RippleCrossRegionXCorr pair column {column!r} must contain "
+                "non-negative integers."
+            )
+        output[column] = np.rint(values).astype(np.int64)
+    for column in _PAIR_FLOAT_COLUMNS:
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"RippleCrossRegionXCorr pair column {column!r} cannot be infinite."
+            )
+    if not output["status"].isin(PAIR_STATUSES).all():
+        raise ValueError("RippleCrossRegionXCorr pair summary has an invalid status.")
+    for prefix in ("ca1", "v1"):
+        expected = (
+            output[f"{prefix}_spikesorting_merge_id"]
+            + ":"
+            + output[f"{prefix}_unit_id"]
+        )
+        if not output[f"{prefix}_stable_unit_id"].equals(expected):
+            raise ValueError(
+                f"RippleCrossRegionXCorr {prefix} stable unit ids are not canonical."
+            )
+    if output.duplicated(["ca1_stable_unit_id", "v1_stable_unit_id"]).any():
+        raise ValueError("RippleCrossRegionXCorr pair identities must be unique.")
+    return output.loc[:, list(PAIR_SUMMARY_COLUMNS)]
+
+
+def _empty_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Construct one typed zero-row DynamicTable without HDMF row inference."""
+    from hdmf.common import DynamicTable, VectorData
+
+    vector_columns = []
+    for column in columns:
+        if column in text_columns:
+            data = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            data = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            data = np.asarray([], dtype=bool)
+        else:
+            data = np.asarray([], dtype=float)
+        vector_columns.append(
+            VectorData(
+                name=column,
+                description=_NWB_COLUMN_DESCRIPTIONS[column],
+                data=data,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=vector_columns,
+    )
+
+
+def ripple_cross_region_unit_audit_to_dynamic_table(
+    table: pd.DataFrame,
+    *,
+    region: str,
+    min_ripple_spikes: int,
+) -> Any:
+    """Convert one regional unit audit to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    if region not in {SOURCE_REGION, TARGET_REGION}:
+        raise ValueError("RippleCrossRegionXCorr region must be 'ca1' or 'v1'.")
+    canonical = _canonical_unit_audit_for_nwb(
+        table,
+        region=region,
+        min_ripple_spikes=min_ripple_spikes,
+    )
+    name = (
+        NWB_CA1_UNITS_TABLE_NAME if region == SOURCE_REGION else NWB_V1_UNITS_TABLE_NAME
+    )
+    description = (
+        f"All-input {region.upper()} unit audit for RippleCrossRegionXCorr; "
+        f"v1ca1 NWB schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        return _empty_dynamic_table(
+            name=name,
+            description=description,
+            columns=UNIT_AUDIT_COLUMNS,
+            text_columns=_UNIT_TEXT_COLUMNS,
+            integer_columns=_UNIT_INTEGER_COLUMNS,
+            boolean_columns=_UNIT_BOOLEAN_COLUMNS,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _NWB_COLUMN_DESCRIPTIONS[column]}
+            for column in UNIT_AUDIT_COLUMNS
+        ],
+    )
+
+
+def ripple_cross_region_unit_audit_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    region: str,
+    min_ripple_spikes: int,
+) -> pd.DataFrame:
+    """Load one regional unit audit from a DynamicTable or fetched frame."""
+    from hdmf.common import DynamicTable
+
+    expected_name = (
+        NWB_CA1_UNITS_TABLE_NAME if region == SOURCE_REGION else NWB_V1_UNITS_TABLE_NAME
+    )
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected RippleCrossRegionXCorr unit object {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("RippleCrossRegionXCorr unit objects must be DynamicTables.")
+    return _canonical_unit_audit_for_nwb(
+        table.reset_index(drop=True),
+        region=region,
+        min_ripple_spikes=min_ripple_spikes,
+    )
+
+
+def _pair_profiles_from_result(result: Mapping[str, Any]) -> np.ndarray:
+    """Return pair profiles ordered exactly like the canonical summary."""
+    summary = result["summary"]
+    dataset = result["dataset"]
+    n_lags = int(dataset.sizes["lag_s"])
+    if summary.empty:
+        return np.empty((0, n_lags), dtype=float)
+    ca1_index = {
+        str(value): index
+        for index, value in enumerate(dataset.coords["ca1_unit"].values)
+    }
+    v1_index = {
+        str(value): index
+        for index, value in enumerate(dataset.coords["v1_unit"].values)
+    }
+    tensor = np.asarray(dataset["xcorr"].values, dtype=float)
+    profiles = []
+    for row in summary.to_dict("records"):
+        try:
+            profiles.append(
+                tensor[
+                    ca1_index[str(row["ca1_stable_unit_id"])],
+                    v1_index[str(row["v1_stable_unit_id"])],
+                    :,
+                ]
+            )
+        except KeyError as exc:
+            raise ValueError(
+                "RippleCrossRegionXCorr pair summary does not align to its tensor."
+            ) from exc
+    return np.asarray(profiles, dtype=float)
+
+
+def ripple_cross_region_pair_xcorr_to_dynamic_table(
+    result: Mapping[str, Any],
+) -> Any:
+    """Store one summary row and one lag profile per CA1-to-V1 pair."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    canonical = validate_ripple_cross_region_xcorr_result(result)
+    summary = _canonical_pair_summary_for_nwb(canonical["summary"])
+    profiles = _pair_profiles_from_result(canonical)
+    description = (
+        "CA1-to-V1 pair summaries with normalized cross-correlation vectors; "
+        f"v1ca1 NWB schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if summary.empty:
+        scalar_columns = []
+        for column in PAIR_SUMMARY_COLUMNS:
+            if column in _PAIR_TEXT_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif column in _PAIR_INTEGER_COLUMNS:
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            scalar_columns.append(
+                VectorData(
+                    name=column,
+                    description=_NWB_COLUMN_DESCRIPTIONS[column],
+                    data=data,
+                )
+            )
+        profile_data = VectorData(
+            name=NWB_XCORR_PROFILE_COLUMN,
+            description=_NWB_COLUMN_DESCRIPTIONS[NWB_XCORR_PROFILE_COLUMN],
+            data=np.asarray([], dtype=float),
+        )
+        profile_index = VectorIndex(
+            name=f"{NWB_XCORR_PROFILE_COLUMN}_index",
+            data=np.asarray([], dtype=np.int64),
+            target=profile_data,
+        )
+        return DynamicTable(
+            name=NWB_PAIR_XCORR_TABLE_NAME,
+            description=description,
+            columns=[*scalar_columns, profile_data, profile_index],
+        )
+    table = DynamicTable.from_dataframe(
+        name=NWB_PAIR_XCORR_TABLE_NAME,
+        df=summary,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _NWB_COLUMN_DESCRIPTIONS[column]}
+            for column in PAIR_SUMMARY_COLUMNS
+        ],
+    )
+    table.add_column(
+        name=NWB_XCORR_PROFILE_COLUMN,
+        description=_NWB_COLUMN_DESCRIPTIONS[NWB_XCORR_PROFILE_COLUMN],
+        data=[np.asarray(profile, dtype=float) for profile in profiles],
+        index=True,
+    )
+    return table
+
+
+def ripple_cross_region_pair_xcorr_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    n_lags: int,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Load pair summaries and aligned lag profiles from one DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_PAIR_XCORR_TABLE_NAME:
+            raise ValueError(
+                f"Unexpected pair-xcorr NWB object name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("The pair-xcorr NWB object must be a DynamicTable.")
+    table = table.reset_index(drop=True)
+    if NWB_XCORR_PROFILE_COLUMN not in table:
+        raise ValueError("The pair-xcorr NWB table lacks its profile column.")
+    raw_profiles = table.pop(NWB_XCORR_PROFILE_COLUMN).tolist()
+    summary = _canonical_pair_summary_for_nwb(
+        table.loc[:, list(PAIR_SUMMARY_COLUMNS)]
+    )
+    if not raw_profiles:
+        return summary, np.empty((0, int(n_lags)), dtype=float)
+    profiles = np.asarray(
+        [np.asarray(profile, dtype=float) for profile in raw_profiles],
+        dtype=float,
+    )
+    if profiles.shape != (len(summary), int(n_lags)):
+        raise ValueError(
+            "RippleCrossRegionXCorr pair profiles do not match the lag axis."
+        )
+    if np.isinf(profiles).any():
+        raise ValueError("RippleCrossRegionXCorr profiles cannot contain infinity.")
+    return summary, profiles
+
+
+def ripple_cross_region_lag_axis_to_dynamic_table(lag_times: Any) -> Any:
+    """Convert the shared relative-lag axis to one DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    lag_times = np.asarray(lag_times, dtype=float)
+    if lag_times.ndim != 1 or not np.all(np.isfinite(lag_times)):
+        raise ValueError("RippleCrossRegionXCorr lag times must be finite and 1D.")
+    if len(lag_times) == 0 or np.any(np.diff(lag_times) <= 0.0):
+        raise ValueError("RippleCrossRegionXCorr lag times must strictly increase.")
+    table = pd.DataFrame(
+        {
+            "lag_index": np.arange(len(lag_times), dtype=np.int64),
+            "lag_s": lag_times,
+        }
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_LAG_AXIS_TABLE_NAME,
+        df=table,
+        table_description=(
+            "Shared relative-lag axis for CA1-to-V1 cross-correlation profiles."
+        ),
+        columns=[
+            {"name": column, "description": _NWB_COLUMN_DESCRIPTIONS[column]}
+            for column in ("lag_index", "lag_s")
+        ],
+    )
+
+
+def ripple_cross_region_lag_axis_from_dynamic_table(nwb_table: Any) -> np.ndarray:
+    """Load and validate one shared relative-lag axis."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_LAG_AXIS_TABLE_NAME:
+            raise ValueError(f"Unexpected lag-axis NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("The lag-axis NWB object must be a DynamicTable.")
+    table = table.reset_index(drop=True)
+    if tuple(str(column) for column in table.columns) != ("lag_index", "lag_s"):
+        raise ValueError("The lag-axis NWB table has a noncanonical schema.")
+    indices = pd.to_numeric(table["lag_index"], errors="raise").to_numpy(
+        dtype=float
+    )
+    expected = np.arange(len(table), dtype=float)
+    if not np.array_equal(indices, expected):
+        raise ValueError("RippleCrossRegionXCorr lag indices are not contiguous.")
+    lag_times = pd.to_numeric(table["lag_s"], errors="raise").to_numpy(dtype=float)
+    if (
+        len(lag_times) == 0
+        or not np.all(np.isfinite(lag_times))
+        or np.any(np.diff(lag_times) <= 0.0)
+    ):
+        raise ValueError("RippleCrossRegionXCorr lag times must strictly increase.")
+    return lag_times
+
+
+def ripple_cross_region_support_to_time_intervals(dataset: Any) -> Any:
+    """Convert persisted selected ripple bounds to native NWB TimeIntervals."""
+    from pynwb.epoch import TimeIntervals
+
+    starts = np.asarray(dataset["ripple_start_time_s"].values, dtype=float)
+    stops = np.asarray(dataset["ripple_end_time_s"].values, dtype=float)
+    intervals = TimeIntervals(
+        name=NWB_RIPPLE_SUPPORT_NAME,
+        description=(
+            "Exact detector-qualified ripple intervals used for the cross-region "
+            "cross-correlation."
+        ),
+    )
+    for start, stop in zip(starts, stops, strict=True):
+        intervals.add_row(start_time=float(start), stop_time=float(stop))
+    return intervals
+
+
+def ripple_cross_region_support_from_time_intervals(nwb_intervals: Any) -> pd.DataFrame:
+    """Load exact selected ripple bounds from TimeIntervals or a fetched frame."""
+    from pynwb.epoch import TimeIntervals
+
+    if isinstance(nwb_intervals, pd.DataFrame):
+        table = nwb_intervals.copy()
+    elif isinstance(nwb_intervals, TimeIntervals):
+        if str(nwb_intervals.name) != NWB_RIPPLE_SUPPORT_NAME:
+            raise ValueError(
+                f"Unexpected ripple-support NWB object {nwb_intervals.name!r}."
+            )
+        table = nwb_intervals.to_dataframe()
+    else:
+        raise TypeError("Ripple support must be TimeIntervals or a DataFrame.")
+    table = table.reset_index(drop=True)
+    if "start_time" not in table or "stop_time" not in table:
+        raise ValueError("Ripple-support intervals require start_time and stop_time.")
+    starts = pd.to_numeric(table["start_time"], errors="raise").to_numpy(
+        dtype=float
+    )
+    stops = pd.to_numeric(table["stop_time"], errors="raise").to_numpy(dtype=float)
+    if (
+        not np.all(np.isfinite(starts))
+        or not np.all(np.isfinite(stops))
+        or np.any(stops <= starts)
+        or (len(starts) > 1 and np.any(starts[1:] < stops[:-1]))
+    ):
+        raise ValueError(
+            "Ripple-support intervals must be finite, positive, and non-overlapping."
+        )
+    return pd.DataFrame({"start_time": starts, "end_time": stops})
+
+
+def _provenance_record(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return one detached, self-describing NWB provenance record."""
+    return {
+        "ripple_cross_region_xcorr_id": str(result["ripple_cross_region_xcorr_id"]),
+        "animal_name": str(result["animal_name"]),
+        "date": str(result["date"]),
+        "epoch": str(result["epoch"]),
+        "parameters_json": json.dumps(
+            dict(result["parameters"]), sort_keys=True, separators=(",", ":")
+        ),
+        "upstream_provenance_json": json.dumps(
+            dict(result["upstream_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "selected_ripple_intervals_sha256": str(
+            result["selected_ripple_intervals_sha256"]
+        ),
+        "analysis_status": str(result["analysis_status"]),
+        "artifact_origin": str(result["artifact_origin"]),
+        "legacy_artifact_provenance_json": json.dumps(
+            dict(result["legacy_artifact_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+
+
+def ripple_cross_region_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Convert one result's provenance to a single-row DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = validate_ripple_cross_region_xcorr_result(result)
+    table = pd.DataFrame.from_records(
+        [_provenance_record(canonical)], columns=_PROVENANCE_COLUMNS
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_PROVENANCE_TABLE_NAME,
+        df=table,
+        table_description=(
+            "Detached RippleCrossRegionXCorr selection, parameter, and source "
+            f"provenance; v1ca1 NWB schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {"name": column, "description": _NWB_COLUMN_DESCRIPTIONS[column]}
+            for column in _PROVENANCE_COLUMNS
+        ],
+    )
+
+
+def ripple_cross_region_provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Load and parse one RippleCrossRegionXCorr provenance record."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_PROVENANCE_TABLE_NAME:
+            raise ValueError(f"Unexpected provenance NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("The provenance NWB object must be a DynamicTable.")
+    table = table.reset_index(drop=True)
+    if tuple(str(column) for column in table.columns) != _PROVENANCE_COLUMNS:
+        raise ValueError("The provenance NWB table has a noncanonical schema.")
+    if len(table) != 1:
+        raise ValueError("The provenance NWB table must contain exactly one row.")
+    record = {
+        column: _decode_nwb_text(table.iloc[0][column], column=column)
+        for column in _PROVENANCE_COLUMNS
+    }
+    if record["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("RippleCrossRegionXCorr NWB schema version is unsupported.")
+    try:
+        parameters = json.loads(record["parameters_json"])
+        upstream = json.loads(record["upstream_provenance_json"])
+        legacy = json.loads(record["legacy_artifact_provenance_json"])
+    except json.JSONDecodeError as exc:
+        raise ValueError("RippleCrossRegionXCorr NWB provenance contains malformed JSON.") from exc
+    if not all(isinstance(value, Mapping) for value in (parameters, upstream, legacy)):
+        raise ValueError("RippleCrossRegionXCorr NWB provenance JSON must encode mappings.")
+    return {
+        "ripple_cross_region_xcorr_id": record["ripple_cross_region_xcorr_id"],
+        "animal_name": record["animal_name"],
+        "date": record["date"],
+        "epoch": record["epoch"],
+        "parameters": dict(parameters),
+        "upstream_provenance": dict(upstream),
+        "selected_ripple_intervals_sha256": record[
+            "selected_ripple_intervals_sha256"
+        ],
+        "analysis_status": record["analysis_status"],
+        "artifact_origin": record["artifact_origin"],
+        "legacy_artifact_provenance": dict(legacy),
+    }
+
+
+def ripple_cross_region_xcorr_result_to_nwb_objects(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one complete canonical result to six NWB objects."""
+    canonical = validate_ripple_cross_region_xcorr_result(result)
+    min_spikes = int(canonical["parameters"]["min_ripple_spikes"])
+    return {
+        "ca1_units": ripple_cross_region_unit_audit_to_dynamic_table(
+            canonical["ca1_units"],
+            region=SOURCE_REGION,
+            min_ripple_spikes=min_spikes,
+        ),
+        "v1_units": ripple_cross_region_unit_audit_to_dynamic_table(
+            canonical["v1_units"],
+            region=TARGET_REGION,
+            min_ripple_spikes=min_spikes,
+        ),
+        "pair_xcorr": ripple_cross_region_pair_xcorr_to_dynamic_table(canonical),
+        "lag_axis": ripple_cross_region_lag_axis_to_dynamic_table(
+            canonical["dataset"].coords["lag_s"].values
+        ),
+        "ripple_support": ripple_cross_region_support_to_time_intervals(
+            canonical["dataset"]
+        ),
+        "provenance": ripple_cross_region_provenance_to_dynamic_table(canonical),
+    }
+
+
+def ripple_cross_region_xcorr_result_from_nwb_objects(
+    *,
+    ca1_units: Any,
+    v1_units: Any,
+    pair_xcorr: Any,
+    lag_axis: Any,
+    ripple_support: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from its six NWB objects."""
+    provenance_record = ripple_cross_region_provenance_from_dynamic_table(provenance)
+    parameters = provenance_record["parameters"]
+    min_spikes = int(parameters["min_ripple_spikes"])
+    ca1_table = ripple_cross_region_unit_audit_from_dynamic_table(
+        ca1_units,
+        region=SOURCE_REGION,
+        min_ripple_spikes=min_spikes,
+    )
+    v1_table = ripple_cross_region_unit_audit_from_dynamic_table(
+        v1_units,
+        region=TARGET_REGION,
+        min_ripple_spikes=min_spikes,
+    )
+    lag_times = ripple_cross_region_lag_axis_from_dynamic_table(lag_axis)
+    summary, profiles = ripple_cross_region_pair_xcorr_from_dynamic_table(
+        pair_xcorr,
+        n_lags=len(lag_times),
+    )
+    ripple_table = ripple_cross_region_support_from_time_intervals(ripple_support)
+    selected_ca1 = ca1_table.loc[ca1_table["included_in_xcorr"]].reset_index(
+        drop=True
+    )
+    selected_v1 = v1_table.loc[v1_table["included_in_xcorr"]].reset_index(
+        drop=True
+    )
+    expected_pairs = {
+        (str(ca1_id), str(v1_id))
+        for ca1_id in selected_ca1["stable_unit_id"]
+        for v1_id in selected_v1["stable_unit_id"]
+    }
+    observed_pairs = set(
+        zip(
+            summary["ca1_stable_unit_id"].astype(str),
+            summary["v1_stable_unit_id"].astype(str),
+            strict=True,
+        )
+    )
+    if observed_pairs != expected_pairs:
+        raise ValueError(
+            "RippleCrossRegionXCorr pair rows do not cover the selected unit grid."
+        )
+    tensor = np.full(
+        (len(selected_ca1), len(selected_v1), len(lag_times)),
+        np.nan,
+        dtype=float,
+    )
+    ca1_index = {
+        str(value): index
+        for index, value in enumerate(selected_ca1["stable_unit_id"])
+    }
+    v1_index = {
+        str(value): index
+        for index, value in enumerate(selected_v1["stable_unit_id"])
+    }
+    for row, profile in zip(summary.to_dict("records"), profiles, strict=True):
+        tensor[
+            ca1_index[str(row["ca1_stable_unit_id"])],
+            v1_index[str(row["v1_stable_unit_id"])],
+            :,
+        ] = profile
+    metadata = {
+        name: provenance_record[name]
+        for name in ("ripple_cross_region_xcorr_id", "animal_name", "date", "epoch")
+    }
+    dataset = _make_dataset(
+        metadata=metadata,
+        parameters=parameters,
+        upstream_provenance_json=json.dumps(
+            provenance_record["upstream_provenance"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        ripple_table=ripple_table,
+        ca1_units=ca1_table,
+        v1_units=v1_table,
+        lag_times=lag_times,
+        xcorr=tensor,
+        analysis_status=provenance_record["analysis_status"],
+        artifact_origin=provenance_record["artifact_origin"],
+        legacy_artifact_provenance=provenance_record[
+            "legacy_artifact_provenance"
+        ],
+    )
+    return validate_ripple_cross_region_xcorr_result(
+        {
+            **metadata,
+            "parameters": parameters,
+            "upstream_provenance": provenance_record["upstream_provenance"],
+            "selected_ripple_intervals_sha256": provenance_record[
+                "selected_ripple_intervals_sha256"
+            ],
+            "ca1_units": ca1_table,
+            "v1_units": v1_table,
+            "summary": summary,
+            "dataset": dataset,
+            "analysis_status": provenance_record["analysis_status"],
+            "artifact_origin": provenance_record["artifact_origin"],
+            "legacy_artifact_provenance": provenance_record[
+                "legacy_artifact_provenance"
+            ],
+        }
+    )
+
+
+def _float_array_sha256(values: Any) -> str:
+    """Return a deterministic digest for one float array, including shape."""
+    array = np.ascontiguousarray(np.asarray(values, dtype="<f8"))
+    if np.isnan(array).any():
+        array = array.copy()
+        array[np.isnan(array)] = np.nan
+    digest = hashlib.sha256()
+    digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def ripple_cross_region_xcorr_nwb_hashes(
+    result: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return storage-independent hashes for all six NWB objects."""
+    canonical = validate_ripple_cross_region_xcorr_result(result)
+    lag_times = np.asarray(canonical["dataset"].coords["lag_s"].values, dtype=float)
+    profiles = _pair_profiles_from_result(canonical)
+    provenance_record = _provenance_record(canonical)
+    return {
+        "ca1_units_sha256": str(canonical["ca1_units_sha256"]),
+        "v1_units_sha256": str(canonical["v1_units_sha256"]),
+        "summary_sha256": str(canonical["summary_sha256"]),
+        "pair_xcorr_sha256": _provenance_sha256(
+            {
+                "summary_sha256": str(canonical["summary_sha256"]),
+                "profiles_sha256": _float_array_sha256(profiles),
+            }
+        ),
+        "lag_axis_sha256": _float_array_sha256(lag_times),
+        "provenance_sha256": _provenance_sha256(provenance_record),
+    }
+
+
 def _manifest_common(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return immutable manifest values repeated for every bundle artifact."""
     return {
@@ -1921,7 +2733,7 @@ def register_existing_ripple_cross_region_xcorr_artifact(
     source_v1_unit_filter_path: Path,
     source_summary_path: Path,
     source_result_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     ripple_cross_region_xcorr_id: Any,
     animal_name: str,
     date: str,
@@ -1957,7 +2769,7 @@ def register_existing_ripple_cross_region_xcorr_artifact(
     source_spyglass_git_commit: str | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Recompute exact NWB inputs and register only four matching legacy artifacts."""
+    """Recompute and normalize four exactly matching legacy artifacts."""
     if str(ca1_sorting_type) != "ImportedSpikeSorting" or str(
         v1_sorting_type
     ) != "ImportedSpikeSorting":
@@ -2112,6 +2924,8 @@ def register_existing_ripple_cross_region_xcorr_artifact(
             "legacy_artifact_provenance": legacy_provenance,
         }
     )
+    if destination_path is None:
+        return registered
     paths = write_ripple_cross_region_xcorr_artifact(
         registered, destination_path, overwrite=overwrite
     )
@@ -2126,6 +2940,7 @@ __all__ = [
     "DEFAULT_EXPECTED_DETECTOR_ZSCORE_THRESHOLD",
     "DEFAULT_REQUIRE_SPEED_GATED",
     "MANIFEST_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
     "OUTPUT_RULE",
     "OUTPUT_RULE_SHA256",
     "PAIR_SUMMARY_COLUMNS",
@@ -2137,6 +2952,19 @@ __all__ = [
     "load_ripple_cross_region_xcorr_artifact",
     "prepare_ripple_cross_region_xcorr_event_selection",
     "register_existing_ripple_cross_region_xcorr_artifact",
+    "ripple_cross_region_lag_axis_from_dynamic_table",
+    "ripple_cross_region_lag_axis_to_dynamic_table",
+    "ripple_cross_region_pair_xcorr_from_dynamic_table",
+    "ripple_cross_region_pair_xcorr_to_dynamic_table",
+    "ripple_cross_region_provenance_from_dynamic_table",
+    "ripple_cross_region_provenance_to_dynamic_table",
+    "ripple_cross_region_support_from_time_intervals",
+    "ripple_cross_region_support_to_time_intervals",
+    "ripple_cross_region_unit_audit_from_dynamic_table",
+    "ripple_cross_region_unit_audit_to_dynamic_table",
+    "ripple_cross_region_xcorr_nwb_hashes",
+    "ripple_cross_region_xcorr_result_from_nwb_objects",
+    "ripple_cross_region_xcorr_result_to_nwb_objects",
     "validate_ripple_cross_region_xcorr_parameters",
     "validate_ripple_cross_region_xcorr_result",
     "write_ripple_cross_region_xcorr_artifact",

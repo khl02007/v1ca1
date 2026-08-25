@@ -122,6 +122,15 @@ DEFAULT_SWAP_LIGHT_OFFSET = False
 DEFAULT_OBSERVED_SPATIAL_BIN_SIZE_CM = DEFAULT_PLACE_BIN_SIZE_CM
 RESULT_SCHEMA_VERSION = "5"
 BUNDLE_SCHEMA_VERSION = "1"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+
+NWB_SELECTED_UNITS_TABLE_NAME = "swap_glm_selected_units"
+NWB_MODEL_METADATA_TABLE_NAME = "swap_glm_model_metadata"
+NWB_AXES_TABLE_NAME = "swap_glm_axes"
+NWB_TRAJECTORY_METADATA_TABLE_NAME = "swap_glm_trajectory_metadata"
+NWB_MODEL_RESULTS_TABLE_NAME = "swap_glm_model_results"
+NWB_OBSERVED_RESPONSE_TABLE_NAME = "swap_glm_observed_response"
+NWB_PROVENANCE_TABLE_NAME = "swap_glm_provenance"
 
 METRIC_PREFIXES = (
     "test_light_swapped_segment_unswapped",
@@ -300,6 +309,67 @@ SELECTED_UNIT_COLUMNS = (
     "n_finite_primary_scores",
     "n_expected_primary_scores",
     "valid_swap_score",
+)
+MODEL_METADATA_COLUMNS = (
+    "model",
+    "selected_model_path",
+    "selected_source_model",
+    "selected_ridge",
+    "selected_score",
+)
+AXES_COLUMNS = ("axis_name", "values")
+TRAJECTORY_METADATA_COLUMNS = (
+    "trajectory",
+    "swap_source_trajectory",
+    "swap_segment_index_1based",
+    "swap_segment_start",
+    "swap_segment_end",
+    "test_light_swapped_segment_n_bins",
+    "test_light_full_n_bins",
+    "test_light_occupancy_s",
+)
+MODEL_RESULT_PROFILE_COLUMNS = (
+    "dark_hz_grid",
+    "train_light_hz_grid",
+    "test_light_unswapped_hz_grid",
+    "test_light_swapped_hz_grid",
+)
+MODEL_RESULT_SCORE_COLUMNS = (
+    *(
+        f"{metric_prefix}_{suffix}"
+        for metric_prefix in METRIC_PREFIXES
+        for suffix in (
+            "raw_ll_sum",
+            "spike_sum",
+            "raw_ll_bits_per_spike",
+        )
+    ),
+    PRIMARY_METRIC,
+)
+MODEL_RESULT_COLUMNS = (
+    "model",
+    "trajectory",
+    *IDENTITY_COLUMNS,
+    "selection_index",
+    *MODEL_RESULT_PROFILE_COLUMNS,
+    *MODEL_RESULT_SCORE_COLUMNS,
+)
+OBSERVED_RESPONSE_COLUMNS = (
+    "trajectory",
+    *IDENTITY_COLUMNS,
+    "selection_index",
+    "test_light_spike_count",
+    "test_light_observed_rate_hz",
+)
+PROVENANCE_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "upstream_provenance_json",
+    "dataset_attrs_json",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
 )
 MANIFEST_COLUMNS = (
     "artifact_key",
@@ -561,6 +631,94 @@ def _load_dark_light_input(path: Path) -> dict[str, Any]:
     return result
 
 
+def _load_dark_light_nwb_input(
+    result: Mapping[str, Any],
+    upstream_provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate an in-memory DarkLightGLM result and attach NWB provenance."""
+    from v1ca1.spyglass.dark_light_glm import validate_dark_light_glm_result
+
+    canonical = validate_dark_light_glm_result(result)
+    upstream = dict(upstream_provenance)
+    required = {
+        "dark_light_glm_id",
+        "dark_light_glm_sha256",
+        "dark_light_selected_model_sha256_by_model",
+        "dark_light_parameter_sha256",
+        "dark_light_output_rule_sha256",
+        "upstream_analysis_status",
+    }
+    missing = sorted(required.difference(upstream))
+    if missing:
+        raise ValueError(
+            f"DarkLightGLM NWB provenance is missing fields {missing!r}."
+        )
+    canonical["upstream_provenance"] = upstream
+    return canonical
+
+
+def _dark_light_provenance_style(
+    upstream: Mapping[str, Any],
+) -> str:
+    """Return the mutually exclusive file-bundle or NWB provenance style."""
+    legacy = {
+        "dark_light_manifest_sha256",
+        "dark_light_selected_sha256_by_model",
+    }.issubset(upstream)
+    nwb = {
+        "dark_light_glm_sha256",
+        "dark_light_selected_model_sha256_by_model",
+    }.issubset(upstream)
+    if legacy == nwb:
+        raise ValueError(
+            "DarkLight upstream must use exactly one file-bundle or NWB "
+            "provenance contract."
+        )
+    return "legacy" if legacy else "nwb"
+
+
+def _dark_light_selected_hashes(
+    upstream: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return selected-model hashes from either supported provenance style."""
+    legacy_field = "dark_light_selected_sha256_by_model"
+    nwb_field = "dark_light_selected_model_sha256_by_model"
+    if legacy_field in upstream and nwb_field not in upstream:
+        field = legacy_field
+    elif nwb_field in upstream and legacy_field not in upstream:
+        field = nwb_field
+    else:
+        raise ValueError(
+            "DarkLight selected-model provenance must use exactly one "
+            "file-bundle or NWB hash field."
+        )
+    return {str(key): str(value) for key, value in dict(upstream[field]).items()}
+
+
+def _dark_light_dataset_provenance_attrs(
+    upstream: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return style-specific DarkLight provenance attrs for a swap dataset."""
+    style = _dark_light_provenance_style(upstream)
+    if style == "legacy":
+        return {
+            "dark_light_manifest_sha256": str(
+                upstream["dark_light_manifest_sha256"]
+            ),
+            "dark_light_selected_sha256_json": json.dumps(
+                upstream["dark_light_selected_sha256_by_model"],
+                sort_keys=True,
+            ),
+        }
+    return {
+        "dark_light_glm_sha256": str(upstream["dark_light_glm_sha256"]),
+        "dark_light_selected_model_sha256_json": json.dumps(
+            upstream["dark_light_selected_model_sha256_by_model"],
+            sort_keys=True,
+        ),
+    }
+
+
 def _validate_upstream_context(
     upstream: Mapping[str, Any],
     metadata: Mapping[str, str],
@@ -798,15 +956,7 @@ def _terminal_dataset(
             ),
             "output_rule_sha256": str(parameters["output_rule_sha256"]),
             "dark_light_glm_id": str(upstream_provenance["dark_light_glm_id"]),
-            "dark_light_manifest_sha256": str(
-                upstream_provenance["dark_light_manifest_sha256"]
-            ),
-            "dark_light_selected_sha256_json": json.dumps(
-                upstream_provenance[
-                    "dark_light_selected_sha256_by_model"
-                ],
-                sort_keys=True,
-            ),
+            **_dark_light_dataset_provenance_attrs(upstream_provenance),
             "dark_light_parameter_sha256": str(
                 upstream_provenance["dark_light_parameter_sha256"]
             ),
@@ -1157,7 +1307,7 @@ def compute_swap_glm(
     dark_epoch: str,
     light_train_epoch: str,
     light_test_epoch: str,
-    dark_light_glm_artifact_path: Path,
+    dark_light_glm_artifact_path: Path | None = None,
     spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]],
     movement_interval: Any,
@@ -1173,6 +1323,8 @@ def compute_swap_glm(
     swap_light_offset: bool = DEFAULT_SWAP_LIGHT_OFFSET,
     observed_spatial_bin_size_cm: float = DEFAULT_OBSERVED_SPATIAL_BIN_SIZE_CM,
     sources: Mapping[str, Any] | None = None,
+    dark_light_glm_result: Mapping[str, Any] | None = None,
+    dark_light_glm_upstream_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Score selected DarkLight models on one held-out light epoch."""
     metadata = _metadata(
@@ -1198,7 +1350,21 @@ def compute_swap_glm(
     if set(graph_inputs_by_trajectory) != set(TRAJECTORY_TYPES):
         raise ValueError("graph_inputs_by_trajectory must contain exactly four paths.")
 
-    upstream = _load_dark_light_input(dark_light_glm_artifact_path)
+    if (dark_light_glm_artifact_path is None) == (dark_light_glm_result is None):
+        raise ValueError(
+            "Provide exactly one DarkLightGLM artifact path or in-memory result."
+        )
+    if dark_light_glm_result is None:
+        upstream = _load_dark_light_input(Path(dark_light_glm_artifact_path))
+    else:
+        if dark_light_glm_upstream_provenance is None:
+            raise ValueError(
+                "In-memory DarkLightGLM input requires frozen NWB provenance."
+            )
+        upstream = _load_dark_light_nwb_input(
+            dark_light_glm_result,
+            dark_light_glm_upstream_provenance,
+        )
     _validate_upstream_context(upstream, metadata)
     upstream_provenance = dict(upstream["upstream_provenance"])
     selected_unit_ids = _selected_unit_ids(upstream)
@@ -1446,12 +1612,22 @@ def compute_swap_glm(
         ]
         for model_name in MODEL_NAMES
     }
-    selected_paths = {
-        model_name: Path(dark_light_glm_artifact_path)
-        / "selected"
-        / f"{DERIVED_MODEL_SOURCES.get(model_name, model_name)}.nc"
-        for model_name in MODEL_NAMES
-    }
+    if dark_light_glm_artifact_path is not None:
+        selected_paths = {
+            model_name: Path(dark_light_glm_artifact_path)
+            / "selected"
+            / f"{DERIVED_MODEL_SOURCES.get(model_name, model_name)}.nc"
+            for model_name in MODEL_NAMES
+        }
+    else:
+        upstream_id = str(upstream_provenance["dark_light_glm_id"])
+        selected_paths = {
+            model_name: (
+                f"analysis-nwb://{upstream_id}/selected/"
+                f"{DERIVED_MODEL_SOURCES.get(model_name, model_name)}"
+            )
+            for model_name in MODEL_NAMES
+        }
     results_by_model = {}
     for model_name in MODEL_NAMES:
         if model_name == VISUAL_ADDITIVE_MODEL_NAME:
@@ -1527,13 +1703,7 @@ def compute_swap_glm(
             "parameter_sha256": parameters["parameter_sha256"],
             "output_rule_sha256": parameters["output_rule_sha256"],
             "dark_light_glm_id": upstream_provenance["dark_light_glm_id"],
-            "dark_light_manifest_sha256": upstream_provenance[
-                "dark_light_manifest_sha256"
-            ],
-            "dark_light_selected_sha256_json": json.dumps(
-                upstream_provenance["dark_light_selected_sha256_by_model"],
-                sort_keys=True,
-            ),
+            **_dark_light_dataset_provenance_attrs(upstream_provenance),
             "dark_light_parameter_sha256": upstream_provenance[
                 "dark_light_parameter_sha256"
             ],
@@ -2132,8 +2302,6 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
     upstream = dict(copied["upstream_provenance"])
     for name in (
         "dark_light_glm_id",
-        "dark_light_manifest_sha256",
-        "dark_light_selected_sha256_by_model",
         "dark_light_parameter_sha256",
         "dark_light_output_rule_sha256",
         "upstream_analysis_status",
@@ -2141,15 +2309,21 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
         if name not in upstream:
             raise ValueError(f"Upstream provenance is missing {name!r}.")
     _uuid_string(upstream["dark_light_glm_id"], name="dark_light_glm_id")
-    if not _is_sha256(upstream["dark_light_manifest_sha256"]):
-        raise ValueError("DarkLight manifest digest must be SHA-256.")
+    provenance_style = _dark_light_provenance_style(upstream)
+    result_digest_field = (
+        "dark_light_manifest_sha256"
+        if provenance_style == "legacy"
+        else "dark_light_glm_sha256"
+    )
+    if not _is_sha256(upstream[result_digest_field]):
+        raise ValueError("DarkLight result digest must be SHA-256.")
     for name in (
         "dark_light_parameter_sha256",
         "dark_light_output_rule_sha256",
     ):
         if not _is_sha256(upstream[name]):
             raise ValueError(f"DarkLight {name} must be SHA-256.")
-    selected_hashes = dict(upstream["dark_light_selected_sha256_by_model"])
+    selected_hashes = _dark_light_selected_hashes(upstream)
     if set(selected_hashes) != set(SOURCE_MODEL_NAMES) or any(
         not _is_sha256(value) for value in selected_hashes.values()
     ):
@@ -2279,9 +2453,6 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
             "observed_spatial_bin_size_cm"
         ],
         "dark_light_glm_id": upstream["dark_light_glm_id"],
-        "dark_light_manifest_sha256": upstream[
-            "dark_light_manifest_sha256"
-        ],
         "dark_light_parameter_sha256": upstream[
             "dark_light_parameter_sha256"
         ],
@@ -2289,6 +2460,13 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
             "dark_light_output_rule_sha256"
         ],
         "upstream_analysis_status": upstream_status,
+        **{
+            key: value
+            for key, value in _dark_light_dataset_provenance_attrs(
+                upstream
+            ).items()
+            if not key.endswith("_json")
+        },
     }
     for name, expected in expected_dataset_attrs.items():
         observed = dataset.attrs.get(name)
@@ -2309,9 +2487,12 @@ def validate_swap_glm_result(result: Mapping[str, Any]) -> dict[str, Any]:
         if not matches:
             raise ValueError(f"Swap dataset has mismatched {name!r}.")
     try:
-        dataset_selected_hashes = json.loads(
-            str(dataset.attrs["dark_light_selected_sha256_json"])
+        selected_attr = (
+            "dark_light_selected_sha256_json"
+            if provenance_style == "legacy"
+            else "dark_light_selected_model_sha256_json"
         )
+        dataset_selected_hashes = json.loads(str(dataset.attrs[selected_attr]))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(
             "Swap dataset lacks DarkLight selected-model provenance."
@@ -2603,6 +2784,1136 @@ def load_swap_glm_artifact(
     return validated
 
 
+_SELECTED_UNIT_TEXT_COLUMNS = IDENTITY_COLUMNS
+_SELECTED_UNIT_INTEGER_COLUMNS = (
+    "selection_index",
+    "n_finite_primary_scores",
+    "n_expected_primary_scores",
+)
+_SELECTED_UNIT_BOOLEAN_COLUMNS = (
+    "upstream_valid_glm_fit",
+    "valid_swap_score",
+)
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one self-describing scratch column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    ragged_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed zero-row DynamicTable without HDMF row inference."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    output_columns = []
+    for column in columns:
+        if column in ragged_columns:
+            data = VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=np.asarray([], dtype=float),
+            )
+            index = VectorIndex(
+                name=f"{column}_index",
+                data=np.asarray([], dtype=np.int64),
+                target=data,
+            )
+            output_columns.extend((data, index))
+            continue
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return a canonical typed frame for one SwapGLM NWB object."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(
+        columns
+    ):
+        raise ValueError("SwapGLM NWB table does not have its canonical schema.")
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(np.int64)
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(f"SwapGLM NWB column {column!r} must be boolean.")
+        output[column] = np.asarray(values, dtype=bool)
+    for column in vector_columns:
+        vectors = [np.asarray(value, dtype=float) for value in output[column]]
+        if any(vector.ndim != 1 or np.isinf(vector).any() for vector in vectors):
+            raise ValueError(
+                f"SwapGLM NWB vector column {column!r} is invalid."
+            )
+        output[column] = vectors
+    for column in columns:
+        if column in (
+            *text_columns,
+            *integer_columns,
+            *boolean_columns,
+            *vector_columns,
+        ):
+            continue
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"SwapGLM NWB numeric column {column!r} contains infinity."
+            )
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert a scalar frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in columns
+        ],
+    )
+
+
+def _ragged_dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert scalar keys and aligned numeric vectors to a DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            ragged_columns=vector_columns,
+        )
+    scalar_columns = tuple(
+        column for column in columns if column not in vector_columns
+    )
+    output = DynamicTable.from_dataframe(
+        name=name,
+        df=canonical.loc[:, list(scalar_columns)],
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in scalar_columns
+        ],
+    )
+    for column in vector_columns:
+        vectors = canonical[column].tolist()
+        if all(vector.size == 0 for vector in vectors):
+            vectors = [np.asarray([np.nan], dtype=float) for _ in vectors]
+        output.add_column(
+            name=column,
+            description=_nwb_column_description(column),
+            data=vectors,
+            index=True,
+        )
+    return output
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Return text after an HDF5-backed DynamicTable round trip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one SwapGLM DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected SwapGLM NWB object {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("SwapGLM NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(columns) or len(observed) != len(columns):
+        raise ValueError("SwapGLM NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    for column in vector_columns:
+        table[column] = [
+            np.asarray(value, dtype=float) for value in table[column]
+        ]
+        if table[column].map(
+            lambda value: value.shape == (1,) and np.isnan(value[0])
+        ).all():
+            table[column] = [
+                np.asarray([], dtype=float) for _ in table[column]
+            ]
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+
+
+def _current_nwb_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one canonical current-schema result suitable for NWB storage."""
+    canonical = validate_swap_glm_result(result)
+    schema_version = str(canonical["dataset"].attrs.get("schema_version", ""))
+    if schema_version != RESULT_SCHEMA_VERSION:
+        raise ValueError(
+            "SwapGLM NWB storage requires a normalized current-schema result."
+        )
+    return canonical
+
+
+def _selected_units_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return the canonical selected-unit audit."""
+    return _current_nwb_result(result)["selected_units"].copy()
+
+
+def _model_metadata_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return one row per fitted or derived model."""
+    dataset = _current_nwb_result(result)["dataset"]
+    if not dataset.data_vars:
+        return pd.DataFrame(columns=MODEL_METADATA_COLUMNS)
+    rows = []
+    for model_index, model in enumerate(MODEL_NAMES):
+        rows.append(
+            {
+                "model": model,
+                "selected_model_path": str(
+                    dataset["selected_model_path"].values[model_index]
+                ),
+                "selected_source_model": str(
+                    dataset["selected_source_model"].values[model_index]
+                ),
+                "selected_ridge": float(
+                    dataset["selected_ridge"].values[model_index]
+                ),
+                "selected_score": float(
+                    dataset["selected_score"].values[model_index]
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=MODEL_METADATA_COLUMNS)
+
+
+def _axes_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return all numerical SwapGLM coordinates as named vectors."""
+    dataset = _current_nwb_result(result)["dataset"]
+    rows = []
+    for axis_name in (
+        "tp_grid",
+        "tp_observed_bin",
+        "tp_observed_edge",
+        "segment_edge",
+    ):
+        values = (
+            np.asarray(dataset.coords[axis_name].values, dtype=float)
+            if axis_name in dataset.coords
+            else np.asarray([], dtype=float)
+        )
+        rows.append({"axis_name": axis_name, "values": values})
+    return pd.DataFrame.from_records(rows, columns=AXES_COLUMNS)
+
+
+def _trajectory_metadata_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return swap geometry and held-out support for each trajectory."""
+    dataset = _current_nwb_result(result)["dataset"]
+    if not dataset.data_vars:
+        return pd.DataFrame(columns=TRAJECTORY_METADATA_COLUMNS)
+    rows = []
+    for trajectory_index, trajectory in enumerate(TRAJECTORY_TYPES):
+        rows.append(
+            {
+                "trajectory": trajectory,
+                "swap_source_trajectory": str(
+                    dataset["swap_source_trajectory"].values[trajectory_index]
+                ),
+                "swap_segment_index_1based": int(
+                    dataset["swap_segment_index_1based"].values[
+                        trajectory_index
+                    ]
+                ),
+                "swap_segment_start": float(
+                    dataset["swap_segment_start"].values[trajectory_index]
+                ),
+                "swap_segment_end": float(
+                    dataset["swap_segment_end"].values[trajectory_index]
+                ),
+                "test_light_swapped_segment_n_bins": int(
+                    dataset["test_light_swapped_segment_n_bins"].values[
+                        trajectory_index
+                    ]
+                ),
+                "test_light_full_n_bins": int(
+                    dataset["test_light_full_n_bins"].values[trajectory_index]
+                ),
+                "test_light_occupancy_s": np.asarray(
+                    dataset["test_light_occupancy_s"].values[trajectory_index],
+                    dtype=float,
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(
+        rows, columns=TRAJECTORY_METADATA_COLUMNS
+    )
+
+
+def _unit_identity_record(unit: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the explicit identity carried by every unit-bearing NWB row."""
+    return {
+        **{name: str(unit[name]) for name in IDENTITY_COLUMNS},
+        "selection_index": int(unit["selection_index"]),
+    }
+
+
+def _model_results_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return model scores and progression profiles keyed by path and unit."""
+    canonical = _current_nwb_result(result)
+    dataset = canonical["dataset"]
+    if not dataset.data_vars:
+        return pd.DataFrame(columns=MODEL_RESULT_COLUMNS)
+    selected_units = canonical["selected_units"].reset_index(drop=True)
+    rows = []
+    for model_index, model in enumerate(MODEL_NAMES):
+        for trajectory_index, trajectory in enumerate(TRAJECTORY_TYPES):
+            for unit_index, unit in selected_units.iterrows():
+                rows.append(
+                    {
+                        "model": model,
+                        "trajectory": trajectory,
+                        **_unit_identity_record(unit),
+                        **{
+                            name: np.asarray(
+                                dataset[name].values[
+                                    model_index,
+                                    trajectory_index,
+                                    :,
+                                    unit_index,
+                                ],
+                                dtype=float,
+                            )
+                            for name in MODEL_RESULT_PROFILE_COLUMNS
+                        },
+                        **{
+                            name: float(
+                                dataset[name].values[
+                                    model_index, trajectory_index, unit_index
+                                ]
+                            )
+                            for name in MODEL_RESULT_SCORE_COLUMNS
+                        },
+                    }
+                )
+    return pd.DataFrame.from_records(rows, columns=MODEL_RESULT_COLUMNS)
+
+
+def _observed_response_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return observed held-out counts and rates keyed by path and unit."""
+    canonical = _current_nwb_result(result)
+    dataset = canonical["dataset"]
+    if not dataset.data_vars:
+        return pd.DataFrame(columns=OBSERVED_RESPONSE_COLUMNS)
+    selected_units = canonical["selected_units"].reset_index(drop=True)
+    rows = []
+    for trajectory_index, trajectory in enumerate(TRAJECTORY_TYPES):
+        for unit_index, unit in selected_units.iterrows():
+            rows.append(
+                {
+                    "trajectory": trajectory,
+                    **_unit_identity_record(unit),
+                    "test_light_spike_count": np.asarray(
+                        dataset["test_light_spike_count"].values[
+                            trajectory_index, :, unit_index
+                        ],
+                        dtype=float,
+                    ),
+                    "test_light_observed_rate_hz": np.asarray(
+                        dataset["test_light_observed_rate_hz"].values[
+                            trajectory_index, :, unit_index
+                        ],
+                        dtype=float,
+                    ),
+                }
+            )
+    return pd.DataFrame.from_records(rows, columns=OBSERVED_RESPONSE_COLUMNS)
+
+
+def _json_ready(value: Any) -> Any:
+    """Return nested provenance using JSON-native scalar types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _provenance_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return one detached, self-describing SwapGLM provenance row."""
+    canonical = _current_nwb_result(result)
+    record = {
+        "metadata_json": json.dumps(
+            _json_ready(canonical["metadata"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "parameters_json": json.dumps(
+            _json_ready(canonical["parameters"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "upstream_provenance_json": json.dumps(
+            _json_ready(canonical["upstream_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "dataset_attrs_json": json.dumps(
+            _json_ready(dict(canonical["dataset"].attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "analysis_status": str(canonical["analysis_status"]),
+        "artifact_origin": str(canonical["artifact_origin"]),
+        "legacy_artifact_provenance_json": json.dumps(
+            _json_ready(canonical["legacy_artifact_provenance"] or {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+    return pd.DataFrame.from_records([record], columns=PROVENANCE_COLUMNS)
+
+
+def swap_glm_selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the complete selected-unit audit to an NWB DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SELECTED_UNITS_TABLE_NAME,
+        description=(
+            "Selected-unit identity and held-out score audit for SwapGLM; "
+            f"v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def swap_glm_selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the selected-unit audit from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def swap_glm_model_metadata_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store selected model identity, ridge, and source metadata."""
+    return _dynamic_table_from_frame(
+        _model_metadata_frame(result),
+        name=NWB_MODEL_METADATA_TABLE_NAME,
+        description="Selected and derived SwapGLM model metadata.",
+        columns=MODEL_METADATA_COLUMNS,
+        text_columns=("model", "selected_model_path", "selected_source_model"),
+    )
+
+
+def swap_glm_model_metadata_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load selected model metadata from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_MODEL_METADATA_TABLE_NAME,
+        columns=MODEL_METADATA_COLUMNS,
+        text_columns=("model", "selected_model_path", "selected_source_model"),
+    )
+
+
+def swap_glm_axes_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store progression, observed-bin, and segment axes."""
+    return _ragged_dynamic_table_from_frame(
+        _axes_frame(result),
+        name=NWB_AXES_TABLE_NAME,
+        description="Named numerical axes for the SwapGLM model arrays.",
+        columns=AXES_COLUMNS,
+        vector_columns=("values",),
+        text_columns=("axis_name",),
+    )
+
+
+def swap_glm_axes_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the named SwapGLM axes from their NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_AXES_TABLE_NAME,
+        columns=AXES_COLUMNS,
+        text_columns=("axis_name",),
+        vector_columns=("values",),
+    )
+
+
+def swap_glm_trajectory_metadata_to_dynamic_table(
+    result: Mapping[str, Any],
+) -> Any:
+    """Store per-path swap geometry, bin counts, and occupancy."""
+    return _ragged_dynamic_table_from_frame(
+        _trajectory_metadata_frame(result),
+        name=NWB_TRAJECTORY_METADATA_TABLE_NAME,
+        description="Swap geometry and held-out evaluation support by path.",
+        columns=TRAJECTORY_METADATA_COLUMNS,
+        vector_columns=("test_light_occupancy_s",),
+        text_columns=("trajectory", "swap_source_trajectory"),
+        integer_columns=(
+            "swap_segment_index_1based",
+            "test_light_swapped_segment_n_bins",
+            "test_light_full_n_bins",
+        ),
+    )
+
+
+def swap_glm_trajectory_metadata_from_dynamic_table(
+    nwb_table: Any,
+) -> pd.DataFrame:
+    """Load per-path SwapGLM metadata from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_TRAJECTORY_METADATA_TABLE_NAME,
+        columns=TRAJECTORY_METADATA_COLUMNS,
+        vector_columns=("test_light_occupancy_s",),
+        text_columns=("trajectory", "swap_source_trajectory"),
+        integer_columns=(
+            "swap_segment_index_1based",
+            "test_light_swapped_segment_n_bins",
+            "test_light_full_n_bins",
+        ),
+    )
+
+
+def swap_glm_model_results_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store model predictions and scores keyed by path and selected unit."""
+    return _ragged_dynamic_table_from_frame(
+        _model_results_frame(result),
+        name=NWB_MODEL_RESULTS_TABLE_NAME,
+        description=(
+            "SwapGLM progression profiles and score metrics keyed by model, "
+            "path, and persistent unit identity."
+        ),
+        columns=MODEL_RESULT_COLUMNS,
+        vector_columns=MODEL_RESULT_PROFILE_COLUMNS,
+        text_columns=("model", "trajectory", *IDENTITY_COLUMNS),
+        integer_columns=("selection_index",),
+    )
+
+
+def swap_glm_model_results_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load keyed model predictions and scores from their NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_MODEL_RESULTS_TABLE_NAME,
+        columns=MODEL_RESULT_COLUMNS,
+        vector_columns=MODEL_RESULT_PROFILE_COLUMNS,
+        text_columns=("model", "trajectory", *IDENTITY_COLUMNS),
+        integer_columns=("selection_index",),
+    )
+
+
+def swap_glm_observed_response_to_dynamic_table(
+    result: Mapping[str, Any],
+) -> Any:
+    """Store held-out observed counts and rates keyed by path and unit."""
+    return _ragged_dynamic_table_from_frame(
+        _observed_response_frame(result),
+        name=NWB_OBSERVED_RESPONSE_TABLE_NAME,
+        description=(
+            "Held-out observed spike counts and rates across progression bins."
+        ),
+        columns=OBSERVED_RESPONSE_COLUMNS,
+        vector_columns=(
+            "test_light_spike_count",
+            "test_light_observed_rate_hz",
+        ),
+        text_columns=("trajectory", *IDENTITY_COLUMNS),
+        integer_columns=("selection_index",),
+    )
+
+
+def swap_glm_observed_response_from_dynamic_table(
+    nwb_table: Any,
+) -> pd.DataFrame:
+    """Load held-out observed responses from their NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_OBSERVED_RESPONSE_TABLE_NAME,
+        columns=OBSERVED_RESPONSE_COLUMNS,
+        vector_columns=(
+            "test_light_spike_count",
+            "test_light_observed_rate_hz",
+        ),
+        text_columns=("trajectory", *IDENTITY_COLUMNS),
+        integer_columns=("selection_index",),
+    )
+
+
+def swap_glm_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store detached SwapGLM parameters, sources, attrs, and status."""
+    return _dynamic_table_from_frame(
+        _provenance_frame(result),
+        name=NWB_PROVENANCE_TABLE_NAME,
+        description=(
+            "Detached SwapGLM identity, parameters, upstream provenance, and "
+            f"dataset attributes; v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=PROVENANCE_COLUMNS,
+        text_columns=PROVENANCE_COLUMNS,
+    )
+
+
+def swap_glm_provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Load and parse one detached SwapGLM provenance row."""
+    table = _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=PROVENANCE_COLUMNS,
+        text_columns=PROVENANCE_COLUMNS,
+    )
+    if len(table) != 1:
+        raise ValueError("SwapGLM provenance must contain exactly one row.")
+    record = table.iloc[0].to_dict()
+    if record["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("SwapGLM NWB artifact schema version is unsupported.")
+    decoded = {}
+    for field in (
+        "metadata_json",
+        "parameters_json",
+        "upstream_provenance_json",
+        "dataset_attrs_json",
+        "legacy_artifact_provenance_json",
+    ):
+        try:
+            value = json.loads(record[field])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"SwapGLM provenance {field!r} contains malformed JSON."
+            ) from exc
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                f"SwapGLM provenance {field!r} must encode a mapping."
+            )
+        decoded[field] = dict(value)
+    return {**record, **decoded}
+
+
+def swap_glm_result_to_nwb_objects(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert one current SwapGLM result to seven NWB scratch objects."""
+    canonical = _current_nwb_result(result)
+    return {
+        "selected_units": swap_glm_selected_units_to_dynamic_table(
+            canonical["selected_units"]
+        ),
+        "model_metadata": swap_glm_model_metadata_to_dynamic_table(canonical),
+        "axes": swap_glm_axes_to_dynamic_table(canonical),
+        "trajectory_metadata": swap_glm_trajectory_metadata_to_dynamic_table(
+            canonical
+        ),
+        "model_results": swap_glm_model_results_to_dynamic_table(canonical),
+        "observed_response": swap_glm_observed_response_to_dynamic_table(
+            canonical
+        ),
+        "provenance": swap_glm_provenance_to_dynamic_table(canonical),
+    }
+
+
+def _require_nwb_row_order(
+    observed: Sequence[Any],
+    expected: Sequence[Any],
+    *,
+    name: str,
+) -> None:
+    """Require deterministic complete keyed rows in canonical order."""
+    if list(observed) != list(expected):
+        raise ValueError(f"SwapGLM NWB {name} rows are incomplete or reordered.")
+
+
+def _require_unit_identity_rows(
+    table: pd.DataFrame,
+    selected_units: pd.DataFrame,
+) -> None:
+    """Require every long-form row to carry the selected-unit identity."""
+    identities = selected_units.set_index("selection_index")
+    for row in table.to_dict("records"):
+        index = int(row["selection_index"])
+        if index not in identities.index:
+            raise ValueError("SwapGLM NWB row has an unknown selection index.")
+        expected = identities.loc[index]
+        if any(str(row[name]) != str(expected[name]) for name in IDENTITY_COLUMNS):
+            raise ValueError("SwapGLM NWB row has a mismatched unit identity.")
+
+
+def swap_glm_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    model_metadata: Any,
+    axes: Any,
+    trajectory_metadata: Any,
+    model_results: Any,
+    observed_response: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one SwapGLM result from seven NWB objects."""
+    import xarray as xr
+
+    selected = swap_glm_selected_units_from_dynamic_table(selected_units)
+    models = swap_glm_model_metadata_from_dynamic_table(model_metadata)
+    axes_table = swap_glm_axes_from_dynamic_table(axes)
+    trajectories = swap_glm_trajectory_metadata_from_dynamic_table(
+        trajectory_metadata
+    )
+    results = swap_glm_model_results_from_dynamic_table(model_results)
+    observed = swap_glm_observed_response_from_dynamic_table(observed_response)
+    source = swap_glm_provenance_from_dynamic_table(provenance)
+    _require_nwb_row_order(
+        axes_table["axis_name"].tolist(),
+        ("tp_grid", "tp_observed_bin", "tp_observed_edge", "segment_edge"),
+        name="axis",
+    )
+    axis_values = {
+        str(row["axis_name"]): np.asarray(row["values"], dtype=float)
+        for row in axes_table.to_dict("records")
+    }
+    metadata = source["metadata_json"]
+    parameters = source["parameters_json"]
+    upstream = source["upstream_provenance_json"]
+    attrs = source["dataset_attrs_json"]
+    status = str(source["analysis_status"])
+    origin = str(source["artifact_origin"])
+    legacy = source["legacy_artifact_provenance_json"] or None
+    unit_ids = selected["group_unit_id"].astype(str).to_numpy()
+    if str(attrs.get("fit_stage", "")) == "terminal":
+        if not models.empty or not trajectories.empty or not results.empty or not observed.empty:
+            raise ValueError("Terminal SwapGLM NWB objects contain model results.")
+        dataset = xr.Dataset(
+            coords={
+                "model": np.asarray(MODEL_NAMES, dtype=str),
+                "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
+                "unit": unit_ids,
+                "segment_edge": axis_values["segment_edge"],
+            },
+            attrs=attrs,
+        )
+    else:
+        _require_nwb_row_order(models["model"].tolist(), MODEL_NAMES, name="model")
+        _require_nwb_row_order(
+            trajectories["trajectory"].tolist(),
+            TRAJECTORY_TYPES,
+            name="trajectory",
+        )
+        expected_model_keys = [
+            (model, trajectory, index)
+            for model in MODEL_NAMES
+            for trajectory in TRAJECTORY_TYPES
+            for index in selected["selection_index"].astype(int)
+        ]
+        observed_model_keys = list(
+            zip(
+                results["model"],
+                results["trajectory"],
+                results["selection_index"].astype(int),
+                strict=True,
+            )
+        )
+        _require_nwb_row_order(
+            observed_model_keys, expected_model_keys, name="model-result"
+        )
+        expected_observed_keys = [
+            (trajectory, index)
+            for trajectory in TRAJECTORY_TYPES
+            for index in selected["selection_index"].astype(int)
+        ]
+        observed_keys = list(
+            zip(
+                observed["trajectory"],
+                observed["selection_index"].astype(int),
+                strict=True,
+            )
+        )
+        _require_nwb_row_order(
+            observed_keys, expected_observed_keys, name="observed-response"
+        )
+        _require_unit_identity_rows(results, selected)
+        _require_unit_identity_rows(observed, selected)
+        n_models = len(MODEL_NAMES)
+        n_trajectories = len(TRAJECTORY_TYPES)
+        n_units = len(selected)
+        n_grid = len(axis_values["tp_grid"])
+        n_observed = len(axis_values["tp_observed_bin"])
+        data_vars: dict[str, Any] = {
+            "selected_model_path": (
+                "model",
+                models["selected_model_path"].astype(str).to_numpy(),
+            ),
+            "selected_source_model": (
+                "model",
+                models["selected_source_model"].astype(str).to_numpy(),
+            ),
+            "selected_ridge": (
+                "model",
+                models["selected_ridge"].to_numpy(dtype=float),
+            ),
+            "selected_score": (
+                "model",
+                models["selected_score"].to_numpy(dtype=float),
+            ),
+            "swap_source_trajectory": (
+                "trajectory",
+                trajectories["swap_source_trajectory"].astype(str).to_numpy(),
+            ),
+            "swap_segment_index_1based": (
+                "trajectory",
+                trajectories["swap_segment_index_1based"].to_numpy(
+                    dtype=np.int64
+                ),
+            ),
+            "swap_segment_start": (
+                "trajectory",
+                trajectories["swap_segment_start"].to_numpy(dtype=float),
+            ),
+            "swap_segment_end": (
+                "trajectory",
+                trajectories["swap_segment_end"].to_numpy(dtype=float),
+            ),
+            "test_light_swapped_segment_n_bins": (
+                "trajectory",
+                trajectories["test_light_swapped_segment_n_bins"].to_numpy(
+                    dtype=np.int64
+                ),
+            ),
+            "test_light_full_n_bins": (
+                "trajectory",
+                trajectories["test_light_full_n_bins"].to_numpy(dtype=np.int64),
+            ),
+            "test_light_occupancy_s": (
+                ("trajectory", "tp_observed_bin"),
+                np.stack(trajectories["test_light_occupancy_s"].tolist()),
+            ),
+        }
+        for name in MODEL_RESULT_PROFILE_COLUMNS:
+            values = np.full(
+                (n_models, n_trajectories, n_grid, n_units),
+                np.nan,
+                dtype=float,
+            )
+            for row_index, value in enumerate(results[name]):
+                vector = np.asarray(value, dtype=float)
+                if vector.shape != (n_grid,):
+                    raise ValueError(
+                        f"SwapGLM NWB profile {name!r} has the wrong length."
+                    )
+                model_index = row_index // (n_trajectories * n_units)
+                within_model = row_index % (n_trajectories * n_units)
+                trajectory_index = within_model // n_units
+                unit_index = within_model % n_units
+                values[model_index, trajectory_index, :, unit_index] = vector
+            data_vars[name] = (
+                ("model", "trajectory", "tp_grid", "unit"),
+                values,
+            )
+        for name in MODEL_RESULT_SCORE_COLUMNS:
+            values = results[name].to_numpy(dtype=float).reshape(
+                n_models, n_trajectories, n_units
+            )
+            data_vars[name] = (("model", "trajectory", "unit"), values)
+        for name in (
+            "test_light_spike_count",
+            "test_light_observed_rate_hz",
+        ):
+            values = np.full(
+                (n_trajectories, n_observed, n_units),
+                np.nan,
+                dtype=float,
+            )
+            for row_index, value in enumerate(observed[name]):
+                vector = np.asarray(value, dtype=float)
+                if vector.shape != (n_observed,):
+                    raise ValueError(
+                        f"SwapGLM NWB observed vector {name!r} has the wrong length."
+                    )
+                trajectory_index = row_index // n_units
+                unit_index = row_index % n_units
+                values[trajectory_index, :, unit_index] = vector
+            data_vars[name] = (
+                ("trajectory", "tp_observed_bin", "unit"),
+                values,
+            )
+        dataset = xr.Dataset(
+            data_vars=data_vars,
+            coords={
+                "model": np.asarray(MODEL_NAMES, dtype=str),
+                "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
+                "unit": unit_ids,
+                **axis_values,
+            },
+            attrs=attrs,
+        )
+    return validate_swap_glm_result(
+        {
+            "metadata": metadata,
+            "parameters": parameters,
+            "upstream_provenance": upstream,
+            "selected_units": selected,
+            "dataset": dataset,
+            "analysis_status": status,
+            "artifact_origin": origin,
+            "legacy_artifact_provenance": legacy,
+        }
+    )
+
+
+def _semantic_frame_sha256(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> str:
+    """Hash a canonical scalar/ragged frame independent of NWB identifiers."""
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(columns), separators=(",", ":")).encode())
+    digest.update(np.asarray([len(canonical)], dtype="<i8").tobytes())
+    for row in canonical.to_dict("records"):
+        for column in columns:
+            value = row[column]
+            if column in text_columns:
+                encoded = str(value).encode("utf-8")
+                digest.update(np.asarray([len(encoded)], dtype="<i8").tobytes())
+                digest.update(encoded)
+            elif column in integer_columns:
+                digest.update(np.asarray([value], dtype="<i8").tobytes())
+            elif column in boolean_columns:
+                digest.update(np.asarray([value], dtype=np.uint8).tobytes())
+            elif column in vector_columns:
+                array = np.ascontiguousarray(np.asarray(value, dtype="<f8"))
+                if np.isnan(array).any():
+                    array = array.copy()
+                    array[np.isnan(array)] = np.nan
+                digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+                digest.update(array.tobytes())
+            else:
+                array = np.asarray([value], dtype="<f8")
+                if np.isnan(array[0]):
+                    array[0] = np.nan
+                digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def swap_glm_nwb_hashes(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return deterministic semantic hashes for all seven NWB objects."""
+    canonical = _current_nwb_result(result)
+    frames = {
+        "selected_units_table_sha256": (
+            _selected_units_frame(canonical),
+            SELECTED_UNIT_COLUMNS,
+            _SELECTED_UNIT_TEXT_COLUMNS,
+            _SELECTED_UNIT_INTEGER_COLUMNS,
+            _SELECTED_UNIT_BOOLEAN_COLUMNS,
+            (),
+        ),
+        "model_metadata_sha256": (
+            _model_metadata_frame(canonical),
+            MODEL_METADATA_COLUMNS,
+            ("model", "selected_model_path", "selected_source_model"),
+            (),
+            (),
+            (),
+        ),
+        "axes_sha256": (
+            _axes_frame(canonical),
+            AXES_COLUMNS,
+            ("axis_name",),
+            (),
+            (),
+            ("values",),
+        ),
+        "trajectory_metadata_sha256": (
+            _trajectory_metadata_frame(canonical),
+            TRAJECTORY_METADATA_COLUMNS,
+            ("trajectory", "swap_source_trajectory"),
+            (
+                "swap_segment_index_1based",
+                "test_light_swapped_segment_n_bins",
+                "test_light_full_n_bins",
+            ),
+            (),
+            ("test_light_occupancy_s",),
+        ),
+        "model_results_sha256": (
+            _model_results_frame(canonical),
+            MODEL_RESULT_COLUMNS,
+            ("model", "trajectory", *IDENTITY_COLUMNS),
+            ("selection_index",),
+            (),
+            MODEL_RESULT_PROFILE_COLUMNS,
+        ),
+        "observed_response_sha256": (
+            _observed_response_frame(canonical),
+            OBSERVED_RESPONSE_COLUMNS,
+            ("trajectory", *IDENTITY_COLUMNS),
+            ("selection_index",),
+            (),
+            ("test_light_spike_count", "test_light_observed_rate_hz"),
+        ),
+        "provenance_sha256": (
+            _provenance_frame(canonical),
+            PROVENANCE_COLUMNS,
+            PROVENANCE_COLUMNS,
+            (),
+            (),
+            (),
+        ),
+    }
+    return {
+        name: _semantic_frame_sha256(
+            frame,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            vector_columns=vector_columns,
+        )
+        for name, (
+            frame,
+            columns,
+            text_columns,
+            integer_columns,
+            boolean_columns,
+            vector_columns,
+        ) in frames.items()
+    }
+
+
 def _verify_legacy_selected_sources(
     dataset: Any,
     upstream_provenance: Mapping[str, Any],
@@ -2611,9 +3922,7 @@ def _verify_legacy_selected_sources(
 ) -> dict[str, str]:
     """Verify that legacy selected-file paths have exact upstream checksums."""
     selected_paths = _legacy_selected_source_paths(dataset)
-    expected_hashes = dict(
-        upstream_provenance["dark_light_selected_sha256_by_model"]
-    )
+    expected_hashes = _dark_light_selected_hashes(upstream_provenance)
     legacy_hashes = dict(
         upstream_provenance.get(
             "dark_light_legacy_selected_sha256_by_model",
@@ -2948,7 +4257,7 @@ def _remap_legacy_unit_coordinate(
 def register_existing_swap_glm_artifact(
     *,
     source_result_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     swap_glm_id: Any,
     animal_name: str,
     date: str,
@@ -2956,7 +4265,7 @@ def register_existing_swap_glm_artifact(
     dark_epoch: str,
     light_train_epoch: str,
     light_test_epoch: str,
-    dark_light_glm_artifact_path: Path,
+    dark_light_glm_artifact_path: Path | None = None,
     spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]],
     movement_interval: Any,
@@ -2973,6 +4282,8 @@ def register_existing_swap_glm_artifact(
     observed_spatial_bin_size_cm: float = DEFAULT_OBSERVED_SPATIAL_BIN_SIZE_CM,
     source_v1ca1_git_commit: str | None = None,
     overwrite: bool = False,
+    dark_light_glm_result: Mapping[str, Any] | None = None,
+    dark_light_glm_upstream_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-score exact NWB inputs and register only a matching legacy result."""
     source_path = Path(source_result_path)
@@ -2994,7 +4305,21 @@ def register_existing_swap_glm_artifact(
         swap_light_offset=swap_light_offset,
         observed_spatial_bin_size_cm=observed_spatial_bin_size_cm,
     )
-    upstream = _load_dark_light_input(dark_light_glm_artifact_path)
+    if (dark_light_glm_artifact_path is None) == (dark_light_glm_result is None):
+        raise ValueError(
+            "Provide exactly one DarkLightGLM artifact path or in-memory result."
+        )
+    if dark_light_glm_result is None:
+        upstream = _load_dark_light_input(Path(dark_light_glm_artifact_path))
+    else:
+        if dark_light_glm_upstream_provenance is None:
+            raise ValueError(
+                "In-memory DarkLightGLM input requires frozen NWB provenance."
+            )
+        upstream = _load_dark_light_nwb_input(
+            dark_light_glm_result,
+            dark_light_glm_upstream_provenance,
+        )
     _validate_upstream_context(upstream, metadata)
     upstream_provenance = dict(upstream["upstream_provenance"])
     source_dataset = _load_dataset(source_path)
@@ -3136,6 +4461,14 @@ def register_existing_swap_glm_artifact(
         light_train_epoch=metadata["light_train_epoch"],
         light_test_epoch=metadata["light_test_epoch"],
         dark_light_glm_artifact_path=dark_light_glm_artifact_path,
+        dark_light_glm_result=(
+            upstream if dark_light_glm_artifact_path is None else None
+        ),
+        dark_light_glm_upstream_provenance=(
+            upstream_provenance
+            if dark_light_glm_artifact_path is None
+            else None
+        ),
         spikes=spikes,
         stable_unit_ids=stable_unit_ids,
         movement_interval=movement_interval,
@@ -3186,6 +4519,8 @@ def register_existing_swap_glm_artifact(
             "legacy_artifact_provenance": provenance,
         }
     )
+    if destination_path is None:
+        return result
     artifact_paths = write_swap_glm_artifact(
         result,
         destination_path,
@@ -3199,12 +4534,30 @@ __all__ = [
     "ARTIFACT_DIRNAME",
     "DEFAULT_ARTIFACT_ROOT",
     "MODEL_NAMES",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
     "OUTPUT_RULE",
     "OUTPUT_RULE_SHA256",
     "compute_swap_glm",
     "get_swap_glm_artifact_paths",
     "load_swap_glm_artifact",
     "register_existing_swap_glm_artifact",
+    "swap_glm_axes_from_dynamic_table",
+    "swap_glm_axes_to_dynamic_table",
+    "swap_glm_model_metadata_from_dynamic_table",
+    "swap_glm_model_metadata_to_dynamic_table",
+    "swap_glm_model_results_from_dynamic_table",
+    "swap_glm_model_results_to_dynamic_table",
+    "swap_glm_nwb_hashes",
+    "swap_glm_observed_response_from_dynamic_table",
+    "swap_glm_observed_response_to_dynamic_table",
+    "swap_glm_provenance_from_dynamic_table",
+    "swap_glm_provenance_to_dynamic_table",
+    "swap_glm_result_from_nwb_objects",
+    "swap_glm_result_to_nwb_objects",
+    "swap_glm_selected_units_from_dynamic_table",
+    "swap_glm_selected_units_to_dynamic_table",
+    "swap_glm_trajectory_metadata_from_dynamic_table",
+    "swap_glm_trajectory_metadata_to_dynamic_table",
     "validate_swap_glm_parameters",
     "validate_swap_glm_result",
     "write_swap_glm_artifact",

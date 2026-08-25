@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
@@ -291,6 +292,152 @@ def test_artifact_round_trip_and_checksum_detection(
     summary.to_parquet(paths["decoding_summary_path"], index=False)
     with pytest.raises(ValueError, match="checksum mismatch"):
         decoding.load_path_specific_decoding_artifact(paths["artifact_dir"])
+
+
+def test_nwb_objects_round_trip_independent_position_timestamps(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import pynapple as nap
+    import pynwb
+
+    result, _calls = _computed_result(monkeypatch)
+    decoded_times = np.asarray(result["decoded"].t, dtype=float)
+    decoded_values = np.asarray(result["true"].d, dtype=float)
+    true_times = np.sort(
+        np.concatenate((decoded_times - 0.05, decoded_times, decoded_times + 0.05))
+    )
+    true_values = np.interp(true_times, decoded_times, decoded_values)
+    result["true"] = nap.Tsd(
+        t=true_times,
+        d=true_values,
+        time_support=result["decoded"].time_support,
+        time_units="s",
+    )
+    decoding.validate_path_specific_decoding_result(result)
+
+    objects = {
+        "selected_units": decoding.selected_units_to_dynamic_table(
+            result["selected_units"]
+        ),
+        "fold_qc": decoding.fold_qc_to_dynamic_table(result["fold_qc"]),
+        "summary": decoding.decoding_summary_to_dynamic_table(
+            result["summary"]
+        ),
+        "binned_error": decoding.binned_error_to_dynamic_table(
+            result["binned_error"]
+        ),
+        "true_position": decoding.true_position_to_time_series(result["true"]),
+        "decoded_position": decoding.decoded_position_to_time_series(
+            result["decoded"]
+        ),
+        "provenance": decoding.decoding_provenance_to_dynamic_table(result),
+    }
+    support = decoding.decoding_support_to_time_intervals(
+        result["true"],
+        result["decoded"],
+    )
+    object_ids = {name: value.object_id for name, value in objects.items()}
+    object_ids["support"] = support.object_id
+    nwbfile = pynwb.NWBFile(
+        session_description="path-specific decoding test",
+        identifier="path-specific-decoding-test",
+        session_start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    for nwb_object in objects.values():
+        nwbfile.add_scratch(nwb_object)
+    nwbfile.add_time_intervals(support)
+    nwb_path = tmp_path / "path-specific-decoding.nwb"
+    with pynwb.NWBHDF5IO(nwb_path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=nwb_path) == []
+
+    with pynwb.NWBHDF5IO(nwb_path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        reconstructed = decoding.path_specific_place_decoding_result_from_nwb_objects(
+            selected_units=stored.objects[object_ids["selected_units"]],
+            fold_qc=stored.objects[object_ids["fold_qc"]],
+            summary=stored.objects[object_ids["summary"]],
+            binned_error=stored.objects[object_ids["binned_error"]],
+            true_position=stored.objects[object_ids["true_position"]],
+            decoded_position=stored.objects[object_ids["decoded_position"]],
+            decoding_support=stored.objects[object_ids["support"]],
+            provenance=stored.objects[object_ids["provenance"]],
+        )
+        assert np.array_equal(reconstructed["true"].t, result["true"].t)
+        assert np.array_equal(reconstructed["true"].d, result["true"].d)
+        assert np.array_equal(reconstructed["decoded"].t, decoded_times)
+        assert np.array_equal(
+            reconstructed["decoded"].d,
+            np.asarray(result["decoded"].d, dtype=float),
+        )
+        assert decoding.decoding_support_sha256(
+            reconstructed["true"], reconstructed["decoded"]
+        ) == decoding.decoding_support_sha256(result["true"], result["decoded"])
+        assert decoding.decoding_provenance_sha256(
+            reconstructed
+        ) == decoding.decoding_provenance_sha256(result)
+
+
+def test_nwb_dynamic_tables_support_terminal_empty_rows(tmp_path: Path) -> None:
+    import pynapple as nap
+    import pynwb
+
+    specifications = (
+        (
+            decoding.selected_units_to_dynamic_table,
+            decoding.selected_units_from_dynamic_table,
+            decoding.SELECTED_UNIT_COLUMNS,
+        ),
+        (
+            decoding.binned_error_to_dynamic_table,
+            decoding.binned_error_from_dynamic_table,
+            decoding.BINNED_ERROR_COLUMNS,
+        ),
+    )
+    empty_objects = []
+    for to_dynamic_table, from_dynamic_table, columns in specifications:
+        nwb_table = to_dynamic_table(pd.DataFrame(columns=columns))
+        restored = from_dynamic_table(nwb_table)
+        assert restored.empty
+        assert tuple(restored.columns) == tuple(columns)
+        empty_objects.append(nwb_table)
+
+    support = nap.IntervalSet(start=0.0, end=1.0, time_units="s")
+    empty_true = nap.Tsd(
+        t=np.asarray([], dtype=float),
+        d=np.asarray([], dtype=float),
+        time_support=support,
+        time_units="s",
+    )
+    empty_decoded = nap.Tsd(
+        t=np.asarray([], dtype=float),
+        d=np.asarray([], dtype=float),
+        time_support=support,
+        time_units="s",
+    )
+    empty_objects.extend(
+        (
+            decoding.true_position_to_time_series(empty_true),
+            decoding.decoded_position_to_time_series(empty_decoded),
+        )
+    )
+    support_object = decoding.decoding_support_to_time_intervals(
+        empty_true,
+        empty_decoded,
+    )
+    nwbfile = pynwb.NWBFile(
+        session_description="terminal decoding test",
+        identifier="terminal-decoding-test",
+        session_start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    for nwb_object in empty_objects:
+        nwbfile.add_scratch(nwb_object)
+    nwbfile.add_time_intervals(support_object)
+    path = tmp_path / "terminal-decoding.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=path) == []
 
 
 def test_legacy_registration_reconstructs_fold_qc_and_provenance(

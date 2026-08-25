@@ -207,15 +207,17 @@ epoch_motor_behavior_output_rule_sha256: char(64)
 
 
 EPOCH_MOTOR_BEHAVIOR_DEFINITION = """
-# One epoch-level motor-distribution, progression, and trajectory-QC bundle.
+# Keyed analysis NWB for one epoch-level motor-behavior selection.
 -> EpochMotorBehaviorSelection
 ---
-artifact_manifest_path: filepath@analysis
-distribution_summary_path: filepath@analysis
-progression_summary_path: filepath@analysis
-trajectory_qc_path: filepath@analysis
-schema_version: varchar(8)
-bundle_schema_version: varchar(8)
+-> AnalysisNwbfile
+distribution_summary_object_id: varchar(40)
+progression_summary_object_id: varchar(40)
+trajectory_qc_object_id: varchar(40)
+distribution_summary_sha256: char(64)
+progression_summary_sha256: char(64)
+trajectory_qc_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_position_samples_input: bigint unsigned
 n_finite_position_samples: bigint unsigned
 n_dropped_nonfinite_samples: bigint unsigned
@@ -294,10 +296,6 @@ light_movement_selection_row_sha256: char(64)
 dark_movement_selection_row_sha256: char(64)
 light_movement_result_row_sha256: char(64)
 dark_movement_result_row_sha256: char(64)
-light_movement_firing_rate_file_sha256: char(64)
-dark_movement_firing_rate_file_sha256: char(64)
-light_movement_intervals_file_sha256: char(64)
-dark_movement_intervals_file_sha256: char(64)
 light_movement_rates_sha256: char(64)
 dark_movement_rates_sha256: char(64)
 light_movement_support_sha256: char(64)
@@ -315,22 +313,29 @@ cv_pca_output_rule_sha256: char(64)
 
 
 CV_PCA_DEFINITION = """
-# One immutable multi-file light/dark cvPCA artifact bundle.
+# One immutable light/dark cvPCA result stored in an analysis NWB file.
 -> CVPCASelection
 ---
-artifact_manifest_path: filepath@analysis
-result_path: filepath@analysis
-summary_path: filepath@analysis
-spectrum_path: filepath@analysis
-selected_units_path: filepath@analysis
-lap_assignments_path: filepath@analysis
-trajectory_qc_path: filepath@analysis
-result_schema_version: varchar(8)
-bundle_schema_version: varchar(8)
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+lap_assignments_object_id: varchar(40)
+trajectory_qc_object_id: varchar(40)
+summary_object_id: varchar(40)
+spectrum_object_id: varchar(40)
+dataset_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 n_input_units: int unsigned
 n_selected_units: int unsigned
 analysis_status: enum('valid', 'no_units', 'no_valid_position', 'no_movement', 'no_trials', 'insufficient_laps', 'no_shared_position_bins', 'no_eligible_units')
 selected_units_sha256: char(64)
+selected_units_table_sha256: char(64)
+lap_assignments_sha256: char(64)
+trajectory_qc_sha256: char(64)
+summary_sha256: char(64)
+spectrum_sha256: char(64)
+dataset_sha256: char(64)
+provenance_sha256: char(64)
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
@@ -350,11 +355,15 @@ movement_parameters_sha256: char(64)
 
 
 MOVEMENT_FIRING_RATE_DEFINITION = """
-# Keyed movement support and all-unit movement firing-rate artifacts.
+# Keyed movement support and all-unit movement firing-rate analysis NWB.
 -> MovementFiringRateSelection
 ---
-movement_firing_rate_path: filepath@analysis
-movement_intervals_path: filepath@analysis
+-> AnalysisNwbfile
+movement_firing_rate_object_id: varchar(40)
+movement_intervals_object_id: varchar(40)
+movement_firing_rate_sha256: char(64)
+movement_intervals_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_units: int unsigned
 n_units_with_spikes: int unsigned
@@ -396,11 +405,15 @@ ripple_modulation_parameters_sha256: char(64)
 
 
 RIPPLE_MODULATION_DEFINITION = """
-# Keyed Parquet artifacts for one ripple-modulation selection.
+# Keyed analysis NWB for one ripple-modulation selection.
 -> RippleModulationSelection
 ---
-summary_path: filepath@analysis
-peri_ripple_firing_rate_path: filepath@analysis
+-> AnalysisNwbfile
+ripple_modulation_summary_object_id: varchar(40)
+peri_ripple_firing_rate_object_id: varchar(40)
+ripple_modulation_summary_sha256: char(64)
+peri_ripple_firing_rate_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_ripples: int unsigned
 n_units: int unsigned
 n_valid_units: int unsigned
@@ -446,10 +459,17 @@ tuning_curve_parameters_sha256: char(64)
 
 
 PATH_SPECIFIC_PLACE_TUNING_CURVE_DEFINITION = """
-# One all-unit path-specific tuning-curve DataArray artifact.
+# One all-unit path-specific tuning curve stored as three NWB DynamicTables.
 -> PathSpecificPlaceTuningCurveSelection
 ---
-tuning_curve_path: filepath@analysis
+-> AnalysisNwbfile
+path_specific_place_tuning_object_id: varchar(40)
+path_specific_place_bins_object_id: varchar(40)
+path_specific_place_provenance_object_id: varchar(40)
+path_specific_place_tuning_sha256: char(64)
+path_specific_place_bins_sha256: char(64)
+path_specific_place_provenance_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_units: int unsigned
 n_trials: int unsigned
@@ -479,10 +499,13 @@ tuning_similarity_parameters_sha256: char(64)
 
 
 PATH_SPECIFIC_PLACE_TUNING_SIMILARITY_DEFINITION = """
-# One all-unit, four-comparison tuning-similarity Parquet artifact.
+# One all-unit, four-comparison tuning-similarity DynamicTable.
 -> PathSpecificPlaceTuningSimilaritySelection
 ---
-similarity_path: filepath@analysis
+-> AnalysisNwbfile
+similarity_object_id: varchar(40)
+similarity_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_comparisons: int unsigned
 n_units_with_valid_comparison: int unsigned
@@ -512,10 +535,17 @@ tuning_curve_parameters_sha256: char(64)
 
 
 DPP_TUNING_CURVE_DEFINITION = """
-# One all-unit directional path-progression tuning-curve DataArray artifact.
+# One all-unit directional progression curve stored as three NWB DynamicTables.
 -> DPPTuningCurveSelection
 ---
-tuning_curve_path: filepath@analysis
+-> AnalysisNwbfile
+dpp_tuning_object_id: varchar(40)
+dpp_bins_object_id: varchar(40)
+dpp_provenance_object_id: varchar(40)
+dpp_tuning_sha256: char(64)
+dpp_bins_sha256: char(64)
+dpp_provenance_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_units: int unsigned
 n_trials: int unsigned
@@ -543,10 +573,13 @@ path_specific_place_stability_id: uuid
 
 
 PATH_SPECIFIC_PLACE_STABILITY_DEFINITION = """
-# One all-unit QC Parquet for a trajectory-level stability selection.
+# One all-unit QC DynamicTable for a trajectory-level stability selection.
 -> PathSpecificPlaceStabilitySelection
 ---
-stability_path: filepath@analysis
+-> AnalysisNwbfile
+stability_object_id: varchar(40)
+stability_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_units: int unsigned
 analysis_status: enum('valid', 'no_units', 'no_valid_position', 'no_movement', 'no_valid_units')
@@ -597,10 +630,13 @@ dpp_encoding_parameters_sha256: char(64)
 
 
 DPP_ENCODING_DEFINITION = """
-# One eligible-unit four-model cross-validated encoding Parquet artifact.
+# One eligible-unit four-model cross-validated encoding DynamicTable.
 -> DPPEncodingSelection
 ---
-dpp_encoding_path: filepath@analysis
+-> AnalysisNwbfile
+dpp_encoding_object_id: varchar(40)
+dpp_encoding_sha256: char(64)
+artifact_schema_version: varchar(8)
 n_units_input: int unsigned
 n_units_eligible: int unsigned
 n_units_valid: int unsigned
@@ -658,12 +694,23 @@ decoding_output_rule_sha256: char(64)
 
 
 PATH_PROGRESSION_DECODING_DEFINITION = """
-# One shared-cohort path-progression decoding artifact bundle.
+# One shared-cohort path-progression decoding analysis NWB.
 -> PathProgressionDecodingSelection
+-> AnalysisNwbfile
 ---
-artifact_manifest_path: filepath@analysis
-decoding_summary_path: filepath@analysis
-unit_eligibility_path: filepath@analysis
+unit_eligibility_object_id: varchar(40)
+selected_units_object_id: varchar(40)
+decoding_summary_object_id: varchar(40)
+cross_path_binned_error_object_id: varchar(40)
+transfer_index_object_id: varchar(40)
+decoding_provenance_object_id: varchar(40)
+unit_eligibility_sha256: char(64)
+selected_units_table_sha256: char(64)
+decoding_summary_sha256: char(64)
+cross_path_binned_error_sha256: char(64)
+transfer_index_sha256: char(64)
+decoding_provenance_sha256: char(64)
+artifact_schema_version: varchar(16)
 n_units_input: int unsigned
 n_units_eligible: int unsigned
 n_transfer_pairs_expected: smallint unsigned
@@ -673,6 +720,23 @@ analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units',
 eligible_units_sha256: char(64)
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
+"""
+
+
+PATH_PROGRESSION_DECODING_TRANSFER_DEFINITION = """
+# Selectively fetchable NWB objects for one valid directed transfer.
+-> master
+transfer_family: varchar(64)
+source_trajectory: varchar(32)
+target_trajectory: varchar(32)
+---
+true_progression_object_id: varchar(40)
+decoded_progression_object_id: varchar(40)
+decoding_support_object_id: varchar(40)
+true_progression_sha256: char(64)
+decoded_progression_sha256: char(64)
+decoding_support_sha256: char(64)
+n_samples: bigint unsigned
 """
 
 
@@ -709,14 +773,27 @@ path_specific_place_decoding_output_rule_sha256: char(64)
 
 
 PATH_SPECIFIC_PLACE_DECODING_DEFINITION = """
-# One within-epoch path-specific physical-place decoding artifact bundle.
+# One within-epoch path-specific physical-place decoding analysis NWB.
 -> PathSpecificPlaceDecodingSelection
+-> AnalysisNwbfile
 ---
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-fold_qc_path: filepath@analysis
-decoding_summary_path: filepath@analysis
-decoding_error_by_position_path: filepath@analysis
+selected_units_object_id: varchar(40)
+fold_qc_object_id: varchar(40)
+decoding_summary_object_id: varchar(40)
+decoding_error_by_position_object_id: varchar(40)
+true_position_object_id: varchar(40)
+decoded_position_object_id: varchar(40)
+decoding_support_object_id: varchar(40)
+decoding_provenance_object_id: varchar(40)
+selected_units_table_sha256: char(64)
+fold_qc_sha256: char(64)
+decoding_summary_sha256: char(64)
+decoding_error_by_position_sha256: char(64)
+true_position_sha256: char(64)
+decoded_position_sha256: char(64)
+decoding_support_sha256: char(64)
+decoding_provenance_sha256: char(64)
+artifact_schema_version: varchar(16)
 n_units: int unsigned
 n_folds_expected: smallint unsigned
 n_folds_valid: smallint unsigned
@@ -781,13 +858,18 @@ motor_encoding_output_rule_sha256: char(64)
 
 
 MOTOR_ENCODING_DEFINITION = """
-# One nested-CV and full-refit motor-encoding artifact bundle.
+# One nested-CV and full-refit motor-encoding analysis NWB.
 -> MotorEncodingSelection
 ---
-artifact_manifest_path: filepath@analysis
-nested_cv_path: filepath@analysis
-full_refit_path: filepath@analysis
-selected_units_path: filepath@analysis
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+dataset_index_object_id: varchar(40)
+coordinates_object_id: varchar(40)
+nested_cv_arrays_object_id: varchar(40)
+full_refit_arrays_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
+schema_version: varchar(8)
 n_units_input: int unsigned
 n_units_eligible: int unsigned
 n_units_valid: int unsigned
@@ -795,6 +877,13 @@ n_outer_folds_expected: smallint unsigned
 n_outer_folds_valid: smallint unsigned
 analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_trials', 'no_valid_position', 'no_movement', 'no_valid_units')
 selected_units_sha256: char(64)
+selected_units_table_sha256: char(64)
+dataset_index_sha256: char(64)
+coordinates_sha256: char(64)
+nested_cv_arrays_sha256: char(64)
+full_refit_arrays_sha256: char(64)
+provenance_sha256: char(64)
+motor_encoding_sha256: char(64)
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
@@ -850,22 +939,33 @@ dark_light_glm_output_rule_sha256: char(64)
 
 
 DARK_LIGHT_GLM_DEFINITION = """
-# One coupled dark/light candidate-selection and selected-model artifact bundle.
+# One coupled dark/light candidate-search and selected-model analysis NWB.
 -> DarkLightGLMSelection
 ---
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-selection_summary_path: filepath@analysis
-visual_model_path: filepath@analysis
-task_segment_bump_model_path: filepath@analysis
-task_segment_scalar_model_path: filepath@analysis
-task_dense_gain_model_path: filepath@analysis
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+dataset_index_object_id: varchar(40)
+axes_object_id: varchar(40)
+candidate_results_object_id: varchar(40)
+selected_results_object_id: varchar(40)
+selection_summary_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 schema_version: varchar(8)
 n_units: int unsigned
 n_candidates: int unsigned
 n_selected_models: smallint unsigned
 analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
 selected_units_sha256: char(64)
+selected_units_table_sha256: char(64)
+dataset_index_sha256: char(64)
+axes_sha256: char(64)
+candidate_results_sha256: char(64)
+selected_results_sha256: char(64)
+selection_summary_sha256: char(64)
+provenance_sha256: char(64)
+dark_light_glm_sha256: char(64)
+selected_model_sha256_by_model: longblob
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
@@ -903,8 +1003,8 @@ swap_glm_id: uuid
 dark_condition: enum('dark')
 light_train_condition: enum('AB', 'gray', 'BA', 'bright')
 light_test_condition: enum('AB', 'gray', 'BA', 'bright')
-dark_light_manifest_sha256: char(64)
-dark_light_selected_sha256_by_model: longblob
+dark_light_glm_sha256: char(64)
+dark_light_selected_model_sha256_by_model: longblob
 dark_light_parameter_sha256: char(64)
 dark_light_output_rule_sha256: char(64)
 upstream_analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
@@ -914,20 +1014,33 @@ swap_glm_output_rule_sha256: char(64)
 
 
 SWAP_GLM_DEFINITION = """
-# One held-out swapped-light unit audit and consolidated model-score bundle.
+# One held-out swapped-light unit audit and model-score analysis NWB.
 -> SwapGLMSelection
 ---
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-swap_glm_path: filepath@analysis
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+model_metadata_object_id: varchar(40)
+axes_object_id: varchar(40)
+trajectory_metadata_object_id: varchar(40)
+model_results_object_id: varchar(40)
+observed_response_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 schema_version: varchar(8)
 bundle_schema_version: varchar(8)
 n_units: int unsigned
 n_valid_units: int unsigned
 analysis_status: enum('valid', 'partial_valid', 'upstream_terminal', 'no_units', 'no_valid_position', 'no_movement', 'no_trajectory_samples', 'no_valid_units')
 selected_units_sha256: char(64)
-dark_light_manifest_sha256: char(64)
-dark_light_selected_sha256_by_model: longblob
+selected_units_table_sha256: char(64)
+model_metadata_sha256: char(64)
+axes_sha256: char(64)
+trajectory_metadata_sha256: char(64)
+model_results_sha256: char(64)
+observed_response_sha256: char(64)
+provenance_sha256: char(64)
+dark_light_glm_sha256: char(64)
+dark_light_selected_model_sha256_by_model: longblob
 dark_light_parameter_sha256: char(64)
 dark_light_output_rule_sha256: char(64)
 upstream_analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'no_valid_position', 'no_movement', 'no_valid_units')
@@ -989,20 +1102,28 @@ swap_tuning_curve_comparison_output_rule_sha256: char(64)
 
 
 SWAP_TUNING_CURVE_COMPARISON_DEFINITION = """
-# One empirical swapped-light summary and model-score artifact bundle.
+# One empirical swapped-light comparison stored in an analysis NWB file.
 -> SwapTuningCurveComparisonSelection
 ---
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-summary_path: filepath@analysis
-swap_tuning_curve_comparison_path: filepath@analysis
-schema_version: varchar(8)
-bundle_schema_version: varchar(8)
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+score_summary_object_id: varchar(40)
+source_profiles_object_id: varchar(40)
+model_profiles_object_id: varchar(40)
+geometry_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 n_source_units: int unsigned
 n_units: int unsigned
 n_valid_units: int unsigned
 analysis_status: enum('valid', 'partial_valid', 'no_units', 'no_eligible_units', 'upstream_terminal', 'no_valid_position', 'no_movement', 'no_trajectory_samples', 'no_valid_units')
 selected_units_sha256: char(64)
+selected_units_table_sha256: char(64)
+score_summary_sha256: char(64)
+source_profiles_sha256: char(64)
+model_profiles_sha256: char(64)
+geometry_sha256: char(64)
+provenance_sha256: char(64)
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
 runtime_spyglass_git_commit = NULL: varchar(64)
@@ -1067,13 +1188,17 @@ ripple_glm_output_rule_sha256: char(64)
 
 
 RIPPLE_GLM_DEFINITION = """
-# One CA1-to-V1 ripple population-GLM audit, summary, and NetCDF bundle.
+# One complete CA1-to-V1 ripple population-GLM analysis NWB.
 -> RippleGLMSelection
 ---
-artifact_manifest_path: filepath@analysis
-selected_units_path: filepath@analysis
-summary_path: filepath@analysis
-ripple_glm_path: filepath@analysis
+-> AnalysisNwbfile
+selected_units_object_id: varchar(40)
+summary_object_id: varchar(40)
+events_object_id: varchar(40)
+source_features_object_id: varchar(40)
+target_results_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 schema_version: varchar(8)
 bundle_schema_version: varchar(8)
 n_source_units: int unsigned
@@ -1084,6 +1209,13 @@ n_valid_target_units: int unsigned
 n_ripples: int unsigned
 selected_ripple_events_sha256: char(64)
 selected_units_sha256: char(64)
+selected_units_table_sha256: char(64)
+summary_table_sha256: char(64)
+events_sha256: char(64)
+source_features_sha256: char(64)
+target_results_sha256: char(64)
+provenance_sha256: char(64)
+ripple_glm_sha256: char(64)
 analysis_status: enum('valid', 'partial_valid', 'no_source_units', 'no_target_units', 'no_ripples', 'insufficient_ripples', 'no_eligible_source_units', 'no_eligible_target_units', 'no_valid_target_units')
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
@@ -1135,16 +1267,17 @@ ripple_cross_region_xcorr_output_rule_sha256: char(64)
 
 
 RIPPLE_CROSS_REGION_XCORR_DEFINITION = """
-# One exact-ripple CA1-to-V1 xcorr audit, pair summary, and NetCDF bundle.
+# One exact-ripple CA1-to-V1 cross-correlation analysis NWB.
 -> RippleCrossRegionXCorrSelection
 ---
-artifact_manifest_path: filepath@analysis
-ca1_units_path: filepath@analysis
-v1_units_path: filepath@analysis
-summary_path: filepath@analysis
-ripple_cross_region_xcorr_path: filepath@analysis
-schema_version: varchar(8)
-bundle_schema_version: varchar(8)
+-> AnalysisNwbfile
+ca1_units_object_id: varchar(40)
+v1_units_object_id: varchar(40)
+pair_xcorr_object_id: varchar(40)
+lag_axis_object_id: varchar(40)
+ripple_support_object_id: varchar(40)
+provenance_object_id: varchar(40)
+artifact_schema_version: varchar(8)
 n_ripples: int unsigned
 ripple_duration_s: double
 n_ca1_units: int unsigned
@@ -1157,6 +1290,9 @@ selected_ripple_intervals_sha256: char(64)
 ca1_units_sha256: char(64)
 v1_units_sha256: char(64)
 summary_sha256: char(64)
+pair_xcorr_sha256: char(64)
+lag_axis_sha256: char(64)
+provenance_sha256: char(64)
 analysis_status: enum('valid', 'partial_valid', 'no_valid_pairs', 'no_ripples', 'no_ca1_units', 'no_v1_units', 'no_eligible_ca1_units', 'no_eligible_v1_units')
 artifact_origin: enum('computed', 'registered_existing')
 runtime_v1ca1_git_commit = NULL: varchar(64)
@@ -1168,7 +1304,7 @@ legacy_artifact_provenance = NULL: longblob
 # SpyglassAnalysis replaces this declaration with its enforced definition.  It
 # remains useful for injectable fakes and documents the intended registry.
 ANALYSIS_NWBFILE_DEFINITION = """
-# Project-owned registry for future analysis-NWB outputs.
+# Project-owned registry for analysis-NWB outputs.
 analysis_file_name: varchar(64)
 ---
 -> Nwbfile

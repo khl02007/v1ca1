@@ -1,4 +1,4 @@
-"""Database-free four-model DPP encoding comparison and Parquet artifacts."""
+"""Four-model DPP encoding comparison and Parquet/NWB adapters."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from v1ca1.helper.session import TRAJECTORY_TYPES, TURN_TRAJECTORY_PAIRS
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
 ARTIFACT_DIRNAME = "dpp_encoding"
 ARTIFACT_FILENAME = "dpp_encoding.parquet"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_DPP_ENCODING_TABLE_NAME = "dpp_encoding"
 FULL_W_CONFIGURATION_NAME = "full_w"
 MODEL_NAMES = (
     "path_specific_place",
@@ -83,6 +85,49 @@ TABLE_COLUMNS = (
     *CONTRAST_COLUMNS,
     "unit_valid",
     "qc_status",
+)
+_TEXT_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "dpp_encoding_id",
+    "animal_name",
+    "date",
+    "region",
+    "epoch",
+    *tuple(f"{model_name}_qc_status" for model_name in MODEL_NAMES),
+    "qc_status",
+)
+_INTEGER_COLUMNS = (
+    "n_folds",
+    "random_seed",
+    "heldout_spike_count",
+)
+_FLOAT_COLUMNS = tuple(
+    column
+    for column in TABLE_COLUMNS
+    if column not in {*_TEXT_COLUMNS, *_INTEGER_COLUMNS, "unit_valid"}
+)
+_COLUMN_DESCRIPTIONS = {
+    column: column.replace("_", " ") for column in TABLE_COLUMNS
+}
+_COLUMN_DESCRIPTIONS.update(
+    {
+        "spikesorting_merge_id": (
+            "Persistent Spyglass spike-sorting merge identifier."
+        ),
+        "unit_id": "Unit identifier within the spike-sorting merge.",
+        "stable_unit_id": (
+            "Composite persistent unit identifier, merge_id:unit_id."
+        ),
+        "group_unit_id": "Unit key in the selected regional spike group.",
+        "dpp_encoding_id": "Immutable DPPEncoding selection UUID.",
+        "movement_firing_rate_hz": "Movement firing rate in hertz.",
+        "heldout_spike_count": "Total held-out spikes across folds.",
+        "null_log_likelihood_nats": (
+            "Held-out null-model log likelihood in total nats."
+        ),
+        "unit_valid": "Whether every encoding model produced a valid score.",
+        "qc_status": "Unit-level encoding-comparison QC status.",
+    }
 )
 LEGACY_METRIC_COLUMNS = (
     "n_spikes",
@@ -1606,6 +1651,147 @@ def validate_dpp_encoding_table(table: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
+def _decode_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as UTF-8 text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"DPPEncoding column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _canonical_nwb_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return one validated DPPEncoding table with deterministic NWB dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Encoding-comparison artifact must be a pandas DataFrame.")
+    missing = sorted(set(TABLE_COLUMNS).difference(table.columns))
+    extra = sorted(set(table.columns).difference(TABLE_COLUMNS))
+    if missing or extra:
+        raise ValueError(
+            "Encoding-comparison table must have the exact canonical schema; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    if table.empty:
+        return empty_dpp_encoding_table()
+
+    output = table.loc[:, list(TABLE_COLUMNS)].copy().reset_index(drop=True)
+    for column in _TEXT_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_text(value, column=column)
+        )
+        if output[column].eq("").any():
+            raise ValueError(f"DPPEncoding column {column!r} cannot be empty.")
+    output["dpp_encoding_id"] = output["dpp_encoding_id"].map(
+        lambda value: _uuid_component(value, name="dpp_encoding_id")
+    )
+    for column in _INTEGER_COLUMNS:
+        output[column] = _validate_nonnegative_integer_column(output, column)
+    for column in _FLOAT_COLUMNS:
+        output[column] = pd.to_numeric(
+            output[column],
+            errors="raise",
+        ).astype(float)
+    unit_valid = output["unit_valid"].tolist()
+    if not all(isinstance(value, (bool, np.bool_)) for value in unit_valid):
+        raise TypeError("unit_valid must contain boolean values.")
+    output["unit_valid"] = np.asarray(unit_valid, dtype=bool)
+    validate_dpp_encoding_table(output)
+    return output
+
+
+def dpp_encoding_table_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical DPPEncoding table to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_nwb_table(table)
+    description = (
+        "Eligible-unit four-model DPP encoding comparison and QC; "
+        f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        columns = []
+        for name in TABLE_COLUMNS:
+            if name in _TEXT_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif name in _INTEGER_COLUMNS:
+                data = np.asarray([], dtype=np.int64)
+            elif name == "unit_valid":
+                data = np.asarray([], dtype=bool)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=_COLUMN_DESCRIPTIONS[name],
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_DPP_ENCODING_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    return DynamicTable.from_dataframe(
+        name=NWB_DPP_ENCODING_TABLE_NAME,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": name,
+                "description": _COLUMN_DESCRIPTIONS[name],
+            }
+            for name in TABLE_COLUMNS
+        ],
+    )
+
+
+def dpp_encoding_table_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical DataFrame from a DynamicTable or fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_DPP_ENCODING_TABLE_NAME:
+            raise ValueError(
+                f"Unexpected DPPEncoding NWB object name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "DPPEncoding NWB object must be a DynamicTable or DataFrame."
+        )
+    return _canonical_nwb_table(table.reset_index(drop=True))
+
+
+def dpp_encoding_table_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical DPPEncoding table independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_nwb_table(table)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in TABLE_COLUMNS:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "columns": list(TABLE_COLUMNS),
+            "records": records,
+        }
+    )
+
+
 def summarize_dpp_encoding_table(table: pd.DataFrame) -> dict[str, Any]:
     """Return result-level counts and status for one canonical table."""
     validate_dpp_encoding_table(table)
@@ -1976,6 +2162,8 @@ __all__ = [
     "LEGACY_METRIC_COLUMNS",
     "MODEL_NAMES",
     "MODEL_QC_STATUSES",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_DPP_ENCODING_TABLE_NAME",
     "STABILITY_COLUMNS",
     "TABLE_COLUMNS",
     "UNIT_QC_STATUSES",
@@ -1983,6 +2171,9 @@ __all__ = [
     "build_encoding_model_inputs",
     "build_strict_cross_validation_folds",
     "compute_selected_dpp_encoding",
+    "dpp_encoding_table_from_dynamic_table",
+    "dpp_encoding_table_sha256",
+    "dpp_encoding_table_to_dynamic_table",
     "empty_dpp_encoding_table",
     "get_dpp_encoding_artifact_path",
     "load_dpp_encoding_artifact",

@@ -43,6 +43,10 @@ PROGRESSION_FILENAME = "progression_summary.parquet"
 TRAJECTORY_QC_FILENAME = "trajectory_qc.parquet"
 SCHEMA_VERSION = "1"
 BUNDLE_SCHEMA_VERSION = "1"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_DISTRIBUTION_TABLE_NAME = "epoch_motor_behavior_distribution_summary"
+NWB_PROGRESSION_TABLE_NAME = "epoch_motor_behavior_progression_summary"
+NWB_TRAJECTORY_QC_TABLE_NAME = "epoch_motor_behavior_trajectory_qc"
 
 DEFAULT_PROGRESSION_BIN_SIZE_CM = 4.0
 DEFAULT_SPEED_THRESHOLD_CM_S = 4.0
@@ -148,6 +152,42 @@ TRAJECTORY_QC_COLUMNS = (
     "occupied_progression_bin_count",
     "graph_length_cm",
     "trajectory_status",
+)
+
+_NWB_TABLE_COLUMNS = MappingProxyType(
+    {
+        "distribution_summary": DISTRIBUTION_COLUMNS,
+        "progression_summary": PROGRESSION_COLUMNS,
+        "trajectory_qc": TRAJECTORY_QC_COLUMNS,
+    }
+)
+_NWB_TABLE_NAMES = MappingProxyType(
+    {
+        "distribution_summary": NWB_DISTRIBUTION_TABLE_NAME,
+        "progression_summary": NWB_PROGRESSION_TABLE_NAME,
+        "trajectory_qc": NWB_TRAJECTORY_QC_TABLE_NAME,
+    }
+)
+_NWB_TEXT_COLUMNS = frozenset(
+    {
+        "epoch_motor_behavior_id",
+        "animal_name",
+        "date",
+        "epoch",
+        "trajectory_type",
+        "trajectory_status",
+        "variable",
+    }
+)
+_NWB_INTEGER_COLUMNS = frozenset(
+    {
+        "sample_count",
+        "progression_bin_index",
+        "trajectory_interval_count",
+        "movement_supported_sample_count",
+        "finite_progression_sample_count",
+        "occupied_progression_bin_count",
+    }
 )
 MANIFEST_COLUMNS = (
     "artifact_key",
@@ -1154,6 +1194,241 @@ def _nonnegative_integer_column(
     return values.astype(np.int64)
 
 
+def _canonical_nwb_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one typed, column-exact motor table for NWB storage."""
+    if artifact_name not in _NWB_TABLE_COLUMNS:
+        raise ValueError(
+            f"Unsupported EpochMotorBehavior artifact {artifact_name!r}."
+        )
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError(
+            "EpochMotorBehavior NWB artifacts must be pandas DataFrames."
+        )
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    _validate_exact_columns(table, columns, name=artifact_name)
+    canonical = table.copy().reset_index(drop=True)
+    for column in columns:
+        if column in _NWB_TEXT_COLUMNS:
+            if canonical[column].isna().any():
+                raise ValueError(
+                    f"EpochMotorBehavior {column!r} cannot contain null text."
+                )
+            canonical[column] = canonical[column].astype(str)
+        elif column in _NWB_INTEGER_COLUMNS:
+            canonical[column] = _nonnegative_integer_column(
+                canonical,
+                column,
+                name=f"EpochMotorBehavior {column}",
+            )
+        else:
+            try:
+                canonical[column] = canonical[column].to_numpy(dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"EpochMotorBehavior {column!r} must be numeric."
+                ) from exc
+    return canonical.loc[:, list(columns)]
+
+
+def _nwb_column_description(column: str) -> str:
+    """Return a compact description for one motor DynamicTable column."""
+    units = {
+        "movement_duration_s": "seconds",
+        "trajectory_interval_duration_s": "seconds",
+        "movement_supported_duration_s": "seconds",
+        "graph_length_cm": "centimeters",
+    }
+    suffix = f" ({units[column]})" if column in units else ""
+    return f"Canonical EpochMotorBehavior field {column!r}{suffix}."
+
+
+def _epoch_motor_behavior_table_to_dynamic_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> Any:
+    """Convert one canonical motor table to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    description = (
+        f"EpochMotorBehavior {artifact_name.replace('_', ' ')}; "
+        f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        vector_columns = []
+        for column in columns:
+            if column in _NWB_TEXT_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif column in _NWB_INTEGER_COLUMNS:
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            vector_columns.append(
+                VectorData(
+                    name=column,
+                    description=_nwb_column_description(column),
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=_NWB_TABLE_NAMES[artifact_name],
+            description=description,
+            columns=vector_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=_NWB_TABLE_NAMES[artifact_name],
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": column,
+                "description": _nwb_column_description(column),
+            }
+            for column in columns
+        ],
+    )
+
+
+def distribution_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert a distribution summary to an NWB DynamicTable."""
+    return _epoch_motor_behavior_table_to_dynamic_table(
+        table,
+        artifact_name="distribution_summary",
+    )
+
+
+def progression_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert a progression summary to an NWB DynamicTable."""
+    return _epoch_motor_behavior_table_to_dynamic_table(
+        table,
+        artifact_name="progression_summary",
+    )
+
+
+def trajectory_qc_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert trajectory QC to an NWB DynamicTable."""
+    return _epoch_motor_behavior_table_to_dynamic_table(
+        table,
+        artifact_name="trajectory_qc",
+    )
+
+
+def _epoch_motor_behavior_table_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one canonical motor table from a fetched NWB object."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        expected_name = _NWB_TABLE_NAMES[artifact_name]
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                "Unexpected EpochMotorBehavior NWB object name "
+                f"{nwb_table.name!r}; expected {expected_name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "EpochMotorBehavior NWB objects must be DynamicTables or DataFrames."
+        )
+    expected_columns = list(_NWB_TABLE_COLUMNS[artifact_name])
+    if len(table.columns) == len(expected_columns) and set(table.columns) == set(
+        expected_columns
+    ):
+        table = table.loc[:, expected_columns]
+    return _canonical_nwb_table(
+        table.reset_index(drop=True),
+        artifact_name=artifact_name,
+    )
+
+
+def distribution_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical distribution summary from an NWB object."""
+    return _epoch_motor_behavior_table_from_dynamic_table(
+        nwb_table,
+        artifact_name="distribution_summary",
+    )
+
+
+def progression_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical progression summary from an NWB object."""
+    return _epoch_motor_behavior_table_from_dynamic_table(
+        nwb_table,
+        artifact_name="progression_summary",
+    )
+
+
+def trajectory_qc_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return canonical trajectory QC from an NWB object."""
+    return _epoch_motor_behavior_table_from_dynamic_table(
+        nwb_table,
+        artifact_name="trajectory_qc",
+    )
+
+
+def _epoch_motor_behavior_table_sha256(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> str:
+    """Digest one motor table independently of its physical storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in _NWB_TABLE_COLUMNS[artifact_name]:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "artifact_name": artifact_name,
+            "columns": list(_NWB_TABLE_COLUMNS[artifact_name]),
+            "records": records,
+        }
+    )
+
+
+def distribution_summary_sha256(table: pd.DataFrame) -> str:
+    """Return the logical SHA-256 of a distribution summary."""
+    return _epoch_motor_behavior_table_sha256(
+        table,
+        artifact_name="distribution_summary",
+    )
+
+
+def progression_summary_sha256(table: pd.DataFrame) -> str:
+    """Return the logical SHA-256 of a progression summary."""
+    return _epoch_motor_behavior_table_sha256(
+        table,
+        artifact_name="progression_summary",
+    )
+
+
+def trajectory_qc_sha256(table: pd.DataFrame) -> str:
+    """Return the logical SHA-256 of trajectory QC."""
+    return _epoch_motor_behavior_table_sha256(
+        table,
+        artifact_name="trajectory_qc",
+    )
+
+
 def _validate_distribution_semantics(
     distribution: pd.DataFrame,
     *,
@@ -1993,7 +2268,7 @@ def register_existing_epoch_motor_behavior_artifact(
     *,
     source_distribution_path: Path,
     source_progression_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     animal_name: str,
     date: str,
     epoch: str,
@@ -2013,8 +2288,9 @@ def register_existing_epoch_motor_behavior_artifact(
     movement_parameters: Mapping[str, Any] | None = None,
     movement_parameters_sha256: str | None = None,
     overwrite: bool = False,
+    write_artifact: bool = True,
 ) -> dict[str, Any]:
-    """Strictly verify and register one epoch from legacy session Parquets."""
+    """Strictly verify one legacy epoch and optionally write its bundle."""
     distribution_path = Path(source_distribution_path)
     progression_path = Path(source_progression_path)
     for name, source in (
@@ -2108,6 +2384,16 @@ def register_existing_epoch_motor_behavior_artifact(
         recomputed=recomputed["progression_summary"],
         kind="progression",
     )
+    if not write_artifact:
+        if destination_path is not None:
+            raise ValueError(
+                "destination_path must be None when write_artifact is false."
+            )
+        return recomputed
+    if destination_path is None:
+        raise ValueError(
+            "destination_path is required when write_artifact is true."
+        )
     paths = write_epoch_motor_behavior_artifact(
         recomputed,
         destination_path,
@@ -2139,6 +2425,10 @@ __all__ = [
     "MANIFEST_FILENAME",
     "MANUSCRIPT_MOVEMENT_PARAMETERS",
     "MANUSCRIPT_PARAMETERS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_DISTRIBUTION_TABLE_NAME",
+    "NWB_PROGRESSION_TABLE_NAME",
+    "NWB_TRAJECTORY_QC_TABLE_NAME",
     "OUTPUT_RULE",
     "PROGRESSION_COLUMNS",
     "PROGRESSION_FILENAME",
@@ -2146,10 +2436,19 @@ __all__ = [
     "TRAJECTORY_QC_COLUMNS",
     "TRAJECTORY_QC_FILENAME",
     "compute_selected_epoch_motor_behavior",
+    "distribution_summary_from_dynamic_table",
+    "distribution_summary_sha256",
+    "distribution_summary_to_dynamic_table",
     "empty_trajectory_qc_table",
     "get_epoch_motor_behavior_artifact_paths",
     "load_epoch_motor_behavior_artifact",
+    "progression_summary_from_dynamic_table",
+    "progression_summary_sha256",
+    "progression_summary_to_dynamic_table",
     "register_existing_epoch_motor_behavior_artifact",
+    "trajectory_qc_from_dynamic_table",
+    "trajectory_qc_sha256",
+    "trajectory_qc_to_dynamic_table",
     "validate_epoch_motor_behavior_parameters",
     "validate_epoch_motor_behavior_result",
     "validate_movement_parameter_snapshot",

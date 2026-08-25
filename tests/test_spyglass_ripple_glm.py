@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
@@ -513,6 +514,68 @@ def test_write_load_roundtrip_and_checksum(
         stream.write(b"tamper")
     with pytest.raises(ValueError, match="checksum"):
         load_ripple_glm_artifact(destination)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("unit_vector", "mean_activity", "terminal"),
+)
+def test_analysis_nwb_objects_roundtrip_complete_and_terminal_results(
+    tmp_path: Path,
+    inputs: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """All six RippleGLM scratch objects survive an NWB HDF5 round trip."""
+    pynwb = pytest.importorskip("pynwb")
+    monkeypatch.setattr(
+        scientific_module,
+        "_fit_ripple_glm_on_prepared_epoch",
+        _fake_fit,
+    )
+    kwargs = dict(inputs)
+    if case != "terminal":
+        kwargs["n_shuffles_ripple"] = 100
+    if case == "mean_activity":
+        kwargs["source_predictor_mode"] = "mean_activity"
+    elif case == "terminal":
+        kwargs["source_spikes"] = {}
+        kwargs["source_stable_unit_ids"] = []
+    result = compute_ripple_glm(**kwargs)
+    expected_hashes = artifact_module.ripple_glm_nwb_hashes(result)
+    objects = artifact_module.ripple_glm_result_to_nwb_objects(result)
+    assert set(objects) == {
+        "selected_units",
+        "summary",
+        "events",
+        "source_features",
+        "target_results",
+        "provenance",
+    }
+    assert len({value.object_id for value in objects.values()}) == 6
+    nwbfile = pynwb.NWBFile(
+        session_description="RippleGLM NWB round-trip",
+        identifier=f"ripple-glm-{case}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    for value in objects.values():
+        nwbfile.add_scratch(value)
+    path = tmp_path / f"ripple_glm_{case}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=path) == []
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = artifact_module.ripple_glm_result_from_nwb_objects(
+            **{
+                name: stored.objects[value.object_id]
+                for name, value in objects.items()
+            }
+        )
+    assert loaded["analysis_status"] == result["analysis_status"]
+    if case != "terminal":
+        assert loaded["dataset"].sizes["shuffle"] == 100
+    assert artifact_module.ripple_glm_nwb_hashes(loaded) == expected_hashes
 
 
 def _legacy_dataset_from_computed(computed: dict[str, object]) -> object:

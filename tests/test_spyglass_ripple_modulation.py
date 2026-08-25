@@ -4,6 +4,7 @@ import inspect
 import sys
 import types
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -226,6 +227,18 @@ def _write_legacy_artifacts(
     )
 
 
+def _nwb_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return one complete stable-identity table pair for NWB tests."""
+    summary = _legacy_summary_table(regions=("v1",))
+    peri = _legacy_peri_table(regions=("v1",))
+    for table in (summary, peri):
+        table["unit_id"] = table["unit_id"].astype(str)
+        table["group_unit_id"] = 11
+        table["spikesorting_merge_id"] = "merge-a"
+        table["stable_unit_id"] = "merge-a:11"
+    return summary, peri
+
+
 def _registration_plan(
     paths: dict[str, Path],
     *,
@@ -414,6 +427,97 @@ def test_compute_preserves_empty_parquet_schemas_when_epoch_has_no_events(
             "stable_unit_id",
         ]
     )
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_ripple_modulation_nwb_tables_roundtrip_real_hdf5(
+    tmp_path: Path,
+    empty: bool,
+) -> None:
+    from pynwb import NWBHDF5IO, NWBFile
+
+    summary, peri = _nwb_tables()
+    if empty:
+        summary = summary.iloc[0:0]
+        peri = peri.iloc[0:0]
+    summary_object = (
+        ripple_modulation.ripple_modulation_summary_to_dynamic_table(
+            summary
+        )
+    )
+    peri_object = (
+        ripple_modulation.peri_ripple_firing_rate_to_dynamic_table(peri)
+    )
+    summary_id = str(summary_object.object_id)
+    peri_id = str(peri_object.object_id)
+    nwbfile = NWBFile(
+        session_description="RippleModulation storage test",
+        identifier=f"ripple-modulation-{empty}",
+        session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    nwbfile.add_scratch(summary_object)
+    nwbfile.add_scratch(peri_object)
+    path = tmp_path / f"ripple-modulation-{empty}.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwbfile)
+
+    with NWBHDF5IO(str(path), mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded_summary = (
+            ripple_modulation.ripple_modulation_summary_from_dynamic_table(
+                stored.objects[summary_id]
+            )
+        )
+        loaded_peri = (
+            ripple_modulation.peri_ripple_firing_rate_from_dynamic_table(
+                stored.objects[peri_id]
+            )
+        )
+        validated_summary, validated_peri = (
+            ripple_modulation.validate_ripple_modulation_tables(
+                loaded_summary,
+                loaded_peri,
+            )
+        )
+
+    assert not __import__("pynwb").validate(path=path)
+    assert list(validated_summary.columns) == list(
+        ripple_modulation.SUMMARY_TABLE_COLUMNS
+    )
+    assert list(validated_peri.columns) == list(
+        ripple_modulation.PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS
+    )
+    assert validated_summary.empty is empty
+    assert validated_peri.empty is empty
+    if not empty:
+        assert validated_summary["invalid_reason"].isna().all()
+        assert validated_summary["stable_unit_id"].tolist() == ["merge-a:11"]
+        assert validated_peri["stable_unit_id"].unique().tolist() == [
+            "merge-a:11"
+        ]
+    assert ripple_modulation.ripple_modulation_summary_sha256(
+        validated_summary
+    ) == ripple_modulation.ripple_modulation_summary_sha256(summary)
+    assert ripple_modulation.peri_ripple_firing_rate_sha256(
+        validated_peri
+    ) == ripple_modulation.peri_ripple_firing_rate_sha256(peri)
+
+
+def test_ripple_modulation_nwb_tables_cross_validate_identity_and_grid() -> None:
+    summary, peri = _nwb_tables()
+    ripple_modulation.validate_ripple_modulation_tables(summary, peri)
+
+    wrong_identity = peri.copy()
+    wrong_identity["stable_unit_id"] = "merge-a:12"
+    with pytest.raises(ValueError, match="stable_unit_id must equal"):
+        ripple_modulation.validate_ripple_modulation_tables(
+            summary,
+            wrong_identity,
+        )
+
+    incomplete = peri.iloc[:-1].copy()
+    with pytest.raises(ValueError, match="incomplete or shifted time grid"):
+        ripple_modulation.validate_ripple_modulation_tables(summary, incomplete)
 
 
 def test_artifact_paths_are_uuid_keyed_and_do_not_create_directories(

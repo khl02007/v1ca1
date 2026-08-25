@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,10 @@ from v1ca1.spyglass.table_specs import (
     MOTOR_ENCODING_MODEL_SPEC,
     MOTOR_ENCODING_OUTPUT_RULE,
 )
+from v1ca1.spyglass.tables import (
+    _load_motor_encoding_result,
+    _write_motor_encoding_nwb,
+)
 
 
 class _Position:
@@ -34,6 +39,69 @@ class _Intervals:
 
     def tot_length(self) -> float:
         return self._duration
+
+
+class _AnalysisBuilder:
+    """Small real-HDF5 stand-in for Spyglass's analysis-file builder."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.analysis_file_name = path.name
+        self._io = None
+        self._nwbfile = None
+
+    def __enter__(self):
+        pynwb = pytest.importorskip("pynwb")
+        nwbfile = pynwb.NWBFile(
+            session_description="MotorEncoding table test",
+            identifier="motor-encoding-table-test",
+            session_start_time=datetime.now(timezone.utc),
+        )
+        with pynwb.NWBHDF5IO(self.path, mode="w") as io:
+            io.write(nwbfile)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._io is not None:
+            self._io.close()
+            self._io = None
+            self._nwbfile = None
+        return False
+
+    def get_path(self) -> str:
+        return str(self.path)
+
+    @property
+    def open_nwb(self):
+        pynwb = pytest.importorskip("pynwb")
+        if self._io is None:
+            self._io = pynwb.NWBHDF5IO(
+                self.path,
+                mode="a",
+                load_namespaces=True,
+            )
+            self._nwbfile = self._io.read()
+        return self._io, self._nwbfile
+
+    def add_nwb_object(self, nwb_object) -> str:
+        self.open_nwb[1].add_scratch(nwb_object)
+        return str(nwb_object.object_id)
+
+    def close_and_write(self) -> None:
+        if self._io is not None:
+            self._io.write(self._nwbfile)
+            self._io.close()
+            self._io = None
+            self._nwbfile = None
+
+
+class _AnalysisNwbfile:
+    def __init__(self, path: Path):
+        self.builder = _AnalysisBuilder(path)
+
+    def build(self, nwb_file_name: str) -> _AnalysisBuilder:
+        assert nwb_file_name == "L1420240611_.nwb"
+        return self.builder
 
 
 def _graph(
@@ -407,6 +475,142 @@ def test_write_load_round_trip_and_checksum(tmp_path: Path) -> None:
     paths["selected_units_path"].write_bytes(b"changed")
     with pytest.raises(ValueError, match="checksum mismatch"):
         motor.load_motor_encoding_artifact(paths["artifact_dir"])
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_analysis_nwb_objects_preserve_both_motor_datasets(
+    tmp_path: Path,
+    terminal: bool,
+) -> None:
+    """All six MotorEncoding scratch tables survive an HDF5 round trip."""
+    pynwb = pytest.importorskip("pynwb")
+    result = _valid_result()
+    if terminal:
+        metadata = result["metadata"]
+        parameters = result["parameters"]
+        selected = result["selected_units"].iloc[0:0].copy()
+        nested, full = motor._terminal_datasets(
+            selected_units=selected,
+            metadata=metadata,
+            parameters=parameters,
+            primary_position_source="head",
+            orientation_reference_position_source="body",
+            analysis_status="no_units",
+        )
+        result = motor.validate_motor_encoding_result(
+            {
+                "metadata": metadata,
+                "parameters": parameters,
+                "selected_units": selected,
+                "nested_cv": nested,
+                "full_refit": full,
+                "n_units_input": 0,
+                "n_units_eligible": 0,
+                "n_units_valid": 0,
+                "n_outer_folds_expected": parameters["outer_n_folds"],
+                "n_outer_folds_valid": 0,
+                "selected_units_sha256": motor._selected_units_identity_sha256(
+                    selected
+                ),
+                "analysis_status": "no_units",
+                "artifact_origin": "computed",
+                "legacy_artifact_provenance": None,
+            }
+        )
+    expected_hashes = motor.motor_encoding_nwb_hashes(result)
+    objects = motor.motor_encoding_result_to_nwb_objects(result)
+    assert set(objects) == {
+        "selected_units",
+        "dataset_index",
+        "coordinates",
+        "nested_cv_arrays",
+        "full_refit_arrays",
+        "provenance",
+    }
+    assert len({value.object_id for value in objects.values()}) == 6
+    nwbfile = pynwb.NWBFile(
+        session_description="MotorEncoding NWB round-trip",
+        identifier=f"motor-encoding-{terminal}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    for value in objects.values():
+        nwbfile.add_scratch(value)
+    path = tmp_path / f"motor_encoding_{terminal}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=path) == []
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = motor.motor_encoding_result_from_nwb_objects(
+            **{
+                name: stored.objects[value.object_id]
+                for name, value in objects.items()
+            }
+        )
+    xr.testing.assert_identical(loaded["nested_cv"], result["nested_cv"])
+    xr.testing.assert_identical(loaded["full_refit"], result["full_refit"])
+    assert motor.motor_encoding_nwb_hashes(loaded) == expected_hashes
+
+
+def test_live_writer_and_fetch_loader_use_six_motor_objects(
+    tmp_path: Path,
+) -> None:
+    """The live lifecycle writes and fetches one complete analysis NWB."""
+    result = _valid_result()
+    analysis_path = tmp_path / "motor-encoding-analysis.nwb"
+    row = _write_motor_encoding_nwb(
+        nwb_file_name="L1420240611_.nwb",
+        result=result,
+        analysis_nwbfile_table=_AnalysisNwbfile(analysis_path),
+    )
+    assert analysis_path.is_file()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == motor.NWB_ARTIFACT_SCHEMA_VERSION
+    assert row["schema_version"] == motor.RESULT_SCHEMA_VERSION
+    object_fields = {
+        f"{name}_object_id"
+        for name in (
+            "selected_units",
+            "dataset_index",
+            "coordinates",
+            "nested_cv_arrays",
+            "full_refit_arrays",
+            "provenance",
+        )
+    }
+    assert len({row[name] for name in object_fields}) == 6
+
+    objects = motor.motor_encoding_result_to_nwb_objects(result)
+
+    class Relation:
+        def __and__(self, key):
+            assert key == {"motor_encoding_id": result["metadata"]["motor_encoding_id"]}
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    name: value.to_dataframe()
+                    for name, value in objects.items()
+                }
+            ]
+
+    result_row = {
+        "motor_encoding_id": result["metadata"]["motor_encoding_id"],
+        **row,
+    }
+    loaded = _load_motor_encoding_result(
+        result_row=result_row,
+        motor_encoding_table=Relation(),
+    )
+    assert motor.motor_encoding_nwb_hashes(loaded) == (
+        motor.motor_encoding_nwb_hashes(result)
+    )
+    with pytest.raises(ValueError, match="metadata disagrees"):
+        _load_motor_encoding_result(
+            result_row={**result_row, "coordinates_sha256": "0" * 64},
+            motor_encoding_table=Relation(),
+        )
 
 
 def test_compute_no_units_returns_terminal_bundle() -> None:

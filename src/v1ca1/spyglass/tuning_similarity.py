@@ -1,4 +1,4 @@
-"""Database-free path-specific tuning-similarity artifacts."""
+"""Path-specific tuning-similarity computation and Parquet/NWB adapters."""
 
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ from v1ca1.task_progression.similarity import (
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
 ARTIFACT_DIRNAME = "path_specific_place_tuning_similarity"
 ARTIFACT_FILENAME = "similarity.parquet"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_TUNING_SIMILARITY_TABLE_NAME = "path_specific_place_tuning_similarity"
 IDENTITY_COLUMNS = (
     "spikesorting_merge_id",
     "unit_id",
@@ -75,6 +77,55 @@ TABLE_COLUMNS = (
     "n_paired_finite_bins",
     "similarity_status",
 )
+_TEXT_COLUMNS = (
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "group_unit_id",
+    "animal_name",
+    "date",
+    "region",
+    "epoch",
+    "similarity_metric",
+    "comparison_family",
+    "comparison_label",
+    "side",
+    "trajectory_a",
+    "trajectory_b",
+    "similarity_status",
+)
+_INTEGER_COLUMNS = (
+    "n_trajectory_a_finite_bins",
+    "n_trajectory_b_finite_bins",
+    "n_paired_finite_bins",
+)
+_FLOAT_COLUMNS = (
+    "movement_firing_rate_hz",
+    "similarity",
+)
+_COLUMN_DESCRIPTIONS = {
+    "spikesorting_merge_id": "Persistent Spyglass spike-sorting merge identifier.",
+    "unit_id": "Unit identifier within the spike-sorting merge.",
+    "stable_unit_id": "Composite persistent unit identifier, merge_id:unit_id.",
+    "group_unit_id": "Unit key in the upstream path-specific tuning curves.",
+    "animal_name": "Subject identifier used by the analysis.",
+    "date": "Session date formatted as YYYYMMDD.",
+    "region": "Canonical analyzed brain region.",
+    "epoch": "Selected epoch name.",
+    "similarity_metric": "Selected correlation or overlap metric.",
+    "comparison_family": "Direct path-comparison family.",
+    "comparison_label": "Canonical direct path-comparison label.",
+    "side": "Left or right comparison side.",
+    "trajectory_a": "First physical path in the comparison.",
+    "trajectory_b": "Second physical path in the comparison.",
+    "flip_trajectory_b": "Whether the second curve was reversed before comparison.",
+    "movement_firing_rate_hz": "Whole-epoch movement firing rate in hertz.",
+    "similarity": "Path-specific tuning-curve similarity score.",
+    "n_trajectory_a_finite_bins": "Finite bins in the first tuning curve.",
+    "n_trajectory_b_finite_bins": "Finite bins in the second tuning curve.",
+    "n_paired_finite_bins": "Bins finite in both compared tuning curves.",
+    "similarity_status": "Similarity-score QC status.",
+}
 LEGACY_COLUMNS = (
     "unit",
     "region",
@@ -584,6 +635,147 @@ def validate_tuning_similarity_table(table: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
+def _decode_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as UTF-8 text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"Tuning-similarity column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _canonical_nwb_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return one validated similarity table with deterministic NWB dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Tuning-similarity artifact must be a pandas DataFrame.")
+    missing = sorted(set(TABLE_COLUMNS).difference(table.columns))
+    extra = sorted(set(table.columns).difference(TABLE_COLUMNS))
+    if missing or extra:
+        raise ValueError(
+            "Tuning-similarity table must have the exact canonical schema; "
+            f"missing={missing!r}, extra={extra!r}."
+        )
+    if table.empty:
+        return empty_tuning_similarity_table()
+
+    output = table.loc[:, list(TABLE_COLUMNS)].copy().reset_index(drop=True)
+    for column in _TEXT_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_text(value, column=column)
+        )
+        if output[column].eq("").any():
+            raise ValueError(
+                f"Tuning-similarity column {column!r} cannot be empty."
+            )
+    flips = output["flip_trajectory_b"].tolist()
+    if not all(isinstance(value, (bool, np.bool_)) for value in flips):
+        raise TypeError("flip_trajectory_b must contain boolean values.")
+    output["flip_trajectory_b"] = np.asarray(flips, dtype=bool)
+    for column in _INTEGER_COLUMNS:
+        output[column] = _validate_integer_column(output, column)
+    for column in _FLOAT_COLUMNS:
+        output[column] = pd.to_numeric(
+            output[column],
+            errors="raise",
+        ).astype(float)
+    validate_tuning_similarity_table(output)
+    return output
+
+
+def tuning_similarity_table_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical tuning-similarity table to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_nwb_table(table)
+    description = (
+        "All-unit direct path-specific tuning comparisons and QC; "
+        f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        columns = []
+        for name in TABLE_COLUMNS:
+            if name in _TEXT_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif name == "flip_trajectory_b":
+                data = np.asarray([], dtype=bool)
+            elif name in _INTEGER_COLUMNS:
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=_COLUMN_DESCRIPTIONS[name],
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_TUNING_SIMILARITY_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    return DynamicTable.from_dataframe(
+        name=NWB_TUNING_SIMILARITY_TABLE_NAME,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": name,
+                "description": _COLUMN_DESCRIPTIONS[name],
+            }
+            for name in TABLE_COLUMNS
+        ],
+    )
+
+
+def tuning_similarity_table_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical DataFrame from a DynamicTable or fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_TUNING_SIMILARITY_TABLE_NAME:
+            raise ValueError(
+                "Unexpected tuning-similarity NWB object name "
+                f"{nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "Tuning-similarity NWB object must be a DynamicTable or DataFrame."
+        )
+    return _canonical_nwb_table(table.reset_index(drop=True))
+
+
+def tuning_similarity_table_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical similarity table independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_nwb_table(table)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in TABLE_COLUMNS:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "columns": list(TABLE_COLUMNS),
+            "records": records,
+        }
+    )
+
+
 def summarize_tuning_similarity_table(table: pd.DataFrame) -> dict[str, Any]:
     """Return result-level counts and status for one validated table."""
     validate_tuning_similarity_table(table)
@@ -968,6 +1160,8 @@ __all__ = [
     "ARTIFACT_FILENAME",
     "DEFAULT_ARTIFACT_ROOT",
     "IDENTITY_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_TUNING_SIMILARITY_TABLE_NAME",
     "REQUIRED_TRAJECTORIES",
     "SIMILARITY_METRICS",
     "SIMILARITY_STATUSES",
@@ -979,6 +1173,9 @@ __all__ = [
     "normalize_legacy_all_units_similarity_table",
     "register_existing_tuning_similarity_artifact",
     "summarize_tuning_similarity_table",
+    "tuning_similarity_table_from_dynamic_table",
+    "tuning_similarity_table_sha256",
+    "tuning_similarity_table_to_dynamic_table",
     "validate_tuning_similarity_against_inputs",
     "validate_similarity_metric",
     "validate_tuning_similarity_table",

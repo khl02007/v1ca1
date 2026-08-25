@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -727,6 +728,47 @@ def test_all_terminal_markers_validate(monkeypatch, status: str) -> None:
 
     assert terminal["analysis_status"] == status
     assert terminal["n_valid_units"] == 0
+
+
+@pytest.mark.parametrize("terminal_status", (None, "no_trajectory_samples"))
+def test_analysis_nwb_objects_roundtrip_valid_and_terminal_results(
+    monkeypatch,
+    tmp_path: Path,
+    terminal_status: str | None,
+) -> None:
+    pynwb = pytest.importorskip("pynwb")
+    result = _compute(monkeypatch)
+    if terminal_status is not None:
+        result = module.validate_swap_tuning_curve_comparison_result(
+            _terminal_result_from_valid(result, terminal_status)
+        )
+    expected_hashes = module.swap_tuning_curve_comparison_nwb_hashes(result)
+    objects = module.swap_tuning_curve_comparison_result_to_nwb_objects(result)
+    nwb = pynwb.NWBFile(
+        session_description="swap tuning NWB test",
+        identifier=f"swap-{terminal_status or 'valid'}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    object_ids = {}
+    for name, obj in objects.items():
+        nwb.add_scratch(obj)
+        object_ids[name] = str(obj.object_id)
+    path = tmp_path / f"swap-{terminal_status or 'valid'}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwb)
+    assert pynwb.validate(path=path) == []
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = module.swap_tuning_curve_comparison_result_from_nwb_objects(
+            **{
+                name: stored.objects[object_id]
+                for name, object_id in object_ids.items()
+            }
+        )
+        assert module.swap_tuning_curve_comparison_nwb_hashes(loaded) == (
+            expected_hashes
+        )
+    assert loaded["analysis_status"] == result["analysis_status"]
 
 
 def test_per_unit_score_failure_is_isolated(monkeypatch) -> None:

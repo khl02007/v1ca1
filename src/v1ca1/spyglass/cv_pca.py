@@ -27,6 +27,15 @@ TRAJECTORY_QC_FILENAME = "trajectory_qc.parquet"
 MANIFEST_FILENAME = "manifest.parquet"
 BUNDLE_SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "1"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+
+NWB_SELECTED_UNITS_TABLE_NAME = "cv_pca_selected_units"
+NWB_LAP_ASSIGNMENTS_TABLE_NAME = "cv_pca_lap_assignments"
+NWB_TRAJECTORY_QC_TABLE_NAME = "cv_pca_trajectory_qc"
+NWB_SUMMARY_TABLE_NAME = "cv_pca_summary"
+NWB_SPECTRUM_TABLE_NAME = "cv_pca_within_spectrum"
+NWB_DATASET_TABLE_NAME = "cv_pca_scientific_dataset"
+NWB_PROVENANCE_TABLE_NAME = "cv_pca_provenance"
 
 TRAJECTORY_TYPES = (
     "center_to_left",
@@ -295,6 +304,14 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _table_sha256(table: pd.DataFrame) -> str:
+    """Return a deterministic digest for one canonical table."""
+    hashed = pd.util.hash_pandas_object(table, index=True).to_numpy(
+        dtype=np.uint64
+    )
+    return hashlib.sha256(hashed.tobytes()).hexdigest()
 
 
 def get_cv_pca_artifact_paths(
@@ -2103,6 +2120,819 @@ def validate_cv_pca_result(result: Mapping[str, Any]) -> dict[str, Any]:
     return output
 
 
+_SELECTED_UNIT_TEXT_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "unit_class",
+    "unit_qc_status",
+)
+_SELECTED_UNIT_INTEGER_COLUMNS = ("input_unit_index",)
+_SELECTED_UNIT_BOOLEAN_COLUMNS = (
+    "passes_dark_firing_rate",
+    "passes_light_firing_rate",
+    "passes_dark_condition_sd",
+    "passes_light_condition_sd",
+    "included_in_cv_pca",
+)
+_LAP_ASSIGNMENT_TEXT_COLUMNS = (
+    "condition",
+    "epoch",
+    "trajectory_type",
+)
+_LAP_ASSIGNMENT_INTEGER_COLUMNS = (
+    "lap_index",
+    "lap_number",
+    "group_index",
+)
+_TRAJECTORY_QC_TEXT_COLUMNS = (
+    "condition",
+    "epoch",
+    "trajectory_type",
+    "trajectory_status",
+)
+_TRAJECTORY_QC_INTEGER_COLUMNS = (
+    "n_trials",
+    "n_groups_required",
+    "n_shared_valid_bins",
+)
+_SUMMARY_TEXT_COLUMNS = (
+    "cv_pca_id",
+    "animal_name",
+    "date",
+    "region",
+    "light_epoch",
+    "dark_epoch",
+    "condition",
+    "epoch",
+    "analysis_status",
+)
+_SUMMARY_INTEGER_COLUMNS = ("random_seed", "n_units")
+_SPECTRUM_TEXT_COLUMNS = (
+    "cv_pca_id",
+    "animal_name",
+    "date",
+    "region",
+    "light_epoch",
+    "dark_epoch",
+    "condition",
+    "analysis_status",
+)
+_SPECTRUM_INTEGER_COLUMNS = ("random_seed", "component")
+_DATASET_TABLE_COLUMNS = (
+    "array_kind",
+    "array_name",
+    "dimensions_json",
+    "shape_json",
+    "dtype",
+    "attrs_json",
+    "numeric_values",
+    "text_values_json",
+)
+_PROVENANCE_COLUMNS = (
+    "cv_pca_id",
+    "animal_name",
+    "date",
+    "region",
+    "light_epoch",
+    "dark_epoch",
+    "parameter_name",
+    "parameter_sha256",
+    "position_offset_samples",
+    "parameters_json",
+    "upstream_provenance_json",
+    "dataset_attrs_json",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
+)
+_PROVENANCE_TEXT_COLUMNS = tuple(
+    column
+    for column in _PROVENANCE_COLUMNS
+    if column != "position_offset_samples"
+)
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one NWB scratch-table column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed empty DynamicTable without HDMF row inference."""
+    from hdmf.common import DynamicTable, VectorData
+
+    output_columns = []
+    for column in columns:
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return one canonical, explicitly typed DataFrame for NWB storage."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(
+        columns
+    ):
+        raise ValueError("cvPCA NWB table does not have its canonical schema.")
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(np.int64)
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(f"cvPCA NWB column {column!r} must be boolean.")
+        output[column] = np.asarray(values, dtype=bool)
+    for column in columns:
+        if (
+            column in text_columns
+            or column in integer_columns
+            or column in boolean_columns
+        ):
+            continue
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(float)
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert one explicitly typed frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": column,
+                "description": _nwb_column_description(column),
+            }
+            for column in columns
+        ],
+    )
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Decode one text value after an HDF5 DynamicTable round-trip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one scalar DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(f"Unexpected cvPCA NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("cvPCA tabular NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(columns) or len(observed) != len(columns):
+        raise ValueError("cvPCA NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+
+
+def cv_pca_selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the complete cvPCA unit audit to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SELECTED_UNITS_TABLE_NAME,
+        description="All input-unit eligibility and cvPCA inclusion metadata.",
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def cv_pca_selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the complete cvPCA unit audit from NWB."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def cv_pca_lap_assignments_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert deterministic lap-to-fold assignments to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_LAP_ASSIGNMENTS_TABLE_NAME,
+        description="Dark and light lap assignments to cvPCA groups.",
+        columns=LAP_ASSIGNMENT_COLUMNS,
+        text_columns=_LAP_ASSIGNMENT_TEXT_COLUMNS,
+        integer_columns=_LAP_ASSIGNMENT_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_lap_assignments_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load deterministic lap-to-fold assignments from NWB."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_LAP_ASSIGNMENTS_TABLE_NAME,
+        columns=LAP_ASSIGNMENT_COLUMNS,
+        text_columns=_LAP_ASSIGNMENT_TEXT_COLUMNS,
+        integer_columns=_LAP_ASSIGNMENT_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_trajectory_qc_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert per-condition, per-path input QC to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_TRAJECTORY_QC_TABLE_NAME,
+        description="Per-condition, per-path cvPCA input and support QC.",
+        columns=TRAJECTORY_QC_COLUMNS,
+        text_columns=_TRAJECTORY_QC_TEXT_COLUMNS,
+        integer_columns=_TRAJECTORY_QC_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_trajectory_qc_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load per-condition, per-path input QC from NWB."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_TRAJECTORY_QC_TABLE_NAME,
+        columns=TRAJECTORY_QC_COLUMNS,
+        text_columns=_TRAJECTORY_QC_TEXT_COLUMNS,
+        integer_columns=_TRAJECTORY_QC_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the two-row dark/light cvPCA summary to a DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SUMMARY_TABLE_NAME,
+        description="Dark and light within-condition cvPCA summary metrics.",
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the two-row dark/light cvPCA summary from NWB."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SUMMARY_TABLE_NAME,
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_spectrum_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the long-form within-condition component spectrum to NWB."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SPECTRUM_TABLE_NAME,
+        description="Within-condition signed, positive, and cumulative spectra.",
+        columns=SPECTRUM_COLUMNS,
+        text_columns=_SPECTRUM_TEXT_COLUMNS,
+        integer_columns=_SPECTRUM_INTEGER_COLUMNS,
+    )
+
+
+def cv_pca_spectrum_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the long-form within-condition component spectrum from NWB."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SPECTRUM_TABLE_NAME,
+        columns=SPECTRUM_COLUMNS,
+        text_columns=_SPECTRUM_TEXT_COLUMNS,
+        integer_columns=_SPECTRUM_INTEGER_COLUMNS,
+    )
+
+
+def _json_ready(value: Any) -> Any:
+    """Return nested metadata using JSON-native scalar and sequence types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _dataset_array_rows(dataset: Any) -> pd.DataFrame:
+    """Flatten every xarray coordinate and variable into explicit NWB rows."""
+    records = []
+    for array_kind, arrays in (
+        ("coordinate", dataset.coords),
+        ("data_variable", dataset.data_vars),
+    ):
+        for name, data_array in arrays.items():
+            values = np.asarray(data_array.values)
+            dtype = str(values.dtype)
+            numeric = values.dtype.kind in "biuf"
+            if values.dtype.kind not in "biufOUS":
+                raise TypeError(
+                    f"cvPCA array {name!r} has unsupported dtype {dtype!r}."
+                )
+            if numeric and np.isinf(values.astype(float)).any():
+                raise ValueError(f"cvPCA array {name!r} contains infinity.")
+            records.append(
+                {
+                    "array_kind": array_kind,
+                    "array_name": str(name),
+                    "dimensions_json": json.dumps(list(data_array.dims)),
+                    "shape_json": json.dumps(list(values.shape)),
+                    "dtype": dtype,
+                    "attrs_json": json.dumps(
+                        _json_ready(dict(data_array.attrs)),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "numeric_values": (
+                        values.astype(float).reshape(-1) if numeric else np.asarray([])
+                    ),
+                    "text_values_json": (
+                        ""
+                        if numeric
+                        else json.dumps(
+                            values.astype(str).reshape(-1).tolist(),
+                            separators=(",", ":"),
+                        )
+                    ),
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=_DATASET_TABLE_COLUMNS)
+
+
+def cv_pca_dataset_to_dynamic_table(dataset: Any) -> Any:
+    """Convert the compact scientific xarray Dataset to one DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    table = _dataset_array_rows(dataset)
+    scalar_columns = tuple(
+        column for column in _DATASET_TABLE_COLUMNS if column != "numeric_values"
+    )
+    scalar = table.loc[:, list(scalar_columns)].copy()
+    for column in scalar_columns:
+        scalar[column] = scalar[column].map(str)
+    output = DynamicTable.from_dataframe(
+        name=NWB_DATASET_TABLE_NAME,
+        df=scalar,
+        table_description=(
+            "Named cvPCA coordinates and compact scientific arrays with explicit "
+            "dimensions, shapes, and dtypes."
+        ),
+        columns=[
+            {
+                "name": column,
+                "description": _nwb_column_description(column),
+            }
+            for column in scalar_columns
+        ],
+    )
+    output.add_column(
+        name="numeric_values",
+        description="Flattened numeric values; empty for text arrays.",
+        data=[
+            np.asarray(values, dtype=float) for values in table["numeric_values"]
+        ],
+        index=True,
+    )
+    return output
+
+
+def _parse_json_list(value: Any, *, name: str) -> list[Any]:
+    """Decode one JSON list with a field-specific error."""
+    try:
+        parsed = json.loads(_decode_nwb_text(value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"cvPCA NWB {name} contains malformed JSON.") from exc
+    if not isinstance(parsed, list):
+        raise ValueError(f"cvPCA NWB {name} must encode a list.")
+    return parsed
+
+
+def cv_pca_dataset_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    dataset_attrs: Mapping[str, Any],
+) -> Any:
+    """Reconstruct the exact compact xarray Dataset from its NWB table."""
+    from hdmf.common import DynamicTable
+    import xarray as xr
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_DATASET_TABLE_NAME:
+            raise ValueError(f"Unexpected cvPCA NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("The cvPCA dataset NWB object must be a DynamicTable.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(_DATASET_TABLE_COLUMNS) or len(observed) != len(
+        _DATASET_TABLE_COLUMNS
+    ):
+        raise ValueError("cvPCA dataset NWB object has a noncanonical schema.")
+    table = table.loc[:, list(_DATASET_TABLE_COLUMNS)]
+    if table.duplicated(["array_kind", "array_name"]).any():
+        raise ValueError("cvPCA dataset NWB arrays must be uniquely named.")
+    coordinates: dict[str, Any] = {}
+    variables: dict[str, Any] = {}
+    for row in table.to_dict("records"):
+        kind = _decode_nwb_text(row["array_kind"])
+        name = _decode_nwb_text(row["array_name"])
+        if kind not in {"coordinate", "data_variable"} or not name:
+            raise ValueError("cvPCA dataset NWB array identity is invalid.")
+        dimensions = tuple(
+            str(value)
+            for value in _parse_json_list(
+                row["dimensions_json"], name=f"{name} dimensions"
+            )
+        )
+        shape = tuple(
+            int(value)
+            for value in _parse_json_list(
+                row["shape_json"], name=f"{name} shape"
+            )
+        )
+        if any(value < 0 for value in shape):
+            raise ValueError(f"cvPCA NWB array {name!r} has an invalid shape.")
+        try:
+            dtype = np.dtype(_decode_nwb_text(row["dtype"]))
+            attrs = json.loads(_decode_nwb_text(row["attrs_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"cvPCA NWB array {name!r} metadata is malformed."
+            ) from exc
+        if not isinstance(attrs, Mapping) or len(dimensions) != len(shape):
+            raise ValueError(f"cvPCA NWB array {name!r} metadata is invalid.")
+        size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+        if dtype.kind in "biuf":
+            values = np.asarray(row["numeric_values"], dtype=float)
+            if values.size != size or np.isinf(values).any():
+                raise ValueError(
+                    f"cvPCA NWB array {name!r} has invalid numeric values."
+                )
+            if dtype.kind in "biu" and np.any(
+                np.isfinite(values) & (values != np.rint(values))
+            ):
+                raise ValueError(
+                    f"cvPCA NWB array {name!r} has nonintegral values."
+                )
+            values = values.astype(dtype).reshape(shape)
+        elif dtype.kind in "OUS":
+            text_values = _parse_json_list(
+                row["text_values_json"], name=f"{name} text values"
+            )
+            if len(text_values) != size:
+                raise ValueError(
+                    f"cvPCA NWB array {name!r} has the wrong text length."
+                )
+            values = np.asarray(text_values, dtype=dtype).reshape(shape)
+        else:
+            raise TypeError(
+                f"cvPCA NWB array {name!r} has unsupported dtype {dtype!s}."
+            )
+        spec = (dimensions, values, dict(attrs))
+        destination = coordinates if kind == "coordinate" else variables
+        destination[name] = spec
+    return xr.Dataset(
+        data_vars=variables,
+        coords=coordinates,
+        attrs=dict(dataset_attrs),
+    )
+
+
+def _cv_pca_provenance_record(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one detached, self-describing cvPCA provenance record."""
+    canonical = validate_cv_pca_result(result)
+    return {
+        "cv_pca_id": canonical["cv_pca_id"],
+        "animal_name": str(canonical["animal_name"]),
+        "date": str(canonical["date"]),
+        "region": str(canonical["region"]),
+        "light_epoch": str(canonical["light_epoch"]),
+        "dark_epoch": str(canonical["dark_epoch"]),
+        "parameter_name": str(canonical["parameter_name"]),
+        "parameter_sha256": str(canonical["parameter_sha256"]),
+        "position_offset_samples": int(canonical["position_offset_samples"]),
+        "parameters_json": json.dumps(
+            _json_ready(canonical["parameters"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "upstream_provenance_json": json.dumps(
+            _json_ready(canonical["upstream_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "dataset_attrs_json": json.dumps(
+            _json_ready(dict(canonical["dataset"].attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "analysis_status": str(canonical["analysis_status"]),
+        "artifact_origin": str(canonical["artifact_origin"]),
+        "legacy_artifact_provenance_json": json.dumps(
+            _json_ready(canonical["legacy_artifact_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+
+
+def cv_pca_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Convert cvPCA identity and provenance to a one-row DynamicTable."""
+    return _dynamic_table_from_frame(
+        pd.DataFrame.from_records(
+            [_cv_pca_provenance_record(result)],
+            columns=_PROVENANCE_COLUMNS,
+        ),
+        name=NWB_PROVENANCE_TABLE_NAME,
+        description=(
+            "Detached cvPCA identity, parameters, upstream provenance, and "
+            f"dataset attributes; schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=_PROVENANCE_COLUMNS,
+        text_columns=_PROVENANCE_TEXT_COLUMNS,
+        integer_columns=("position_offset_samples",),
+    )
+
+
+def cv_pca_provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Load and parse one cvPCA provenance record from NWB."""
+    table = _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=_PROVENANCE_COLUMNS,
+        text_columns=_PROVENANCE_TEXT_COLUMNS,
+        integer_columns=("position_offset_samples",),
+    )
+    if len(table) != 1:
+        raise ValueError("cvPCA provenance must contain exactly one row.")
+    record = table.iloc[0].to_dict()
+    if record["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("cvPCA NWB artifact schema version is unsupported.")
+    decoded = {}
+    for field in (
+        "parameters_json",
+        "upstream_provenance_json",
+        "dataset_attrs_json",
+        "legacy_artifact_provenance_json",
+    ):
+        try:
+            value = json.loads(record[field])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"cvPCA provenance {field!r} contains malformed JSON."
+            ) from exc
+        if not isinstance(value, Mapping):
+            raise ValueError(f"cvPCA provenance {field!r} must encode a mapping.")
+        decoded[field] = dict(value)
+    return {**record, **decoded}
+
+
+def cv_pca_result_to_nwb_objects(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert one canonical cvPCA result to seven NWB scratch objects."""
+    canonical = validate_cv_pca_result(result)
+    return {
+        "selected_units": cv_pca_selected_units_to_dynamic_table(
+            canonical["selected_units"]
+        ),
+        "lap_assignments": cv_pca_lap_assignments_to_dynamic_table(
+            canonical["lap_assignments"]
+        ),
+        "trajectory_qc": cv_pca_trajectory_qc_to_dynamic_table(
+            canonical["trajectory_qc"]
+        ),
+        "summary": cv_pca_summary_to_dynamic_table(canonical["summary"]),
+        "spectrum": cv_pca_spectrum_to_dynamic_table(canonical["spectrum"]),
+        "dataset": cv_pca_dataset_to_dynamic_table(canonical["dataset"]),
+        "provenance": cv_pca_provenance_to_dynamic_table(canonical),
+    }
+
+
+def cv_pca_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    lap_assignments: Any,
+    trajectory_qc: Any,
+    summary: Any,
+    spectrum: Any,
+    dataset: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one cvPCA result from seven NWB objects."""
+    provenance_record = cv_pca_provenance_from_dynamic_table(provenance)
+    reconstructed_dataset = cv_pca_dataset_from_dynamic_table(
+        dataset,
+        dataset_attrs=provenance_record["dataset_attrs_json"],
+    )
+    return validate_cv_pca_result(
+        {
+            "cv_pca_id": provenance_record["cv_pca_id"],
+            "animal_name": provenance_record["animal_name"],
+            "date": provenance_record["date"],
+            "region": provenance_record["region"],
+            "light_epoch": provenance_record["light_epoch"],
+            "dark_epoch": provenance_record["dark_epoch"],
+            "parameter_name": provenance_record["parameter_name"],
+            "parameter_sha256": provenance_record["parameter_sha256"],
+            "parameters": provenance_record["parameters_json"],
+            "upstream_provenance": provenance_record[
+                "upstream_provenance_json"
+            ],
+            "position_offset_samples": provenance_record[
+                "position_offset_samples"
+            ],
+            "selected_units": cv_pca_selected_units_from_dynamic_table(
+                selected_units
+            ),
+            "lap_assignments": cv_pca_lap_assignments_from_dynamic_table(
+                lap_assignments
+            ),
+            "trajectory_qc": cv_pca_trajectory_qc_from_dynamic_table(
+                trajectory_qc
+            ),
+            "summary": cv_pca_summary_from_dynamic_table(summary),
+            "spectrum": cv_pca_spectrum_from_dynamic_table(spectrum),
+            "dataset": reconstructed_dataset,
+            "analysis_status": provenance_record["analysis_status"],
+            "artifact_origin": provenance_record["artifact_origin"],
+            "legacy_artifact_provenance": provenance_record[
+                "legacy_artifact_provenance_json"
+            ],
+        }
+    )
+
+
+def _array_sha256(values: Any) -> str:
+    """Hash one array semantically, preserving dtype and shape."""
+    array = np.asarray(values)
+    if array.dtype.kind in "OUS":
+        payload = {
+            "dtype": str(array.dtype),
+            "shape": list(array.shape),
+            "values": array.astype(str).reshape(-1).tolist(),
+        }
+        return _provenance_sha256(payload)
+    if array.dtype.kind not in "biuf":
+        raise TypeError(f"Unsupported cvPCA array dtype {array.dtype!s}.")
+    if array.dtype.kind == "f":
+        canonical = np.ascontiguousarray(array.astype("<f8"))
+        if np.isnan(canonical).any():
+            canonical = canonical.copy()
+            canonical[np.isnan(canonical)] = np.nan
+    elif array.dtype.kind == "b":
+        canonical = np.ascontiguousarray(array.astype(np.uint8))
+    elif array.dtype.kind == "i":
+        canonical = np.ascontiguousarray(array.astype("<i8"))
+    else:
+        canonical = np.ascontiguousarray(array.astype("<u8"))
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("utf-8"))
+    digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+    digest.update(canonical.tobytes())
+    return digest.hexdigest()
+
+
+def cv_pca_dataset_sha256(dataset: Any) -> str:
+    """Hash the complete compact xarray Dataset independently of storage."""
+    rows = []
+    for kind, arrays in (("coordinate", dataset.coords), ("data_variable", dataset.data_vars)):
+        for name, data_array in arrays.items():
+            rows.append(
+                {
+                    "array_kind": kind,
+                    "array_name": str(name),
+                    "dimensions": list(data_array.dims),
+                    "attrs": _json_ready(dict(data_array.attrs)),
+                    "values_sha256": _array_sha256(data_array.values),
+                }
+            )
+    return _provenance_sha256(
+        {
+            "arrays": rows,
+            "dataset_attrs": _json_ready(dict(dataset.attrs)),
+        }
+    )
+
+
+def cv_pca_nwb_hashes(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return storage-independent hashes for all seven NWB objects."""
+    canonical = validate_cv_pca_result(result)
+    return {
+        "selected_units_table_sha256": _table_sha256(
+            canonical["selected_units"]
+        ),
+        "lap_assignments_sha256": _table_sha256(
+            canonical["lap_assignments"]
+        ),
+        "trajectory_qc_sha256": _table_sha256(canonical["trajectory_qc"]),
+        "summary_sha256": _table_sha256(canonical["summary"]),
+        "spectrum_sha256": _table_sha256(canonical["spectrum"]),
+        "dataset_sha256": cv_pca_dataset_sha256(canonical["dataset"]),
+        "provenance_sha256": _provenance_sha256(
+            _cv_pca_provenance_record(canonical)
+        ),
+    }
+
+
 def _manifest_for_directory(result: Mapping[str, Any], directory: Path) -> pd.DataFrame:
     """Build the six-row immutable bundle manifest."""
     artifacts = {
@@ -2547,7 +3377,7 @@ def register_existing_cv_pca_artifact(
     legacy_result_path: Path,
     legacy_summary_path: Path,
     compute_inputs: Mapping[str, Any],
-    artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
+    artifact_root: Path | None = DEFAULT_ARTIFACT_ROOT,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Strictly verify, compact, and register one legacy cvPCA result pair."""
@@ -2585,6 +3415,8 @@ def register_existing_cv_pca_artifact(
         "legacy_artifact_provenance": legacy_provenance,
     }
     registered = validate_cv_pca_result(registered)
+    if artifact_root is None:
+        return registered
     return write_cv_pca_artifact(
         registered, artifact_root=artifact_root, overwrite=overwrite
     )
@@ -2608,6 +3440,14 @@ __all__ = [
     "DEFAULT_UNIT_FILTER_MODE",
     "LAP_ASSIGNMENT_COLUMNS",
     "MANIFEST_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_DATASET_TABLE_NAME",
+    "NWB_LAP_ASSIGNMENTS_TABLE_NAME",
+    "NWB_PROVENANCE_TABLE_NAME",
+    "NWB_SELECTED_UNITS_TABLE_NAME",
+    "NWB_SPECTRUM_TABLE_NAME",
+    "NWB_SUMMARY_TABLE_NAME",
+    "NWB_TRAJECTORY_QC_TABLE_NAME",
     "OUTPUT_RULE",
     "OUTPUT_RULE_SHA256",
     "PROHIBITED_RESULT_VARIABLES",
@@ -2618,6 +3458,24 @@ __all__ = [
     "TRAJECTORY_QC_COLUMNS",
     "TRAJECTORY_TYPES",
     "compute_cv_pca",
+    "cv_pca_dataset_from_dynamic_table",
+    "cv_pca_dataset_sha256",
+    "cv_pca_dataset_to_dynamic_table",
+    "cv_pca_lap_assignments_from_dynamic_table",
+    "cv_pca_lap_assignments_to_dynamic_table",
+    "cv_pca_nwb_hashes",
+    "cv_pca_provenance_from_dynamic_table",
+    "cv_pca_provenance_to_dynamic_table",
+    "cv_pca_result_from_nwb_objects",
+    "cv_pca_result_to_nwb_objects",
+    "cv_pca_selected_units_from_dynamic_table",
+    "cv_pca_selected_units_to_dynamic_table",
+    "cv_pca_spectrum_from_dynamic_table",
+    "cv_pca_spectrum_to_dynamic_table",
+    "cv_pca_summary_from_dynamic_table",
+    "cv_pca_summary_to_dynamic_table",
+    "cv_pca_trajectory_qc_from_dynamic_table",
+    "cv_pca_trajectory_qc_to_dynamic_table",
     "get_cv_pca_artifact_paths",
     "get_legacy_cv_pca_paths",
     "load_cv_pca_artifact",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -140,6 +141,36 @@ def _canonical_tuning_curve(
     return curve
 
 
+def _computed_stability_table() -> pd.DataFrame:
+    """Return one nonempty canonical stability table for storage tests."""
+    odd = _canonical_tuning_curve(
+        trial_subset="odd",
+        values=np.asarray(
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+                [5.0, 4.0, 3.0, 2.0, 1.0],
+            ]
+        ),
+    )
+    even = _canonical_tuning_curve(
+        trial_subset="even",
+        values=np.asarray(
+            [
+                [2.0, 4.0, 6.0, 8.0, 10.0],
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+            ]
+        ),
+    )
+    movement_rates = _movement_firing_rate_table()
+    movement_rates.loc[1, "movement_spike_count"] = 4
+    movement_rates.loc[1, "movement_firing_rate_hz"] = 2.0
+    return stability.compute_selected_stability_from_tuning_curves(
+        odd_tuning_curve=odd,
+        even_tuning_curve=even,
+        movement_firing_rate_table=movement_rates,
+    )["table"]
+
+
 def test_stability_artifact_path_is_uuid_keyed_and_session_first(
     tmp_path: Path,
 ) -> None:
@@ -224,6 +255,70 @@ def test_empty_stability_table_has_persistent_identity_schema() -> None:
         "segment_stability_shape_overlaps",
         "segmented_shape_overlap_status",
     }.issubset(table.columns)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_stability_dynamic_table_roundtrip_is_valid_nwb(
+    tmp_path: Path,
+    empty: bool,
+) -> None:
+    """Valid and empty stability tables survive a real NWB HDF5 roundtrip."""
+    from pynwb import NWBHDF5IO, NWBFile, validate
+
+    source = (
+        stability.empty_stability_table()
+        if empty
+        else _computed_stability_table()
+    )
+    dynamic_table = stability.stability_table_to_dynamic_table(source)
+    object_id = str(dynamic_table.object_id)
+    nwbfile = NWBFile(
+        session_description="PathSpecificPlaceStability storage test",
+        identifier=f"stability-storage-{empty}",
+        session_start_time=datetime(2024, 6, 11, tzinfo=timezone.utc),
+    )
+    nwbfile.add_scratch(dynamic_table)
+    path = tmp_path / f"stability-{empty}.nwb"
+    with NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+
+    assert validate(path=path) == []
+    with NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read().objects[object_id]
+        roundtrip = stability.stability_table_from_dynamic_table(stored)
+        fetched_roundtrip = stability.stability_table_from_dynamic_table(
+            stored.to_dataframe()
+        )
+
+    pd.testing.assert_frame_equal(roundtrip, source, check_dtype=False)
+    pd.testing.assert_frame_equal(fetched_roundtrip, source, check_dtype=False)
+    assert stability.stability_table_sha256(roundtrip) == (
+        stability.stability_table_sha256(source)
+    )
+
+
+def test_stability_dynamic_table_rejects_noncanonical_identity() -> None:
+    table = _computed_stability_table()
+    table.loc[1, "group_unit_id"] = 1
+    with pytest.raises(TypeError, match="one homogeneous type"):
+        stability.stability_table_to_dynamic_table(table)
+
+    table = _computed_stability_table()
+    table.loc[0, "stable_unit_id"] = "wrong"
+    with pytest.raises(ValueError, match="merge_id:unit_id"):
+        stability.stability_table_to_dynamic_table(table)
+
+
+def test_stability_semantic_hash_covers_metrics_not_dataframe_index() -> None:
+    table = _computed_stability_table()
+    baseline = stability.stability_table_sha256(table)
+    reindexed = table.copy()
+    reindexed.index = [10, 11]
+    assert stability.stability_table_sha256(reindexed) == baseline
+
+    changed = table.copy()
+    changed.loc[0, "stability_correlation"] = 0.5
+    assert stability.stability_table_sha256(changed) != baseline
 
 
 def test_stability_from_tuning_curves_uses_saved_identities_and_rates() -> None:

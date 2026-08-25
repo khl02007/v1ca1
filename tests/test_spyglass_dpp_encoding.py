@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
@@ -278,6 +279,89 @@ def test_artifact_path_and_empty_summary_are_uuid_keyed(tmp_path: Path) -> None:
     assert summary["n_units_eligible"] == 0
     assert summary["n_units_valid"] == 0
     assert len(summary["eligible_units_sha256"]) == 64
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_dpp_encoding_dynamic_table_roundtrip_is_valid_nwb(
+    tmp_path: Path,
+    empty: bool,
+) -> None:
+    """Valid and empty encoding tables survive a real NWB HDF5 roundtrip."""
+    from pynwb import NWBHDF5IO, NWBFile, validate
+
+    source = (
+        encoding.empty_dpp_encoding_table()
+        if empty
+        else pd.DataFrame.from_records([_canonical_row()]).loc[
+            :, list(encoding.TABLE_COLUMNS)
+        ]
+    )
+    dynamic_table = encoding.dpp_encoding_table_to_dynamic_table(source)
+    object_id = str(dynamic_table.object_id)
+    nwbfile = NWBFile(
+        session_description="DPPEncoding storage test",
+        identifier=f"dpp-encoding-storage-{empty}",
+        session_start_time=datetime(2024, 6, 11, tzinfo=timezone.utc),
+    )
+    nwbfile.add_scratch(dynamic_table)
+    path = tmp_path / f"dpp-encoding-{empty}.nwb"
+    with NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+
+    assert validate(path=path) == []
+    with NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read().objects[object_id]
+        roundtrip = encoding.dpp_encoding_table_from_dynamic_table(stored)
+        fetched_roundtrip = encoding.dpp_encoding_table_from_dynamic_table(
+            stored.to_dataframe()
+        )
+
+    pd.testing.assert_frame_equal(roundtrip, source, check_dtype=False)
+    pd.testing.assert_frame_equal(
+        fetched_roundtrip,
+        source,
+        check_dtype=False,
+    )
+    assert encoding.dpp_encoding_table_sha256(roundtrip) == (
+        encoding.dpp_encoding_table_sha256(source)
+    )
+
+
+def test_dpp_encoding_semantic_hash_covers_scores_not_dataframe_index() -> None:
+    table = pd.DataFrame.from_records([_canonical_row()]).loc[
+        :, list(encoding.TABLE_COLUMNS)
+    ]
+    baseline = encoding.dpp_encoding_table_sha256(table)
+    reindexed = table.copy()
+    reindexed.index = [10]
+    assert encoding.dpp_encoding_table_sha256(reindexed) == baseline
+
+    changed = table.copy()
+    changed.loc[0, "dpp_log_likelihood_nats"] -= 1.0
+    changed.loc[0, "dpp_information_bits_per_spike"] = (
+        changed.loc[0, "dpp_log_likelihood_nats"]
+        - changed.loc[0, "null_log_likelihood_nats"]
+    ) / (np.log(2.0) * changed.loc[0, "heldout_spike_count"])
+    for column, alternative in {
+        "dpp_vs_path_specific_place_bits_per_spike": "path_specific_place",
+        "dpp_vs_absolute_place_bits_per_spike": "absolute_place",
+        "dpp_vs_distance_to_reward_bits_per_spike": "distance_to_reward",
+    }.items():
+        changed.loc[0, column] = (
+            changed.loc[0, "dpp_log_likelihood_nats"]
+            - changed.loc[0, f"{alternative}_log_likelihood_nats"]
+        ) / (np.log(2.0) * changed.loc[0, "heldout_spike_count"])
+    assert encoding.dpp_encoding_table_sha256(changed) != baseline
+
+
+def test_dpp_encoding_dynamic_table_rejects_nonboolean_unit_valid() -> None:
+    table = pd.DataFrame.from_records([_canonical_row()]).loc[
+        :, list(encoding.TABLE_COLUMNS)
+    ]
+    table["unit_valid"] = table["unit_valid"].astype(int)
+
+    with pytest.raises(TypeError, match="boolean"):
+        encoding.dpp_encoding_table_to_dynamic_table(table)
 
 
 def test_eligibility_is_inclusive_firing_rate_and_any_trajectory_stability() -> None:

@@ -33,6 +33,15 @@ SELECTION_SUMMARY_FILENAME = "selection_summary.nc"
 CANDIDATE_DIRNAME = "candidates"
 SELECTED_DIRNAME = "selected"
 
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_SELECTED_UNITS_TABLE_NAME = "dark_light_glm_selected_units"
+NWB_DATASET_INDEX_TABLE_NAME = "dark_light_glm_dataset_index"
+NWB_AXES_TABLE_NAME = "dark_light_glm_axes"
+NWB_CANDIDATE_RESULTS_TABLE_NAME = "dark_light_glm_candidate_results"
+NWB_SELECTED_RESULTS_TABLE_NAME = "dark_light_glm_selected_results"
+NWB_SELECTION_SUMMARY_TABLE_NAME = "dark_light_glm_selection_summary"
+NWB_PROVENANCE_TABLE_NAME = "dark_light_glm_provenance"
+
 MODEL_NAMES = (
     "visual",
     "task_segment_bump",
@@ -128,6 +137,34 @@ MANIFEST_COLUMNS = (
     "analysis_status",
     "artifact_origin",
     "legacy_artifact_provenance_json",
+)
+
+DATASET_INDEX_COLUMNS = (
+    "dataset_key",
+    "fit_stage",
+    "model_name",
+    "attrs_json",
+)
+ARRAY_COMPONENT_COLUMNS = (
+    "dataset_key",
+    "component_name",
+    "dimensions_json",
+    "shape_json",
+    "dtype",
+    "numeric_count",
+    "numeric_values",
+    "text_values_json",
+    "attrs_json",
+)
+PROVENANCE_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "trajectory_length_cm",
+    "segment_edges",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
 )
 
 
@@ -2065,7 +2102,7 @@ def register_existing_dark_light_glm_artifact(
     source_candidate_paths: Sequence[Path],
     source_selected_paths_by_model: Mapping[str, Path],
     source_selection_summary_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     dark_light_glm_id: Any,
     animal_name: str,
     date: str,
@@ -2315,8 +2352,931 @@ def register_existing_dark_light_glm_artifact(
         },
     }
     validated = validate_dark_light_glm_result(result)
+    if destination_path is None:
+        return validated
     write_dark_light_glm_artifact(validated, destination_path, overwrite=overwrite)
     return load_dark_light_glm_artifact(destination_path)
+
+
+def _json_ready(value: Any) -> Any:
+    """Return nested metadata using JSON-native scalar types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one scratch-table column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    ragged_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed zero-row DynamicTable without row inference."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    output_columns = []
+    for column in columns:
+        if column in ragged_columns:
+            data = VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=np.asarray([], dtype=float),
+            )
+            output_columns.extend(
+                (
+                    data,
+                    VectorIndex(
+                        name=f"{column}_index",
+                        data=np.asarray([], dtype=np.int64),
+                        target=data,
+                    ),
+                )
+            )
+            continue
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return one canonical typed DarkLightGLM scratch-table frame."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(
+        columns
+    ):
+        raise ValueError(
+            "DarkLightGLM NWB table does not have its canonical schema."
+        )
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(np.int64)
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(
+                f"DarkLightGLM NWB column {column!r} must be boolean."
+            )
+        output[column] = np.asarray(values, dtype=bool)
+    for column in vector_columns:
+        vectors = [np.asarray(value, dtype=float) for value in output[column]]
+        if any(vector.ndim != 1 or np.isinf(vector).any() for vector in vectors):
+            raise ValueError(
+                f"DarkLightGLM NWB vector column {column!r} is invalid."
+            )
+        output[column] = vectors
+    for column in columns:
+        if column in (
+            *text_columns,
+            *integer_columns,
+            *boolean_columns,
+            *vector_columns,
+        ):
+            continue
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"DarkLightGLM NWB numeric column {column!r} contains infinity."
+            )
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert one scalar frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in columns
+        ],
+    )
+
+
+def _ragged_dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert scalar keys and aligned numeric vectors to a DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            ragged_columns=vector_columns,
+        )
+    scalar_columns = tuple(
+        column for column in columns if column not in vector_columns
+    )
+    output = DynamicTable.from_dataframe(
+        name=name,
+        df=canonical.loc[:, list(scalar_columns)],
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in scalar_columns
+        ],
+    )
+    for column in vector_columns:
+        vectors = canonical[column].tolist()
+        if all(vector.size == 0 for vector in vectors):
+            vectors = [np.asarray([np.nan], dtype=float) for _ in vectors]
+        output.add_column(
+            name=column,
+            description=_nwb_column_description(column),
+            data=vectors,
+            index=True,
+        )
+    return output
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Return text after an HDF5-backed DynamicTable round trip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected DarkLightGLM NWB object {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("DarkLightGLM NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(columns) or len(observed) != len(columns):
+        raise ValueError("DarkLightGLM NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    for column in vector_columns:
+        table[column] = [
+            np.asarray(value, dtype=float) for value in table[column]
+        ]
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+
+
+def _dataset_records(result: Mapping[str, Any]) -> list[tuple[str, str, Any]]:
+    """Return every xarray dataset in deterministic storage order."""
+    canonical = validate_dark_light_glm_result(result)
+    records = [
+        (key, "candidate", dataset)
+        for key, dataset in sorted(canonical["candidate_datasets"].items())
+    ]
+    records.extend(
+        (
+            model_name,
+            (
+                "terminal"
+                if canonical["analysis_status"]
+                in {"no_units", "no_eligible_units", "no_valid_position", "no_movement"}
+                else "selected"
+            ),
+            canonical["selected_datasets"][model_name],
+        )
+        for model_name in MODEL_NAMES
+    )
+    records.append(
+        ("selection_summary", "selection_summary", canonical["selection_summary"])
+    )
+    return records
+
+
+def _dataset_index_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return one metadata row per candidate, selected model, and summary."""
+    rows = []
+    for dataset_key, fit_stage, dataset in _dataset_records(result):
+        rows.append(
+            {
+                "dataset_key": dataset_key,
+                "fit_stage": fit_stage,
+                "model_name": str(dataset.attrs.get("model_name", "")),
+                "attrs_json": json.dumps(
+                    _json_ready(dict(dataset.attrs)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=DATASET_INDEX_COLUMNS)
+
+
+def _array_component_record(
+    *,
+    dataset_key: str,
+    component_name: str,
+    array: Any,
+) -> dict[str, Any]:
+    """Flatten one xarray coordinate or variable without numeric JSON."""
+    values = np.asarray(array.values)
+    kind = values.dtype.kind
+    if kind in {"O", "S", "U"}:
+        flattened = [_decode_nwb_text(value) for value in values.reshape(-1)]
+        dtype = "str"
+        numeric = np.asarray([], dtype=float)
+        text_json = json.dumps(flattened, separators=(",", ":"))
+    elif kind in {"b", "i", "u", "f"}:
+        numeric = values.astype(float, copy=False).reshape(-1)
+        if np.isinf(numeric).any():
+            raise ValueError(
+                f"DarkLightGLM array {component_name!r} contains infinity."
+            )
+        dtype = str(values.dtype)
+        text_json = "[]"
+    else:
+        raise TypeError(
+            f"DarkLightGLM array {component_name!r} has unsupported dtype "
+            f"{values.dtype}."
+        )
+    return {
+        "dataset_key": dataset_key,
+        "component_name": component_name,
+        "dimensions_json": json.dumps(list(array.dims), separators=(",", ":")),
+        "shape_json": json.dumps(list(values.shape), separators=(",", ":")),
+        "dtype": dtype,
+        "numeric_count": int(numeric.size),
+        "numeric_values": np.asarray(numeric, dtype=float),
+        "text_values_json": text_json,
+        "attrs_json": json.dumps(
+            _json_ready(dict(array.attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+
+
+def _axes_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return every named coordinate as one keyed ragged row."""
+    rows = []
+    for dataset_key, _fit_stage, dataset in _dataset_records(result):
+        rows.extend(
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_name=str(name),
+                array=coordinate,
+            )
+            for name, coordinate in dataset.coords.items()
+        )
+    return pd.DataFrame.from_records(rows, columns=ARRAY_COMPONENT_COLUMNS)
+
+
+def _variables_frame(
+    result: Mapping[str, Any],
+    *,
+    fit_stages: set[str],
+) -> pd.DataFrame:
+    """Return flattened data variables for selected dataset stages."""
+    rows = []
+    for dataset_key, fit_stage, dataset in _dataset_records(result):
+        if fit_stage not in fit_stages:
+            continue
+        rows.extend(
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_name=str(name),
+                array=variable,
+            )
+            for name, variable in dataset.data_vars.items()
+        )
+    return pd.DataFrame.from_records(rows, columns=ARRAY_COMPONENT_COLUMNS)
+
+
+def _provenance_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return detached result metadata and global geometry."""
+    canonical = validate_dark_light_glm_result(result)
+    return pd.DataFrame.from_records(
+        [
+            {
+                "metadata_json": json.dumps(
+                    _json_ready(canonical["metadata"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "parameters_json": json.dumps(
+                    _json_ready(canonical["parameters"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "trajectory_length_cm": float(canonical["trajectory_length_cm"]),
+                "segment_edges": np.asarray(canonical["segment_edges"], dtype=float),
+                "analysis_status": str(canonical["analysis_status"]),
+                "artifact_origin": str(canonical["artifact_origin"]),
+                "legacy_artifact_provenance_json": json.dumps(
+                    _json_ready(canonical["legacy_artifact_provenance"] or {}),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+            }
+        ],
+        columns=PROVENANCE_COLUMNS,
+    )
+
+
+def dark_light_glm_selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the complete selected-unit audit to an NWB DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SELECTED_UNITS_TABLE_NAME,
+        description=(
+            "Selected-unit identity and fit audit for DarkLightGLM; "
+            f"v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=IDENTITY_COLUMNS,
+        integer_columns=("selection_index", "n_selected_model_trajectory_fits"),
+        boolean_columns=("valid_glm_fit",),
+    )
+
+
+def dark_light_glm_selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the selected-unit audit from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=IDENTITY_COLUMNS,
+        integer_columns=("selection_index", "n_selected_model_trajectory_fits"),
+        boolean_columns=("valid_glm_fit",),
+    )
+
+
+def _component_frame_to_dynamic_table(
+    frame: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+) -> Any:
+    """Store flattened xarray components as keyed ragged rows."""
+    return _ragged_dynamic_table_from_frame(
+        frame,
+        name=name,
+        description=description,
+        columns=ARRAY_COMPONENT_COLUMNS,
+        vector_columns=("numeric_values",),
+        text_columns=(
+            "dataset_key",
+            "component_name",
+            "dimensions_json",
+            "shape_json",
+            "dtype",
+            "text_values_json",
+            "attrs_json",
+        ),
+        integer_columns=("numeric_count",),
+    )
+
+
+def _component_frame_from_dynamic_table(nwb_table: Any, *, name: str) -> pd.DataFrame:
+    """Load flattened xarray components from one scratch table."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=name,
+        columns=ARRAY_COMPONENT_COLUMNS,
+        vector_columns=("numeric_values",),
+        text_columns=(
+            "dataset_key",
+            "component_name",
+            "dimensions_json",
+            "shape_json",
+            "dtype",
+            "text_values_json",
+            "attrs_json",
+        ),
+        integer_columns=("numeric_count",),
+    )
+
+
+def dark_light_glm_result_to_nwb_objects(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one DarkLightGLM result to seven NWB scratch objects."""
+    canonical = validate_dark_light_glm_result(result)
+    return {
+        "selected_units": dark_light_glm_selected_units_to_dynamic_table(
+            canonical["selected_units"]
+        ),
+        "dataset_index": _dynamic_table_from_frame(
+            _dataset_index_frame(canonical),
+            name=NWB_DATASET_INDEX_TABLE_NAME,
+            description="Candidate, selected, and selection-summary dataset index.",
+            columns=DATASET_INDEX_COLUMNS,
+            text_columns=DATASET_INDEX_COLUMNS,
+        ),
+        "axes": _component_frame_to_dynamic_table(
+            _axes_frame(canonical),
+            name=NWB_AXES_TABLE_NAME,
+            description="Coordinates for every stored DarkLightGLM dataset.",
+        ),
+        "candidate_results": _component_frame_to_dynamic_table(
+            _variables_frame(canonical, fit_stages={"candidate"}),
+            name=NWB_CANDIDATE_RESULTS_TABLE_NAME,
+            description="Complete candidate-search arrays for DarkLightGLM.",
+        ),
+        "selected_results": _component_frame_to_dynamic_table(
+            _variables_frame(canonical, fit_stages={"selected", "terminal"}),
+            name=NWB_SELECTED_RESULTS_TABLE_NAME,
+            description="Selected-ridge model arrays used by downstream analyses.",
+        ),
+        "selection_summary": _component_frame_to_dynamic_table(
+            _variables_frame(canonical, fit_stages={"selection_summary"}),
+            name=NWB_SELECTION_SUMMARY_TABLE_NAME,
+            description="Complete DarkLightGLM hyperparameter-search summary arrays.",
+        ),
+        "provenance": _ragged_dynamic_table_from_frame(
+            _provenance_frame(canonical),
+            name=NWB_PROVENANCE_TABLE_NAME,
+            description=(
+                "Detached DarkLightGLM identity, parameters, geometry, and status."
+            ),
+            columns=PROVENANCE_COLUMNS,
+            vector_columns=("segment_edges",),
+            text_columns=(
+                "metadata_json",
+                "parameters_json",
+                "analysis_status",
+                "artifact_origin",
+                "legacy_artifact_provenance_json",
+                "artifact_schema_version",
+            ),
+        ),
+    }
+
+
+def _parse_json_mapping(value: str, *, name: str) -> dict[str, Any]:
+    """Parse one JSON object with a field-specific error."""
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"DarkLightGLM {name} contains malformed JSON.") from exc
+    if not isinstance(decoded, Mapping):
+        raise ValueError(f"DarkLightGLM {name} must encode a mapping.")
+    return dict(decoded)
+
+
+def _decode_array_component(
+    record: Mapping[str, Any],
+) -> tuple[tuple[str, ...], Any, dict[str, Any]]:
+    """Restore one xarray component from its flattened NWB row."""
+    try:
+        dimensions = tuple(
+            str(value) for value in json.loads(record["dimensions_json"])
+        )
+        shape = tuple(int(value) for value in json.loads(record["shape_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("DarkLightGLM array shape metadata is malformed.") from exc
+    if len(dimensions) != len(shape) or any(value < 0 for value in shape):
+        raise ValueError("DarkLightGLM array dimensions and shape disagree.")
+    expected_size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+    dtype = str(record["dtype"])
+    if dtype == "str":
+        try:
+            values = json.loads(record["text_values_json"])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "DarkLightGLM text array contains malformed JSON."
+            ) from exc
+        if not isinstance(values, list) or len(values) != expected_size:
+            raise ValueError("DarkLightGLM text array size disagrees with its shape.")
+        array = np.asarray([str(value) for value in values], dtype=str)
+    else:
+        count = int(record["numeric_count"])
+        values = np.asarray(record["numeric_values"], dtype=float)[:count]
+        if count != expected_size or values.size != expected_size:
+            raise ValueError(
+                "DarkLightGLM numeric array size disagrees with its shape."
+            )
+        try:
+            target_dtype = np.dtype(dtype)
+        except TypeError as exc:
+            raise ValueError("DarkLightGLM array dtype is unsupported.") from exc
+        array = values.astype(target_dtype)
+    attrs = _parse_json_mapping(str(record["attrs_json"]), name="array attrs")
+    return dimensions, array.reshape(shape), attrs
+
+
+def _dataset_from_nwb_frames(
+    *,
+    index_record: Mapping[str, Any],
+    axes: pd.DataFrame,
+    variables: pd.DataFrame,
+) -> Any:
+    """Rebuild one exact xarray Dataset from keyed component rows."""
+    import xarray as xr
+
+    dataset_key = str(index_record["dataset_key"])
+    coordinate_values = {}
+    coordinate_attrs = {}
+    for record in axes.loc[
+        axes["dataset_key"].astype(str) == dataset_key
+    ].to_dict("records"):
+        name = str(record["component_name"])
+        dimensions, values, attrs = _decode_array_component(record)
+        coordinate_values[name] = (dimensions, values)
+        coordinate_attrs[name] = attrs
+    data_values = {}
+    data_attrs = {}
+    for record in variables.loc[
+        variables["dataset_key"].astype(str) == dataset_key
+    ].to_dict("records"):
+        name = str(record["component_name"])
+        dimensions, values, attrs = _decode_array_component(record)
+        data_values[name] = (dimensions, values)
+        data_attrs[name] = attrs
+    dataset = xr.Dataset(
+        data_vars=data_values,
+        coords=coordinate_values,
+        attrs=_parse_json_mapping(
+            str(index_record["attrs_json"]), name="dataset attrs"
+        ),
+    )
+    for name, attrs in coordinate_attrs.items():
+        dataset.coords[name].attrs.update(attrs)
+    for name, attrs in data_attrs.items():
+        dataset[name].attrs.update(attrs)
+    return dataset
+
+
+def dark_light_glm_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    dataset_index: Any,
+    axes: Any,
+    candidate_results: Any,
+    selected_results: Any,
+    selection_summary: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from seven NWB objects."""
+    selected = dark_light_glm_selected_units_from_dynamic_table(selected_units)
+    index = _frame_from_dynamic_table(
+        dataset_index,
+        expected_name=NWB_DATASET_INDEX_TABLE_NAME,
+        columns=DATASET_INDEX_COLUMNS,
+        text_columns=DATASET_INDEX_COLUMNS,
+    )
+    if index["dataset_key"].duplicated().any():
+        raise ValueError("DarkLightGLM NWB dataset keys must be unique.")
+    axes_frame = _component_frame_from_dynamic_table(
+        axes, name=NWB_AXES_TABLE_NAME
+    )
+    candidate_frame = _component_frame_from_dynamic_table(
+        candidate_results, name=NWB_CANDIDATE_RESULTS_TABLE_NAME
+    )
+    selected_frame = _component_frame_from_dynamic_table(
+        selected_results, name=NWB_SELECTED_RESULTS_TABLE_NAME
+    )
+    summary_frame = _component_frame_from_dynamic_table(
+        selection_summary, name=NWB_SELECTION_SUMMARY_TABLE_NAME
+    )
+    provenance_frame = _frame_from_dynamic_table(
+        provenance,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=PROVENANCE_COLUMNS,
+        vector_columns=("segment_edges",),
+        text_columns=(
+            "metadata_json",
+            "parameters_json",
+            "analysis_status",
+            "artifact_origin",
+            "legacy_artifact_provenance_json",
+            "artifact_schema_version",
+        ),
+    )
+    if len(provenance_frame) != 1:
+        raise ValueError("DarkLightGLM provenance must contain exactly one row.")
+    source = provenance_frame.iloc[0].to_dict()
+    if source["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("DarkLightGLM NWB artifact schema version is unsupported.")
+    candidate_datasets = {}
+    selected_datasets = {}
+    summary = None
+    for record in index.to_dict("records"):
+        fit_stage = str(record["fit_stage"])
+        if fit_stage == "candidate":
+            dataset = _dataset_from_nwb_frames(
+                index_record=record,
+                axes=axes_frame,
+                variables=candidate_frame,
+            )
+            candidate_datasets[str(record["dataset_key"])] = dataset
+        elif fit_stage in {"selected", "terminal"}:
+            dataset = _dataset_from_nwb_frames(
+                index_record=record,
+                axes=axes_frame,
+                variables=selected_frame,
+            )
+            selected_datasets[str(record["dataset_key"])] = dataset
+        elif fit_stage == "selection_summary":
+            if summary is not None:
+                raise ValueError("DarkLightGLM NWB contains multiple summaries.")
+            summary = _dataset_from_nwb_frames(
+                index_record=record,
+                axes=axes_frame,
+                variables=summary_frame,
+            )
+        else:
+            raise ValueError(f"Unsupported DarkLightGLM NWB fit stage {fit_stage!r}.")
+    if summary is None:
+        raise ValueError("DarkLightGLM NWB is missing its selection summary.")
+    legacy = _parse_json_mapping(
+        str(source["legacy_artifact_provenance_json"]),
+        name="legacy provenance",
+    )
+    return validate_dark_light_glm_result(
+        {
+            "metadata": _parse_json_mapping(
+                str(source["metadata_json"]), name="metadata"
+            ),
+            "parameters": _parse_json_mapping(
+                str(source["parameters_json"]), name="parameters"
+            ),
+            "selected_units": selected,
+            "candidate_datasets": candidate_datasets,
+            "selected_datasets": selected_datasets,
+            "selection_summary": summary,
+            "trajectory_length_cm": float(source["trajectory_length_cm"]),
+            "segment_edges": np.asarray(source["segment_edges"], dtype=float),
+            "analysis_status": str(source["analysis_status"]),
+            "artifact_origin": str(source["artifact_origin"]),
+            "legacy_artifact_provenance": legacy or None,
+        }
+    )
+
+
+def _semantic_frame_sha256(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    vector_columns: Sequence[str] = (),
+) -> str:
+    """Hash one canonical frame without depending on HDF5 object identity."""
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(columns), separators=(",", ":")).encode())
+    for record in table.loc[:, list(columns)].to_dict("records"):
+        for column in columns:
+            digest.update(column.encode())
+            value = record[column]
+            if column in vector_columns:
+                vector = np.asarray(value, dtype=np.float64).copy()
+                vector[np.isnan(vector)] = np.nan
+                digest.update(np.asarray([vector.size], dtype=np.int64).tobytes())
+                digest.update(vector.tobytes(order="C"))
+            else:
+                digest.update(
+                    json.dumps(
+                        _json_ready(value),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+    return digest.hexdigest()
+
+
+def _dataset_semantic_sha256(dataset: Any, *, dataset_key: str) -> str:
+    """Hash one xarray dataset through its NWB storage representation."""
+    index = pd.DataFrame.from_records(
+        [
+            {
+                "dataset_key": dataset_key,
+                "fit_stage": str(dataset.attrs.get("fit_stage", "")),
+                "model_name": str(dataset.attrs.get("model_name", "")),
+                "attrs_json": json.dumps(
+                    _json_ready(dict(dataset.attrs)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        ],
+        columns=DATASET_INDEX_COLUMNS,
+    )
+    axes = pd.DataFrame.from_records(
+        [
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_name=str(name),
+                array=value,
+            )
+            for name, value in dataset.coords.items()
+        ],
+        columns=ARRAY_COMPONENT_COLUMNS,
+    )
+    variables = pd.DataFrame.from_records(
+        [
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_name=str(name),
+                array=value,
+            )
+            for name, value in dataset.data_vars.items()
+        ],
+        columns=ARRAY_COMPONENT_COLUMNS,
+    )
+    component_hashes = (
+        _semantic_frame_sha256(index, columns=DATASET_INDEX_COLUMNS),
+        _semantic_frame_sha256(
+            axes,
+            columns=ARRAY_COMPONENT_COLUMNS,
+            vector_columns=("numeric_values",),
+        ),
+        _semantic_frame_sha256(
+            variables,
+            columns=ARRAY_COMPONENT_COLUMNS,
+            vector_columns=("numeric_values",),
+        ),
+    )
+    return hashlib.sha256("".join(component_hashes).encode()).hexdigest()
+
+
+def dark_light_glm_selected_model_sha256s(
+    result: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return one semantic digest for each selected DarkLightGLM model."""
+    canonical = validate_dark_light_glm_result(result)
+    return {
+        model_name: _dataset_semantic_sha256(
+            canonical["selected_datasets"][model_name],
+            dataset_key=model_name,
+        )
+        for model_name in MODEL_NAMES
+    }
+
+
+def dark_light_glm_nwb_hashes(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return semantic hashes for all seven NWB objects and the result."""
+    canonical = validate_dark_light_glm_result(result)
+    frames = {
+        "selected_units_table_sha256": (
+            canonical["selected_units"],
+            SELECTED_UNIT_COLUMNS,
+            (),
+        ),
+        "dataset_index_sha256": (
+            _dataset_index_frame(canonical),
+            DATASET_INDEX_COLUMNS,
+            (),
+        ),
+        "axes_sha256": (
+            _axes_frame(canonical),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "candidate_results_sha256": (
+            _variables_frame(canonical, fit_stages={"candidate"}),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "selected_results_sha256": (
+            _variables_frame(canonical, fit_stages={"selected", "terminal"}),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "selection_summary_sha256": (
+            _variables_frame(canonical, fit_stages={"selection_summary"}),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "provenance_sha256": (
+            _provenance_frame(canonical),
+            PROVENANCE_COLUMNS,
+            ("segment_edges",),
+        ),
+    }
+    hashes = {
+        name: _semantic_frame_sha256(
+            frame,
+            columns=columns,
+            vector_columns=vector_columns,
+        )
+        for name, (frame, columns, vector_columns) in frames.items()
+    }
+    hashes["dark_light_glm_sha256"] = hashlib.sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return hashes
 
 
 __all__ = [
@@ -2332,8 +3292,15 @@ __all__ = [
     "LEGACY_N_SPLINES",
     "LEGACY_PARAMETERS",
     "MODEL_NAMES",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
     "SCHEMA_VERSION_BY_MODE",
     "compute_dark_light_glm",
+    "dark_light_glm_nwb_hashes",
+    "dark_light_glm_result_from_nwb_objects",
+    "dark_light_glm_result_to_nwb_objects",
+    "dark_light_glm_selected_model_sha256s",
+    "dark_light_glm_selected_units_from_dynamic_table",
+    "dark_light_glm_selected_units_to_dynamic_table",
     "derive_graph_geometry",
     "get_dark_light_glm_artifact_paths",
     "load_dark_light_glm_artifact",

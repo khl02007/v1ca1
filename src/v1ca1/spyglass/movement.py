@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from numbers import Integral
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +21,9 @@ DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
 ARTIFACT_DIRNAME = "movement_firing_rate"
 FIRING_RATE_FILENAME = "movement_firing_rate.parquet"
 INTERVALS_FILENAME = "movement_intervals.npz"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_FIRING_RATE_TABLE_NAME = "movement_firing_rate"
+NWB_MOVEMENT_INTERVALS_NAME = "movement_intervals"
 IDENTITY_COLUMNS = (
     "spikesorting_merge_id",
     "unit_id",
@@ -49,6 +53,51 @@ ANALYSIS_STATUSES = (
     "no_movement",
     "valid",
 )
+_STRING_COLUMNS = (
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "animal_name",
+    "date",
+    "region",
+    "epoch",
+    "firing_rate_status",
+)
+_INTEGER_COLUMNS = (
+    "movement_spike_count",
+    "position_sample_count",
+    "finite_position_sample_count",
+    "finite_speed_sample_count",
+    "movement_interval_count",
+)
+_FLOAT_COLUMNS = (
+    "movement_duration_s",
+    "movement_firing_rate_hz",
+    "speed_threshold_cm_s",
+    "speed_smoothing_sigma_s",
+)
+_MOVEMENT_COLUMN_DESCRIPTIONS = {
+    "spikesorting_merge_id": "Persistent Spyglass spike-sorting merge identifier.",
+    "unit_id": "Unit identifier within the spike-sorting merge.",
+    "stable_unit_id": "Composite persistent unit identifier, merge_id:unit_id.",
+    "group_unit_id": "Ephemeral unit key in the selected Pynapple TsGroup.",
+    "animal_name": "Subject identifier used by the analysis.",
+    "date": "Session date formatted as YYYYMMDD.",
+    "region": "Canonical analyzed brain region.",
+    "epoch": "Selected epoch name.",
+    "movement_spike_count": "Number of spikes during movement intervals.",
+    "movement_duration_s": "Total movement support duration in seconds.",
+    "movement_firing_rate_hz": "Movement spike count divided by duration, in hertz.",
+    "firing_rate_status": "Movement analysis status shared by all unit rows.",
+    "position_sample_count": "Number of selected position samples.",
+    "finite_position_sample_count": "Number of finite selected position samples.",
+    "finite_speed_sample_count": "Number of finite derived speed samples.",
+    "movement_interval_count": "Number of movement intervals.",
+    "speed_threshold_cm_s": (
+        "Strict movement speed threshold in centimeters per second."
+    ),
+    "speed_smoothing_sigma_s": "Gaussian speed-smoothing sigma in seconds.",
+}
 
 
 def _path_component(value: Any, *, name: str) -> str:
@@ -224,13 +273,16 @@ def _empty_intervalset() -> Any:
     )
 
 
-def movement_interval_summary(movement_intervals: Any) -> tuple[int, float]:
-    """Validate one IntervalSet-like object and return count and duration."""
+def _validated_movement_interval_bounds(
+    starts: Any,
+    ends: Any,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return validated ordered movement bounds and their duration."""
     try:
-        starts = np.asarray(movement_intervals.start, dtype=float).reshape(-1)
-        ends = np.asarray(movement_intervals.end, dtype=float).reshape(-1)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("Movement intervals must expose numeric start and end arrays.") from exc
+        starts = np.asarray(starts, dtype=float).reshape(-1)
+        ends = np.asarray(ends, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Movement interval bounds must be numeric arrays.") from exc
     if starts.shape != ends.shape:
         raise ValueError("Movement interval start and end arrays must align.")
     if not np.all(np.isfinite(starts)) or not np.all(np.isfinite(ends)):
@@ -244,6 +296,22 @@ def movement_interval_summary(movement_intervals: Any) -> tuple[int, float]:
     duration = float(np.sum(ends - starts))
     if not np.isfinite(duration) or duration < 0.0:
         raise ValueError("Movement interval duration must be non-negative and finite.")
+    return starts, ends, duration
+
+
+def movement_interval_summary(movement_intervals: Any) -> tuple[int, float]:
+    """Validate one IntervalSet-like object and return count and duration."""
+    try:
+        raw_starts = movement_intervals.start
+        raw_ends = movement_intervals.end
+    except AttributeError as exc:
+        raise ValueError(
+            "Movement intervals must expose numeric start and end arrays."
+        ) from exc
+    starts, ends, duration = _validated_movement_interval_bounds(
+        raw_starts,
+        raw_ends,
+    )
     if hasattr(movement_intervals, "tot_length"):
         reported_duration = float(movement_intervals.tot_length())
         if not np.isfinite(reported_duration) or not np.isclose(
@@ -681,6 +749,251 @@ def validate_movement_artifacts(
     return table, movement_intervals
 
 
+def _decode_text(value: Any, *, column: str) -> str:
+    """Return one NWB-loaded scalar as text."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"Movement table column {column!r} contains invalid UTF-8."
+            ) from exc
+    return str(value)
+
+
+def _canonical_group_unit_ids(values: Sequence[Any]) -> pd.Series:
+    """Return one homogeneous, NWB-compatible ephemeral unit-id column."""
+    normalized: list[Any] = []
+    kinds: set[str] = set()
+    for value in values:
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("group_unit_id contains invalid UTF-8.") from exc
+        if isinstance(value, Integral) and not isinstance(value, (bool, np.bool_)):
+            integer = int(value)
+            if not np.iinfo(np.int64).min <= integer <= np.iinfo(np.int64).max:
+                raise ValueError("Integer group_unit_id values must fit in int64.")
+            normalized.append(integer)
+            kinds.add("integer")
+        elif isinstance(value, str) and value:
+            normalized.append(value)
+            kinds.add("string")
+        else:
+            raise TypeError(
+                "group_unit_id values must be non-empty strings or integers."
+            )
+    if len(kinds) > 1:
+        raise TypeError("group_unit_id values must have one homogeneous type.")
+    dtype: Any = np.int64 if kinds == {"integer"} else object
+    return pd.Series(normalized, dtype=dtype, name="group_unit_id")
+
+
+def _canonical_movement_firing_rate_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return one validated table with deterministic columns, index, and dtypes."""
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Movement firing-rate artifact must be a pandas DataFrame.")
+    actual_columns = tuple(str(column) for column in table.columns)
+    if actual_columns != MOVEMENT_TABLE_COLUMNS:
+        missing = [column for column in MOVEMENT_TABLE_COLUMNS if column not in table]
+        unexpected = [
+            column for column in table if column not in MOVEMENT_TABLE_COLUMNS
+        ]
+        if missing or unexpected:
+            raise ValueError(
+                "Movement firing-rate NWB table has non-canonical columns: "
+                f"missing={missing!r}, unexpected={unexpected!r}."
+            )
+    if table.empty:
+        return empty_movement_firing_rate_table()
+
+    output = table.loc[:, list(MOVEMENT_TABLE_COLUMNS)].copy().reset_index(drop=True)
+    for column in _STRING_COLUMNS:
+        output[column] = output[column].map(
+            lambda value, column=column: _decode_text(value, column=column)
+        )
+    output["group_unit_id"] = _canonical_group_unit_ids(
+        output["group_unit_id"].tolist()
+    )
+    for column in _INTEGER_COLUMNS:
+        numeric = pd.to_numeric(output[column], errors="raise").to_numpy(dtype=float)
+        if not np.all(np.isfinite(numeric)) or not np.allclose(
+            numeric,
+            np.rint(numeric),
+            rtol=0.0,
+            atol=1e-9,
+        ):
+            raise ValueError(f"Movement table column {column!r} must contain integers.")
+        output[column] = np.rint(numeric).astype(np.int64)
+    for column in _FLOAT_COLUMNS:
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(float)
+    validate_movement_firing_rate_table(output)
+    return output
+
+
+def movement_firing_rate_table_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert one canonical movement-rate DataFrame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_movement_firing_rate_table(table)
+    description = (
+        "All selected-unit movement firing rates and movement-quality metadata; "
+        f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        columns = []
+        for name in MOVEMENT_TABLE_COLUMNS:
+            if name in _STRING_COLUMNS:
+                data = np.asarray([], dtype="S1")
+            elif name in _INTEGER_COLUMNS or name == "group_unit_id":
+                data = np.asarray([], dtype=np.int64)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=_MOVEMENT_COLUMN_DESCRIPTIONS[name],
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_FIRING_RATE_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    column_specs = [
+        {
+            "name": name,
+            "description": _MOVEMENT_COLUMN_DESCRIPTIONS[name],
+        }
+        for name in MOVEMENT_TABLE_COLUMNS
+    ]
+    return DynamicTable.from_dataframe(
+        name=NWB_FIRING_RATE_TABLE_NAME,
+        df=canonical,
+        table_description=description,
+        columns=column_specs,
+    )
+
+
+def movement_firing_rate_table_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return a canonical DataFrame from a DynamicTable or fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_FIRING_RATE_TABLE_NAME:
+            raise ValueError(
+                "Unexpected movement firing-rate NWB object name "
+                f"{nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "Movement firing-rate NWB object must be a DynamicTable or DataFrame."
+        )
+    return _canonical_movement_firing_rate_table(table.reset_index(drop=True))
+
+
+def movement_interval_set_to_time_intervals(movement_intervals: Any) -> Any:
+    """Convert one validated seconds-based IntervalSet to native TimeIntervals."""
+    from pynwb.epoch import TimeIntervals
+
+    movement_interval_summary(movement_intervals)
+    starts = np.asarray(movement_intervals.start, dtype=float).reshape(-1)
+    ends = np.asarray(movement_intervals.end, dtype=float).reshape(-1)
+    output = TimeIntervals(
+        name=NWB_MOVEMENT_INTERVALS_NAME,
+        description=(
+            "Movement support in ephys-reference seconds; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+    )
+    for start, end in zip(starts, ends, strict=True):
+        output.add_interval(start_time=float(start), stop_time=float(end))
+    return output
+
+
+def movement_interval_set_from_time_intervals(nwb_intervals: Any) -> Any:
+    """Return a seconds-based IntervalSet from TimeIntervals or its DataFrame."""
+    from pynwb.epoch import TimeIntervals
+
+    if isinstance(nwb_intervals, pd.DataFrame):
+        table = nwb_intervals
+    elif isinstance(nwb_intervals, TimeIntervals):
+        if str(nwb_intervals.name) != NWB_MOVEMENT_INTERVALS_NAME:
+            raise ValueError(
+                f"Unexpected movement interval NWB object name {nwb_intervals.name!r}."
+            )
+        table = nwb_intervals.to_dataframe()
+    else:
+        raise TypeError(
+            "Movement interval NWB object must be TimeIntervals or a DataFrame."
+        )
+    if tuple(str(column) for column in table.columns) != (
+        "start_time",
+        "stop_time",
+    ):
+        raise ValueError(
+            "Movement TimeIntervals must contain only start_time and stop_time."
+        )
+    starts, ends, _duration = _validated_movement_interval_bounds(
+        table["start_time"],
+        table["stop_time"],
+    )
+    import pynapple as nap
+
+    intervals = nap.IntervalSet(start=starts, end=ends, time_units="s")
+    movement_interval_summary(intervals)
+    return intervals
+
+
+def movement_firing_rate_table_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete canonical movement-rate table independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = _canonical_movement_firing_rate_table(table)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in MOVEMENT_TABLE_COLUMNS:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            elif isinstance(value, float) and np.isposinf(value):
+                value = "Infinity"
+            elif isinstance(value, float) and np.isneginf(value):
+                value = "-Infinity"
+            normalized[column] = value
+        records.append(normalized)
+    return provenance_sha256(
+        {
+            "columns": list(MOVEMENT_TABLE_COLUMNS),
+            "records": records,
+        }
+    )
+
+
+def movement_interval_set_sha256(movement_intervals: Any) -> str:
+    """Digest exact ordered movement bounds independent of storage format."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    movement_interval_summary(movement_intervals)
+    starts = np.asarray(movement_intervals.start, dtype=float).reshape(-1)
+    ends = np.asarray(movement_intervals.end, dtype=float).reshape(-1)
+    return provenance_sha256(
+        {
+            "start_time_s": starts.tolist(),
+            "end_time_s": ends.tolist(),
+        }
+    )
+
+
 def load_movement_firing_rate_artifact(path: Path) -> pd.DataFrame:
     """Load and validate one canonical movement-rate Parquet."""
     path = Path(path)
@@ -807,6 +1120,9 @@ __all__ = [
     "IDENTITY_COLUMNS",
     "INTERVALS_FILENAME",
     "MOVEMENT_TABLE_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_FIRING_RATE_TABLE_NAME",
+    "NWB_MOVEMENT_INTERVALS_NAME",
     "align_movement_firing_rates",
     "compute_selected_movement_firing_rate",
     "empty_movement_firing_rate_table",
@@ -815,6 +1131,12 @@ __all__ = [
     "load_movement_artifacts",
     "load_movement_firing_rate_artifact",
     "load_movement_interval_artifact",
+    "movement_firing_rate_table_from_dynamic_table",
+    "movement_firing_rate_table_sha256",
+    "movement_firing_rate_table_to_dynamic_table",
+    "movement_interval_set_from_time_intervals",
+    "movement_interval_set_sha256",
+    "movement_interval_set_to_time_intervals",
     "movement_interval_summary",
     "validate_movement_artifacts",
     "validate_movement_firing_rate_table",

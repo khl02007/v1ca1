@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -377,6 +378,74 @@ def test_write_load_is_atomic_immutable_and_checksum_validated(
     distribution.to_parquet(paths["distribution_summary_path"], index=False)
     with pytest.raises(ValueError, match="checksum mismatch"):
         motor_behavior.load_epoch_motor_behavior_artifact(destination)
+
+
+def test_epoch_motor_behavior_nwb_tables_roundtrip_real_hdf5(
+    tmp_path: Path,
+    fake_linearization: list[str],
+) -> None:
+    """All three DynamicTables retain their schema, values, and logical hash."""
+    del fake_linearization
+    from pynwb import NWBHDF5IO, NWBFile
+
+    result = motor_behavior.compute_selected_epoch_motor_behavior(
+        **_compute_kwargs()
+    )
+    specifications = (
+        (
+            "distribution_summary",
+            motor_behavior.distribution_summary_to_dynamic_table,
+            motor_behavior.distribution_summary_from_dynamic_table,
+            motor_behavior.distribution_summary_sha256,
+        ),
+        (
+            "progression_summary",
+            motor_behavior.progression_summary_to_dynamic_table,
+            motor_behavior.progression_summary_from_dynamic_table,
+            motor_behavior.progression_summary_sha256,
+        ),
+        (
+            "trajectory_qc",
+            motor_behavior.trajectory_qc_to_dynamic_table,
+            motor_behavior.trajectory_qc_from_dynamic_table,
+            motor_behavior.trajectory_qc_sha256,
+        ),
+    )
+    objects = {
+        name: to_dynamic_table(result[name])
+        for name, to_dynamic_table, _from_dynamic_table, _hasher in specifications
+    }
+    object_ids = {name: str(obj.object_id) for name, obj in objects.items()}
+    assert len(set(object_ids.values())) == 3
+
+    path = tmp_path / "epoch-motor-behavior.nwb"
+    nwbfile = NWBFile(
+        session_description="EpochMotorBehavior NWB roundtrip test",
+        identifier="epoch-motor-behavior-test",
+        session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    for obj in objects.values():
+        nwbfile.add_scratch(obj)
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwbfile)
+
+    with NWBHDF5IO(str(path), mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        for name, _to_dynamic_table, from_dynamic_table, hasher in specifications:
+            observed = from_dynamic_table(stored.objects[object_ids[name]])
+            pd.testing.assert_frame_equal(
+                observed,
+                result[name],
+                check_dtype=False,
+                check_categorical=False,
+            )
+            assert hasher(observed) == hasher(result[name])
+
+    empty = result["progression_summary"].iloc[0:0].copy()
+    empty_object = motor_behavior.progression_summary_to_dynamic_table(empty)
+    assert motor_behavior.progression_summary_from_dynamic_table(
+        empty_object
+    ).empty
 
 
 def test_strict_registration_selects_epoch_and_recomputes_from_nwb(

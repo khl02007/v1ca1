@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -1156,6 +1157,71 @@ def test_write_load_roundtrip_and_checksum_guard(
     paths["result_path"].write_bytes(paths["result_path"].read_bytes() + b"bad")
     with pytest.raises(ValueError, match="checksum mismatch"):
         module.load_swap_glm_artifact(destination)
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_analysis_nwb_objects_roundtrip_valid_and_terminal_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
+) -> None:
+    """All seven SwapGLM scratch objects survive an NWB HDF5 round trip."""
+    pynwb = pytest.importorskip("pynwb")
+    result, _ = _compute(monkeypatch, second_unit_valid=False)
+    if terminal:
+        selected_units = result["selected_units"].iloc[0:0].copy()
+        terminal_dataset = module._terminal_dataset(
+            metadata=result["metadata"],
+            unit_ids=np.asarray([], dtype=str),
+            segment_edges=np.asarray(
+                result["dataset"].coords["segment_edge"].values,
+                dtype=float,
+            ),
+            parameters=result["parameters"],
+            upstream_provenance=result["upstream_provenance"],
+            analysis_status="no_units",
+        )
+        result = module.validate_swap_glm_result(
+            {
+                **result,
+                "selected_units": selected_units,
+                "dataset": terminal_dataset,
+                "analysis_status": "no_units",
+            }
+        )
+    expected_hashes = module.swap_glm_nwb_hashes(result)
+    objects = module.swap_glm_result_to_nwb_objects(result)
+    assert set(objects) == {
+        "selected_units",
+        "model_metadata",
+        "axes",
+        "trajectory_metadata",
+        "model_results",
+        "observed_response",
+        "provenance",
+    }
+    assert len({value.object_id for value in objects.values()}) == 7
+    nwbfile = pynwb.NWBFile(
+        session_description="SwapGLM NWB round-trip",
+        identifier=f"swap-glm-{terminal}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    for value in objects.values():
+        nwbfile.add_scratch(value)
+    path = tmp_path / f"swap_glm_{terminal}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert pynwb.validate(path=path) == []
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = module.swap_glm_result_from_nwb_objects(
+            **{
+                name: stored.objects[value.object_id]
+                for name, value in objects.items()
+            }
+        )
+    assert loaded["analysis_status"] == result["analysis_status"]
+    assert module.swap_glm_nwb_hashes(loaded) == expected_hashes
 
 
 def test_load_preserves_historical_schema4_bundle(

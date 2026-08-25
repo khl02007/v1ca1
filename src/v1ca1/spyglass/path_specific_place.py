@@ -1,4 +1,4 @@
-"""Database-free path-specific place tuning curves and NetCDF artifacts."""
+"""Database-free path-specific place tuning curves and artifact adapters."""
 
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ import numpy as np
 DEFAULT_ARTIFACT_ROOT = Path("/stelmo/nwb/analysis/kyu/v1ca1")
 ARTIFACT_DIRNAME = "path_specific_place_tuning_curve"
 ARTIFACT_FILENAME = "tuning_curve.nc"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_TUNING_TABLE_NAME = "path_specific_place_tuning"
+NWB_BINS_TABLE_NAME = "path_specific_place_bins"
+NWB_PROVENANCE_TABLE_NAME = "path_specific_place_provenance"
 BINNING_MODES = ("bin_size_cm", "bin_count")
 TRIAL_SUBSETS = ("all", "odd", "even")
 ANALYSIS_STATUSES = (
@@ -37,6 +41,27 @@ POSITION_DIM = "linear_position_cm"
 PATH_FRACTION_COORDINATE = "path_fraction"
 SPIKE_COUNT_COORDINATE = "spike_count"
 UNIT_DIM = "unit"
+
+_NWB_TUNING_COLUMNS = (
+    "curve_row",
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "group_unit_id",
+    SPIKE_COUNT_COORDINATE,
+    "firing_rate_hz",
+)
+_NWB_BIN_COLUMNS = (
+    "position_bin",
+    "left_edge_cm",
+    POSITION_DIM,
+    "right_edge_cm",
+    PATH_FRACTION_COORDINATE,
+)
+_NWB_PROVENANCE_COLUMNS = (
+    "artifact_schema_version",
+    "metadata_json",
+)
 
 
 def _path_component(value: Any, *, name: str) -> str:
@@ -1023,6 +1048,503 @@ def validate_path_specific_place_tuning_curve(curve: Any) -> Any:
     return curve
 
 
+def _decoded_nwb_text(value: Any, *, name: str) -> str:
+    """Return one UTF-8 string fetched from an NWB DynamicTable."""
+    if isinstance(value, (bytes, np.bytes_)):
+        try:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{name} is not valid UTF-8.") from exc
+    value = str(value)
+    if not value:
+        raise ValueError(f"{name} must be non-empty.")
+    return value
+
+
+def _nwb_table_frame(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    expected_columns: Sequence[str],
+) -> Any:
+    """Return one fetched DynamicTable as an exact-column DataFrame."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected path-specific place NWB object name "
+                f"{nwb_table.name!r}; expected {expected_name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError(
+            "Path-specific place NWB objects must be DynamicTables or "
+            "DataFrames."
+        )
+    observed_columns = tuple(str(column) for column in table.columns)
+    if set(observed_columns) != set(expected_columns) or len(
+        observed_columns
+    ) != len(expected_columns):
+        raise ValueError(
+            f"{expected_name} must contain exactly columns "
+            f"{tuple(expected_columns)!r}."
+        )
+    return table.loc[:, list(expected_columns)].reset_index(drop=True)
+
+
+def _curve_metadata_payload(curve: Any) -> dict[str, Any]:
+    """Return scalar and coordinate metadata needed to rebuild one curve."""
+    validate_path_specific_place_tuning_curve(curve)
+    return {
+        "attrs": dict(curve.attrs),
+        "coordinate_attrs": {
+            str(name): dict(curve.coords[name].attrs)
+            for name in (
+                POSITION_DIM,
+                PATH_FRACTION_COORDINATE,
+                SPIKE_COUNT_COORDINATE,
+            )
+        },
+    }
+
+
+def path_specific_place_tuning_to_dynamic_table(curve: Any) -> Any:
+    """Store unit identities, spike counts, and fixed-length tuning vectors."""
+    import pandas as pd
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = validate_path_specific_place_tuning_curve(curve)
+    n_units = int(canonical.sizes[UNIT_DIM])
+    n_bins = int(canonical.sizes[POSITION_DIM])
+    description = (
+        "One row per selected unit with its path-specific firing-rate vector; "
+        f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if n_units == 0:
+        string_columns = {
+            "spikesorting_merge_id",
+            "unit_id",
+            "stable_unit_id",
+            "group_unit_id",
+        }
+        columns = []
+        for name in _NWB_TUNING_COLUMNS:
+            if name in string_columns:
+                data = np.asarray([], dtype="S1")
+            elif name == "curve_row":
+                data = np.asarray([], dtype=np.int64)
+            elif name == "firing_rate_hz":
+                data = np.empty((0, n_bins), dtype=float)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=(
+                        "Zero-based row in the unit-by-position tuning matrix."
+                        if name == "curve_row"
+                        else "Canonical path-specific place-tuning field."
+                    ),
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_TUNING_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    table = pd.DataFrame(
+        {
+            "curve_row": np.arange(n_units, dtype=np.int64),
+            "spikesorting_merge_id": np.asarray(
+                canonical.coords["spikesorting_merge_id"].values
+            ).astype(str),
+            "unit_id": np.asarray(canonical.coords["unit_id"].values).astype(str),
+            "stable_unit_id": np.asarray(
+                canonical.coords["stable_unit_id"].values
+            ).astype(str),
+            "group_unit_id": np.asarray(
+                canonical.coords["group_unit_id"].values
+            ).astype(str),
+            SPIKE_COUNT_COORDINATE: np.asarray(
+                canonical.coords[SPIKE_COUNT_COORDINATE].values,
+                dtype=float,
+            ),
+            "firing_rate_hz": [
+                np.asarray(row, dtype=float)
+                for row in np.asarray(canonical.values, dtype=float)
+            ],
+        },
+        columns=list(_NWB_TUNING_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_TUNING_TABLE_NAME,
+        df=table,
+        table_description=description,
+        columns=[
+            {
+                "name": name,
+                "description": (
+                    "Zero-based row in the unit-by-position tuning matrix."
+                    if name == "curve_row"
+                    else "Canonical path-specific place-tuning field."
+                ),
+            }
+            for name in _NWB_TUNING_COLUMNS
+        ],
+    )
+
+
+def path_specific_place_bins_to_dynamic_table(curve: Any) -> Any:
+    """Store one typed row for every column of the tuning vectors."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    canonical = validate_path_specific_place_tuning_curve(curve)
+    edges = _parse_bin_edges(
+        canonical.attrs["bin_edges_cm_json"],
+        name="bin_edges_cm_json",
+    )
+    n_bins = int(canonical.sizes[POSITION_DIM])
+    table = pd.DataFrame(
+        {
+            "position_bin": np.arange(n_bins, dtype=np.int64),
+            "left_edge_cm": edges[:-1],
+            POSITION_DIM: np.asarray(
+                canonical.coords[POSITION_DIM].values,
+                dtype=float,
+            ),
+            "right_edge_cm": edges[1:],
+            PATH_FRACTION_COORDINATE: np.asarray(
+                canonical.coords[PATH_FRACTION_COORDINATE].values,
+                dtype=float,
+            ),
+        },
+        columns=list(_NWB_BIN_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_BINS_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One row per path-position column of path_specific_place_tuning; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": name,
+                "description": (
+                    "Zero-based tuning-vector column."
+                    if name == "position_bin"
+                    else "Canonical path-position bin field."
+                ),
+            }
+            for name in _NWB_BIN_COLUMNS
+        ],
+    )
+
+
+def path_specific_place_provenance_to_dynamic_table(curve: Any) -> Any:
+    """Store one canonical JSON metadata record for the complete curve."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    from v1ca1.spyglass.selection import canonical_json
+
+    payload = _curve_metadata_payload(curve)
+    table = pd.DataFrame(
+        [
+            {
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+                "metadata_json": canonical_json(payload),
+            }
+        ],
+        columns=list(_NWB_PROVENANCE_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_PROVENANCE_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One provenance record for path-specific place tuning; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": "artifact_schema_version",
+                "description": "v1ca1 NWB artifact schema version.",
+            },
+            {
+                "name": "metadata_json",
+                "description": (
+                    "Canonical JSON containing DataArray and coordinate metadata."
+                ),
+            },
+        ],
+    )
+
+
+def _path_specific_place_nwb_frames(
+    tuning: Any,
+    bins: Any,
+    provenance: Any,
+) -> tuple[Any, Any, Any]:
+    """Return the three canonical NWB table frames after structural checks."""
+    tuning_table = _nwb_table_frame(
+        tuning,
+        expected_name=NWB_TUNING_TABLE_NAME,
+        expected_columns=_NWB_TUNING_COLUMNS,
+    )
+    bins_table = _nwb_table_frame(
+        bins,
+        expected_name=NWB_BINS_TABLE_NAME,
+        expected_columns=_NWB_BIN_COLUMNS,
+    )
+    provenance_table = _nwb_table_frame(
+        provenance,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        expected_columns=_NWB_PROVENANCE_COLUMNS,
+    )
+    if len(provenance_table) != 1:
+        raise ValueError(
+            "Path-specific place provenance must contain exactly one row."
+        )
+    return tuning_table, bins_table, provenance_table
+
+
+def path_specific_place_tuning_curve_from_nwb_objects(
+    tuning: Any,
+    bins: Any,
+    provenance: Any,
+) -> Any:
+    """Reconstruct the canonical DataArray from three fetched NWB objects."""
+    tuning_table, bins_table, provenance_table = _path_specific_place_nwb_frames(
+        tuning,
+        bins,
+        provenance,
+    )
+    schema_version = _decoded_nwb_text(
+        provenance_table.loc[0, "artifact_schema_version"],
+        name="artifact_schema_version",
+    )
+    if schema_version != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError(
+            "Path-specific place NWB artifact schema version is unsupported."
+        )
+    metadata_json = _decoded_nwb_text(
+        provenance_table.loc[0, "metadata_json"],
+        name="metadata_json",
+    )
+    try:
+        metadata = json.loads(metadata_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Path-specific place provenance is not valid JSON.") from exc
+    if not isinstance(metadata, Mapping) or set(metadata) != {
+        "attrs",
+        "coordinate_attrs",
+    }:
+        raise ValueError("Path-specific place provenance has an invalid schema.")
+    attrs = dict(metadata["attrs"])
+    coordinate_attrs = dict(metadata["coordinate_attrs"])
+
+    n_units = len(tuning_table)
+    n_bins = len(bins_table)
+    curve_rows = np.asarray(tuning_table["curve_row"], dtype=np.int64)
+    if not np.array_equal(curve_rows, np.arange(n_units, dtype=np.int64)):
+        raise ValueError("Path-specific tuning curve_row values must be consecutive.")
+    bin_rows = np.asarray(bins_table["position_bin"], dtype=np.int64)
+    if not np.array_equal(bin_rows, np.arange(n_bins, dtype=np.int64)):
+        raise ValueError("Path-specific position_bin values must be consecutive.")
+    if n_bins == 0:
+        raise ValueError("Path-specific place tuning requires at least one bin.")
+
+    left_edges = np.asarray(bins_table["left_edge_cm"], dtype=float)
+    right_edges = np.asarray(bins_table["right_edge_cm"], dtype=float)
+    if (
+        not np.all(np.isfinite(left_edges))
+        or not np.all(np.isfinite(right_edges))
+        or np.any(right_edges <= left_edges)
+        or not np.allclose(
+            left_edges[1:],
+            right_edges[:-1],
+            rtol=1e-10,
+            atol=1e-12,
+        )
+    ):
+        raise ValueError("Path-specific place bin edges are invalid or discontinuous.")
+    edges = np.concatenate((left_edges[:1], right_edges))
+
+    if n_units:
+        tuning_rows = [
+            np.asarray(value, dtype=float).reshape(-1)
+            for value in tuning_table["firing_rate_hz"]
+        ]
+        if any(row.shape != (n_bins,) for row in tuning_rows):
+            raise ValueError(
+                "Every path-specific tuning vector must align with the bin table."
+            )
+        values = np.stack(tuning_rows, axis=0)
+    else:
+        values = np.empty((0, n_bins), dtype=float)
+    identity_rows = [
+        {
+            "spikesorting_merge_id": _decoded_nwb_text(
+                row.spikesorting_merge_id,
+                name="spikesorting_merge_id",
+            ),
+            "unit_id": _decoded_nwb_text(row.unit_id, name="unit_id"),
+            "stable_unit_id": _decoded_nwb_text(
+                row.stable_unit_id,
+                name="stable_unit_id",
+            ),
+            "group_unit_id": _decoded_nwb_text(
+                row.group_unit_id,
+                name="group_unit_id",
+            ),
+        }
+        for row in tuning_table.itertuples(index=False)
+    ]
+    curve = _build_curve(
+        values,
+        identity_rows=identity_rows,
+        spike_counts=np.asarray(tuning_table[SPIKE_COUNT_COORDINATE], dtype=float),
+        bin_edges_cm=edges,
+        attrs=attrs,
+    )
+    observed_position = np.asarray(
+        bins_table[POSITION_DIM],
+        dtype=float,
+    )
+    observed_fraction = np.asarray(
+        bins_table[PATH_FRACTION_COORDINATE],
+        dtype=float,
+    )
+    if not np.allclose(
+        observed_position,
+        np.asarray(curve.coords[POSITION_DIM].values, dtype=float),
+        rtol=1e-10,
+        atol=1e-12,
+    ) or not np.allclose(
+        observed_fraction,
+        np.asarray(curve.coords[PATH_FRACTION_COORDINATE].values, dtype=float),
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError(
+            "Path-specific place bin metadata disagrees with curve provenance."
+        )
+    for coordinate_name, values_by_name in coordinate_attrs.items():
+        if coordinate_name not in curve.coords or not isinstance(
+            values_by_name,
+            Mapping,
+        ):
+            raise ValueError(
+                "Path-specific place coordinate provenance is invalid."
+            )
+        curve.coords[coordinate_name].attrs.update(dict(values_by_name))
+    return validate_path_specific_place_tuning_curve(curve)
+
+
+def _normalized_float_values(values: Any) -> list[Any]:
+    """Return floats with NaN represented canonically for semantic hashing."""
+    normalized = []
+    for value in np.asarray(values, dtype=float).reshape(-1):
+        normalized.append(None if np.isnan(value) else float(value))
+    return normalized
+
+
+def path_specific_place_tuning_sha256(curve: Any) -> str:
+    """Digest unit metadata and tuning values independently of NWB storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = validate_path_specific_place_tuning_curve(curve)
+    values = np.asarray(canonical.values, dtype=float)
+    records = []
+    for row_index in range(int(canonical.sizes[UNIT_DIM])):
+        records.append(
+            {
+                "curve_row": row_index,
+                "spikesorting_merge_id": str(
+                    canonical.coords["spikesorting_merge_id"].values[row_index]
+                ),
+                "unit_id": str(canonical.coords["unit_id"].values[row_index]),
+                "stable_unit_id": str(
+                    canonical.coords["stable_unit_id"].values[row_index]
+                ),
+                "group_unit_id": str(
+                    canonical.coords["group_unit_id"].values[row_index]
+                ),
+                SPIKE_COUNT_COORDINATE: _normalized_float_values(
+                    [canonical.coords[SPIKE_COUNT_COORDINATE].values[row_index]]
+                )[0],
+                "firing_rate_hz": _normalized_float_values(values[row_index]),
+            }
+        )
+    return provenance_sha256(
+        {"columns": list(_NWB_TUNING_COLUMNS), "records": records}
+    )
+
+
+def path_specific_place_bins_sha256(curve: Any) -> str:
+    """Digest ordered path-bin metadata independently of NWB storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = validate_path_specific_place_tuning_curve(curve)
+    edges = _parse_bin_edges(
+        canonical.attrs["bin_edges_cm_json"],
+        name="bin_edges_cm_json",
+    )
+    return provenance_sha256(
+        {
+            "position_bin": list(range(int(canonical.sizes[POSITION_DIM]))),
+            "left_edge_cm": edges[:-1].tolist(),
+            POSITION_DIM: np.asarray(
+                canonical.coords[POSITION_DIM].values,
+                dtype=float,
+            ).tolist(),
+            "right_edge_cm": edges[1:].tolist(),
+            PATH_FRACTION_COORDINATE: np.asarray(
+                canonical.coords[PATH_FRACTION_COORDINATE].values,
+                dtype=float,
+            ).tolist(),
+        }
+    )
+
+
+def path_specific_place_provenance_sha256(curve: Any) -> str:
+    """Digest the canonical scalar and coordinate provenance payload."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+            "metadata": _curve_metadata_payload(curve),
+        }
+    )
+
+
+def path_specific_place_tuning_curve_sha256(curve: Any) -> str:
+    """Digest all three logical curve objects as one scientific artifact."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "path_specific_place_tuning_sha256": (
+                path_specific_place_tuning_sha256(curve)
+            ),
+            "path_specific_place_bins_sha256": (
+                path_specific_place_bins_sha256(curve)
+            ),
+            "path_specific_place_provenance_sha256": (
+                path_specific_place_provenance_sha256(curve)
+            ),
+        }
+    )
+
+
 def load_path_specific_place_artifact(path: Path) -> Any:
     """Load and validate one canonical NetCDF tuning curve."""
     path = Path(path)
@@ -1392,6 +1914,10 @@ __all__ = [
     "BINNING_MODES",
     "DEFAULT_ARTIFACT_ROOT",
     "IDENTITY_COORDINATES",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_BINS_TABLE_NAME",
+    "NWB_PROVENANCE_TABLE_NAME",
+    "NWB_TUNING_TABLE_NAME",
     "PATH_FRACTION_COORDINATE",
     "POSITION_DIM",
     "SPIKE_COUNT_COORDINATE",
@@ -1404,6 +1930,14 @@ __all__ = [
     "graph_length_from_inputs",
     "load_path_specific_place_artifact",
     "normalize_legacy_all_trial_tuning_curve",
+    "path_specific_place_bins_sha256",
+    "path_specific_place_bins_to_dynamic_table",
+    "path_specific_place_provenance_sha256",
+    "path_specific_place_provenance_to_dynamic_table",
+    "path_specific_place_tuning_curve_from_nwb_objects",
+    "path_specific_place_tuning_curve_sha256",
+    "path_specific_place_tuning_sha256",
+    "path_specific_place_tuning_to_dynamic_table",
     "register_existing_path_specific_place_artifact",
     "select_trial_subset_intervals",
     "smooth_tuning_values",

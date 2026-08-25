@@ -26,6 +26,15 @@ NESTED_CV_FILENAME = "nested_cv.nc"
 FULL_REFIT_FILENAME = "full_refit.nc"
 FULL_W_CONFIGURATION_NAME = "full_w"
 
+RESULT_SCHEMA_VERSION = "2"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_SELECTED_UNITS_TABLE_NAME = "motor_encoding_selected_units"
+NWB_DATASET_INDEX_TABLE_NAME = "motor_encoding_dataset_index"
+NWB_COORDINATES_TABLE_NAME = "motor_encoding_coordinates"
+NWB_NESTED_CV_ARRAYS_TABLE_NAME = "motor_encoding_nested_cv_arrays"
+NWB_FULL_REFIT_ARRAYS_TABLE_NAME = "motor_encoding_full_refit_arrays"
+NWB_PROVENANCE_TABLE_NAME = "motor_encoding_provenance"
+
 DEFAULT_BIN_SIZE_S = 0.05
 DEFAULT_N_FOLDS = 5
 DEFAULT_INNER_N_FOLDS = 3
@@ -150,6 +159,39 @@ MANIFEST_COLUMNS = (
     "analysis_status",
     "artifact_origin",
     "legacy_artifact_provenance_json",
+)
+
+DATASET_INDEX_COLUMNS = (
+    "dataset_key",
+    "dataset_index",
+    "dimensions_json",
+    "sizes_json",
+    "coordinate_names_json",
+    "variable_names_json",
+    "attrs_json",
+)
+ARRAY_COMPONENT_COLUMNS = (
+    "dataset_key",
+    "component_index",
+    "component_name",
+    "dimensions_json",
+    "shape_json",
+    "dtype",
+    "numeric_count",
+    "numeric_values",
+    "text_values_json",
+    "attrs_json",
+)
+PROVENANCE_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "model_spec_json",
+    "output_rule_json",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
+    "result_schema_version",
 )
 
 
@@ -1771,6 +1813,941 @@ def validate_motor_encoding_result(result: Mapping[str, Any]) -> dict[str, Any]:
     return copied
 
 
+def _json_ready(value: Any) -> Any:
+    """Return nested metadata using JSON-native scalar types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one scratch-table column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    ragged_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed zero-row DynamicTable without row inference."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    output_columns = []
+    for column in columns:
+        if column in ragged_columns:
+            data = VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=np.asarray([], dtype=float),
+            )
+            output_columns.extend(
+                (
+                    data,
+                    VectorIndex(
+                        name=f"{column}_index",
+                        data=np.asarray([], dtype=np.int64),
+                        target=data,
+                    ),
+                )
+            )
+            continue
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return one canonical typed MotorEncoding scratch-table frame."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(
+        columns
+    ):
+        raise ValueError(
+            "MotorEncoding NWB table does not have its canonical schema."
+        )
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(np.int64)
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(
+                f"MotorEncoding NWB column {column!r} must be boolean."
+            )
+        output[column] = np.asarray(values, dtype=bool)
+    for column in vector_columns:
+        vectors = [np.asarray(value, dtype=float) for value in output[column]]
+        if any(vector.ndim != 1 or np.isinf(vector).any() for vector in vectors):
+            raise ValueError(
+                f"MotorEncoding NWB vector column {column!r} is invalid."
+            )
+        output[column] = vectors
+    for column in columns:
+        if column in (
+            *text_columns,
+            *integer_columns,
+            *boolean_columns,
+            *vector_columns,
+        ):
+            continue
+        output[column] = pd.to_numeric(
+            output[column], errors="raise"
+        ).astype(float)
+        if np.isinf(output[column].to_numpy(dtype=float)).any():
+            raise ValueError(
+                f"MotorEncoding NWB numeric column {column!r} contains infinity."
+            )
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert one scalar frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in columns
+        ],
+    )
+
+
+def _ragged_dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert scalar keys and numeric vectors to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+            ragged_columns=vector_columns,
+        )
+    scalar_columns = tuple(
+        column for column in columns if column not in vector_columns
+    )
+    output = DynamicTable.from_dataframe(
+        name=name,
+        df=canonical.loc[:, list(scalar_columns)],
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in scalar_columns
+        ],
+    )
+    for column in vector_columns:
+        vectors = canonical[column].tolist()
+        if all(vector.size == 0 for vector in vectors):
+            vectors = [np.asarray([np.nan], dtype=float) for _ in vectors]
+        output.add_column(
+            name=column,
+            description=_nwb_column_description(column),
+            data=vectors,
+            index=True,
+        )
+    return output
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Return text after an HDF5-backed DynamicTable round trip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    vector_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected MotorEncoding NWB object {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("MotorEncoding NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed = tuple(str(column) for column in table.columns)
+    if set(observed) != set(columns) or len(observed) != len(columns):
+        raise ValueError("MotorEncoding NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    for column in vector_columns:
+        table[column] = [
+            np.asarray(value, dtype=float) for value in table[column]
+        ]
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+        vector_columns=vector_columns,
+    )
+
+
+def _dataset_records(result: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """Return the nested-CV and full-refit datasets in storage order."""
+    canonical = validate_motor_encoding_result(result)
+    return (
+        ("nested_cv", canonical["nested_cv"]),
+        ("full_refit", canonical["full_refit"]),
+    )
+
+
+def _dataset_index_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return ordered structure and attributes for both xarray datasets."""
+    rows = []
+    for dataset_index, (dataset_key, dataset) in enumerate(
+        _dataset_records(result)
+    ):
+        rows.append(
+            {
+                "dataset_key": dataset_key,
+                "dataset_index": dataset_index,
+                "dimensions_json": json.dumps(
+                    list(dataset.dims), separators=(",", ":")
+                ),
+                "sizes_json": json.dumps(
+                    [int(dataset.sizes[name]) for name in dataset.dims],
+                    separators=(",", ":"),
+                ),
+                "coordinate_names_json": json.dumps(
+                    [str(name) for name in dataset.coords],
+                    separators=(",", ":"),
+                ),
+                "variable_names_json": json.dumps(
+                    [str(name) for name in dataset.data_vars],
+                    separators=(",", ":"),
+                ),
+                "attrs_json": json.dumps(
+                    _json_ready(dict(dataset.attrs)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=DATASET_INDEX_COLUMNS)
+
+
+def _array_component_record(
+    *,
+    dataset_key: str,
+    component_index: int,
+    component_name: str,
+    array: Any,
+) -> dict[str, Any]:
+    """Flatten one xarray coordinate or numeric variable without data JSON."""
+    values = np.asarray(array.values)
+    kind = values.dtype.kind
+    if kind in {"O", "S", "U"}:
+        flattened = [_decode_nwb_text(value) for value in values.reshape(-1)]
+        dtype = "str"
+        numeric = np.asarray([], dtype=float)
+        text_json = json.dumps(flattened, separators=(",", ":"))
+    elif kind in {"b", "i", "u", "f"}:
+        numeric = values.astype(float, copy=False).reshape(-1)
+        if np.isinf(numeric).any():
+            raise ValueError(
+                f"MotorEncoding array {component_name!r} contains infinity."
+            )
+        dtype = str(values.dtype)
+        text_json = "[]"
+    else:
+        raise TypeError(
+            f"MotorEncoding array {component_name!r} has unsupported dtype "
+            f"{values.dtype}."
+        )
+    return {
+        "dataset_key": dataset_key,
+        "component_index": int(component_index),
+        "component_name": component_name,
+        "dimensions_json": json.dumps(list(array.dims), separators=(",", ":")),
+        "shape_json": json.dumps(list(values.shape), separators=(",", ":")),
+        "dtype": dtype,
+        "numeric_count": int(numeric.size),
+        "numeric_values": np.asarray(numeric, dtype=float),
+        "text_values_json": text_json,
+        "attrs_json": json.dumps(
+            _json_ready(dict(array.attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+
+
+def _coordinates_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return every xarray coordinate as one ordered ragged row."""
+    rows = []
+    for dataset_key, dataset in _dataset_records(result):
+        rows.extend(
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_index=index,
+                component_name=str(name),
+                array=coordinate,
+            )
+            for index, (name, coordinate) in enumerate(dataset.coords.items())
+        )
+    return pd.DataFrame.from_records(rows, columns=ARRAY_COMPONENT_COLUMNS)
+
+
+def _variables_frame(result: Mapping[str, Any], *, dataset_key: str) -> pd.DataFrame:
+    """Return every numeric variable for one dataset as an ordered ragged row."""
+    datasets = dict(_dataset_records(result))
+    if dataset_key not in datasets:
+        raise ValueError(f"Unknown MotorEncoding dataset key {dataset_key!r}.")
+    dataset = datasets[dataset_key]
+    rows = []
+    for index, (name, variable) in enumerate(dataset.data_vars.items()):
+        if np.asarray(variable.values).dtype.kind not in {"b", "i", "u", "f"}:
+            raise TypeError(
+                f"MotorEncoding data variable {name!r} must be numeric."
+            )
+        rows.append(
+            _array_component_record(
+                dataset_key=dataset_key,
+                component_index=index,
+                component_name=str(name),
+                array=variable,
+            )
+        )
+    return pd.DataFrame.from_records(rows, columns=ARRAY_COMPONENT_COLUMNS)
+
+
+def _provenance_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return detached result metadata and fixed analysis definitions."""
+    canonical = validate_motor_encoding_result(result)
+    return pd.DataFrame.from_records(
+        [
+            {
+                "metadata_json": json.dumps(
+                    _json_ready(canonical["metadata"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "parameters_json": json.dumps(
+                    _json_ready(canonical["parameters"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "model_spec_json": json.dumps(
+                    _json_ready(dict(MODEL_SPEC)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "output_rule_json": json.dumps(
+                    _json_ready(dict(OUTPUT_RULE)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "analysis_status": str(canonical["analysis_status"]),
+                "artifact_origin": str(canonical["artifact_origin"]),
+                "legacy_artifact_provenance_json": json.dumps(
+                    _json_ready(canonical["legacy_artifact_provenance"] or {}),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+                "result_schema_version": RESULT_SCHEMA_VERSION,
+            }
+        ],
+        columns=PROVENANCE_COLUMNS,
+    )
+
+
+def motor_encoding_result_to_nwb_objects(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one MotorEncoding result to six NWB scratch tables."""
+    canonical = validate_motor_encoding_result(result)
+    selected_integer = (
+        "selection_index",
+        "n_outer_folds_selected",
+        "n_outer_folds_with_finite_evidence",
+    )
+    selected_boolean = (
+        "passes_movement_firing_rate",
+        "passes_stability",
+        "eligible",
+        "valid_nested_cv",
+    )
+    component_text = (
+        "dataset_key",
+        "component_name",
+        "dimensions_json",
+        "shape_json",
+        "dtype",
+        "text_values_json",
+        "attrs_json",
+    )
+    return {
+        "selected_units": _dynamic_table_from_frame(
+            canonical["selected_units"],
+            name=NWB_SELECTED_UNITS_TABLE_NAME,
+            description=(
+                "All-unit identity, eligibility, and nested-CV audit for "
+                f"MotorEncoding NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+            ),
+            columns=SELECTED_UNIT_COLUMNS,
+            text_columns=IDENTITY_COLUMNS,
+            integer_columns=selected_integer,
+            boolean_columns=selected_boolean,
+        ),
+        "dataset_index": _dynamic_table_from_frame(
+            _dataset_index_frame(canonical),
+            name=NWB_DATASET_INDEX_TABLE_NAME,
+            description="Ordered nested-CV and full-refit xarray dataset index.",
+            columns=DATASET_INDEX_COLUMNS,
+            text_columns=tuple(
+                column
+                for column in DATASET_INDEX_COLUMNS
+                if column != "dataset_index"
+            ),
+            integer_columns=("dataset_index",),
+        ),
+        "coordinates": _ragged_dynamic_table_from_frame(
+            _coordinates_frame(canonical),
+            name=NWB_COORDINATES_TABLE_NAME,
+            description="Coordinates for both MotorEncoding xarray datasets.",
+            columns=ARRAY_COMPONENT_COLUMNS,
+            vector_columns=("numeric_values",),
+            text_columns=component_text,
+            integer_columns=("component_index", "numeric_count"),
+        ),
+        "nested_cv_arrays": _ragged_dynamic_table_from_frame(
+            _variables_frame(canonical, dataset_key="nested_cv"),
+            name=NWB_NESTED_CV_ARRAYS_TABLE_NAME,
+            description="Complete nested-CV data variables for MotorEncoding.",
+            columns=ARRAY_COMPONENT_COLUMNS,
+            vector_columns=("numeric_values",),
+            text_columns=component_text,
+            integer_columns=("component_index", "numeric_count"),
+        ),
+        "full_refit_arrays": _ragged_dynamic_table_from_frame(
+            _variables_frame(canonical, dataset_key="full_refit"),
+            name=NWB_FULL_REFIT_ARRAYS_TABLE_NAME,
+            description="Complete full-refit data variables for MotorEncoding.",
+            columns=ARRAY_COMPONENT_COLUMNS,
+            vector_columns=("numeric_values",),
+            text_columns=component_text,
+            integer_columns=("component_index", "numeric_count"),
+        ),
+        "provenance": _dynamic_table_from_frame(
+            _provenance_frame(canonical),
+            name=NWB_PROVENANCE_TABLE_NAME,
+            description=(
+                "Detached MotorEncoding identity, parameters, definitions, "
+                "status, and legacy provenance."
+            ),
+            columns=PROVENANCE_COLUMNS,
+            text_columns=PROVENANCE_COLUMNS,
+        ),
+    }
+
+
+def _parse_json(value: str, *, name: str, expected_type: type) -> Any:
+    """Parse one JSON value with a field-specific error."""
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"MotorEncoding {name} contains malformed JSON.") from exc
+    if not isinstance(decoded, expected_type):
+        raise ValueError(
+            f"MotorEncoding {name} must encode {expected_type.__name__}."
+        )
+    return decoded
+
+
+def _decode_array_component(
+    record: Mapping[str, Any],
+) -> tuple[tuple[str, ...], Any, dict[str, Any]]:
+    """Restore one xarray coordinate or variable from a flattened row."""
+    dimensions = tuple(
+        str(value)
+        for value in _parse_json(
+            str(record["dimensions_json"]),
+            name="array dimensions",
+            expected_type=list,
+        )
+    )
+    try:
+        shape = tuple(
+            int(value)
+            for value in _parse_json(
+                str(record["shape_json"]),
+                name="array shape",
+                expected_type=list,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MotorEncoding array shape is malformed.") from exc
+    if len(dimensions) != len(shape) or any(value < 0 for value in shape):
+        raise ValueError("MotorEncoding array dimensions and shape disagree.")
+    expected_size = int(np.prod(shape, dtype=np.int64)) if shape else 1
+    dtype = str(record["dtype"])
+    if dtype == "str":
+        values = _parse_json(
+            str(record["text_values_json"]),
+            name="text array",
+            expected_type=list,
+        )
+        if len(values) != expected_size:
+            raise ValueError("MotorEncoding text array size disagrees with shape.")
+        array = np.asarray([str(value) for value in values], dtype=str)
+    else:
+        count = int(record["numeric_count"])
+        values = np.asarray(record["numeric_values"], dtype=float)[:count]
+        if count != expected_size or values.size != expected_size:
+            raise ValueError(
+                "MotorEncoding numeric array size disagrees with its shape."
+            )
+        try:
+            target_dtype = np.dtype(dtype)
+        except TypeError as exc:
+            raise ValueError("MotorEncoding array dtype is unsupported.") from exc
+        if target_dtype.kind not in {"b", "i", "u", "f"}:
+            raise ValueError("MotorEncoding numeric array dtype is unsupported.")
+        array = values.astype(target_dtype)
+    attrs = _parse_json(
+        str(record["attrs_json"]),
+        name="array attributes",
+        expected_type=dict,
+    )
+    return dimensions, array.reshape(shape), attrs
+
+
+def _ordered_component_records(
+    table: pd.DataFrame,
+    *,
+    dataset_key: str,
+) -> list[dict[str, Any]]:
+    """Return uniquely named, contiguously indexed component records."""
+    selected = table.loc[table["dataset_key"].astype(str) == dataset_key].copy()
+    selected = selected.sort_values("component_index", kind="stable")
+    if selected["component_name"].astype(str).duplicated().any():
+        raise ValueError("MotorEncoding NWB component names must be unique.")
+    if selected["component_index"].tolist() != list(range(len(selected))):
+        raise ValueError("MotorEncoding NWB component indices must be contiguous.")
+    return selected.to_dict("records")
+
+
+def _dataset_from_nwb_frames(
+    *,
+    index_record: Mapping[str, Any],
+    coordinates: pd.DataFrame,
+    variables: pd.DataFrame,
+) -> Any:
+    """Rebuild one exact xarray Dataset from indexed component rows."""
+    import xarray as xr
+
+    dataset_key = str(index_record["dataset_key"])
+    coordinate_records = _ordered_component_records(
+        coordinates, dataset_key=dataset_key
+    )
+    variable_records = _ordered_component_records(
+        variables, dataset_key=dataset_key
+    )
+    coordinate_names = _parse_json(
+        str(index_record["coordinate_names_json"]),
+        name="coordinate names",
+        expected_type=list,
+    )
+    variable_names = _parse_json(
+        str(index_record["variable_names_json"]),
+        name="variable names",
+        expected_type=list,
+    )
+    if [str(record["component_name"]) for record in coordinate_records] != [
+        str(value) for value in coordinate_names
+    ]:
+        raise ValueError("MotorEncoding coordinate order disagrees with its index.")
+    if [str(record["component_name"]) for record in variable_records] != [
+        str(value) for value in variable_names
+    ]:
+        raise ValueError("MotorEncoding variable order disagrees with its index.")
+    coords = {}
+    coord_attrs = {}
+    for record in coordinate_records:
+        name = str(record["component_name"])
+        dims, values, attrs = _decode_array_component(record)
+        coords[name] = (dims, values)
+        coord_attrs[name] = attrs
+    data_vars = {}
+    variable_attrs = {}
+    for record in variable_records:
+        name = str(record["component_name"])
+        dims, values, attrs = _decode_array_component(record)
+        data_vars[name] = (dims, values)
+        variable_attrs[name] = attrs
+    dataset = xr.Dataset(
+        data_vars=data_vars,
+        coords=coords,
+        attrs=_parse_json(
+            str(index_record["attrs_json"]),
+            name="dataset attributes",
+            expected_type=dict,
+        ),
+    )
+    for name, attrs in coord_attrs.items():
+        dataset.coords[name].attrs.update(attrs)
+    for name, attrs in variable_attrs.items():
+        dataset[name].attrs.update(attrs)
+    dimensions = [
+        str(value)
+        for value in _parse_json(
+            str(index_record["dimensions_json"]),
+            name="dataset dimensions",
+            expected_type=list,
+        )
+    ]
+    sizes = [
+        int(value)
+        for value in _parse_json(
+            str(index_record["sizes_json"]),
+            name="dataset sizes",
+            expected_type=list,
+        )
+    ]
+    if dimensions != list(dataset.dims) or sizes != [
+        int(dataset.sizes[name]) for name in dataset.dims
+    ]:
+        raise ValueError("MotorEncoding dataset dimensions disagree with its index.")
+    return dataset
+
+
+def motor_encoding_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    dataset_index: Any,
+    coordinates: Any,
+    nested_cv_arrays: Any,
+    full_refit_arrays: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from six NWB scratch tables."""
+    selected = _frame_from_dynamic_table(
+        selected_units,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=IDENTITY_COLUMNS,
+        integer_columns=(
+            "selection_index",
+            "n_outer_folds_selected",
+            "n_outer_folds_with_finite_evidence",
+        ),
+        boolean_columns=(
+            "passes_movement_firing_rate",
+            "passes_stability",
+            "eligible",
+            "valid_nested_cv",
+        ),
+    )
+    index = _frame_from_dynamic_table(
+        dataset_index,
+        expected_name=NWB_DATASET_INDEX_TABLE_NAME,
+        columns=DATASET_INDEX_COLUMNS,
+        text_columns=tuple(
+            column for column in DATASET_INDEX_COLUMNS if column != "dataset_index"
+        ),
+        integer_columns=("dataset_index",),
+    ).sort_values("dataset_index", kind="stable")
+    if index["dataset_key"].tolist() != ["nested_cv", "full_refit"] or index[
+        "dataset_index"
+    ].tolist() != [0, 1]:
+        raise ValueError("MotorEncoding NWB dataset index is noncanonical.")
+    component_text = (
+        "dataset_key",
+        "component_name",
+        "dimensions_json",
+        "shape_json",
+        "dtype",
+        "text_values_json",
+        "attrs_json",
+    )
+    component_kwargs = {
+        "columns": ARRAY_COMPONENT_COLUMNS,
+        "text_columns": component_text,
+        "integer_columns": ("component_index", "numeric_count"),
+        "vector_columns": ("numeric_values",),
+    }
+    coordinate_frame = _frame_from_dynamic_table(
+        coordinates,
+        expected_name=NWB_COORDINATES_TABLE_NAME,
+        **component_kwargs,
+    )
+    nested_frame = _frame_from_dynamic_table(
+        nested_cv_arrays,
+        expected_name=NWB_NESTED_CV_ARRAYS_TABLE_NAME,
+        **component_kwargs,
+    )
+    full_frame = _frame_from_dynamic_table(
+        full_refit_arrays,
+        expected_name=NWB_FULL_REFIT_ARRAYS_TABLE_NAME,
+        **component_kwargs,
+    )
+    provenance_frame = _frame_from_dynamic_table(
+        provenance,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=PROVENANCE_COLUMNS,
+        text_columns=PROVENANCE_COLUMNS,
+    )
+    if len(provenance_frame) != 1:
+        raise ValueError("MotorEncoding provenance must contain exactly one row.")
+    source = provenance_frame.iloc[0].to_dict()
+    if source["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("MotorEncoding NWB artifact schema version is unsupported.")
+    if source["result_schema_version"] != RESULT_SCHEMA_VERSION:
+        raise ValueError("MotorEncoding result schema version is unsupported.")
+    if _parse_json(
+        source["model_spec_json"], name="model spec", expected_type=dict
+    ) != dict(MODEL_SPEC):
+        raise ValueError("MotorEncoding model spec is stale.")
+    if _parse_json(
+        source["output_rule_json"], name="output rule", expected_type=dict
+    ) != _json_ready(dict(OUTPUT_RULE)):
+        raise ValueError("MotorEncoding output rule is stale.")
+    records = {str(row["dataset_key"]): row for row in index.to_dict("records")}
+    nested = _dataset_from_nwb_frames(
+        index_record=records["nested_cv"],
+        coordinates=coordinate_frame,
+        variables=nested_frame,
+    )
+    full = _dataset_from_nwb_frames(
+        index_record=records["full_refit"],
+        coordinates=coordinate_frame,
+        variables=full_frame,
+    )
+    legacy = _parse_json(
+        source["legacy_artifact_provenance_json"],
+        name="legacy provenance",
+        expected_type=dict,
+    )
+    parameters = _parse_json(
+        source["parameters_json"], name="parameters", expected_type=dict
+    )
+    return validate_motor_encoding_result(
+        {
+            "metadata": _parse_json(
+                source["metadata_json"], name="metadata", expected_type=dict
+            ),
+            "parameters": parameters,
+            "selected_units": selected,
+            "nested_cv": nested,
+            "full_refit": full,
+            "n_units_input": len(selected),
+            "n_units_eligible": int(selected["eligible"].sum()),
+            "n_units_valid": int(selected["valid_nested_cv"].sum()),
+            "n_outer_folds_expected": int(parameters["outer_n_folds"]),
+            "n_outer_folds_valid": int(
+                np.sum(
+                    (np.asarray(nested["outer_train_bin_count"], dtype=int) > 0)
+                    & (np.asarray(nested["outer_test_bin_count"], dtype=int) > 0)
+                )
+            ),
+            "selected_units_sha256": _selected_units_identity_sha256(selected),
+            "analysis_status": source["analysis_status"],
+            "artifact_origin": source["artifact_origin"],
+            "legacy_artifact_provenance": legacy or None,
+        }
+    )
+
+
+def _selected_units_identity_sha256(table: pd.DataFrame) -> str:
+    """Return the established selected-unit identity digest."""
+    from v1ca1.spyglass.selection import unit_identity_sha256
+
+    return unit_identity_sha256(
+        table.loc[:, ["spikesorting_merge_id", "unit_id"]].to_dict("records")
+    )
+
+
+def _semantic_frame_sha256(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    vector_columns: Sequence[str] = (),
+) -> str:
+    """Hash one canonical frame without HDF5 or object-ID dependence."""
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(columns), separators=(",", ":")).encode())
+    for record in table.loc[:, list(columns)].to_dict("records"):
+        for column in columns:
+            digest.update(column.encode())
+            value = record[column]
+            if column in vector_columns:
+                vector = np.asarray(value, dtype=np.float64).copy()
+                vector[np.isnan(vector)] = np.nan
+                digest.update(np.asarray([vector.size], dtype=np.int64).tobytes())
+                digest.update(vector.tobytes(order="C"))
+            else:
+                digest.update(
+                    json.dumps(
+                        _json_ready(value),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+    return digest.hexdigest()
+
+
+def motor_encoding_nwb_hashes(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return semantic hashes for all six NWB objects and the full result."""
+    canonical = validate_motor_encoding_result(result)
+    frames = {
+        "selected_units_table_sha256": (
+            canonical["selected_units"],
+            SELECTED_UNIT_COLUMNS,
+            (),
+        ),
+        "dataset_index_sha256": (
+            _dataset_index_frame(canonical),
+            DATASET_INDEX_COLUMNS,
+            (),
+        ),
+        "coordinates_sha256": (
+            _coordinates_frame(canonical),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "nested_cv_arrays_sha256": (
+            _variables_frame(canonical, dataset_key="nested_cv"),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "full_refit_arrays_sha256": (
+            _variables_frame(canonical, dataset_key="full_refit"),
+            ARRAY_COMPONENT_COLUMNS,
+            ("numeric_values",),
+        ),
+        "provenance_sha256": (
+            _provenance_frame(canonical),
+            PROVENANCE_COLUMNS,
+            (),
+        ),
+    }
+    hashes = {
+        name: _semantic_frame_sha256(
+            frame,
+            columns=columns,
+            vector_columns=vector_columns,
+        )
+        for name, (frame, columns, vector_columns) in frames.items()
+    }
+    hashes["motor_encoding_sha256"] = hashlib.sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return hashes
+
+
 def _file_sha256(path: Path) -> str:
     """Return one file's SHA-256 digest."""
     digest = hashlib.sha256()
@@ -2231,7 +3208,7 @@ def register_existing_motor_encoding_artifact(
     *,
     source_nested_cv_path: Path,
     source_full_refit_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     animal_name: str,
     date: str,
     region: str,
@@ -2426,6 +3403,8 @@ def register_existing_motor_encoding_artifact(
         "legacy_artifact_provenance": provenance,
     }
     result = validate_motor_encoding_result(result)
+    if destination_path is None:
+        return result
     paths = write_motor_encoding_artifact(
         result,
         destination_path,
@@ -2442,13 +3421,18 @@ __all__ = [
     "MODEL_NAMES",
     "MODEL_SPEC",
     "MODEL_SPEC_SHA256",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
     "OUTPUT_RULE",
     "OUTPUT_RULE_SHA256",
+    "RESULT_SCHEMA_VERSION",
     "build_graph_derived_position_basis_configs",
     "build_motor_model_features",
     "compute_motor_encoding",
     "get_motor_encoding_artifact_paths",
     "load_motor_encoding_artifact",
+    "motor_encoding_nwb_hashes",
+    "motor_encoding_result_from_nwb_objects",
+    "motor_encoding_result_to_nwb_objects",
     "register_existing_motor_encoding_artifact",
     "validate_motor_encoding_parameters",
     "validate_motor_encoding_result",

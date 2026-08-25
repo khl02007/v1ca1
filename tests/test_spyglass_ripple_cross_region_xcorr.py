@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -397,6 +398,60 @@ def test_terminal_missing_region_preserves_other_region_audit(
         "excluded_spike_threshold",
     ]
     assert not result["v1_units"]["included_in_xcorr"].any()
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_analysis_nwb_objects_roundtrip_valid_and_empty_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
+) -> None:
+    """All six NWB objects reconstruct the exact scientific result."""
+    import pynwb
+
+    if terminal:
+        _patch_science(monkeypatch)
+        ca1_spikes, v1_spikes = _spikes()
+        ca1_ids, v1_ids = _identities()
+        result = module.compute_ripple_cross_region_xcorr(
+            ripple_cross_region_xcorr_id=RESULT_ID,
+            animal_name="L14",
+            date="20240611",
+            epoch="missing_epoch",
+            ripple_table=_ripples(),
+            ca1_spikes=ca1_spikes,
+            ca1_stable_unit_ids=ca1_ids,
+            v1_spikes=v1_spikes,
+            v1_stable_unit_ids=v1_ids,
+            upstream_provenance=_provenance(),
+        )
+    else:
+        result = _compute(monkeypatch)
+    expected_hashes = module.ripple_cross_region_xcorr_nwb_hashes(result)
+    objects = module.ripple_cross_region_xcorr_result_to_nwb_objects(result)
+    nwbfile = pynwb.NWBFile(
+        session_description="test",
+        identifier=f"xcorr-{terminal}",
+        session_start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    object_ids = {}
+    for name in ("ca1_units", "v1_units", "pair_xcorr", "lag_axis", "provenance"):
+        nwbfile.add_scratch(objects[name])
+        object_ids[name] = objects[name].object_id
+    nwbfile.add_time_intervals(objects["ripple_support"])
+    object_ids["ripple_support"] = objects["ripple_support"].object_id
+    path = tmp_path / f"xcorr-{terminal}.nwb"
+    with pynwb.NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert not pynwb.validate(path=path)
+    with pynwb.NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = module.ripple_cross_region_xcorr_result_from_nwb_objects(
+            **{name: stored.objects[object_id] for name, object_id in object_ids.items()}
+        )
+    assert module.ripple_cross_region_xcorr_nwb_hashes(loaded) == expected_hashes
+    assert loaded["analysis_status"] == result["analysis_status"]
+    assert loaded["n_ripples"] == result["n_ripples"]
 
 
 def test_validation_rejects_tensor_summary_and_qc_corruption(

@@ -411,6 +411,80 @@ def test_legacy_normalization_is_strict_and_preserves_source_metadata() -> None:
         )
 
 
+@pytest.mark.parametrize("empty_units", [False, True])
+def test_three_nwb_tables_roundtrip_curve_and_axis_metadata(
+    tmp_path: Path,
+    empty_units: bool,
+) -> None:
+    """Unit rows bind identities/counts to vectors while bins define columns."""
+    from datetime import datetime, timezone
+
+    from pynwb import NWBFile, NWBHDF5IO
+
+    curve = _normalize_legacy()
+    if empty_units:
+        curve = curve.isel(unit=slice(0, 0)).copy()
+        curve.attrs.update(
+            n_units=0,
+            n_valid_units=0,
+            analysis_status="no_units",
+        )
+        dpp.validate_dpp_tuning_curve(curve)
+
+    tuning = dpp.dpp_tuning_to_dynamic_table(curve)
+    bins = dpp.dpp_bins_to_dynamic_table(curve)
+    provenance = dpp.dpp_provenance_to_dynamic_table(curve)
+    assert tuning.name == dpp.NWB_TUNING_TABLE_NAME
+    assert bins.name == dpp.NWB_BINS_TABLE_NAME
+    assert provenance.name == dpp.NWB_PROVENANCE_TABLE_NAME
+    if not empty_units:
+        tuning_frame = tuning.to_dataframe()
+        assert tuning_frame.loc[0, "stable_unit_id"] == "merge-b:22"
+        assert np.isnan(tuning_frame.loc[0, "spike_count"])
+        np.testing.assert_allclose(
+            tuning_frame.loc[0, "firing_rate_hz"],
+            [7.0, 7.5],
+        )
+
+    bins_frame = bins.to_dataframe()
+    np.testing.assert_allclose(bins_frame["dpp"], [0.25, 0.75])
+    np.testing.assert_allclose(
+        bins_frame["linear_position_cm"],
+        [2.5, 7.5],
+    )
+
+    path = tmp_path / "dpp.nwb"
+    nwbfile = NWBFile(
+        session_description="DPP NWB test",
+        identifier="dpp-test",
+        session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    object_ids = {}
+    for name, nwb_object in {
+        "tuning": tuning,
+        "bins": bins,
+        "provenance": provenance,
+    }.items():
+        nwbfile.add_scratch(nwb_object)
+        object_ids[name] = nwb_object.object_id
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwbfile)
+    with NWBHDF5IO(str(path), mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        roundtrip = dpp.dpp_tuning_curve_from_nwb_objects(
+            stored.objects[object_ids["tuning"]],
+            stored.objects[object_ids["bins"]],
+            stored.objects[object_ids["provenance"]],
+        )
+
+    xr.testing.assert_identical(roundtrip, curve)
+    assert dpp.dpp_tuning_sha256(roundtrip) == dpp.dpp_tuning_sha256(curve)
+    assert dpp.dpp_bins_sha256(roundtrip) == dpp.dpp_bins_sha256(curve)
+    assert dpp.dpp_provenance_sha256(roundtrip) == (
+        dpp.dpp_provenance_sha256(curve)
+    )
+
+
 def test_register_existing_writes_valid_canonical_artifact(tmp_path: Path) -> None:
     source = tmp_path / "legacy.nc"
     destination = tmp_path / "canonical" / "tuning_curve.nc"

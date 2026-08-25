@@ -26,6 +26,18 @@ METRICS_FILENAME = "decoding_summary.parquet"
 ELIGIBILITY_FILENAME = "unit_eligibility.parquet"
 BINNED_FILENAME = "cross_path_error_by_position.parquet"
 
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_UNIT_ELIGIBILITY_TABLE_NAME = (
+    "path_progression_decoding_unit_eligibility"
+)
+NWB_SELECTED_UNITS_TABLE_NAME = "path_progression_decoding_selected_units"
+NWB_SUMMARY_TABLE_NAME = "path_progression_decoding_summary"
+NWB_BINNED_ERROR_TABLE_NAME = (
+    "path_progression_decoding_error_by_position"
+)
+NWB_TRANSFER_INDEX_TABLE_NAME = "path_progression_decoding_transfer_index"
+NWB_PROVENANCE_TABLE_NAME = "path_progression_decoding_provenance"
+
 DEFAULT_DECODING_BIN_SIZE_S = 0.02
 DEFAULT_SLIDING_WINDOW_SIZE_BINS = 4
 DEFAULT_SPATIAL_BIN_SIZE_CM = 4.0
@@ -128,6 +140,18 @@ ELIGIBILITY_COLUMNS = (
         for trajectory_type in TRAJECTORY_TYPES
     ),
     *ELIGIBILITY_FLAG_COLUMNS,
+)
+TRANSFER_INDEX_COLUMNS = (
+    "transfer_index",
+    "transfer_family",
+    "source_trajectory",
+    "target_trajectory",
+    "flip_tuning_curve",
+    "coordinate_unit",
+    "n_samples",
+    "true_object_name",
+    "decoded_object_name",
+    "support_object_name",
 )
 MANIFEST_COLUMNS = (
     "artifact_key",
@@ -1777,6 +1801,846 @@ def validate_decoding_comparison_result(result: Mapping[str, Any]) -> dict[str, 
     return dict(result)
 
 
+_NWB_TABLE_COLUMNS = {
+    "unit_eligibility": ELIGIBILITY_COLUMNS,
+    "selected_units": UNIT_TABLE_COLUMNS,
+    "decoding_summary": METRIC_COLUMNS,
+    "cross_path_binned_error": BINNED_COLUMNS,
+    "transfer_index": TRANSFER_INDEX_COLUMNS,
+}
+_NWB_TABLE_NAMES = {
+    "unit_eligibility": NWB_UNIT_ELIGIBILITY_TABLE_NAME,
+    "selected_units": NWB_SELECTED_UNITS_TABLE_NAME,
+    "decoding_summary": NWB_SUMMARY_TABLE_NAME,
+    "cross_path_binned_error": NWB_BINNED_ERROR_TABLE_NAME,
+    "transfer_index": NWB_TRANSFER_INDEX_TABLE_NAME,
+}
+_NWB_TABLE_TEXT_COLUMNS = {
+    "unit_eligibility": {
+        *IDENTITY_COLUMNS,
+        "target_epoch",
+        "cohort_epoch",
+    },
+    "selected_units": set(IDENTITY_COLUMNS),
+    "decoding_summary": {
+        "path_progression_decoding_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "cohort_epoch",
+        "transfer_family",
+        "source_trajectory",
+        "target_trajectory",
+        "coordinate_unit",
+        "qc_status",
+        "qc_message",
+    },
+    "cross_path_binned_error": {
+        "path_progression_decoding_id",
+        "animal_name",
+        "date",
+        "region",
+        "epoch",
+        "cohort_epoch",
+        "transfer_family",
+        "source_trajectory",
+        "target_trajectory",
+        "coordinate_unit",
+    },
+    "transfer_index": {
+        "transfer_family",
+        "source_trajectory",
+        "target_trajectory",
+        "coordinate_unit",
+        "true_object_name",
+        "decoded_object_name",
+        "support_object_name",
+    },
+}
+_NWB_TABLE_INTEGER_COLUMNS = {
+    "unit_eligibility": set(),
+    "selected_units": {"selection_index"},
+    "decoding_summary": {"n_units", "n_samples"},
+    "cross_path_binned_error": {"n"},
+    "transfer_index": {"transfer_index", "n_samples"},
+}
+_NWB_TABLE_BOOLEAN_COLUMNS = {
+    "unit_eligibility": set(ELIGIBILITY_FLAG_COLUMNS),
+    "selected_units": set(),
+    "decoding_summary": {"flip_tuning_curve"},
+    "cross_path_binned_error": {"flip_tuning_curve"},
+    "transfer_index": {"flip_tuning_curve"},
+}
+_NWB_PROVENANCE_COLUMNS = (
+    "artifact_schema_version",
+    "metadata_json",
+)
+
+
+def _decoded_nwb_text(
+    value: Any,
+    *,
+    name: str,
+    allow_empty: bool = False,
+) -> str:
+    """Return one UTF-8 string fetched from an NWB object."""
+    if isinstance(value, (bytes, np.bytes_)):
+        try:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{name} is not valid UTF-8.") from exc
+    value = str(value)
+    if not value and not allow_empty:
+        raise ValueError(f"{name} must be non-empty.")
+    return value
+
+
+def _canonical_nwb_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one exact-schema decoding table with stable dtypes."""
+    if artifact_name not in _NWB_TABLE_COLUMNS:
+        raise ValueError(f"Unknown path-progression table {artifact_name!r}.")
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Path-progression decoding tables must be DataFrames.")
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    observed = tuple(str(column) for column in table.columns)
+    if len(observed) != len(columns) or set(observed) != set(columns):
+        raise ValueError(
+            f"{artifact_name} must contain exactly columns {tuple(columns)!r}."
+        )
+    output = table.loc[:, list(columns)].copy().reset_index(drop=True)
+    text_columns = _NWB_TABLE_TEXT_COLUMNS[artifact_name]
+    integer_columns = _NWB_TABLE_INTEGER_COLUMNS[artifact_name]
+    boolean_columns = _NWB_TABLE_BOOLEAN_COLUMNS[artifact_name]
+    for column in columns:
+        if column in text_columns:
+            output[column] = output[column].map(
+                lambda value, column=column: _decoded_nwb_text(
+                    value,
+                    name=f"{artifact_name}.{column}",
+                    allow_empty=(column == "qc_message"),
+                )
+            )
+        elif column in boolean_columns:
+            values = output[column].to_numpy(dtype=object)
+            if not all(isinstance(value, (bool, np.bool_)) for value in values):
+                raise ValueError(
+                    f"{artifact_name}.{column} must contain booleans."
+                )
+            output[column] = np.asarray(values, dtype=bool)
+        elif column in integer_columns:
+            values = pd.to_numeric(output[column], errors="raise").to_numpy(
+                dtype=float
+            )
+            if not np.all(np.isfinite(values)) or not np.allclose(
+                values,
+                np.rint(values),
+                rtol=0.0,
+                atol=1e-9,
+            ):
+                raise ValueError(
+                    f"{artifact_name}.{column} must contain finite integers."
+                )
+            output[column] = np.rint(values).astype(np.int64)
+        else:
+            values = pd.to_numeric(output[column], errors="raise").to_numpy(
+                dtype=float
+            )
+            if np.any(np.isinf(values)):
+                raise ValueError(
+                    f"{artifact_name}.{column} cannot contain infinity."
+                )
+            output[column] = values.astype(float)
+    return output
+
+
+def _table_to_dynamic_table(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> Any:
+    """Convert one canonical path-progression table to DynamicTable."""
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    columns = _NWB_TABLE_COLUMNS[artifact_name]
+    description = (
+        f"PathProgressionDecoding {artifact_name.replace('_', ' ')}; "
+        f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if canonical.empty:
+        vector_columns = []
+        for column in columns:
+            if column in _NWB_TABLE_TEXT_COLUMNS[artifact_name]:
+                data = np.asarray([], dtype="S1")
+            elif column in _NWB_TABLE_INTEGER_COLUMNS[artifact_name]:
+                data = np.asarray([], dtype=np.int64)
+            elif column in _NWB_TABLE_BOOLEAN_COLUMNS[artifact_name]:
+                data = np.asarray([], dtype=bool)
+            else:
+                data = np.asarray([], dtype=float)
+            vector_columns.append(
+                VectorData(
+                    name=column,
+                    description=f"Canonical {artifact_name} field {column!r}.",
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=_NWB_TABLE_NAMES[artifact_name],
+            description=description,
+            columns=vector_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=_NWB_TABLE_NAMES[artifact_name],
+        df=canonical,
+        table_description=description,
+        columns=[
+            {
+                "name": column,
+                "description": f"Canonical {artifact_name} field {column!r}.",
+            }
+            for column in columns
+        ],
+    )
+
+
+def _table_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    artifact_name: str,
+) -> pd.DataFrame:
+    """Return one canonical table from a fetched NWB object."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        expected_name = _NWB_TABLE_NAMES[artifact_name]
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected NWB object name {nwb_table.name!r}; "
+                f"expected {expected_name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Path-progression tabular NWB objects are DynamicTables.")
+    return _canonical_nwb_table(table, artifact_name=artifact_name)
+
+
+def unit_eligibility_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert unit eligibility to an NWB DynamicTable."""
+    return _table_to_dynamic_table(table, artifact_name="unit_eligibility")
+
+
+def unit_eligibility_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return unit eligibility from a fetched NWB object."""
+    return _table_from_dynamic_table(
+        nwb_table,
+        artifact_name="unit_eligibility",
+    )
+
+
+def selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert selected units to an NWB DynamicTable."""
+    return _table_to_dynamic_table(table, artifact_name="selected_units")
+
+
+def selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return selected units from a fetched NWB object."""
+    return _table_from_dynamic_table(nwb_table, artifact_name="selected_units")
+
+
+def decoding_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the transfer summary to an NWB DynamicTable."""
+    return _table_to_dynamic_table(table, artifact_name="decoding_summary")
+
+
+def decoding_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return the transfer summary from a fetched NWB object."""
+    return _table_from_dynamic_table(
+        nwb_table,
+        artifact_name="decoding_summary",
+    )
+
+
+def binned_error_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert binned cross-path error to an NWB DynamicTable."""
+    return _table_to_dynamic_table(
+        table,
+        artifact_name="cross_path_binned_error",
+    )
+
+
+def binned_error_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return binned cross-path error from a fetched NWB object."""
+    return _table_from_dynamic_table(
+        nwb_table,
+        artifact_name="cross_path_binned_error",
+    )
+
+
+def transfer_index_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the valid-transfer index to an NWB DynamicTable."""
+    return _table_to_dynamic_table(table, artifact_name="transfer_index")
+
+
+def transfer_index_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Return the valid-transfer index from a fetched NWB object."""
+    return _table_from_dynamic_table(nwb_table, artifact_name="transfer_index")
+
+
+def _transfer_key(value: Sequence[Any]) -> tuple[str, str, str]:
+    """Return one validated canonical transfer key."""
+    if len(value) != 3:
+        raise ValueError("Transfer keys must contain family, source, and target.")
+    key = tuple(str(component) for component in value)
+    expected = tuple(
+        (
+            str(spec["transfer_family"]),
+            str(spec["source_trajectory"]),
+            str(spec["target_trajectory"]),
+        )
+        for spec in TRANSFER_PAIR_SPECS
+    )
+    if key not in expected:
+        raise ValueError(f"Unknown path-progression transfer key {key!r}.")
+    return key
+
+
+def _transfer_spec_index(key: Sequence[Any]) -> int:
+    """Return the fixed zero-based index of one transfer key."""
+    canonical = _transfer_key(key)
+    keys = tuple(
+        (
+            str(spec["transfer_family"]),
+            str(spec["source_trajectory"]),
+            str(spec["target_trajectory"]),
+        )
+        for spec in TRANSFER_PAIR_SPECS
+    )
+    return keys.index(canonical)
+
+
+def transfer_object_names(key: Sequence[Any]) -> dict[str, str]:
+    """Return deterministic NWB object names for one transfer."""
+    index = _transfer_spec_index(key)
+    prefix = f"path_progression_decoding_transfer_{index:02d}"
+    return {
+        "true": f"{prefix}_true_progression",
+        "decoded": f"{prefix}_decoded_progression",
+        "support": f"{prefix}_support",
+    }
+
+
+def build_transfer_index_table(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return the deterministic in-file index of valid transfer objects."""
+    canonical = validate_decoding_comparison_result(result)
+    metrics = canonical["cross_path_metrics"]
+    rows = []
+    for spec_index, spec in enumerate(TRANSFER_PAIR_SPECS):
+        key = (
+            str(spec["transfer_family"]),
+            str(spec["source_trajectory"]),
+            str(spec["target_trajectory"]),
+        )
+        if key not in canonical["cross_path_outputs"]:
+            continue
+        metric = metrics.iloc[spec_index]
+        names = transfer_object_names(key)
+        rows.append(
+            {
+                "transfer_index": spec_index,
+                "transfer_family": key[0],
+                "source_trajectory": key[1],
+                "target_trajectory": key[2],
+                "flip_tuning_curve": bool(metric["flip_tuning_curve"]),
+                "coordinate_unit": str(metric["coordinate_unit"]),
+                "n_samples": int(metric["n_samples"]),
+                "true_object_name": names["true"],
+                "decoded_object_name": names["decoded"],
+                "support_object_name": names["support"],
+            }
+        )
+    return _canonical_nwb_table(
+        pd.DataFrame.from_records(rows, columns=list(TRANSFER_INDEX_COLUMNS)),
+        artifact_name="transfer_index",
+    )
+
+
+def transfer_progression_to_time_series(
+    tsd: Any,
+    *,
+    key: Sequence[Any],
+    role: str,
+) -> Any:
+    """Convert one true or decoded progression Tsd to NWB TimeSeries."""
+    from pynwb import TimeSeries
+
+    if role not in {"true", "decoded"}:
+        raise ValueError("Transfer TimeSeries role must be 'true' or 'decoded'.")
+    canonical_key = _transfer_key(key)
+    _validate_tsd(tsd, name=f"{canonical_key} {role}", decoded=role == "decoded")
+    return TimeSeries(
+        name=transfer_object_names(canonical_key)[role],
+        data=np.asarray(tsd.d, dtype=float).reshape(-1),
+        unit="normalized_path_progression",
+        timestamps=np.asarray(tsd.t, dtype=float).reshape(-1),
+        description=(
+            f"{role.capitalize()} normalized path progression for transfer "
+            f"{canonical_key!r}; v1ca1 NWB artifact schema "
+            f"{NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+    )
+
+
+def _support_bounds(intervals: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated ordered support bounds in seconds."""
+    starts = np.asarray(intervals.start, dtype=float).reshape(-1)
+    ends = np.asarray(intervals.end, dtype=float).reshape(-1)
+    if starts.shape != ends.shape or not np.all(np.isfinite(starts)) or (
+        not np.all(np.isfinite(ends))
+    ):
+        raise ValueError("Transfer support bounds must be aligned and finite.")
+    if np.any(ends < starts) or (
+        starts.size > 1 and np.any(starts[1:] < ends[:-1])
+    ):
+        raise ValueError("Transfer support intervals must be ordered and disjoint.")
+    return starts, ends
+
+
+def transfer_support_to_time_intervals(
+    true: Any,
+    decoded: Any,
+    *,
+    key: Sequence[Any],
+) -> Any:
+    """Return the native TimeIntervals support for one transfer pair."""
+    from pynwb.epoch import TimeIntervals
+
+    canonical_key = _transfer_key(key)
+    true_starts, true_ends = _support_bounds(true.time_support)
+    decoded_starts, decoded_ends = _support_bounds(decoded.time_support)
+    if not np.array_equal(true_starts, decoded_starts) or not np.array_equal(
+        true_ends,
+        decoded_ends,
+    ):
+        raise ValueError("True and decoded progressions must share time support.")
+    output = TimeIntervals(
+        name=transfer_object_names(canonical_key)["support"],
+        description=(
+            f"Shared true/decoded support for transfer {canonical_key!r} in "
+            "ephys-reference seconds; v1ca1 NWB artifact schema "
+            f"{NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+    )
+    for start, end in zip(true_starts, true_ends, strict=True):
+        output.add_interval(start_time=float(start), stop_time=float(end))
+    return output
+
+
+def _time_series_arrays(
+    nwb_series: Any,
+    *,
+    key: Sequence[Any],
+    role: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated timestamps and values from one transfer TimeSeries."""
+    from pynwb import TimeSeries
+
+    canonical_key = _transfer_key(key)
+    if role not in {"true", "decoded"}:
+        raise ValueError("Transfer TimeSeries role must be 'true' or 'decoded'.")
+    if not isinstance(nwb_series, TimeSeries):
+        raise TypeError("Transfer progression NWB objects must be TimeSeries.")
+    expected_name = transfer_object_names(canonical_key)[role]
+    if str(nwb_series.name) != expected_name:
+        raise ValueError(
+            f"Unexpected transfer TimeSeries name {nwb_series.name!r}; "
+            f"expected {expected_name!r}."
+        )
+    if str(nwb_series.unit) != "normalized_path_progression":
+        raise ValueError("Transfer TimeSeries must use normalized progression.")
+    if nwb_series.timestamps is None:
+        raise ValueError("Transfer TimeSeries must use explicit timestamps.")
+    times = np.asarray(nwb_series.timestamps[:], dtype=float).reshape(-1)
+    values = np.asarray(nwb_series.data[:], dtype=float).reshape(-1)
+    if times.shape != values.shape or not times.size:
+        raise ValueError("Transfer TimeSeries values and timestamps must align.")
+    if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0.0):
+        raise ValueError("Transfer TimeSeries timestamps must increase.")
+    if np.any(np.isinf(values)) or (
+        role == "decoded" and not np.all(np.isfinite(values))
+    ):
+        raise ValueError("Transfer TimeSeries values are invalid.")
+    return times, values
+
+
+def transfer_support_from_time_intervals(
+    nwb_intervals: Any,
+    *,
+    key: Sequence[Any],
+) -> Any:
+    """Return a seconds-based IntervalSet from fetched transfer support."""
+    from pynwb.epoch import TimeIntervals
+
+    canonical_key = _transfer_key(key)
+    if isinstance(nwb_intervals, pd.DataFrame):
+        table = nwb_intervals
+    elif isinstance(nwb_intervals, TimeIntervals):
+        expected_name = transfer_object_names(canonical_key)["support"]
+        if str(nwb_intervals.name) != expected_name:
+            raise ValueError(
+                f"Unexpected transfer support name {nwb_intervals.name!r}."
+            )
+        table = nwb_intervals.to_dataframe()
+    else:
+        raise TypeError("Transfer support must be TimeIntervals or DataFrame.")
+    if tuple(str(column) for column in table.columns) != (
+        "start_time",
+        "stop_time",
+    ):
+        raise ValueError("Transfer support has an invalid TimeIntervals schema.")
+    import pynapple as nap
+
+    support = nap.IntervalSet(
+        start=np.asarray(table["start_time"], dtype=float),
+        end=np.asarray(table["stop_time"], dtype=float),
+        time_units="s",
+    )
+    _support_bounds(support)
+    return support
+
+
+def transfer_output_from_nwb_objects(
+    *,
+    key: Sequence[Any],
+    true: Any,
+    decoded: Any,
+    support: Any,
+) -> dict[str, Any]:
+    """Reconstruct one true/decoded transfer output from NWB objects."""
+    canonical_key = _transfer_key(key)
+    interval_set = transfer_support_from_time_intervals(
+        support,
+        key=canonical_key,
+    )
+    import pynapple as nap
+
+    output = {}
+    for role, nwb_series in (("true", true), ("decoded", decoded)):
+        times, values = _time_series_arrays(
+            nwb_series,
+            key=canonical_key,
+            role=role,
+        )
+        output[role] = nap.Tsd(
+            t=times,
+            d=values,
+            time_support=interval_set,
+            time_units="s",
+        )
+    return output
+
+
+def _provenance_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return storage-independent scalar provenance for one result."""
+    canonical = validate_decoding_comparison_result(result)
+    return {
+        "metadata": dict(canonical["metadata"]),
+        "parameters": dict(canonical["parameters"]),
+        "n_units_input": int(canonical["n_units_input"]),
+        "n_units_eligible": int(canonical["n_units_eligible"]),
+        "n_transfer_pairs_expected": int(
+            canonical["n_transfer_pairs_expected"]
+        ),
+        "n_transfer_pairs_valid": int(canonical["n_transfer_pairs_valid"]),
+        "n_decoded_samples": int(canonical["n_decoded_samples"]),
+        "analysis_status": str(canonical["analysis_status"]),
+        "eligible_units_sha256": str(canonical["eligible_units_sha256"]),
+    }
+
+
+def decoding_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store one canonical JSON provenance record in a DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    from v1ca1.spyglass.selection import canonical_json
+
+    table = pd.DataFrame(
+        [
+            {
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+                "metadata_json": canonical_json(_provenance_payload(result)),
+            }
+        ],
+        columns=list(_NWB_PROVENANCE_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_PROVENANCE_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One provenance record for PathProgressionDecoding; "
+            f"v1ca1 NWB artifact schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": "artifact_schema_version",
+                "description": "v1ca1 NWB artifact schema version.",
+            },
+            {
+                "name": "metadata_json",
+                "description": "Canonical JSON result metadata and parameters.",
+            },
+        ],
+    )
+
+
+def _provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Return and validate scalar provenance from a fetched table."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != NWB_PROVENANCE_TABLE_NAME:
+            raise ValueError(
+                f"Unexpected decoding provenance name {nwb_table.name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Decoding provenance must be DynamicTable or DataFrame.")
+    if len(table) != 1 or set(table.columns) != set(_NWB_PROVENANCE_COLUMNS):
+        raise ValueError("Decoding provenance must contain one canonical row.")
+    version = _decoded_nwb_text(
+        table.iloc[0]["artifact_schema_version"],
+        name="artifact_schema_version",
+    )
+    if version != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("Path-progression NWB schema version is unsupported.")
+    payload_text = _decoded_nwb_text(
+        table.iloc[0]["metadata_json"],
+        name="metadata_json",
+    )
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Decoding provenance is not valid JSON.") from exc
+    expected = {
+        "metadata",
+        "parameters",
+        "n_units_input",
+        "n_units_eligible",
+        "n_transfer_pairs_expected",
+        "n_transfer_pairs_valid",
+        "n_decoded_samples",
+        "analysis_status",
+        "eligible_units_sha256",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected:
+        raise ValueError("Decoding provenance has an invalid schema.")
+    return dict(payload)
+
+
+def path_progression_decoding_result_from_nwb_objects(
+    *,
+    unit_eligibility: Any,
+    selected_units: Any,
+    decoding_summary: Any,
+    binned_error: Any,
+    transfer_index: Any,
+    provenance: Any,
+    transfer_objects: Mapping[tuple[str, str, str], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from fetched NWB objects."""
+    payload = _provenance_from_dynamic_table(provenance)
+    index_table = transfer_index_from_dynamic_table(transfer_index)
+    expected_keys = tuple(
+        (
+            str(row["transfer_family"]),
+            str(row["source_trajectory"]),
+            str(row["target_trajectory"]),
+        )
+        for _, row in index_table.iterrows()
+    )
+    observed_keys = tuple(_transfer_key(key) for key in transfer_objects)
+    if observed_keys != expected_keys:
+        raise ValueError("Fetched transfer objects do not match the transfer index.")
+    outputs = {
+        key: transfer_output_from_nwb_objects(
+            key=key,
+            true=transfer_objects[key]["true_progression"],
+            decoded=transfer_objects[key]["decoded_progression"],
+            support=transfer_objects[key]["decoding_support"],
+        )
+        for key in expected_keys
+    }
+    result = {
+        "metadata": dict(payload["metadata"]),
+        "parameters": dict(payload["parameters"]),
+        "unit_eligibility": unit_eligibility_from_dynamic_table(
+            unit_eligibility
+        ),
+        "selected_units": selected_units_from_dynamic_table(selected_units),
+        "cross_path_outputs": outputs,
+        "cross_path_metrics": decoding_summary_from_dynamic_table(
+            decoding_summary
+        ),
+        "cross_path_binned_error": binned_error_from_dynamic_table(
+            binned_error
+        ),
+        "n_units_input": int(payload["n_units_input"]),
+        "n_units_eligible": int(payload["n_units_eligible"]),
+        "n_transfer_pairs_expected": int(
+            payload["n_transfer_pairs_expected"]
+        ),
+        "n_transfer_pairs_valid": int(payload["n_transfer_pairs_valid"]),
+        "n_decoded_samples": int(payload["n_decoded_samples"]),
+        "analysis_status": str(payload["analysis_status"]),
+        "eligible_units_sha256": str(payload["eligible_units_sha256"]),
+    }
+    canonical = validate_decoding_comparison_result(result)
+    expected_index = build_transfer_index_table(canonical)
+    try:
+        pd.testing.assert_frame_equal(
+            index_table,
+            expected_index,
+            check_dtype=True,
+            check_exact=True,
+        )
+    except AssertionError as exc:
+        raise ValueError(
+            "Transfer index is inconsistent with decoded outputs."
+        ) from exc
+    return canonical
+
+
+def _normalized_records(
+    table: pd.DataFrame,
+    *,
+    artifact_name: str,
+) -> list[dict[str, Any]]:
+    """Return JSON-safe canonical records for logical hashing."""
+    canonical = _canonical_nwb_table(table, artifact_name=artifact_name)
+    records = []
+    for record in canonical.to_dict("records"):
+        normalized = {}
+        for column in _NWB_TABLE_COLUMNS[artifact_name]:
+            value = record[column]
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, float) and np.isnan(value):
+                value = None
+            normalized[column] = value
+        records.append(normalized)
+    return records
+
+
+def _table_sha256(table: pd.DataFrame, *, artifact_name: str) -> str:
+    """Digest one canonical table independently of NWB storage IDs."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "columns": list(_NWB_TABLE_COLUMNS[artifact_name]),
+            "records": _normalized_records(table, artifact_name=artifact_name),
+        }
+    )
+
+
+def unit_eligibility_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete unit-eligibility table."""
+    return _table_sha256(table, artifact_name="unit_eligibility")
+
+
+def selected_units_table_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete selected-unit table."""
+    return _table_sha256(table, artifact_name="selected_units")
+
+
+def decoding_summary_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete transfer-summary table."""
+    return _table_sha256(table, artifact_name="decoding_summary")
+
+
+def binned_error_sha256(table: pd.DataFrame) -> str:
+    """Digest the complete binned-error table."""
+    return _table_sha256(table, artifact_name="cross_path_binned_error")
+
+
+def transfer_index_sha256(table: pd.DataFrame) -> str:
+    """Digest the storage-independent valid-transfer index."""
+    return _table_sha256(table, artifact_name="transfer_index")
+
+
+def _nan_safe_float_list(values: Any) -> list[float | None]:
+    """Return one JSON-safe float list preserving NaN positions."""
+    return [
+        None if np.isnan(value) else float(value)
+        for value in np.asarray(values, dtype=float).reshape(-1)
+    ]
+
+
+def transfer_progression_sha256(
+    tsd: Any,
+    *,
+    key: Sequence[Any],
+    role: str,
+) -> str:
+    """Digest one transfer TimeSeries independently of object IDs."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    if role not in {"true", "decoded"}:
+        raise ValueError("Transfer hash role must be 'true' or 'decoded'.")
+    canonical_key = _transfer_key(key)
+    _validate_tsd(tsd, name=f"{canonical_key} {role}", decoded=role == "decoded")
+    return provenance_sha256(
+        {
+            "transfer_key": list(canonical_key),
+            "role": role,
+            "timestamps_s": np.asarray(tsd.t, dtype=float).reshape(-1).tolist(),
+            "normalized_path_progression": _nan_safe_float_list(tsd.d),
+        }
+    )
+
+
+def transfer_support_sha256(
+    true: Any,
+    decoded: Any,
+    *,
+    key: Sequence[Any],
+) -> str:
+    """Digest one transfer's exact shared support bounds."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical_key = _transfer_key(key)
+    true_starts, true_ends = _support_bounds(true.time_support)
+    decoded_starts, decoded_ends = _support_bounds(decoded.time_support)
+    if not np.array_equal(true_starts, decoded_starts) or not np.array_equal(
+        true_ends,
+        decoded_ends,
+    ):
+        raise ValueError("True and decoded progressions must share time support.")
+    return provenance_sha256(
+        {
+            "transfer_key": list(canonical_key),
+            "start_time_s": true_starts.tolist(),
+            "stop_time_s": true_ends.tolist(),
+        }
+    )
+
+
+def decoding_provenance_sha256(result: Mapping[str, Any]) -> str:
+    """Digest the scalar result provenance stored in NWB."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(_provenance_payload(result))
+
+
 def _file_sha256(path: Path) -> str:
     """Return the SHA-256 digest of one file."""
     digest = hashlib.sha256()
@@ -2244,18 +3108,52 @@ __all__ = [
     "MANIFEST_FILENAME",
     "MANUSCRIPT_PARAMETERS",
     "METRIC_COLUMNS",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_BINNED_ERROR_TABLE_NAME",
+    "NWB_PROVENANCE_TABLE_NAME",
+    "NWB_SELECTED_UNITS_TABLE_NAME",
+    "NWB_SUMMARY_TABLE_NAME",
+    "NWB_TRANSFER_INDEX_TABLE_NAME",
+    "NWB_UNIT_ELIGIBILITY_TABLE_NAME",
     "TRANSFER_QC_STATUSES",
+    "TRANSFER_INDEX_COLUMNS",
     "TRANSFER_PAIR_SPECS",
     "TRANSFER_SPEC_SHA256",
+    "binned_error_from_dynamic_table",
+    "binned_error_sha256",
+    "binned_error_to_dynamic_table",
     "build_cross_path_transfer_specs",
     "build_symmetric_cohort_eligibility_table",
+    "build_transfer_index_table",
     "compute_path_progression_decoding",
+    "decoding_provenance_sha256",
+    "decoding_provenance_to_dynamic_table",
+    "decoding_summary_from_dynamic_table",
+    "decoding_summary_sha256",
+    "decoding_summary_to_dynamic_table",
     "get_decoding_artifact_paths",
     "get_decoding_comparison_artifact_path",
     "get_shared_eligible_stable_unit_ids",
     "load_decoding_artifact_bundle",
     "load_decoding_comparison_artifact",
+    "path_progression_decoding_result_from_nwb_objects",
+    "selected_units_from_dynamic_table",
+    "selected_units_table_sha256",
+    "selected_units_to_dynamic_table",
     "summarize_decoding_artifact_bundle",
+    "transfer_index_from_dynamic_table",
+    "transfer_index_sha256",
+    "transfer_index_to_dynamic_table",
+    "transfer_object_names",
+    "transfer_output_from_nwb_objects",
+    "transfer_progression_sha256",
+    "transfer_progression_to_time_series",
+    "transfer_support_from_time_intervals",
+    "transfer_support_sha256",
+    "transfer_support_to_time_intervals",
+    "unit_eligibility_from_dynamic_table",
+    "unit_eligibility_sha256",
+    "unit_eligibility_to_dynamic_table",
     "validate_decoding_comparison_result",
     "validate_decoding_parameters",
     "write_decoding_artifact_bundle",

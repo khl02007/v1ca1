@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -478,6 +479,64 @@ def test_bundle_round_trip_is_compact_immutable_and_checksummed(
         stream.write(b"corrupt")
     with pytest.raises(ValueError, match="checksum mismatch"):
         module.load_cv_pca_artifact(directory)
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_nwb_objects_round_trip_valid_and_terminal_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminal: bool,
+) -> None:
+    """All seven scratch objects survive a real NWB HDF5 round-trip."""
+    from pynwb import NWBFile, NWBHDF5IO, validate
+
+    if terminal:
+        inputs = _inputs()
+        inputs.update(
+            spikes={},
+            stable_unit_ids=[],
+            light_movement_firing_rate_hz=[],
+            dark_movement_firing_rate_hz=[],
+        )
+        result = module.compute_cv_pca(**inputs)
+    else:
+        result = _compute(monkeypatch)
+    objects = module.cv_pca_result_to_nwb_objects(result)
+    assert set(objects) == {
+        "selected_units",
+        "lap_assignments",
+        "trajectory_qc",
+        "summary",
+        "spectrum",
+        "dataset",
+        "provenance",
+    }
+    assert len({value.object_id for value in objects.values()}) == 7
+
+    nwbfile = NWBFile(
+        session_description="cvPCA NWB round-trip",
+        identifier=f"cv-pca-{terminal}",
+        session_start_time=datetime.now(timezone.utc),
+    )
+    for value in objects.values():
+        nwbfile.add_scratch(value)
+    path = tmp_path / f"cv_pca_{terminal}.nwb"
+    with NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+    assert validate(path=path) == []
+
+    with NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = module.cv_pca_result_from_nwb_objects(
+            **{
+                name: stored.objects[value.object_id]
+                for name, value in objects.items()
+            }
+        )
+    assert loaded["analysis_status"] == result["analysis_status"]
+    assert module.cv_pca_nwb_hashes(loaded) == module.cv_pca_nwb_hashes(
+        result
+    )
 
 
 def test_final_reload_failure_removes_new_bundle(

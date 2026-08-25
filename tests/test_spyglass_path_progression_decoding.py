@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -741,3 +742,347 @@ def test_artifact_bundle_roundtrip_refuses_overwrite_and_detects_tamper(
         stream.write(b"tampered")
     with pytest.raises(ValueError, match="checksum mismatch"):
         decoding.load_decoding_artifact_bundle(paths["artifact_manifest_path"])
+
+
+def test_analysis_nwb_roundtrip_preserves_all_transfer_objects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """NWB tables and per-transfer streams reconstruct the exact result."""
+    from pynwb import NWBHDF5IO, NWBFile
+
+    result, _ = _compute(monkeypatch, different_time_grids=True)
+    fixed_objects = {
+        "unit_eligibility": decoding.unit_eligibility_to_dynamic_table(
+            result["unit_eligibility"]
+        ),
+        "selected_units": decoding.selected_units_to_dynamic_table(
+            result["selected_units"]
+        ),
+        "decoding_summary": decoding.decoding_summary_to_dynamic_table(
+            result["cross_path_metrics"]
+        ),
+        "binned_error": decoding.binned_error_to_dynamic_table(
+            result["cross_path_binned_error"]
+        ),
+        "transfer_index": decoding.transfer_index_to_dynamic_table(
+            decoding.build_transfer_index_table(result)
+        ),
+        "provenance": decoding.decoding_provenance_to_dynamic_table(result),
+    }
+    nwbfile = NWBFile(
+        session_description="PathProgressionDecoding NWB roundtrip",
+        identifier="path-progression-decoding-test",
+        session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    fixed_ids = {}
+    for name, nwb_object in fixed_objects.items():
+        nwbfile.add_scratch(nwb_object)
+        fixed_ids[name] = str(nwb_object.object_id)
+    transfer_ids = {}
+    for key, output in result["cross_path_outputs"].items():
+        true = decoding.transfer_progression_to_time_series(
+            output["true"], key=key, role="true"
+        )
+        decoded = decoding.transfer_progression_to_time_series(
+            output["decoded"], key=key, role="decoded"
+        )
+        support = decoding.transfer_support_to_time_intervals(
+            output["true"], output["decoded"], key=key
+        )
+        nwbfile.add_scratch(true)
+        nwbfile.add_scratch(decoded)
+        nwbfile.add_time_intervals(support)
+        transfer_ids[key] = {
+            "true_progression": str(true.object_id),
+            "decoded_progression": str(decoded.object_id),
+            "decoding_support": str(support.object_id),
+        }
+    output_path = tmp_path / "path_progression_decoding.nwb"
+    with NWBHDF5IO(str(output_path), mode="w") as io:
+        io.write(nwbfile)
+    assert not __import__("pynwb").validate(path=output_path)
+
+    with NWBHDF5IO(str(output_path), mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        loaded = decoding.path_progression_decoding_result_from_nwb_objects(
+            unit_eligibility=stored.objects[fixed_ids["unit_eligibility"]],
+            selected_units=stored.objects[fixed_ids["selected_units"]],
+            decoding_summary=stored.objects[fixed_ids["decoding_summary"]],
+            binned_error=stored.objects[fixed_ids["binned_error"]],
+            transfer_index=stored.objects[fixed_ids["transfer_index"]],
+            provenance=stored.objects[fixed_ids["provenance"]],
+            transfer_objects={
+                key: {
+                    role: stored.objects[object_id]
+                    for role, object_id in role_ids.items()
+                }
+                for key, role_ids in transfer_ids.items()
+            },
+        )
+    pd.testing.assert_frame_equal(
+        loaded["unit_eligibility"],
+        decoding.unit_eligibility_from_dynamic_table(
+            fixed_objects["unit_eligibility"]
+        ),
+    )
+    assert tuple(loaded["cross_path_outputs"]) == tuple(
+        result["cross_path_outputs"]
+    )
+    first_key = next(iter(result["cross_path_outputs"]))
+    assert not np.array_equal(
+        loaded["cross_path_outputs"][first_key]["true"].t,
+        loaded["cross_path_outputs"][first_key]["decoded"].t,
+    )
+    assert decoding.decoding_provenance_sha256(loaded) == (
+        decoding.decoding_provenance_sha256(result)
+    )
+
+
+def test_empty_nwb_tables_roundtrip_for_no_valid_decodes(monkeypatch) -> None:
+    """Terminal results retain typed empty selected/binned/index tables."""
+    result, _ = _compute(
+        monkeypatch,
+        failure_policy=lambda _spec: (_ for _ in ()).throw(
+            decoding.TransferSupportError("no_target_movement", "missing")
+        ),
+    )
+    assert result["analysis_status"] == "no_valid_decodes"
+    for table, to_nwb, from_nwb in (
+        (
+            result["cross_path_binned_error"],
+            decoding.binned_error_to_dynamic_table,
+            decoding.binned_error_from_dynamic_table,
+        ),
+        (
+            decoding.build_transfer_index_table(result),
+            decoding.transfer_index_to_dynamic_table,
+            decoding.transfer_index_from_dynamic_table,
+        ),
+    ):
+        restored = from_nwb(to_nwb(table))
+        pd.testing.assert_frame_equal(restored, table, check_dtype=False)
+
+
+def test_live_loader_uses_parent_and_transfer_fetch_nwb(monkeypatch) -> None:
+    """The live loader resolves fixed and variable objects via fetch_nwb."""
+    from v1ca1.spyglass import tables
+
+    result, _ = _compute(monkeypatch, different_time_grids=True)
+    transfer_index = decoding.build_transfer_index_table(result)
+    parent_record = {
+        "unit_eligibility": decoding.unit_eligibility_to_dynamic_table(
+            result["unit_eligibility"]
+        ).to_dataframe(),
+        "selected_units": decoding.selected_units_to_dynamic_table(
+            result["selected_units"]
+        ).to_dataframe(),
+        "decoding_summary": decoding.decoding_summary_to_dynamic_table(
+            result["cross_path_metrics"]
+        ).to_dataframe(),
+        "cross_path_binned_error": decoding.binned_error_to_dynamic_table(
+            result["cross_path_binned_error"]
+        ).to_dataframe(),
+        "transfer_index": decoding.transfer_index_to_dynamic_table(
+            transfer_index
+        ).to_dataframe(),
+        "decoding_provenance": decoding.decoding_provenance_to_dynamic_table(
+            result
+        ).to_dataframe(),
+    }
+    transfer_hashes = tables._path_progression_transfer_hashes(result)
+    transfer_records = []
+    for key, output in result["cross_path_outputs"].items():
+        transfer_records.append(
+            {
+                "transfer_family": key[0],
+                "source_trajectory": key[1],
+                "target_trajectory": key[2],
+                "true_progression": decoding.transfer_progression_to_time_series(
+                    output["true"], key=key, role="true"
+                ),
+                "decoded_progression": (
+                    decoding.transfer_progression_to_time_series(
+                        output["decoded"], key=key, role="decoded"
+                    )
+                ),
+                "decoding_support": (
+                    decoding.transfer_support_to_time_intervals(
+                        output["true"], output["decoded"], key=key
+                    ).to_dataframe()
+                ),
+                **transfer_hashes[key],
+                "n_samples": len(output["decoded"]),
+            }
+        )
+
+    class FetchRelation:
+        def __init__(self, records):
+            self.records = records
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return self.records
+
+    parent_relation = FetchRelation([parent_record])
+    transfer_relation = FetchRelation(list(reversed(transfer_records)))
+    metadata = result["metadata"]
+    result_row = {
+        "path_progression_decoding_id": metadata[
+            "path_progression_decoding_id"
+        ],
+        "artifact_schema_version": decoding.NWB_ARTIFACT_SCHEMA_VERSION,
+        **tables._path_progression_decoding_hashes(result),
+        **{
+            name: result[name]
+            for name in (
+                "n_units_input",
+                "n_units_eligible",
+                "n_transfer_pairs_expected",
+                "n_transfer_pairs_valid",
+                "n_decoded_samples",
+                "analysis_status",
+                "eligible_units_sha256",
+            )
+        },
+    }
+    selection_row = {
+        "path_progression_decoding_id": metadata[
+            "path_progression_decoding_id"
+        ],
+        "epoch": metadata["epoch"],
+        "cohort_epoch": metadata["cohort_epoch"],
+        "path_progression_decoding_param_name": metadata["parameter_name"],
+        "path_progression_decoding_parameters_sha256": metadata[
+            "parameter_sha256"
+        ],
+        "eligibility_rule_sha256": metadata["eligibility_rule_sha256"],
+        "transfer_spec_sha256": metadata["transfer_spec_sha256"],
+        "decoding_output_rule_sha256": metadata[
+            "decoding_output_rule_sha256"
+        ],
+    }
+    loaded = tables._load_path_progression_decoding_result(
+        result_row=result_row,
+        decoding_table=parent_relation,
+        transfer_table=transfer_relation,
+        selection_row=selection_row,
+        parameters_row={
+            "path_progression_decoding_param_name": metadata[
+                "parameter_name"
+            ]
+        },
+        region_row={"region_name": metadata["region"]},
+        animal_name=metadata["animal_name"],
+        date=metadata["date"],
+    )
+    assert tuple(loaded["cross_path_outputs"]) == tuple(
+        result["cross_path_outputs"]
+    )
+    assert parent_relation.keys == [
+        {
+            "path_progression_decoding_id": metadata[
+                "path_progression_decoding_id"
+            ]
+        }
+    ]
+    assert transfer_relation.keys == parent_relation.keys
+
+    with pytest.raises(ValueError, match="object hash mismatch"):
+        tables._load_path_progression_decoding_result(
+            result_row={**result_row, "decoding_summary_sha256": "0" * 64},
+            decoding_table=parent_relation,
+            transfer_table=transfer_relation,
+            selection_row=selection_row,
+            parameters_row={
+                "path_progression_decoding_param_name": metadata[
+                    "parameter_name"
+                ]
+            },
+            region_row={"region_name": metadata["region"]},
+            animal_name=metadata["animal_name"],
+            date=metadata["date"],
+        )
+
+
+def test_live_writer_creates_one_verified_analysis_nwb(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The live writer stores fixed tables and all valid transfer triples."""
+    from pynwb import NWBHDF5IO, NWBFile
+
+    from v1ca1.spyglass import tables
+
+    result, _ = _compute(monkeypatch, different_time_grids=True)
+    analysis_path = tmp_path / "path-progression-analysis.nwb"
+
+    class Builder:
+        def __init__(self):
+            self.analysis_file_name = analysis_path.name
+            self.nwbfile = NWBFile(
+                session_description="PathProgressionDecoding writer test",
+                identifier="path-progression-writer-test",
+                session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            )
+            self.registered = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.registered = exc_type is None
+            return False
+
+        def get_path(self):
+            return str(analysis_path)
+
+        @property
+        def open_nwb(self):
+            return None, self.nwbfile
+
+        def add_nwb_object(self, nwb_object):
+            self.nwbfile.add_scratch(nwb_object)
+            return str(nwb_object.object_id)
+
+        def close_and_write(self):
+            with NWBHDF5IO(str(analysis_path), mode="w") as io:
+                io.write(self.nwbfile)
+
+    class AnalysisTable:
+        def __init__(self):
+            self.builder = Builder()
+
+        def build(self, nwb_file_name):
+            assert nwb_file_name == "L1420240611_.nwb"
+            return self.builder
+
+    analysis_table = AnalysisTable()
+    row = tables._write_path_progression_decoding_nwb(
+        nwb_file_name="L1420240611_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
+    )
+    assert analysis_table.builder.registered
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == decoding.NWB_ARTIFACT_SCHEMA_VERSION
+    assert len(row["_transfer_rows"]) == 16
+    assert len(
+        {
+            object_id
+            for transfer in row["_transfer_rows"]
+            for object_id in (
+                transfer["true_progression_object_id"],
+                transfer["decoded_progression_object_id"],
+                transfer["decoding_support_object_id"],
+            )
+        }
+    ) == 48
+    with NWBHDF5IO(str(analysis_path), mode="r", load_namespaces=True) as io:
+        stored = io.read()
+        assert len(stored.intervals) == 16
+        assert len(stored.scratch) == 38

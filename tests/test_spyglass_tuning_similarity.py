@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -273,6 +274,78 @@ def test_compute_retains_all_units_four_direct_rows_qc_and_movement_rate() -> No
     assert constant["similarity_status"].eq("nonfinite_similarity").all()
     assert constant["n_paired_finite_bins"].eq(4).all()
     assert not table["comparison_label"].astype(str).str.startswith("pooled").any()
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_tuning_similarity_dynamic_table_roundtrip_is_valid_nwb(
+    tmp_path: Path,
+    empty: bool,
+) -> None:
+    """Valid and empty similarity tables survive a real NWB HDF5 roundtrip."""
+    from pynwb import NWBHDF5IO, NWBFile, validate
+
+    source = (
+        tuning_similarity.empty_tuning_similarity_table()
+        if empty
+        else _computed_table()
+    )
+    dynamic_table = tuning_similarity.tuning_similarity_table_to_dynamic_table(
+        source
+    )
+    object_id = str(dynamic_table.object_id)
+    nwbfile = NWBFile(
+        session_description="PathSpecificPlaceTuningSimilarity storage test",
+        identifier=f"tuning-similarity-storage-{empty}",
+        session_start_time=datetime(2024, 6, 11, tzinfo=timezone.utc),
+    )
+    nwbfile.add_scratch(dynamic_table)
+    path = tmp_path / f"tuning-similarity-{empty}.nwb"
+    with NWBHDF5IO(path, mode="w") as io:
+        io.write(nwbfile)
+
+    assert validate(path=path) == []
+    with NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
+        stored = io.read().objects[object_id]
+        roundtrip = (
+            tuning_similarity.tuning_similarity_table_from_dynamic_table(
+                stored
+            )
+        )
+        fetched_roundtrip = (
+            tuning_similarity.tuning_similarity_table_from_dynamic_table(
+                stored.to_dataframe()
+            )
+        )
+
+    pd.testing.assert_frame_equal(roundtrip, source, check_dtype=False)
+    pd.testing.assert_frame_equal(
+        fetched_roundtrip,
+        source,
+        check_dtype=False,
+    )
+    assert tuning_similarity.tuning_similarity_table_sha256(roundtrip) == (
+        tuning_similarity.tuning_similarity_table_sha256(source)
+    )
+
+
+def test_tuning_similarity_semantic_hash_covers_scores_not_dataframe_index() -> None:
+    table = _computed_table()
+    baseline = tuning_similarity.tuning_similarity_table_sha256(table)
+    reindexed = table.copy()
+    reindexed.index = np.arange(10, 10 + len(reindexed))
+    assert tuning_similarity.tuning_similarity_table_sha256(reindexed) == baseline
+
+    changed = table.copy()
+    changed.loc[0, "similarity"] = 0.5
+    assert tuning_similarity.tuning_similarity_table_sha256(changed) != baseline
+
+
+def test_tuning_similarity_dynamic_table_rejects_nonboolean_flip() -> None:
+    table = _computed_table()
+    table["flip_trajectory_b"] = table["flip_trajectory_b"].astype(int)
+
+    with pytest.raises(TypeError, match="boolean"):
+        tuning_similarity.tuning_similarity_table_to_dynamic_table(table)
 
 
 @pytest.mark.parametrize(

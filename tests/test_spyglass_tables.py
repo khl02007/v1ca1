@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -37,7 +37,18 @@ from v1ca1.spyglass.tables import (
     _legacy_ripple_cross_region_xcorr_identity_resolver,
     _legacy_swap_glm_unit_identity_resolver,
     _legacy_swap_tuning_curve_comparison_unit_identity_resolver,
+    _load_cv_pca_result,
+    _load_dpp_encoding_result,
+    _load_dpp_tuning_curve_result,
+    _load_path_progression_decoding_result,
+    _load_path_specific_place_decoding_result,
+    _load_path_specific_place_tuning_curve_result,
+    _load_ripple_modulation_result,
+    _load_ripple_cross_region_xcorr_result,
+    _load_swap_tuning_curve_comparison_result,
+    _load_path_specific_place_tuning_similarity_result,
     _load_tuning_similarity_inputs,
+    _load_path_specific_place_stability_result,
     _make_dpp_encoding_row,
     _make_dpp_tuning_curve_row,
     _make_movement_firing_rate_row,
@@ -78,6 +89,9 @@ from v1ca1.spyglass.tables import (
     _validate_path_progression_decoding_artifact_link,
     _validate_path_specific_place_decoding_artifact_link,
     _validate_ripple_provenance,
+    _write_dpp_tuning_curve_nwb,
+    _write_path_progression_decoding_nwb,
+    _write_path_specific_place_decoding_nwb,
     _validate_ripple_glm_parameter_row,
     _validate_ripple_cross_region_xcorr_parameter_row,
     _validate_cv_pca_artifact_link,
@@ -87,6 +101,12 @@ from v1ca1.spyglass.tables import (
     _validate_swap_tuning_curve_comparison_artifact_link,
     _validate_swap_tuning_curve_comparison_parameter_row,
     _validate_swap_tuning_curve_comparison_upstream_link,
+    _write_path_specific_place_tuning_similarity_nwb,
+    _write_path_specific_place_tuning_curve_nwb,
+    _write_path_specific_place_stability_nwb,
+    _write_dpp_encoding_nwb,
+    _write_ripple_modulation_nwb,
+    _write_ripple_cross_region_xcorr_nwb,
 )
 from v1ca1.spyglass.spikes import _sorting_output_sessions
 
@@ -112,6 +132,10 @@ class _FakeManual(_FakeTable):
 
 
 class _FakeComputed(_FakeTable):
+    pass
+
+
+class _FakePart(_FakeTable):
     pass
 
 
@@ -173,6 +197,78 @@ class _FakeRowsRelation:
         return _FakeRelation(matches[0])
 
 
+class _TestAnalysisFileBuilder:
+    """Small real-HDF5 stand-in for Spyglass's analysis-file builder."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.analysis_file_name = path.name
+        self.registered = False
+        self._open_io = None
+        self._open_nwb = None
+
+    def __enter__(self):
+        from pynwb import NWBHDF5IO, NWBFile
+
+        nwbfile = NWBFile(
+            session_description="MovementFiringRate table test",
+            identifier="movement-table-test",
+            session_start_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        )
+        with NWBHDF5IO(str(self.path), mode="w") as io:
+            io.write(nwbfile)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._open_io is not None:
+            self._open_io.close()
+            self._open_io = None
+            self._open_nwb = None
+        if exc_type is None:
+            self.registered = True
+        return False
+
+    def get_path(self) -> str:
+        return str(self.path)
+
+    @property
+    def open_nwb(self):
+        from pynwb import NWBHDF5IO
+
+        if self._open_io is None:
+            self._open_io = NWBHDF5IO(
+                str(self.path),
+                mode="a",
+                load_namespaces=True,
+            )
+            self._open_nwb = self._open_io.read()
+        return self._open_io, self._open_nwb
+
+    def add_nwb_object(self, nwb_object) -> str:
+        nwbfile = self.open_nwb[1]
+        nwbfile.add_scratch(nwb_object)
+        return str(nwb_object.object_id)
+
+    def close_and_write(self) -> None:
+        if self._open_io is None:
+            return
+        self._open_io.write(self._open_nwb)
+        self._open_io.close()
+        self._open_io = None
+        self._open_nwb = None
+
+
+class _TestAnalysisNwbfile:
+    """Capture one analysis-file builder without touching DataJoint."""
+
+    def __init__(self, path: Path):
+        self.builder = _TestAnalysisFileBuilder(path)
+
+    def build(self, nwb_file_name: str) -> _TestAnalysisFileBuilder:
+        assert nwb_file_name == "L1420240102_.nwb"
+        return self.builder
+
+
 class _FakeGroupUnits:
     def __init__(self, merge_ids):
         self.merge_ids = list(merge_ids)
@@ -230,7 +326,11 @@ def _fake_bundle(*, runtime_hooks=None):
             "exclude_labels": [],
         }
     )
-    fake_dj = SimpleNamespace(Manual=_FakeManual, Computed=_FakeComputed)
+    fake_dj = SimpleNamespace(
+        Manual=_FakeManual,
+        Computed=_FakeComputed,
+        Part=_FakePart,
+    )
     bundle = _construct_tables(
         dj_module=fake_dj,
         session_table=session,
@@ -296,6 +396,448 @@ def _movement_selection_key() -> dict[str, Any]:
             "61111111-1111-5111-8111-111111111111"
         ),
     }
+
+
+def _valid_ripple_modulation_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return one canonical RippleModulation table pair for NWB tests."""
+    from v1ca1.spyglass import ripple_modulation
+
+    common = {
+        "animal_name": "L14",
+        "date": "20240102",
+        "epoch": "02_r1",
+        "region": "ca1",
+        "unit_id": "11",
+        "n_ripples": 3,
+        "bin_size_s": 0.1,
+        "time_before_s": 0.2,
+        "time_after_s": 0.2,
+        "group_unit_id": 10,
+        "spikesorting_merge_id": "merge-a",
+        "stable_unit_id": "merge-a:11",
+    }
+    summary = pd.DataFrame.from_records(
+        [
+            {
+                **common,
+                "baseline_mean_hz": 1.0,
+                "baseline_std_hz": 0.5,
+                "response_mean_hz": 1.5,
+                "ripple_modulation_index": 0.2,
+                "response_zscore": 1.0,
+                "invalid_reason": None,
+            }
+        ],
+        columns=ripple_modulation.SUMMARY_TABLE_COLUMNS,
+    )
+    peri = pd.DataFrame.from_records(
+        [
+            {
+                **common,
+                "time_s": time_s,
+                "mean_rate_hz": mean_rate_hz,
+            }
+            for time_s, mean_rate_hz in zip(
+                (-0.15, -0.05, 0.05, 0.15),
+                (1.0, 1.0, 1.5, 1.5),
+                strict=True,
+            )
+        ],
+        columns=ripple_modulation.PERI_RIPPLE_FIRING_RATE_TABLE_COLUMNS,
+    )
+    return ripple_modulation.validate_ripple_modulation_tables(summary, peri)
+
+
+def _valid_epoch_motor_behavior_result() -> dict[str, Any]:
+    """Return one canonical terminal motor result for NWB lifecycle tests."""
+    from v1ca1.helper.session import TRAJECTORY_TYPES
+    from v1ca1.spyglass import epoch_motor_behavior
+
+    result_id = uuid.UUID("73333333-3333-5333-8333-333333333333")
+    variables = tuple(epoch_motor_behavior._motor_module().MOTOR_VARIABLES)
+    distribution = pd.DataFrame.from_records(
+        [
+            {
+                "epoch": "02_r1",
+                "variable": variable,
+                "sample_count": 0,
+                "movement_duration_s": 0.0,
+                "mean": np.nan,
+                "median": np.nan,
+                "std": np.nan,
+                "p10": np.nan,
+                "p90": np.nan,
+                "circular_mean_deg": np.nan,
+                "resultant_length": np.nan,
+            }
+            for variable in variables
+        ],
+        columns=epoch_motor_behavior.DISTRIBUTION_COLUMNS,
+    )
+    progression = pd.DataFrame(
+        columns=epoch_motor_behavior.PROGRESSION_COLUMNS
+    )
+    trajectory_qc = pd.DataFrame.from_records(
+        [
+            {
+                "epoch_motor_behavior_id": str(result_id),
+                "animal_name": "L14",
+                "date": "20240102",
+                "epoch": "02_r1",
+                "trajectory_type": trajectory_type,
+                "trajectory_interval_count": 0,
+                "trajectory_interval_duration_s": 0.0,
+                "movement_supported_duration_s": 0.0,
+                "movement_supported_sample_count": 0,
+                "finite_progression_sample_count": 0,
+                "occupied_progression_bin_count": 0,
+                "graph_length_cm": 100.0,
+                "trajectory_status": "no_valid_position",
+            }
+            for trajectory_type in TRAJECTORY_TYPES
+        ],
+        columns=epoch_motor_behavior.TRAJECTORY_QC_COLUMNS,
+    )
+    parameters = epoch_motor_behavior._parameter_snapshot(
+        parameter_name="manuscript_4cm",
+        parameters=epoch_motor_behavior.validate_epoch_motor_behavior_parameters(),
+        parameter_sha256=None,
+        output_rule_sha256=None,
+    )
+    movement = epoch_motor_behavior.validate_movement_parameter_snapshot()
+    return epoch_motor_behavior.validate_epoch_motor_behavior_result(
+        {
+            "metadata": {
+                "epoch_motor_behavior_id": str(result_id),
+                "animal_name": "L14",
+                "date": "20240102",
+                "epoch": "02_r1",
+                "epoch_type": "run",
+                "primary_position_source": "head_position",
+                "primary_position_role": "translation_anchor",
+                "orientation_reference_position_source": "body_position",
+                "orientation_reference_position_role": "orientation_reference",
+                "position_offset_samples": 0,
+            },
+            "parameters": parameters,
+            "movement_parameters": movement,
+            "distribution_summary": distribution,
+            "progression_summary": progression,
+            "trajectory_qc": trajectory_qc,
+            "n_position_samples_input": 20,
+            "n_finite_position_samples": 0,
+            "n_dropped_nonfinite_samples": 20,
+            "n_movement_samples": 0,
+            "movement_duration_s": 0.0,
+            "n_supported_trajectories": 0,
+            "sampling_rate_hz": np.nan,
+            "median_sample_interval_s": np.nan,
+            "maximum_sample_gap_s": np.nan,
+            "analysis_status": "no_valid_position",
+            "artifact_origin": "computed",
+            "legacy_artifact_provenance": None,
+        }
+    )
+
+
+def _valid_tuning_similarity_table() -> pd.DataFrame:
+    """Return one canonical four-comparison similarity table."""
+    from v1ca1.spyglass import tuning_similarity
+
+    rows = []
+    for spec in tuning_similarity.DIRECT_COMPARISON_SPECS:
+        rows.append(
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "11",
+                "stable_unit_id": "merge-a:11",
+                "group_unit_id": "curve-unit-a",
+                "animal_name": "L14",
+                "date": "20240102",
+                "region": "ca1",
+                "epoch": "02_r1",
+                "similarity_metric": "correlation",
+                "comparison_family": spec["comparison_family"],
+                "comparison_label": spec["comparison_label"],
+                "side": spec["side"],
+                "trajectory_a": spec["trajectory_a"],
+                "trajectory_b": spec["trajectory_b"],
+                "flip_trajectory_b": spec["flip_trajectory_b"],
+                "movement_firing_rate_hz": 1.5,
+                "similarity": 0.5,
+                "n_trajectory_a_finite_bins": 5,
+                "n_trajectory_b_finite_bins": 5,
+                "n_paired_finite_bins": 5,
+                "similarity_status": "valid",
+            }
+        )
+    table = pd.DataFrame.from_records(
+        rows,
+        columns=tuning_similarity.TABLE_COLUMNS,
+    )
+    return tuning_similarity.validate_tuning_similarity_table(table)
+
+
+def _valid_path_specific_place_curve() -> tuple[Any, dict[str, Any]]:
+    """Return one canonical curve with its complete live selection identity."""
+    import xarray as xr
+
+    from v1ca1.spyglass import path_specific_place
+
+    curve_id = uuid.UUID("73333333-3333-5333-8333-333333333333")
+    movement_id = uuid.UUID("74444444-4444-5444-8444-444444444444")
+    legacy = xr.DataArray(
+        np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+        dims=("unit", "linpos"),
+        coords={"unit": [11, 22], "linpos": [2.5, 7.5]},
+        name="firing_rate_hz",
+        attrs={
+            "animal_name": "L14",
+            "date": "20240102",
+            "region": "ca1",
+            "epoch": "02_r1",
+            "trajectory_type": "center_to_left",
+            "model_name": "place",
+            "bin_edges": "[[0.0,5.0,10.0]]",
+        },
+    )
+    curve = path_specific_place.normalize_legacy_all_trial_tuning_curve(
+        legacy,
+        unit_identity_resolver={
+            11: {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "11",
+                "group_unit_id": 0,
+                "sorting_unit_id": 11,
+            },
+            22: {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "22",
+                "group_unit_id": 1,
+                "sorting_unit_id": 22,
+            },
+        },
+        animal_name="L14",
+        date="20240102",
+        region="ca1",
+        epoch="02_r1",
+        trajectory_type="center_to_left",
+        graph_length_cm=10.0,
+        n_trials=3,
+        support_duration_s=2.4,
+        n_feature_samples=24,
+        n_valid_position_samples=20,
+        bin_count=2,
+    )
+    selected_units_sha256 = unit_identity_sha256(
+        [
+            {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
+            {"spikesorting_merge_id": "merge-a", "unit_id": "22"},
+        ]
+    )
+    selection = {
+        "path_specific_place_tuning_curve_id": curve_id,
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "trajectory_type": "center_to_left",
+        "configuration_name": "center_to_left",
+        "movement_firing_rate_id": movement_id,
+        "tuning_curve_param_name": "two_bins",
+        "trial_subset": "all",
+        "tuning_curve_parameters_sha256": "a" * 64,
+    }
+    curve.attrs.update(
+        tables_module._tuning_curve_artifact_attributes(
+            selection,
+            selected_units_sha256=selected_units_sha256,
+        )
+    )
+    return curve, selection
+
+
+def _valid_dpp_curve() -> tuple[Any, dict[str, Any]]:
+    """Return one canonical DPP curve with its live selection identity."""
+    import xarray as xr
+
+    from v1ca1.spyglass import dpp
+
+    curve_id = uuid.UUID("75555555-5555-5555-8555-555555555555")
+    movement_id = uuid.UUID("76666666-6666-5666-8666-666666666666")
+    legacy = xr.DataArray(
+        np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+        dims=("unit", "tp"),
+        coords={"unit": [11, 22], "tp": [0.25, 0.75]},
+        name="firing_rate_hz",
+        attrs={
+            "animal_name": "L14",
+            "date": "20240102",
+            "region": "ca1",
+            "epoch": "02_r1",
+            "model_name": "task_progression",
+            "turn_type": "left",
+            "bin_edges": "[[0.0,0.5,1.0]]",
+        },
+    )
+    curve = dpp.normalize_legacy_all_trial_dpp_tuning_curve(
+        legacy,
+        unit_identity_resolver={
+            11: {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "11",
+                "group_unit_id": 0,
+                "sorting_unit_id": 11,
+            },
+            22: {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "22",
+                "group_unit_id": 1,
+                "sorting_unit_id": 22,
+            },
+        },
+        animal_name="L14",
+        date="20240102",
+        region="ca1",
+        epoch="02_r1",
+        turn_type="left",
+        common_graph_length_cm=10.0,
+        graph_length_cm_by_trajectory={
+            "center_to_left": 10.0,
+            "right_to_center": 10.0,
+        },
+        n_trials_by_trajectory={"center_to_left": 2, "right_to_center": 1},
+        support_duration_s_by_trajectory={
+            "center_to_left": 1.6,
+            "right_to_center": 0.8,
+        },
+        n_feature_samples_by_trajectory={
+            "center_to_left": 16,
+            "right_to_center": 8,
+        },
+        n_valid_position_samples_by_trajectory={
+            "center_to_left": 15,
+            "right_to_center": 8,
+        },
+        bin_count=2,
+    )
+    selected_units_sha256 = unit_identity_sha256(
+        [
+            {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
+            {"spikesorting_merge_id": "merge-a", "unit_id": "22"},
+        ]
+    )
+    selection = {
+        "dpp_tuning_curve_id": curve_id,
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "outbound_trajectory_type": "center_to_left",
+        "inbound_trajectory_type": "right_to_center",
+        "outbound_configuration_name": "center_to_left",
+        "inbound_configuration_name": "right_to_center",
+        "movement_firing_rate_id": movement_id,
+        "tuning_curve_param_name": "two_bins",
+        "turn_type": "left",
+        "trial_subset": "all",
+        "tuning_curve_parameters_sha256": "a" * 64,
+    }
+    curve.attrs.update(
+        tables_module._dpp_tuning_curve_artifact_attributes(
+            selection,
+            selected_units_sha256=selected_units_sha256,
+        )
+    )
+    return curve, selection
+
+
+def _valid_dpp_encoding_table() -> pd.DataFrame:
+    """Return one canonical nonempty DPPEncoding table for NWB tests."""
+    from v1ca1.spyglass import dpp_encoding
+
+    comparison_id = uuid.UUID("72222222-2222-5222-8222-222222222222")
+    metrics = dpp_encoding._unit_metric_row(
+        store={
+            "heldout_spike_count": 4,
+            "null_log_likelihood_nats": -12.0,
+            "zero_training_spikes": False,
+            "model_log_likelihood_nats": {
+                "path_specific_place": -10.0,
+                "absolute_place": -11.0,
+                "dpp": -8.0,
+                "distance_to_reward": -9.0,
+            },
+            "model_failed": {
+                model_name: False
+                for model_name in dpp_encoding.MODEL_NAMES
+            },
+        }
+    )
+    row = {
+        "spikesorting_merge_id": "merge-a",
+        "unit_id": "11",
+        "stable_unit_id": "merge-a:11",
+        "group_unit_id": "10",
+        "dpp_encoding_id": str(comparison_id),
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "ca1",
+        "epoch": "02_r1",
+        "n_folds": 5,
+        "evaluation_bin_size_s": 0.05,
+        "spatial_bin_size_cm": 4.0,
+        "gaussian_smoothing_sigma_bins": 1.0,
+        "random_seed": 47,
+        "minimum_movement_firing_rate_hz": 0.5,
+        "minimum_stability_correlation": 0.5,
+        "movement_firing_rate_hz": 0.5,
+        "center_to_left_stability_correlation": 0.5,
+        "center_to_right_stability_correlation": 0.1,
+        "left_to_center_stability_correlation": 0.1,
+        "right_to_center_stability_correlation": 0.1,
+        **metrics,
+    }
+    table = pd.DataFrame.from_records([row]).loc[
+        :, list(dpp_encoding.TABLE_COLUMNS)
+    ]
+    return dpp_encoding.validate_dpp_encoding_table(table)
+
+
+def _valid_stability_table() -> pd.DataFrame:
+    """Return one canonical nonempty stability table for NWB-loader tests."""
+    from v1ca1.spyglass.stability import (
+        STABILITY_TABLE_COLUMNS,
+        empty_stability_table,
+        validate_stability_table,
+    )
+
+    empty = empty_stability_table()
+    row = {}
+    for column in STABILITY_TABLE_COLUMNS:
+        if pd.api.types.is_integer_dtype(empty[column].dtype):
+            row[column] = 1
+        elif pd.api.types.is_float_dtype(empty[column].dtype):
+            row[column] = 0.5
+        else:
+            row[column] = "valid"
+    row.update(
+        spikesorting_merge_id="merge-a",
+        unit_id="11",
+        stable_unit_id="merge-a:11",
+        group_unit_id=0,
+        animal_name="L14",
+        date="20240102",
+        region="ca1",
+        epoch="02_r1",
+        trajectory_type="center_to_left",
+        segment_stability_shape_overlaps="[0.5, 0.5, 0.5]",
+        segment_shape_overlap_statuses='["valid", "valid", "valid"]',
+        odd_segment_mean_firing_rates_hz="[0.5, 0.5, 0.5]",
+        even_segment_mean_firing_rates_hz="[0.5, 0.5, 0.5]",
+        odd_segment_tuning_curve_areas="[0.5, 0.5, 0.5]",
+        even_segment_tuning_curve_areas="[0.5, 0.5, 0.5]",
+        segment_edges_normalized="[0.0, 0.33, 0.67, 1.0]",
+    )
+    return validate_stability_table(
+        pd.DataFrame.from_records([row], columns=STABILITY_TABLE_COLUMNS)
+    )
 
 
 def _tuning_curve_selection_key(*, trial_subset: str = "odd") -> dict[str, Any]:
@@ -562,6 +1104,9 @@ def _dpp_encoding_runtime_inputs(
         "movement": {
             "movement_intervals": object(),
             "table": object(),
+        },
+        "movement_selection": {
+            "nwb_file_name": "L1420240102_.nwb",
         },
         "stability_tables": {
             trajectory_type: object()
@@ -869,6 +1414,139 @@ def _build_path_specific_place_decoding_selection() -> dict[str, Any]:
     )
 
 
+def _path_specific_place_decoding_result() -> dict[str, Any]:
+    """Return one compact canonical result for NWB lifecycle tests."""
+    import pynapple as nap
+
+    from v1ca1.spyglass import path_specific_decoding as decoding
+
+    result_id = str(uuid.UUID("12345678-1234-5678-1234-567812345678"))
+    metadata = {
+        "path_specific_place_decoding_id": result_id,
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "v1",
+        "epoch": "02_r1",
+    }
+    effective = decoding.validate_path_specific_decoding_parameters(
+        n_folds=2
+    )
+    parameters = {
+        "parameter_name": "test",
+        "parameter_sha256": provenance_sha256(
+            {
+                "path_specific_place_decoding_param_name": "test",
+                **effective,
+            }
+        ),
+        "output_rule_sha256": provenance_sha256(dict(decoding.OUTPUT_RULE)),
+        **effective,
+    }
+    selected_units = pd.DataFrame.from_records(
+        [
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "11",
+                "stable_unit_id": "merge-a:11",
+                "group_unit_id": "0",
+                "selection_index": 0,
+            }
+        ],
+        columns=decoding.SELECTED_UNIT_COLUMNS,
+    )
+    selected_digest = unit_identity_sha256(
+        [{"spikesorting_merge_id": "merge-a", "unit_id": "11"}]
+    )
+    fold_qc = pd.DataFrame.from_records(
+        [
+            {
+                **metadata,
+                "fold": fold,
+                "n_train_laps": 1,
+                "n_test_laps": 1,
+                "train_duration_s": 1.0,
+                "test_duration_s": 1.0,
+                "n_decoded_samples": 2,
+                "qc_status": "valid",
+                "qc_message": "",
+            }
+            for fold in range(2)
+        ],
+        columns=decoding.FOLD_QC_COLUMNS,
+    )
+    summary = pd.DataFrame.from_records(
+        [
+            {
+                **metadata,
+                "model": "path_specific_place",
+                "coordinate_unit": "cm",
+                "n_units": 1,
+                "n_folds_expected": 2,
+                "n_folds_valid": 2,
+                "mae": 0.25,
+                "rmse": 0.25,
+                "mean_signed_error": 0.25,
+                "median_abs_error": 0.25,
+                "n_samples": 4,
+                "analysis_status": "valid",
+            }
+        ],
+        columns=decoding.SUMMARY_COLUMNS,
+    )
+    binned_error = pd.DataFrame.from_records(
+        [
+            {
+                **metadata,
+                "coordinate_unit": "cm",
+                "bin_left": 0.0,
+                "bin_right": 4.0,
+                "bin_center": 2.0,
+                "n": 4,
+                "center": 0.25,
+                "yerr_low": 0.0,
+                "yerr_high": 0.0,
+            }
+        ],
+        columns=decoding.BINNED_ERROR_COLUMNS,
+    )
+    support = nap.IntervalSet(
+        start=np.asarray([0.0, 2.0]),
+        end=np.asarray([1.0, 3.0]),
+        time_units="s",
+    )
+    true = nap.Tsd(
+        t=np.asarray([0.1, 0.2, 0.3, 2.1, 2.2, 2.3]),
+        d=np.asarray([1.0, 2.0, 3.0, 1.0, 2.0, 3.0]),
+        time_support=support,
+        time_units="s",
+    )
+    decoded = nap.Tsd(
+        t=np.asarray([0.2, 0.3, 2.2, 2.3]),
+        d=np.asarray([2.25, 3.25, 2.25, 3.25]),
+        time_support=support,
+        time_units="s",
+    )
+    return {
+        "metadata": metadata,
+        "parameters": parameters,
+        "selected_units": selected_units,
+        "fold_qc": fold_qc,
+        "summary": summary,
+        "binned_error": binned_error,
+        "true": true,
+        "decoded": decoded,
+        "path_length_cm": 10.0,
+        "n_units": 1,
+        "n_folds_expected": 2,
+        "n_folds_valid": 2,
+        "n_decoded_samples": 4,
+        "selected_units_sha256": selected_digest,
+        "analysis_status": "valid",
+        "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+    }
+
+
 def _motor_encoding_selection_inputs() -> dict[str, Any]:
     """Return internally consistent motor-encoding selection inputs."""
     base = _dpp_encoding_selection_inputs()
@@ -1142,9 +1820,9 @@ def _swap_glm_selection_inputs() -> dict[str, Any]:
     }
     parameters = dict(table_specs.DEFAULT_SWAP_GLM_PARAMETERS)
     snapshot = {
-        "artifact_dir": Path("/analysis/dark-light"),
-        "manifest_sha256": "1" * 64,
-        "selected_sha256_by_model": {
+        "bundle": {"legacy_artifact_provenance": None},
+        "dark_light_glm_sha256": "1" * 64,
+        "selected_model_sha256_by_model": {
             model_name: str(index + 2) * 64
             for index, model_name in enumerate(SOURCE_MODEL_NAMES)
         },
@@ -1613,6 +2291,7 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "PathProgressionDecodingSelection" in schemas[0].context
     )
     assert "PathProgressionDecoding" in schemas[0].context
+    assert schemas[0].context["AnalysisNwbfile"] is bundle["analysis_nwbfile"]
     legacy_stability_prefix = "".join(("TaskProgression", "Stability"))
     assert not any(
         name.startswith(legacy_stability_prefix) for name in schemas[0].context
@@ -1650,6 +2329,14 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     ripple_result = bundle["ripple_modulation"].definition
     assert "-> RippleModulationSelection" in ripple_result
+    assert "-> AnalysisNwbfile" in ripple_result
+    assert "ripple_modulation_summary_object_id: varchar(40)" in ripple_result
+    assert "peri_ripple_firing_rate_object_id: varchar(40)" in ripple_result
+    assert "ripple_modulation_summary_sha256: char(64)" in ripple_result
+    assert "peri_ripple_firing_rate_sha256: char(64)" in ripple_result
+    assert "artifact_schema_version: varchar(8)" in ripple_result
+    assert "summary_path:" not in ripple_result
+    assert "peri_ripple_firing_rate_path:" not in ripple_result
     assert "analysis_status:" in ripple_result
     assert "selected_units_sha256: char(64)" in ripple_result
     assert "RippleModulationComputed" not in ripple_result
@@ -1664,8 +2351,12 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     movement_result = bundle["movement_firing_rate"].definition
     assert "-> MovementFiringRateSelection" in movement_result
-    assert "movement_firing_rate_path: filepath@analysis" in movement_result
-    assert "movement_intervals_path: filepath@analysis" in movement_result
+    assert "-> AnalysisNwbfile" in movement_result
+    assert "movement_firing_rate_object_id: varchar(40)" in movement_result
+    assert "movement_intervals_object_id: varchar(40)" in movement_result
+    assert "movement_firing_rate_sha256: char(64)" in movement_result
+    assert "movement_intervals_sha256: char(64)" in movement_result
+    assert "artifact_schema_version: varchar(8)" in movement_result
     assert "n_units_with_spikes: int unsigned" in movement_result
     assert "'no_valid_position'" in movement_result
     assert "'no_movement'" in movement_result
@@ -1695,13 +2386,24 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     )
     assert "graph_inputs_sha256_by_trajectory: longblob" in cv_pca_selection
     assert "cv_pca_output_rule_sha256: char(64)" in cv_pca_selection
+    assert "movement_firing_rate_file_sha256" not in cv_pca_selection
+    assert "movement_intervals_file_sha256" not in cv_pca_selection
 
     cv_pca_result = bundle["cv_pca"].definition
     assert "-> CVPCASelection" in cv_pca_result
-    assert "result_path: filepath@analysis" in cv_pca_result
-    assert "spectrum_path: filepath@analysis" in cv_pca_result
-    assert "lap_assignments_path: filepath@analysis" in cv_pca_result
-    assert "trajectory_qc_path: filepath@analysis" in cv_pca_result
+    assert "-> AnalysisNwbfile" in cv_pca_result
+    for object_name in (
+        "selected_units",
+        "lap_assignments",
+        "trajectory_qc",
+        "summary",
+        "spectrum",
+        "dataset",
+        "provenance",
+    ):
+        assert f"{object_name}_object_id: varchar(40)" in cv_pca_result
+    assert "artifact_manifest_path" not in cv_pca_result
+    assert "filepath@analysis" not in cv_pca_result
     assert "'no_movement'" in cv_pca_result
     assert "'insufficient_laps'" in cv_pca_result
     assert hasattr(bundle["cv_pca"], "register_existing")
@@ -1721,7 +2423,16 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     tuning_result = bundle["path_specific_place_tuning_curve"].definition
     assert "-> PathSpecificPlaceTuningCurveSelection" in tuning_result
-    assert "tuning_curve_path: filepath@analysis" in tuning_result
+    assert "-> AnalysisNwbfile" in tuning_result
+    for object_name in (
+        "path_specific_place_tuning",
+        "path_specific_place_bins",
+        "path_specific_place_provenance",
+    ):
+        assert f"{object_name}_object_id: varchar(40)" in tuning_result
+        assert f"{object_name}_sha256: char(64)" in tuning_result
+    assert "artifact_schema_version: varchar(8)" in tuning_result
+    assert "tuning_curve_path:" not in tuning_result
     assert "n_trials: int unsigned" in tuning_result
     assert "n_feature_samples: int unsigned" in tuning_result
     assert "n_position_bins: int unsigned" in tuning_result
@@ -1760,7 +2471,11 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "path_specific_place_tuning_similarity"
     ].definition
     assert "-> PathSpecificPlaceTuningSimilaritySelection" in similarity_result
-    assert "similarity_path: filepath@analysis" in similarity_result
+    assert "-> AnalysisNwbfile" in similarity_result
+    assert "similarity_object_id: varchar(40)" in similarity_result
+    assert "similarity_sha256: char(64)" in similarity_result
+    assert "artifact_schema_version: varchar(8)" in similarity_result
+    assert "similarity_path" not in similarity_result
     assert "n_valid_comparisons: int unsigned" in similarity_result
     assert "n_units_with_valid_comparison: int unsigned" in similarity_result
     assert "'no_valid_comparisons'" in similarity_result
@@ -1783,7 +2498,12 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     dpp_result = bundle["dpp_tuning_curve"].definition
     assert "-> DPPTuningCurveSelection" in dpp_result
-    assert "tuning_curve_path: filepath@analysis" in dpp_result
+    assert "-> AnalysisNwbfile" in dpp_result
+    for object_name in ("dpp_tuning", "dpp_bins", "dpp_provenance"):
+        assert f"{object_name}_object_id: varchar(40)" in dpp_result
+        assert f"{object_name}_sha256: char(64)" in dpp_result
+    assert "artifact_schema_version: varchar(8)" in dpp_result
+    assert "tuning_curve_path:" not in dpp_result
     assert "n_outbound_trials: int unsigned" in dpp_result
     assert "n_inbound_trials: int unsigned" in dpp_result
     assert "selected_units_sha256: char(64)" in dpp_result
@@ -1800,7 +2520,11 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     stability_result = bundle["path_specific_place_stability"].definition
     assert "-> PathSpecificPlaceStabilitySelection" in stability_result
-    assert "stability_path: filepath@analysis" in stability_result
+    assert "-> AnalysisNwbfile" in stability_result
+    assert "stability_object_id: varchar(40)" in stability_result
+    assert "stability_sha256: char(64)" in stability_result
+    assert "artifact_schema_version: varchar(8)" in stability_result
+    assert "stability_path" not in stability_result
     assert "analysis_status:" in stability_result
     assert "'no_valid_position'" in stability_result
     assert "'no_movement'" in stability_result
@@ -1845,7 +2569,11 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     encoding_result = bundle["dpp_encoding"].definition
     assert "-> DPPEncodingSelection" in encoding_result
-    assert "dpp_encoding_path: filepath@analysis" in encoding_result
+    assert "-> AnalysisNwbfile" in encoding_result
+    assert "dpp_encoding_object_id: varchar(40)" in encoding_result
+    assert "dpp_encoding_sha256: char(64)" in encoding_result
+    assert "artifact_schema_version: varchar(8)" in encoding_result
+    assert "dpp_encoding_path" not in encoding_result
     assert "n_units_input: int unsigned" in encoding_result
     assert "n_units_eligible: int unsigned" in encoding_result
     assert "n_units_valid: int unsigned" in encoding_result
@@ -1898,12 +2626,33 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "path_progression_decoding"
     ].definition
     assert "-> PathProgressionDecodingSelection" in decoding_result
-    assert "artifact_manifest_path: filepath@analysis" in decoding_result
-    assert "decoding_summary_path: filepath@analysis" in decoding_result
-    assert "unit_eligibility_path: filepath@analysis" in decoding_result
+    assert "-> AnalysisNwbfile" in decoding_result
+    for object_id_field in (
+        "unit_eligibility_object_id",
+        "selected_units_object_id",
+        "decoding_summary_object_id",
+        "cross_path_binned_error_object_id",
+        "transfer_index_object_id",
+        "decoding_provenance_object_id",
+    ):
+        assert f"{object_id_field}: varchar(40)" in decoding_result
+    assert "filepath@analysis" not in decoding_result
+    assert "artifact_schema_version: varchar(16)" in decoding_result
     assert "n_transfer_pairs_expected: smallint unsigned" in decoding_result
     assert "n_transfer_pairs_valid: smallint unsigned" in decoding_result
     assert "'partial_valid'" in decoding_result
+    transfer_definition = bundle[
+        "path_progression_decoding"
+    ].Transfer.definition
+    assert transfer_definition == (
+        table_specs.PATH_PROGRESSION_DECODING_TRANSFER_DEFINITION
+    )
+    for object_id_field in (
+        "true_progression_object_id",
+        "decoded_progression_object_id",
+        "decoding_support_object_id",
+    ):
+        assert f"{object_id_field}: varchar(40)" in transfer_definition
     assert not hasattr(
         bundle["path_progression_decoding"],
         "register_existing",
@@ -1930,8 +2679,21 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "path_specific_place_decoding"
     ].definition
     assert "-> PathSpecificPlaceDecodingSelection" in place_decoding_result
-    assert "artifact_manifest_path: filepath@analysis" in place_decoding_result
-    assert "fold_qc_path: filepath@analysis" in place_decoding_result
+    assert "-> AnalysisNwbfile" in place_decoding_result
+    for object_id_field in (
+        "selected_units_object_id",
+        "fold_qc_object_id",
+        "decoding_summary_object_id",
+        "decoding_error_by_position_object_id",
+        "true_position_object_id",
+        "decoded_position_object_id",
+        "decoding_support_object_id",
+        "decoding_provenance_object_id",
+    ):
+        assert f"{object_id_field}: varchar(40)" in place_decoding_result
+    assert "artifact_manifest_path" not in place_decoding_result
+    assert "filepath@analysis" not in place_decoding_result
+    assert "artifact_schema_version: varchar(16)" in place_decoding_result
     assert "'partial_valid'" in place_decoding_result
     assert hasattr(
         bundle["path_specific_place_decoding"],
@@ -1966,9 +2728,15 @@ def test_constructed_bundle_matches_current_architecture() -> None:
 
     motor_result = bundle["motor_encoding"].definition
     assert "-> MotorEncodingSelection" in motor_result
-    assert "nested_cv_path: filepath@analysis" in motor_result
-    assert "full_refit_path: filepath@analysis" in motor_result
-    assert "selected_units_path: filepath@analysis" in motor_result
+    assert "-> AnalysisNwbfile" in motor_result
+    assert "selected_units_object_id: varchar(40)" in motor_result
+    assert "dataset_index_object_id: varchar(40)" in motor_result
+    assert "coordinates_object_id: varchar(40)" in motor_result
+    assert "nested_cv_arrays_object_id: varchar(40)" in motor_result
+    assert "full_refit_arrays_object_id: varchar(40)" in motor_result
+    assert "provenance_object_id: varchar(40)" in motor_result
+    assert "motor_encoding_sha256: char(64)" in motor_result
+    assert "filepath@analysis" not in motor_result
     assert "'partial_valid'" in motor_result
     assert hasattr(bundle["motor_encoding"], "register_existing")
 
@@ -1991,8 +2759,10 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     )
     dark_light_result = bundle["dark_light_glm"].definition
     assert "-> DarkLightGLMSelection" in dark_light_result
-    assert "selection_summary_path: filepath@analysis" in dark_light_result
-    assert "task_dense_gain_model_path: filepath@analysis" in dark_light_result
+    assert "-> AnalysisNwbfile" in dark_light_result
+    assert "candidate_results_object_id: varchar(40)" in dark_light_result
+    assert "selection_summary_object_id: varchar(40)" in dark_light_result
+    assert "artifact_manifest_path" not in dark_light_result
     assert "'partial_valid'" in dark_light_result
     assert hasattr(bundle["dark_light_glm"], "register_existing")
 
@@ -2005,14 +2775,19 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "-> RegionSortedSpikesGroup" in swap_selection
     assert "light_test_movement_firing_rate_id=" in swap_selection
     assert "light_test_center_to_left_trajectory_type=" in swap_selection
-    assert "dark_light_manifest_sha256: char(64)" in swap_selection
-    assert "dark_light_selected_sha256_by_model: longblob" in swap_selection
+    assert "dark_light_glm_sha256: char(64)" in swap_selection
+    assert (
+        "dark_light_selected_model_sha256_by_model: longblob"
+        in swap_selection
+    )
     assert "dark_light_parameter_sha256: char(64)" in swap_selection
     assert "upstream_analysis_status:" in swap_selection
     swap_result = bundle["swap_glm"].definition
     assert "-> SwapGLMSelection" in swap_result
-    assert "artifact_manifest_path: filepath@analysis" in swap_result
-    assert "swap_glm_path: filepath@analysis" in swap_result
+    assert "-> AnalysisNwbfile" in swap_result
+    assert "model_results_object_id: varchar(40)" in swap_result
+    assert "observed_response_object_id: varchar(40)" in swap_result
+    assert "artifact_manifest_path" not in swap_result
     assert "'upstream_terminal'" in swap_result
     assert "'no_trajectory_samples'" in swap_result
     assert hasattr(bundle["swap_glm"], "register_existing")
@@ -2054,11 +2829,28 @@ def test_constructed_bundle_matches_current_architecture() -> None:
         "swap_tuning_curve_comparison"
     ].definition
     assert "-> SwapTuningCurveComparisonSelection" in swap_tuning_result
-    assert "artifact_manifest_path: filepath@analysis" in swap_tuning_result
-    assert "summary_path: filepath@analysis" in swap_tuning_result
-    assert "swap_tuning_curve_comparison_path: filepath@analysis" in (
-        swap_tuning_result
-    )
+    assert "-> AnalysisNwbfile" in swap_tuning_result
+    for object_name in (
+        "selected_units",
+        "score_summary",
+        "source_profiles",
+        "model_profiles",
+        "geometry",
+        "provenance",
+    ):
+        assert f"{object_name}_object_id: varchar(40)" in swap_tuning_result
+    for hash_name in (
+        "selected_units_table",
+        "score_summary",
+        "source_profiles",
+        "model_profiles",
+        "geometry",
+        "provenance",
+    ):
+        assert f"{hash_name}_sha256: char(64)" in swap_tuning_result
+    assert "artifact_schema_version: varchar(8)" in swap_tuning_result
+    assert "artifact_manifest_path:" not in swap_tuning_result
+    assert "swap_tuning_curve_comparison_path:" not in swap_tuning_result
     assert "n_source_units: int unsigned" in swap_tuning_result
     assert "'upstream_terminal'" in swap_tuning_result
     assert hasattr(
@@ -2080,8 +2872,20 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "ripple_provenance_sha256" in ripple_glm_selection
     ripple_glm_result = bundle["ripple_glm"].definition
     assert "-> RippleGLMSelection" in ripple_glm_result
-    assert "artifact_manifest_path: filepath@analysis" in ripple_glm_result
-    assert "ripple_glm_path: filepath@analysis" in ripple_glm_result
+    assert "-> AnalysisNwbfile" in ripple_glm_result
+    for object_name in (
+        "selected_units",
+        "summary",
+        "events",
+        "source_features",
+        "target_results",
+        "provenance",
+    ):
+        assert f"{object_name}_object_id: varchar(40)" in ripple_glm_result
+    assert "artifact_schema_version: varchar(8)" in ripple_glm_result
+    assert "ripple_glm_sha256: char(64)" in ripple_glm_result
+    assert "artifact_manifest_path" not in ripple_glm_result
+    assert "ripple_glm_path" not in ripple_glm_result
     assert "n_valid_target_units: int unsigned" in ripple_glm_result
     assert hasattr(bundle["ripple_glm"], "register_existing")
 
@@ -2096,9 +2900,15 @@ def test_constructed_bundle_matches_current_architecture() -> None:
     assert "selected_ripple_intervals_sha256: char(64)" in xcorr_selection
     xcorr_result = bundle["ripple_cross_region_xcorr"].definition
     assert "-> RippleCrossRegionXCorrSelection" in xcorr_result
-    assert "ca1_units_path: filepath@analysis" in xcorr_result
-    assert "v1_units_path: filepath@analysis" in xcorr_result
-    assert "ripple_cross_region_xcorr_path: filepath@analysis" in xcorr_result
+    assert "-> AnalysisNwbfile" in xcorr_result
+    assert "ca1_units_object_id: varchar(40)" in xcorr_result
+    assert "v1_units_object_id: varchar(40)" in xcorr_result
+    assert "pair_xcorr_object_id: varchar(40)" in xcorr_result
+    assert "lag_axis_object_id: varchar(40)" in xcorr_result
+    assert "ripple_support_object_id: varchar(40)" in xcorr_result
+    assert "provenance_object_id: varchar(40)" in xcorr_result
+    assert "artifact_manifest_path" not in xcorr_result
+    assert "ripple_cross_region_xcorr_path" not in xcorr_result
     assert "n_valid_pairs: int unsigned" in xcorr_result
     assert hasattr(bundle["ripple_cross_region_xcorr"], "register_existing")
 
@@ -2562,6 +3372,12 @@ def test_path_progression_decoding_preset_and_definitions_are_exact() -> None:
     ) == 2
     result = bundle["path_progression_decoding"]
     assert result.definition == table_specs.PATH_PROGRESSION_DECODING_DEFINITION
+    assert "-> AnalysisNwbfile" in result.definition
+    assert "filepath@analysis" not in result.definition
+    assert result.Transfer.definition == (
+        table_specs.PATH_PROGRESSION_DECODING_TRANSFER_DEFINITION
+    )
+    assert result.Transfer._nwb_table is bundle["analysis_nwbfile"]
     assert "artifact_origin" not in result.definition
     assert "legacy_artifact_provenance" not in result.definition
     assert not hasattr(result, "register_existing")
@@ -3611,29 +4427,37 @@ def test_path_progression_decoding_selection_accepts_empty_regional_source() -> 
 
 
 def test_empty_stability_artifact_can_support_empty_decoding_source(
-    tmp_path: Path,
 ) -> None:
     from v1ca1.spyglass.selection import unit_identity_sha256
     from v1ca1.spyglass.stability import (
-        ARTIFACT_FILENAME,
+        NWB_ARTIFACT_SCHEMA_VERSION,
         empty_stability_table,
+        stability_table_sha256,
     )
     from v1ca1.spyglass.tables import _load_dpp_stability_artifact
 
     stability_id = uuid.UUID("75555555-5555-5555-8555-555555555555")
-    artifact_path = tmp_path / str(stability_id) / ARTIFACT_FILENAME
-    artifact_path.parent.mkdir()
-    empty_stability_table().to_parquet(artifact_path, index=False)
+    empty = empty_stability_table()
+
+    class StabilityFetch:
+        def __and__(self, key):
+            assert key == {"path_specific_place_stability_id": stability_id}
+            return self
+
+        def fetch_nwb(self):
+            return [{"stability": empty.copy()}]
 
     table = _load_dpp_stability_artifact(
         result_row={
             "path_specific_place_stability_id": stability_id,
-            "stability_path": str(artifact_path),
+            "stability_sha256": stability_table_sha256(empty),
+            "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
             "n_units": 0,
             "n_valid_units": 0,
             "analysis_status": "no_units",
             "selected_units_sha256": unit_identity_sha256([]),
         },
+        stability_table=StabilityFetch(),
         trajectory_type="center_to_left",
         animal_name="L14",
         date="20240102",
@@ -3674,9 +4498,7 @@ def test_path_progression_decoding_selection_rejects_key_mismatch(
         _build_path_progression_decoding_selection(inputs)
 
 
-def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
-    tmp_path: Path,
-) -> None:
+def test_dpp_encoding_artifact_link_checks_summary_and_uuid() -> None:
     from v1ca1.spyglass.dpp_encoding import (
         empty_dpp_encoding_table,
         summarize_dpp_encoding_table,
@@ -3690,16 +4512,6 @@ def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
     result_row = {
         **summarize_dpp_encoding_table(table),
         "n_units_input": 5,
-        "dpp_encoding_path": str(
-            tmp_path
-            / "L14"
-            / "20240102"
-            / "dpp_encoding"
-            / "02_r1"
-            / "ca1"
-            / str(comparison_id)
-            / "dpp_encoding.parquet"
-        ),
     }
     selection_row = {
         "dpp_encoding_id": comparison_id,
@@ -3733,25 +4545,6 @@ def test_dpp_encoding_artifact_link_checks_summary_uuid_and_path(
             animal_name="L14",
             date="20240102",
         )
-    with pytest.raises(ValueError, match="artifact path does not match"):
-        _validate_dpp_encoding_artifact_link(
-            table=table,
-            result_row={
-                **result_row,
-                "dpp_encoding_path": str(
-                    tmp_path / str(uuid.uuid4()) / "dpp_encoding.parquet"
-                ),
-            },
-            selection_row=selection_row,
-            parameters_row=dict(
-                table_specs.MANUSCRIPT_DPP_ENCODING_PARAMETERS
-            ),
-            region_row={"region_name": "ca1", "n_units": 5},
-            animal_name="L14",
-            date="20240102",
-        )
-
-
 def test_similarity_input_loader_rejects_stale_tuning_parameters(
     monkeypatch,
 ) -> None:
@@ -3800,13 +4593,8 @@ def test_similarity_input_loader_rejects_stale_tuning_parameters(
     )
     monkeypatch.setitem(
         _load_tuning_similarity_inputs.__globals__,
-        "_validate_tuning_curve_artifact_link",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        path_specific_place,
-        "load_path_specific_place_artifact",
-        lambda path: SimpleNamespace(attrs={}),
+        "_load_path_specific_place_tuning_curve_result",
+        lambda **kwargs: SimpleNamespace(attrs={}),
     )
 
     with pytest.raises(ValueError, match="parameters changed after selection"):
@@ -3931,6 +4719,1487 @@ def test_compute_helpers_reject_parameters_changed_after_selection() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid RippleModulation NWB"]],
+)
+def test_ripple_modulation_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Both ripple tables are validated before one NWB is registered."""
+    import pynwb
+
+    from v1ca1.spyglass import ripple_modulation
+
+    summary, peri = _valid_ripple_modulation_tables()
+    analysis_path = tmp_path / "ripple-modulation-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+    validation_calls = []
+
+    def validate_before_registration(*, path):
+        validation_calls.append(str(path))
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    kwargs = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "summary": summary,
+        "peri_ripple_firing_rate": peri,
+        "analysis_nwbfile_table": analysis_table,
+    }
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_ripple_modulation_nwb(**kwargs)
+        assert validation_calls == [str(analysis_path)]
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_ripple_modulation_nwb(**kwargs)
+
+    assert validation_calls == [str(analysis_path)]
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == (
+        ripple_modulation.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["ripple_modulation_summary_sha256"] == (
+        ripple_modulation.ripple_modulation_summary_sha256(summary)
+    )
+    assert row["peri_ripple_firing_rate_sha256"] == (
+        ripple_modulation.peri_ripple_firing_rate_sha256(peri)
+    )
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_ripple_modulation_result_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live ripple readers resolve and verify both tables through fetch_nwb()."""
+    from v1ca1.spyglass import ripple_modulation
+
+    summary, peri = _valid_ripple_modulation_tables()
+    ripple_modulation_id = uuid.uuid4()
+
+    class RippleModulationRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    "ripple_modulation_summary": summary.copy(),
+                    "peri_ripple_firing_rate": peri.copy(),
+                }
+            ]
+
+    relation = RippleModulationRelation()
+    result = {
+        "ripple_modulation_id": ripple_modulation_id,
+        "ripple_modulation_summary_sha256": (
+            ripple_modulation.ripple_modulation_summary_sha256(summary)
+        ),
+        "peri_ripple_firing_rate_sha256": (
+            ripple_modulation.peri_ripple_firing_rate_sha256(peri)
+        ),
+        "artifact_schema_version": ripple_modulation.NWB_ARTIFACT_SCHEMA_VERSION,
+        "n_ripples": 3,
+        "n_units": 1,
+        "n_valid_units": 1,
+        "analysis_status": "valid",
+    }
+
+    loaded = _load_ripple_modulation_result(
+        result_row=result,
+        ripple_modulation_table=relation,
+    )
+    pd.testing.assert_frame_equal(loaded["summary"], summary)
+    pd.testing.assert_frame_equal(loaded["peri_ripple_firing_rate"], peri)
+    assert relation.keys == [{"ripple_modulation_id": ripple_modulation_id}]
+
+    with pytest.raises(ValueError, match="summary_sha256"):
+        _load_ripple_modulation_result(
+            result_row={
+                **result,
+                "ripple_modulation_summary_sha256": "0" * 64,
+            },
+            ripple_modulation_table=relation,
+        )
+
+
+@pytest.mark.parametrize(
+    ("n_units", "n_ripples", "analysis_status"),
+    [(0, 3, "no_units"), (2, 0, "no_ripples")],
+)
+def test_ripple_modulation_result_loader_accepts_terminal_empty_tables(
+    n_units: int,
+    n_ripples: int,
+    analysis_status: str,
+) -> None:
+    """Terminal selections retain explicit result counts with empty NWB tables."""
+    from v1ca1.spyglass import ripple_modulation
+
+    summary, peri = _valid_ripple_modulation_tables()
+    summary = summary.iloc[0:0]
+    peri = peri.iloc[0:0]
+    ripple_modulation_id = uuid.uuid4()
+
+    class RippleModulationRelation:
+        def __and__(self, key):
+            assert key == {"ripple_modulation_id": ripple_modulation_id}
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    "ripple_modulation_summary": summary.copy(),
+                    "peri_ripple_firing_rate": peri.copy(),
+                }
+            ]
+
+    loaded = _load_ripple_modulation_result(
+        result_row={
+            "ripple_modulation_id": ripple_modulation_id,
+            "ripple_modulation_summary_sha256": (
+                ripple_modulation.ripple_modulation_summary_sha256(summary)
+            ),
+            "peri_ripple_firing_rate_sha256": (
+                ripple_modulation.peri_ripple_firing_rate_sha256(peri)
+            ),
+            "artifact_schema_version": (
+                ripple_modulation.NWB_ARTIFACT_SCHEMA_VERSION
+            ),
+            "n_ripples": n_ripples,
+            "n_units": n_units,
+            "n_valid_units": 0,
+            "analysis_status": analysis_status,
+        },
+        ripple_modulation_table=RippleModulationRelation(),
+    )
+
+    assert loaded["summary"].empty
+    assert loaded["peri_ripple_firing_rate"].empty
+    assert loaded["analysis_status"] == analysis_status
+
+
+def test_ripple_modulation_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a ripple NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "ripple_modulation_compute": lambda **kwargs: pytest.fail(
+                "RippleModulation computation must not start outside populate()."
+            )
+        }
+    )
+    ripple = bundle["ripple_modulation"]
+    ripple.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        ripple().make({"ripple_modulation_id": uuid.uuid4()})
+
+
+def test_ripple_modulation_registration_uses_one_datajoint_transaction(
+    monkeypatch,
+) -> None:
+    """Legacy normalization and both ripple result inserts are transactional."""
+    ripple_modulation_id = uuid.uuid4()
+    selection = {
+        "ripple_modulation_id": ripple_modulation_id,
+        **_ripple_selection_key(),
+    }
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-ripple-modulation.nwb",
+            "ripple_modulation_summary_object_id": "summary-object-id",
+            "peri_ripple_firing_rate_object_id": "peri-object-id",
+            "ripple_modulation_summary_sha256": "d" * 64,
+            "peri_ripple_firing_rate_sha256": "e" * 64,
+            "artifact_schema_version": "1",
+            "n_ripples": 3,
+            "n_units": 1,
+            "n_valid_units": 1,
+            "analysis_status": "valid",
+            "selected_units_sha256": "f" * 64,
+            "legacy_artifact_provenance": {"source": "legacy"},
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"ripple_modulation_register_existing": register}
+    )
+    ripple = bundle["ripple_modulation"]
+    ripple.connection = connection
+
+    row = ripple.register_existing(
+        {"ripple_modulation_id": ripple_modulation_id},
+        summary_path="legacy-summary.parquet",
+        peri_ripple_firing_rate_path="legacy-peri.parquet",
+    )
+
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
+    ]
+    assert row["analysis_file_name"] == "registered-ripple-modulation.nwb"
+    assert ripple._insert_calls[-1][0]["ripple_modulation_id"] == (
+        ripple_modulation_id
+    )
+
+
+@pytest.mark.parametrize("validation_errors", [None, ["invalid test NWB"]])
+def test_movement_make_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Movement output is validated before registration and cleaned exactly."""
+    import pynwb
+
+    from v1ca1.spyglass import movement
+
+    parameters = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
+    key = {
+        **_movement_selection_key(),
+        "movement_firing_rate_id": uuid.uuid4(),
+        "movement_parameters_sha256": provenance_sha256(parameters),
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_registered_region_spikes",
+        lambda **kwargs: {
+            "status": "no_units",
+            "ts_group": {},
+            "unit_ids": [],
+            "registration_row": {"region_name": "v1"},
+        },
+    )
+    analysis_path = tmp_path / "movement-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+    validation_calls = []
+
+    def validate_before_registration(*, path):
+        validation_calls.append(str(path))
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    kwargs = {
+        "key": key,
+        "parameters_table": _FakeRelation(parameters),
+        "epoch_intervals_table": _FakeRelation(
+            {"start_time": 10.0, "stop_time": 20.0}
+        ),
+        "position_table": _FakeRelation({"spatial_unit": "cm"}),
+        "session_table": _FakeRelation(
+            {
+                "subject_id": "L14",
+                "session_start_time": datetime(2024, 1, 2),
+            }
+        ),
+        "region_sorted_spikes_group_table": object(),
+        "nwbfile_table": object(),
+        "artifact_root": tmp_path,
+        "analysis_nwbfile_table": analysis_table,
+    }
+
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _make_movement_firing_rate_row(**kwargs)
+        assert validation_calls == [str(analysis_path)]
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _make_movement_firing_rate_row(**kwargs)
+
+    assert validation_calls == [str(analysis_path)]
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert analysis_path.stat().st_mode & 0o777 == 0o644
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == movement.NWB_ARTIFACT_SCHEMA_VERSION
+    assert row["movement_firing_rate_sha256"] == (
+        movement.movement_firing_rate_table_sha256(
+            movement.empty_movement_firing_rate_table()
+        )
+    )
+    assert row["movement_intervals_sha256"] == (
+        movement.movement_interval_set_sha256(
+            movement.movement_interval_set_from_time_intervals(
+                pd.DataFrame(columns=["start_time", "stop_time"])
+            )
+        )
+    )
+    assert row["analysis_status"] == "no_units"
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_movement_make_requires_populate_transaction() -> None:
+    """Direct make cannot register an NWB outside the populate transaction."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "movement_firing_rate_compute": lambda **kwargs: pytest.fail(
+                "Movement computation must not start outside populate()."
+            )
+        }
+    )
+    movement = bundle["movement_firing_rate"]
+    movement.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        movement().make({"movement_firing_rate_id": uuid.uuid4()})
+
+
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid path-specific decoding NWB"]],
+)
+def test_path_specific_decoding_write_uses_eight_nwb_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Tables, two timestamp grids, support, and provenance are verified."""
+    import pynwb
+
+    from v1ca1.spyglass import path_specific_decoding as decoding
+
+    result = _path_specific_place_decoding_result()
+    analysis_path = tmp_path / "path-specific-decoding-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+
+    def validate_before_registration(*, path):
+        assert not analysis_table.builder.registered
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_path_specific_place_decoding_nwb(
+                nwb_file_name="L1420240102_.nwb",
+                result=result,
+                analysis_nwbfile_table=analysis_table,
+            )
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_path_specific_place_decoding_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
+    )
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["artifact_schema_version"] == decoding.NWB_ARTIFACT_SCHEMA_VERSION
+    object_ids = [
+        row[field_name]
+        for field_name in (
+            "selected_units_object_id",
+            "fold_qc_object_id",
+            "decoding_summary_object_id",
+            "decoding_error_by_position_object_id",
+            "true_position_object_id",
+            "decoded_position_object_id",
+            "decoding_support_object_id",
+            "decoding_provenance_object_id",
+        )
+    ]
+    assert len(object_ids) == len(set(object_ids)) == 8
+    assert row["true_position_sha256"] == (
+        decoding.position_time_series_sha256(result["true"], kind="true")
+    )
+    assert row["decoded_position_sha256"] == (
+        decoding.position_time_series_sha256(
+            result["decoded"],
+            kind="decoded",
+        )
+    )
+    with pynwb.NWBHDF5IO(
+        analysis_path,
+        mode="r",
+        load_namespaces=True,
+    ) as io:
+        stored = io.read()
+        assert decoding.NWB_TRUE_POSITION_TIMESERIES_NAME in stored.scratch
+        assert decoding.NWB_DECODED_POSITION_TIMESERIES_NAME in stored.scratch
+        assert decoding.NWB_DECODING_SUPPORT_NAME in stored.intervals
+
+
+def test_path_specific_decoding_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a decoder NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_decoding_compute": lambda **kwargs: pytest.fail(
+                "Decoding computation must not start outside populate()."
+            )
+        }
+    )
+    decoding_table = bundle["path_specific_place_decoding"]
+    decoding_table.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        decoding_table().make(
+            {"path_specific_place_decoding_id": uuid.uuid4()}
+        )
+
+
+def test_path_specific_decoding_loader_uses_fetch_nwb_and_checks_hashes() -> None:
+    """Live decoder readers reconstruct all eight objects through fetch_nwb."""
+    from v1ca1.spyglass import path_specific_decoding as decoding
+
+    result = _path_specific_place_decoding_result()
+    objects = {
+        "selected_units": decoding.selected_units_to_dynamic_table(
+            result["selected_units"]
+        ).to_dataframe(),
+        "fold_qc": decoding.fold_qc_to_dynamic_table(
+            result["fold_qc"]
+        ).to_dataframe(),
+        "decoding_summary": decoding.decoding_summary_to_dynamic_table(
+            result["summary"]
+        ).to_dataframe(),
+        "decoding_error_by_position": (
+            decoding.binned_error_to_dynamic_table(
+                result["binned_error"]
+            ).to_dataframe()
+        ),
+        "true_position": decoding.true_position_to_time_series(result["true"]),
+        "decoded_position": decoding.decoded_position_to_time_series(
+            result["decoded"]
+        ),
+        "decoding_support": decoding.decoding_support_to_time_intervals(
+            result["true"],
+            result["decoded"],
+        ).to_dataframe(),
+        "decoding_provenance": decoding.decoding_provenance_to_dynamic_table(
+            result
+        ).to_dataframe(),
+    }
+
+    class FetchTable:
+        def __and__(self, key):
+            return self
+
+        def fetch_nwb(self):
+            return [dict(objects)]
+
+    result_row = {
+        "path_specific_place_decoding_id": result["metadata"][
+            "path_specific_place_decoding_id"
+        ],
+        "artifact_schema_version": decoding.NWB_ARTIFACT_SCHEMA_VERSION,
+        **tables_module._path_specific_place_decoding_hashes(result),
+        **{
+            name: result[name]
+            for name in (
+                "n_units",
+                "n_folds_expected",
+                "n_folds_valid",
+                "n_decoded_samples",
+                "analysis_status",
+                "selected_units_sha256",
+                "artifact_origin",
+            )
+        },
+        "legacy_artifact_provenance": result["legacy_artifact_provenance"],
+    }
+    parameters_row = {
+        "path_specific_place_decoding_param_name": result["parameters"][
+            "parameter_name"
+        ],
+        **{
+            name: result["parameters"][name]
+            for name in decoding.MANUSCRIPT_PARAMETERS
+        },
+    }
+    selection_row = {
+        "path_specific_place_decoding_id": result_row[
+            "path_specific_place_decoding_id"
+        ],
+        "path_specific_place_decoding_param_name": parameters_row[
+            "path_specific_place_decoding_param_name"
+        ],
+        "path_specific_place_decoding_parameters_sha256": result[
+            "parameters"
+        ]["parameter_sha256"],
+        "path_specific_place_decoding_output_rule_sha256": result[
+            "parameters"
+        ]["output_rule_sha256"],
+        "epoch": result["metadata"]["epoch"],
+    }
+    loaded = _load_path_specific_place_decoding_result(
+        result_row=result_row,
+        decoding_table=FetchTable(),
+        selection_row=selection_row,
+        parameters_row=parameters_row,
+        region_row={"region_name": result["metadata"]["region"]},
+        animal_name=result["metadata"]["animal_name"],
+        date=result["metadata"]["date"],
+    )
+    assert np.array_equal(loaded["true"].t, result["true"].t)
+    assert np.array_equal(loaded["decoded"].t, result["decoded"].t)
+
+    stale = {**result_row, "decoded_position_sha256": "0" * 64}
+    with pytest.raises(ValueError, match="decoded_position_sha256"):
+        _load_path_specific_place_decoding_result(
+            result_row=stale,
+            decoding_table=FetchTable(),
+            selection_row=selection_row,
+            parameters_row=parameters_row,
+            region_row={"region_name": result["metadata"]["region"]},
+            animal_name=result["metadata"]["animal_name"],
+            date=result["metadata"]["date"],
+        )
+
+
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid path-specific tuning NWB"]],
+)
+def test_path_specific_tuning_write_uses_three_nwb_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Unit curves, bins, and provenance are verified before registration."""
+    import pynwb
+
+    from v1ca1.spyglass import path_specific_place
+
+    curve, _selection = _valid_path_specific_place_curve()
+    analysis_path = tmp_path / "path-specific-place-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+
+    def validate_before_registration(*, path):
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    kwargs = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "curve": curve,
+        "analysis_nwbfile_table": analysis_table,
+    }
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_path_specific_place_tuning_curve_nwb(**kwargs)
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_path_specific_place_tuning_curve_nwb(**kwargs)
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == (
+        path_specific_place.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    object_ids = {
+        row[f"{name}_object_id"]
+        for name in (
+            "path_specific_place_tuning",
+            "path_specific_place_bins",
+            "path_specific_place_provenance",
+        )
+    }
+    assert len(object_ids) == 3
+    assert row["path_specific_place_tuning_sha256"] == (
+        path_specific_place.path_specific_place_tuning_sha256(curve)
+    )
+    assert row["path_specific_place_bins_sha256"] == (
+        path_specific_place.path_specific_place_bins_sha256(curve)
+    )
+    assert row["path_specific_place_provenance_sha256"] == (
+        path_specific_place.path_specific_place_provenance_sha256(curve)
+    )
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_path_specific_tuning_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live tuning readers reconstruct the DataArray through fetch_nwb()."""
+    import xarray as xr
+
+    from v1ca1.spyglass import path_specific_place
+
+    curve, selection = _valid_path_specific_place_curve()
+    objects = {
+        "path_specific_place_tuning": (
+            path_specific_place.path_specific_place_tuning_to_dynamic_table(
+                curve
+            ).to_dataframe()
+        ),
+        "path_specific_place_bins": (
+            path_specific_place.path_specific_place_bins_to_dynamic_table(
+                curve
+            ).to_dataframe()
+        ),
+        "path_specific_place_provenance": (
+            path_specific_place.path_specific_place_provenance_to_dynamic_table(
+                curve
+            ).to_dataframe()
+        ),
+    }
+
+    class TuningRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [{name: value.copy() for name, value in objects.items()}]
+
+    relation = TuningRelation()
+    result = {
+        "path_specific_place_tuning_curve_id": selection[
+            "path_specific_place_tuning_curve_id"
+        ],
+        "artifact_schema_version": (
+            path_specific_place.NWB_ARTIFACT_SCHEMA_VERSION
+        ),
+        "path_specific_place_tuning_sha256": (
+            path_specific_place.path_specific_place_tuning_sha256(curve)
+        ),
+        "path_specific_place_bins_sha256": (
+            path_specific_place.path_specific_place_bins_sha256(curve)
+        ),
+        "path_specific_place_provenance_sha256": (
+            path_specific_place.path_specific_place_provenance_sha256(curve)
+        ),
+        "n_units": int(curve.attrs["n_units"]),
+        "n_valid_units": int(curve.attrs["n_valid_units"]),
+        "n_trials": int(curve.attrs["n_trials"]),
+        "support_duration_s": float(curve.attrs["support_duration_s"]),
+        "n_feature_samples": int(curve.attrs["n_feature_samples"]),
+        "n_position_bins": int(curve.sizes[curve.dims[1]]),
+        "analysis_status": str(curve.attrs["analysis_status"]),
+        "selected_units_sha256": str(curve.attrs["selected_units_sha256"]),
+    }
+    loaded = _load_path_specific_place_tuning_curve_result(
+        result_row=result,
+        tuning_curve_table=relation,
+        selection_row=selection,
+    )
+    xr.testing.assert_identical(loaded, curve)
+    assert relation.keys == [
+        {
+            "path_specific_place_tuning_curve_id": selection[
+                "path_specific_place_tuning_curve_id"
+            ]
+        }
+    ]
+
+    with pytest.raises(ValueError, match="path_specific_place_bins_sha256"):
+        _load_path_specific_place_tuning_curve_result(
+            result_row={
+                **result,
+                "path_specific_place_bins_sha256": "0" * 64,
+            },
+            tuning_curve_table=relation,
+            selection_row=selection,
+        )
+
+
+def test_path_specific_tuning_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a tuning NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_tuning_curve_compute": lambda **kwargs: (
+                pytest.fail("Tuning computation must not start outside populate().")
+            )
+        }
+    )
+    tuning = bundle["path_specific_place_tuning_curve"]
+    tuning.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        tuning().make(
+            {"path_specific_place_tuning_curve_id": uuid.uuid4()}
+        )
+
+
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid DPP tuning NWB"]],
+)
+def test_dpp_tuning_write_uses_three_nwb_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """DPP unit curves, bins, and provenance precede registration."""
+    import pynwb
+
+    from v1ca1.spyglass import dpp
+
+    curve, _selection = _valid_dpp_curve()
+    analysis_path = tmp_path / "dpp-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+
+    def validate_before_registration(*, path):
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    kwargs = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "curve": curve,
+        "analysis_nwbfile_table": analysis_table,
+    }
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_dpp_tuning_curve_nwb(**kwargs)
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_dpp_tuning_curve_nwb(**kwargs)
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == dpp.NWB_ARTIFACT_SCHEMA_VERSION
+    object_ids = {
+        row[f"{name}_object_id"]
+        for name in ("dpp_tuning", "dpp_bins", "dpp_provenance")
+    }
+    assert len(object_ids) == 3
+    assert row["dpp_tuning_sha256"] == dpp.dpp_tuning_sha256(curve)
+    assert row["dpp_bins_sha256"] == dpp.dpp_bins_sha256(curve)
+    assert row["dpp_provenance_sha256"] == (
+        dpp.dpp_provenance_sha256(curve)
+    )
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_dpp_tuning_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live DPP readers reconstruct the DataArray through fetch_nwb()."""
+    import xarray as xr
+
+    from v1ca1.spyglass import dpp
+
+    curve, selection = _valid_dpp_curve()
+    objects = {
+        "dpp_tuning": dpp.dpp_tuning_to_dynamic_table(curve).to_dataframe(),
+        "dpp_bins": dpp.dpp_bins_to_dynamic_table(curve).to_dataframe(),
+        "dpp_provenance": (
+            dpp.dpp_provenance_to_dynamic_table(curve).to_dataframe()
+        ),
+    }
+
+    class TuningRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [{name: value.copy() for name, value in objects.items()}]
+
+    relation = TuningRelation()
+    result = {
+        "dpp_tuning_curve_id": selection["dpp_tuning_curve_id"],
+        "artifact_schema_version": dpp.NWB_ARTIFACT_SCHEMA_VERSION,
+        "dpp_tuning_sha256": dpp.dpp_tuning_sha256(curve),
+        "dpp_bins_sha256": dpp.dpp_bins_sha256(curve),
+        "dpp_provenance_sha256": dpp.dpp_provenance_sha256(curve),
+        "n_units": int(curve.attrs["n_units"]),
+        "n_valid_units": int(curve.attrs["n_valid_units"]),
+        "n_trials": int(curve.attrs["n_trials"]),
+        "n_outbound_trials": int(curve.attrs["n_outbound_trials"]),
+        "n_inbound_trials": int(curve.attrs["n_inbound_trials"]),
+        "support_duration_s": float(curve.attrs["support_duration_s"]),
+        "n_feature_samples": int(curve.attrs["n_feature_samples"]),
+        "n_position_bins": int(curve.sizes[curve.dims[1]]),
+        "analysis_status": str(curve.attrs["analysis_status"]),
+        "selected_units_sha256": str(curve.attrs["selected_units_sha256"]),
+    }
+    loaded = _load_dpp_tuning_curve_result(
+        result_row=result,
+        tuning_curve_table=relation,
+        selection_row=selection,
+    )
+    xr.testing.assert_identical(loaded, curve)
+    assert relation.keys == [
+        {"dpp_tuning_curve_id": selection["dpp_tuning_curve_id"]}
+    ]
+
+    with pytest.raises(ValueError, match="dpp_bins_sha256"):
+        _load_dpp_tuning_curve_result(
+            result_row={**result, "dpp_bins_sha256": "0" * 64},
+            tuning_curve_table=relation,
+            selection_row=selection,
+        )
+
+
+def test_dpp_tuning_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a DPP NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "dpp_tuning_curve_compute": lambda **kwargs: pytest.fail(
+                "DPP computation must not start outside populate()."
+            )
+        }
+    )
+    tuning = bundle["dpp_tuning_curve"]
+    tuning.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        tuning().make({"dpp_tuning_curve_id": uuid.uuid4()})
+
+
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid tuning-similarity NWB"]],
+)
+def test_tuning_similarity_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Similarity output is validated before registration and cleaned exactly."""
+    import pynwb
+
+    from v1ca1.spyglass import tuning_similarity
+
+    analysis_path = tmp_path / "tuning-similarity-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+    validation_calls = []
+
+    def validate_before_registration(*, path):
+        validation_calls.append(str(path))
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    source = _valid_tuning_similarity_table()
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_path_specific_place_tuning_similarity_nwb(
+                nwb_file_name="L1420240102_.nwb",
+                table=source,
+                analysis_nwbfile_table=analysis_table,
+            )
+        assert validation_calls == [str(analysis_path)]
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_path_specific_place_tuning_similarity_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        table=source,
+        analysis_nwbfile_table=analysis_table,
+    )
+
+    assert validation_calls == [str(analysis_path)]
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == (
+        tuning_similarity.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["similarity_sha256"] == (
+        tuning_similarity.tuning_similarity_table_sha256(source)
+    )
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_tuning_similarity_result_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live similarity readers resolve the DynamicTable through fetch_nwb()."""
+    from v1ca1.spyglass import tuning_similarity
+
+    similarity_id = uuid.UUID("74444444-4444-5444-8444-444444444444")
+    source = _valid_tuning_similarity_table()
+
+    class SimilarityRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [{"similarity": source.copy()}]
+
+    relation = SimilarityRelation()
+    result = {
+        "path_specific_place_tuning_similarity_id": similarity_id,
+        "similarity_sha256": (
+            tuning_similarity.tuning_similarity_table_sha256(source)
+        ),
+        "artifact_schema_version": (
+            tuning_similarity.NWB_ARTIFACT_SCHEMA_VERSION
+        ),
+        "n_units": 1,
+        "n_valid_comparisons": 4,
+        "n_units_with_valid_comparison": 1,
+        "analysis_status": "valid",
+        "selected_units_sha256": unit_identity_sha256(
+            [{"spikesorting_merge_id": "merge-a", "unit_id": "11"}]
+        ),
+    }
+
+    loaded = _load_path_specific_place_tuning_similarity_result(
+        result_row=result,
+        similarity_table=relation,
+        similarity_metric="correlation",
+    )
+    pd.testing.assert_frame_equal(loaded, source)
+    assert relation.keys == [
+        {"path_specific_place_tuning_similarity_id": similarity_id}
+    ]
+
+    with pytest.raises(ValueError, match="similarity_sha256"):
+        _load_path_specific_place_tuning_similarity_result(
+            result_row={**result, "similarity_sha256": "0" * 64},
+            similarity_table=relation,
+            similarity_metric="correlation",
+        )
+
+
+def test_tuning_similarity_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a similarity NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_tuning_similarity_compute": (
+                lambda **kwargs: pytest.fail(
+                    "Similarity computation must not start outside populate()."
+                )
+            )
+        }
+    )
+    similarity_table = bundle["path_specific_place_tuning_similarity"]
+    similarity_table.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        similarity_table().make(
+            {"path_specific_place_tuning_similarity_id": uuid.uuid4()}
+        )
+
+
+def test_tuning_similarity_registration_uses_one_datajoint_transaction(
+    monkeypatch,
+) -> None:
+    """Legacy normalization and both result inserts share one transaction."""
+    similarity_id = uuid.UUID("73333333-3333-5333-8333-333333333333")
+    selection = {
+        "path_specific_place_tuning_similarity_id": similarity_id,
+        **_tuning_similarity_selection_key(),
+        "tuning_similarity_parameters_sha256": provenance_sha256(
+            dict(table_specs.CORRELATION_TUNING_SIMILARITY_PARAMETERS)
+        ),
+    }
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-tuning-similarity.nwb",
+            "similarity_object_id": "similarity-object-id",
+            "similarity_sha256": "f" * 64,
+            "artifact_schema_version": "1",
+            "n_units": 1,
+            "n_valid_comparisons": 4,
+            "n_units_with_valid_comparison": 1,
+            "analysis_status": "valid",
+            "selected_units_sha256": "e" * 64,
+            "legacy_artifact_provenance": {"source": "all_units"},
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_tuning_similarity_register_existing": (
+                register
+            ),
+        }
+    )
+    similarity_table = bundle["path_specific_place_tuning_similarity"]
+    similarity_table.connection = connection
+
+    row = similarity_table.register_existing(
+        {"path_specific_place_tuning_similarity_id": similarity_id},
+        similarity_path="legacy-similarity-all_units.parquet",
+    )
+
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
+    ]
+    assert row["analysis_file_name"] == "registered-tuning-similarity.nwb"
+    assert similarity_table._insert_calls[-1][0][
+        "path_specific_place_tuning_similarity_id"
+    ] == similarity_id
+
+
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid DPPEncoding NWB"]],
+)
+def test_dpp_encoding_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Encoding output is validated before registration and cleaned exactly."""
+    import pynwb
+
+    from v1ca1.spyglass import dpp_encoding
+
+    analysis_path = tmp_path / "dpp-encoding-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+    validation_calls = []
+
+    def validate_before_registration(*, path):
+        validation_calls.append(str(path))
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    source = _valid_dpp_encoding_table()
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_dpp_encoding_nwb(
+                nwb_file_name="L1420240102_.nwb",
+                table=source,
+                analysis_nwbfile_table=analysis_table,
+            )
+        assert validation_calls == [str(analysis_path)]
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_dpp_encoding_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        table=source,
+        analysis_nwbfile_table=analysis_table,
+    )
+
+    assert validation_calls == [str(analysis_path)]
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == (
+        dpp_encoding.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["dpp_encoding_sha256"] == (
+        dpp_encoding.dpp_encoding_table_sha256(source)
+    )
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_dpp_encoding_result_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live encoding readers resolve the DynamicTable through fetch_nwb()."""
+    from v1ca1.spyglass import dpp_encoding
+
+    source = _valid_dpp_encoding_table()
+    dpp_encoding_id = uuid.UUID(source["dpp_encoding_id"].iloc[0])
+
+    class DPPEncodingRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [{"dpp_encoding": source.copy()}]
+
+    relation = DPPEncodingRelation()
+    result = {
+        "dpp_encoding_id": dpp_encoding_id,
+        "dpp_encoding_sha256": (
+            dpp_encoding.dpp_encoding_table_sha256(source)
+        ),
+        "artifact_schema_version": dpp_encoding.NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+
+    loaded = _load_dpp_encoding_result(
+        result_row=result,
+        dpp_encoding_table=relation,
+    )
+    pd.testing.assert_frame_equal(loaded, source)
+    assert relation.keys == [{"dpp_encoding_id": dpp_encoding_id}]
+
+    with pytest.raises(ValueError, match="dpp_encoding_sha256"):
+        _load_dpp_encoding_result(
+            result_row={**result, "dpp_encoding_sha256": "0" * 64},
+            dpp_encoding_table=relation,
+        )
+
+
+def test_dpp_encoding_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a DPPEncoding NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "dpp_encoding_compute": lambda **kwargs: pytest.fail(
+                "DPPEncoding computation must not start outside populate()."
+            )
+        }
+    )
+    dpp_encoding_table = bundle["dpp_encoding"]
+    dpp_encoding_table.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        dpp_encoding_table().make({"dpp_encoding_id": uuid.uuid4()})
+
+
+def test_dpp_encoding_registration_uses_one_datajoint_transaction(
+    monkeypatch,
+) -> None:
+    """Legacy normalization and both result inserts share one transaction."""
+    dpp_encoding_id = uuid.UUID("71111111-1111-5111-8111-111111111111")
+    selection = {"dpp_encoding_id": dpp_encoding_id}
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-dpp-encoding.nwb",
+            "dpp_encoding_object_id": "dpp-encoding-object-id",
+            "dpp_encoding_sha256": "f" * 64,
+            "artifact_schema_version": "1",
+            "n_units_input": 2,
+            "n_units_eligible": 1,
+            "n_units_valid": 1,
+            "analysis_status": "valid",
+            "eligible_units_sha256": "e" * 64,
+            "legacy_artifact_provenance": {"source": "legacy"},
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"dpp_encoding_register_existing": register}
+    )
+    dpp_encoding_table = bundle["dpp_encoding"]
+    dpp_encoding_table.connection = connection
+
+    row = dpp_encoding_table.register_existing(
+        {"dpp_encoding_id": dpp_encoding_id},
+        dpp_encoding_path="legacy-encoding.parquet",
+    )
+
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
+    ]
+    assert row["analysis_file_name"] == "registered-dpp-encoding.nwb"
+    assert dpp_encoding_table._insert_calls[-1][0]["dpp_encoding_id"] == (
+        dpp_encoding_id
+    )
+
+
+@pytest.mark.parametrize("validation_errors", [None, ["invalid stability NWB"]])
+def test_stability_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Stability output is validated before registration and cleaned exactly."""
+    import pynwb
+
+    from v1ca1.spyglass import stability
+
+    analysis_path = tmp_path / "stability-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+    validation_calls = []
+
+    def validate_before_registration(*, path):
+        validation_calls.append(str(path))
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    source = _valid_stability_table()
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            _write_path_specific_place_stability_nwb(
+                nwb_file_name="L1420240102_.nwb",
+                table=source,
+                analysis_nwbfile_table=analysis_table,
+            )
+        assert validation_calls == [str(analysis_path)]
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = _write_path_specific_place_stability_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        table=source,
+        analysis_nwbfile_table=analysis_table,
+    )
+
+    assert validation_calls == [str(analysis_path)]
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == stability.NWB_ARTIFACT_SCHEMA_VERSION
+    assert row["stability_sha256"] == stability.stability_table_sha256(source)
+    assert row["_created_artifact_paths"] == [str(analysis_path)]
+
+
+def test_stability_result_loader_uses_fetch_nwb_and_checks_hash() -> None:
+    """Live stability readers resolve object IDs rather than filesystem paths."""
+    from v1ca1.spyglass import stability
+
+    stability_id = uuid.UUID("75555555-5555-5555-8555-555555555555")
+    source = _valid_stability_table()
+
+    class StabilityRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [{"stability": source.copy()}]
+
+    relation = StabilityRelation()
+    result = {
+        "path_specific_place_stability_id": stability_id,
+        "stability_sha256": stability.stability_table_sha256(source),
+        "artifact_schema_version": stability.NWB_ARTIFACT_SCHEMA_VERSION,
+        "n_units": 1,
+        "n_valid_units": 1,
+        "analysis_status": "valid",
+        "selected_units_sha256": unit_identity_sha256(
+            [{"spikesorting_merge_id": "merge-a", "unit_id": "11"}]
+        ),
+    }
+
+    loaded = _load_path_specific_place_stability_result(
+        result_row=result,
+        stability_table=relation,
+        expected_metadata={"trajectory_type": "center_to_left"},
+    )
+    pd.testing.assert_frame_equal(loaded, source)
+    assert relation.keys == [
+        {"path_specific_place_stability_id": stability_id}
+    ]
+
+    with pytest.raises(ValueError, match="stability_sha256"):
+        _load_path_specific_place_stability_result(
+            result_row={**result, "stability_sha256": "0" * 64},
+            stability_table=relation,
+        )
+
+
+def test_stability_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a stability NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_stability_compute": lambda **kwargs: pytest.fail(
+                "Stability computation must not start outside populate()."
+            )
+        }
+    )
+    stability_table = bundle["path_specific_place_stability"]
+    stability_table.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        stability_table().make(
+            {"path_specific_place_stability_id": uuid.uuid4()}
+        )
+
+
+def test_stability_registration_uses_one_datajoint_transaction(monkeypatch) -> None:
+    """Legacy normalization and both result inserts share one transaction."""
+    stability_id = uuid.UUID("76666666-6666-5666-8666-666666666666")
+    selection = {
+        "path_specific_place_stability_id": stability_id,
+        **_stability_selection_key(),
+    }
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-stability.nwb",
+            "stability_object_id": "stability-object-id",
+            "stability_sha256": "f" * 64,
+            "artifact_schema_version": "1",
+            "n_units": 1,
+            "n_valid_units": 1,
+            "analysis_status": "valid",
+            "selected_units_sha256": "e" * 64,
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_specific_place_stability_register_existing": register,
+        }
+    )
+    stability_table = bundle["path_specific_place_stability"]
+    stability_table.connection = connection
+
+    row = stability_table.register_existing(
+        {"path_specific_place_stability_id": stability_id},
+        stability_path="legacy-stability.parquet",
+    )
+
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
+    ]
+    assert row["analysis_file_name"] == "registered-stability.nwb"
+    assert stability_table._insert_calls[-1][0][
+        "path_specific_place_stability_id"
+    ] == stability_id
+
+
 def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -> None:
     ripple_id = uuid.UUID("11111111-1111-5111-8111-111111111111")
     stability_id = uuid.UUID("22222222-2222-5222-8222-222222222222")
@@ -3954,8 +6223,12 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def ripple_compute(**kwargs):
         calls.append(("ripple_compute", kwargs))
         return {
-            "summary_path": "/analysis/summary.parquet",
-            "peri_ripple_firing_rate_path": "/analysis/peri.parquet",
+            "analysis_file_name": "ripple-modulation-analysis.nwb",
+            "ripple_modulation_summary_object_id": "summary-object-id",
+            "peri_ripple_firing_rate_object_id": "peri-object-id",
+            "ripple_modulation_summary_sha256": "d" * 64,
+            "peri_ripple_firing_rate_sha256": "e" * 64,
+            "artifact_schema_version": "1",
             "n_ripples": 4,
             "n_units": 2,
             "n_valid_units": 1,
@@ -3966,8 +6239,12 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def movement_compute(**kwargs):
         calls.append(("movement_compute", kwargs))
         return {
-            "movement_firing_rate_path": "/analysis/movement_firing_rate.parquet",
-            "movement_intervals_path": "/analysis/movement_intervals.npz",
+            "analysis_file_name": "movement-analysis.nwb",
+            "movement_firing_rate_object_id": "rate-object-id",
+            "movement_intervals_object_id": "interval-object-id",
+            "movement_firing_rate_sha256": "d" * 64,
+            "movement_intervals_sha256": "e" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 2,
             "n_units_with_spikes": 1,
@@ -3980,8 +6257,12 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def ripple_register(**kwargs):
         calls.append(("ripple_register", kwargs))
         return {
-            "summary_path": "/analysis/keyed-summary.parquet",
-            "peri_ripple_firing_rate_path": "/analysis/keyed-peri.parquet",
+            "analysis_file_name": "registered-ripple-modulation.nwb",
+            "ripple_modulation_summary_object_id": "summary-object-id",
+            "peri_ripple_firing_rate_object_id": "peri-object-id",
+            "ripple_modulation_summary_sha256": "d" * 64,
+            "peri_ripple_firing_rate_sha256": "e" * 64,
+            "artifact_schema_version": "1",
             "n_ripples": 4,
             "n_units": 2,
             "n_valid_units": 1,
@@ -3992,7 +6273,14 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def tuning_curve_compute(**kwargs):
         calls.append(("tuning_curve_compute", kwargs))
         return {
-            "tuning_curve_path": "/analysis/tuning_curve.nc",
+            "analysis_file_name": "tuning-curve-analysis.nwb",
+            "path_specific_place_tuning_object_id": "tuning-object-id",
+            "path_specific_place_bins_object_id": "bins-object-id",
+            "path_specific_place_provenance_object_id": "provenance-object-id",
+            "path_specific_place_tuning_sha256": "1" * 64,
+            "path_specific_place_bins_sha256": "2" * 64,
+            "path_specific_place_provenance_sha256": "3" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 2,
             "n_trials": 5,
@@ -4006,7 +6294,14 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def tuning_curve_register(**kwargs):
         calls.append(("tuning_curve_register", kwargs))
         return {
-            "tuning_curve_path": "/analysis/keyed-tuning-curve.nc",
+            "analysis_file_name": "registered-tuning-curve-analysis.nwb",
+            "path_specific_place_tuning_object_id": "tuning-object-id",
+            "path_specific_place_bins_object_id": "bins-object-id",
+            "path_specific_place_provenance_object_id": "provenance-object-id",
+            "path_specific_place_tuning_sha256": "1" * 64,
+            "path_specific_place_bins_sha256": "2" * 64,
+            "path_specific_place_provenance_sha256": "3" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 2,
             "n_trials": 5,
@@ -4020,7 +6315,10 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def stability_compute(**kwargs):
         calls.append(("stability_compute", kwargs))
         return {
-            "stability_path": "/analysis/stability.parquet",
+            "analysis_file_name": "stability-analysis.nwb",
+            "stability_object_id": "stability-object-id",
+            "stability_sha256": "f" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 1,
             "analysis_status": "valid",
@@ -4030,7 +6328,10 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     def stability_register(**kwargs):
         calls.append(("stability_register", kwargs))
         return {
-            "stability_path": "/analysis/keyed-stability.parquet",
+            "analysis_file_name": "keyed-stability-analysis.nwb",
+            "stability_object_id": "keyed-stability-object-id",
+            "stability_sha256": "1" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 1,
             "analysis_status": "valid",
@@ -4122,6 +6423,10 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         assert calls[call_index][1][
             "region_sorted_spikes_group_table"
         ] is bundle["region_sorted_spikes_group"]
+    for call_index in (0, 1):
+        assert calls[call_index][1]["analysis_nwbfile_table"] is bundle[
+            "analysis_nwbfile"
+        ]
     assert ripple._insert_calls[0][0]["ripple_modulation_id"] == ripple_id
     assert ripple._insert_calls[1][0]["artifact_origin"] == "registered_existing"
     assert ripple._insert_calls[1][1] == {
@@ -4131,6 +6436,9 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
     assert movement._insert_calls[0][0]["movement_firing_rate_id"] == movement_id
     assert "artifact_origin" not in movement._insert_calls[0][0]
     assert calls[2][1]["parameters_table"] is bundle["movement_parameters"]
+    assert calls[2][1]["analysis_nwbfile_table"] is bundle[
+        "analysis_nwbfile"
+    ]
     for call_index in (3, 4):
         assert calls[call_index][1]["movement_firing_rate_table"] is movement
         assert calls[call_index][1][
@@ -4141,6 +6449,9 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         ]
         assert calls[call_index][1]["parameters_table"] is bundle[
             "tuning_curve_parameters"
+        ]
+        assert calls[call_index][1]["analysis_nwbfile_table"] is bundle[
+            "analysis_nwbfile"
         ]
     assert tuning_curve._insert_calls[0][0][
         "path_specific_place_tuning_curve_id"
@@ -4158,6 +6469,9 @@ def test_result_make_and_register_hooks_receive_fetched_selection(monkeypatch) -
         assert calls[call_index][1][
             "tuning_curve_selection_table"
         ] is bundle["path_specific_place_tuning_curve_selection"]
+        assert calls[call_index][1]["analysis_nwbfile_table"] is bundle[
+            "analysis_nwbfile"
+        ]
     assert stability._insert_calls[0][0][
         "path_specific_place_stability_id"
     ] == stability_id
@@ -4185,9 +6499,16 @@ def test_dpp_result_hooks_receive_fetched_selection(monkeypatch) -> None:
     }
     calls = []
 
-    def result_row(path: str) -> dict[str, Any]:
+    def result_row(analysis_file_name: str) -> dict[str, Any]:
         return {
-            "tuning_curve_path": path,
+            "analysis_file_name": analysis_file_name,
+            "dpp_tuning_object_id": "dpp-tuning-object-id",
+            "dpp_bins_object_id": "dpp-bins-object-id",
+            "dpp_provenance_object_id": "dpp-provenance-object-id",
+            "dpp_tuning_sha256": "1" * 64,
+            "dpp_bins_sha256": "2" * 64,
+            "dpp_provenance_sha256": "3" * 64,
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 2,
             "n_trials": 7,
@@ -4202,11 +6523,11 @@ def test_dpp_result_hooks_receive_fetched_selection(monkeypatch) -> None:
 
     def compute(**kwargs):
         calls.append(("compute", kwargs))
-        return result_row("/analysis/dpp-tuning-curve.nc")
+        return result_row("dpp-tuning-analysis.nwb")
 
     def register(**kwargs):
         calls.append(("register", kwargs))
-        return result_row("/analysis/keyed-dpp-tuning-curve.nc")
+        return result_row("registered-dpp-tuning-analysis.nwb")
 
     def fetch_selection(table, key):
         assert table.__name__ == "DPPTuningCurveSelection"
@@ -4248,6 +6569,7 @@ def test_dpp_result_hooks_receive_fetched_selection(monkeypatch) -> None:
         assert call["region_sorted_spikes_group_table"] is bundle[
             "region_sorted_spikes_group"
         ]
+        assert call["analysis_nwbfile_table"] is bundle["analysis_nwbfile"]
     assert result._insert_calls[0][0]["dpp_tuning_curve_id"] == selection_id
     assert result._insert_calls[0][0]["artifact_origin"] == "computed"
     assert result._insert_calls[1][0]["artifact_origin"] == (
@@ -4275,20 +6597,47 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
     ]._compute_hook is _make_path_progression_decoding_row
 
     calls = []
+    transfer_row = {
+        "transfer_family": "same_turn_cross_arm",
+        "source_trajectory": "center_to_left",
+        "target_trajectory": "center_to_right",
+        "true_progression_object_id": "true-object-id",
+        "decoded_progression_object_id": "decoded-object-id",
+        "decoding_support_object_id": "support-object-id",
+        "true_progression_sha256": "1" * 64,
+        "decoded_progression_sha256": "2" * 64,
+        "decoding_support_sha256": "3" * 64,
+        "n_samples": 1000,
+    }
 
     def compute(**kwargs):
         calls.append(kwargs)
         return {
-            "artifact_manifest_path": "/analysis/manifest.parquet",
-            "decoding_summary_path": "/analysis/decoding-summary.parquet",
-            "unit_eligibility_path": "/analysis/unit-eligibility.parquet",
+            "analysis_file_name": "path-progression-analysis.nwb",
+            "unit_eligibility_object_id": "eligibility-object-id",
+            "selected_units_object_id": "selected-object-id",
+            "decoding_summary_object_id": "summary-object-id",
+            "cross_path_binned_error_object_id": "binned-object-id",
+            "transfer_index_object_id": "index-object-id",
+            "decoding_provenance_object_id": "provenance-object-id",
+            "unit_eligibility_sha256": "a" * 64,
+            "selected_units_table_sha256": "b" * 64,
+            "decoding_summary_sha256": "c" * 64,
+            "cross_path_binned_error_sha256": "d" * 64,
+            "transfer_index_sha256": "f" * 64,
+            "decoding_provenance_sha256": "0" * 64,
+            "artifact_schema_version": "1",
             "n_units_input": 5,
             "n_units_eligible": 3,
             "n_transfer_pairs_expected": 16,
-            "n_transfer_pairs_valid": 16,
+            "n_transfer_pairs_valid": 1,
             "n_decoded_samples": 1000,
-            "analysis_status": "valid",
+            "analysis_status": "partial_valid",
             "eligible_units_sha256": "e" * 64,
+            "_transfer_rows": [transfer_row],
+            "_created_artifact_paths": [
+                "/analysis/path-progression-analysis.nwb"
+            ],
         }
 
     def fetch_selection(table, key):
@@ -4342,23 +6691,47 @@ def test_path_progression_decoding_make_uses_default_and_injected_hook(
         "path_specific_place_stability"
     ]
     assert call["artifact_root"] == Path("/analysis")
+    assert call["analysis_nwbfile_table"] is bundle["analysis_nwbfile"]
     inserted, insert_kwargs = result._insert_calls[0]
     assert insert_kwargs == {}
     assert inserted == {
         "path_progression_decoding_id": comparison_id,
-        "artifact_manifest_path": "/analysis/manifest.parquet",
-        "decoding_summary_path": "/analysis/decoding-summary.parquet",
-        "unit_eligibility_path": "/analysis/unit-eligibility.parquet",
+        "analysis_file_name": "path-progression-analysis.nwb",
+        "unit_eligibility_object_id": "eligibility-object-id",
+        "selected_units_object_id": "selected-object-id",
+        "decoding_summary_object_id": "summary-object-id",
+        "cross_path_binned_error_object_id": "binned-object-id",
+        "transfer_index_object_id": "index-object-id",
+        "decoding_provenance_object_id": "provenance-object-id",
+        "unit_eligibility_sha256": "a" * 64,
+        "selected_units_table_sha256": "b" * 64,
+        "decoding_summary_sha256": "c" * 64,
+        "cross_path_binned_error_sha256": "d" * 64,
+        "transfer_index_sha256": "f" * 64,
+        "decoding_provenance_sha256": "0" * 64,
+        "artifact_schema_version": "1",
         "n_units_input": 5,
         "n_units_eligible": 3,
         "n_transfer_pairs_expected": 16,
-        "n_transfer_pairs_valid": 16,
+        "n_transfer_pairs_valid": 1,
         "n_decoded_samples": 1000,
-        "analysis_status": "valid",
+        "analysis_status": "partial_valid",
         "eligible_units_sha256": "e" * 64,
         "runtime_v1ca1_git_commit": "runtime-v1ca1-commit",
         "runtime_spyglass_git_commit": "runtime-spyglass-commit",
     }
+    assert result.Transfer._insert_many_calls == [
+        (
+            [
+                {
+                    "path_progression_decoding_id": comparison_id,
+                    "analysis_file_name": "path-progression-analysis.nwb",
+                    **transfer_row,
+                }
+            ],
+            {},
+        )
+    ]
     assert "artifact_origin" not in inserted
     assert not hasattr(result, "register_existing")
 
@@ -4368,29 +6741,36 @@ def test_path_progression_decoding_failed_insert_removes_new_bundle(
     monkeypatch,
 ) -> None:
     comparison_id = uuid.UUID("87777777-7777-5777-8777-777777777777")
-    artifact_dir = tmp_path / str(comparison_id)
+    analysis_path = tmp_path / "path-progression-analysis.nwb"
     retained_path = tmp_path / "preexisting.parquet"
     retained_path.write_bytes(b"keep")
 
     def compute(**_kwargs):
-        artifact_dir.mkdir()
-        paths = {
-            "artifact_manifest_path": artifact_dir / "manifest.parquet",
-            "decoding_summary_path": artifact_dir / "decoding-summary.parquet",
-            "unit_eligibility_path": artifact_dir / "unit-eligibility.parquet",
-        }
-        for path in paths.values():
-            path.write_bytes(b"new")
+        analysis_path.write_bytes(b"new")
         return {
-            **{name: str(path) for name, path in paths.items()},
+            "analysis_file_name": analysis_path.name,
+            "unit_eligibility_object_id": "eligibility-object-id",
+            "selected_units_object_id": "selected-object-id",
+            "decoding_summary_object_id": "summary-object-id",
+            "cross_path_binned_error_object_id": "binned-object-id",
+            "transfer_index_object_id": "index-object-id",
+            "decoding_provenance_object_id": "provenance-object-id",
+            "unit_eligibility_sha256": "a" * 64,
+            "selected_units_table_sha256": "b" * 64,
+            "decoding_summary_sha256": "c" * 64,
+            "cross_path_binned_error_sha256": "d" * 64,
+            "transfer_index_sha256": "f" * 64,
+            "decoding_provenance_sha256": "0" * 64,
+            "artifact_schema_version": "1",
             "n_units_input": 5,
             "n_units_eligible": 3,
             "n_transfer_pairs_expected": 16,
-            "n_transfer_pairs_valid": 16,
+            "n_transfer_pairs_valid": 0,
             "n_decoded_samples": 1000,
-            "analysis_status": "valid",
+            "analysis_status": "no_valid_decodes",
             "eligible_units_sha256": "e" * 64,
-            "_created_artifact_paths": [str(artifact_dir)],
+            "_transfer_rows": [],
+            "_created_artifact_paths": [str(analysis_path)],
         }
 
     monkeypatch.setitem(
@@ -4416,8 +6796,24 @@ def test_path_progression_decoding_failed_insert_removes_new_bundle(
             {"path_progression_decoding_id": comparison_id}
         )
 
-    assert not artifact_dir.exists()
+    assert not analysis_path.exists()
     assert retained_path.read_bytes() == b"keep"
+
+
+def test_path_progression_decoding_make_requires_populate_transaction() -> None:
+    """Direct make cannot register parent and transfer rows independently."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "path_progression_decoding_compute": lambda **kwargs: pytest.fail(
+                "Path-progression computation must not start outside populate()."
+            )
+        }
+    )
+    result = bundle["path_progression_decoding"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"path_progression_decoding_id": uuid.uuid4()})
 
 
 def test_path_specific_place_decoding_selection_is_deterministic() -> None:
@@ -4475,6 +6871,101 @@ def test_motor_encoding_selection_rejects_misaligned_position_sources() -> None:
 
     with pytest.raises(ValueError, match="aligned sampling metadata"):
         _build_motor_encoding_selection(inputs)
+
+
+def test_motor_encoding_make_requires_populate_transaction() -> None:
+    """AnalysisNwbfile and MotorEncoding rows must share populate's transaction."""
+    bundle, _, _ = _fake_bundle()
+    result = bundle["motor_encoding"]
+    result.connection = SimpleNamespace(in_transaction=False)
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"motor_encoding_id": uuid.uuid4()})
+
+
+def test_motor_encoding_registration_uses_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy validation, NWB registration, and result insert are transactional."""
+    result_id = uuid.uuid4()
+    selection = {
+        "motor_encoding_id": result_id,
+        "nwb_file_name": "L1420240611_.nwb",
+    }
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        assert kwargs["analysis_nwbfile_table"] is bundle["analysis_nwbfile"]
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-motor-encoding.nwb",
+            "selected_units_object_id": "selected-units-object-id",
+            "dataset_index_object_id": "dataset-index-object-id",
+            "coordinates_object_id": "coordinates-object-id",
+            "nested_cv_arrays_object_id": "nested-cv-arrays-object-id",
+            "full_refit_arrays_object_id": "full-refit-arrays-object-id",
+            "provenance_object_id": "provenance-object-id",
+            "artifact_schema_version": "1",
+            "schema_version": "2",
+            "n_units_input": 2,
+            "n_units_eligible": 1,
+            "n_units_valid": 1,
+            "n_outer_folds_expected": 5,
+            "n_outer_folds_valid": 5,
+            "analysis_status": "valid",
+            "selected_units_sha256": "a" * 64,
+            "selected_units_table_sha256": "b" * 64,
+            "dataset_index_sha256": "c" * 64,
+            "coordinates_sha256": "d" * 64,
+            "nested_cv_arrays_sha256": "e" * 64,
+            "full_refit_arrays_sha256": "f" * 64,
+            "provenance_sha256": "1" * 64,
+            "motor_encoding_sha256": "2" * 64,
+            "legacy_artifact_provenance": {"source": "legacy"},
+            "_created_artifact_paths": ["registered-motor-encoding.nwb"],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"motor_encoding_register_existing": register}
+    )
+    result = bundle["motor_encoding"]
+    result.connection = connection
+    row = result.register_existing(
+        {"motor_encoding_id": result_id},
+        source_nested_cv_path="old-nested.nc",
+        source_full_refit_path="old-full-refit.nc",
+    )
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
+    ]
+    assert row["analysis_file_name"] == "registered-motor-encoding.nwb"
 
 
 def test_dark_light_glm_parameters_and_selection_are_frozen() -> None:
@@ -4576,7 +7067,7 @@ def test_dark_light_legacy_resolver_requires_imported_unique_units() -> None:
         _legacy_dark_light_unit_identity_resolver(loaded)
 
 
-def test_dark_light_registration_uses_canonical_selected_paths(
+def test_dark_light_registration_converts_legacy_bundle_to_analysis_nwb(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4584,6 +7075,7 @@ def test_dark_light_registration_uses_canonical_selected_paths(
         table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS
     )
     selection = {
+        "nwb_file_name": "L1420240611_.nwb",
         "dark_light_glm_id": uuid.uuid4(),
         "dark_light_glm_param_name": parameters[
             "dark_light_glm_param_name"
@@ -4640,19 +7132,26 @@ def test_dark_light_registration_uses_canonical_selected_paths(
             if field_name != "dark_light_glm_param_name"
         },
     }
+    register_calls = []
     monkeypatch.setattr(
         dark_light_glm,
         "register_existing_dark_light_glm_artifact",
-        lambda **kwargs: {
-            "parameters": expected_parameters,
-            "legacy_artifact_provenance": {"source": "legacy"},
-            "n_units": 1,
-            "n_candidates": 9,
-            "n_selected_models": 4,
-            "analysis_status": "valid",
-            "selected_units_sha256": "a" * 64,
-        },
+        lambda **kwargs: (
+            register_calls.append(kwargs)
+            or {
+                "parameters": expected_parameters,
+                "legacy_artifact_provenance": {"source": "legacy"},
+            }
+        ),
     )
+    writer_calls = []
+    monkeypatch.setattr(
+        tables_module,
+        "_write_dark_light_glm_nwb",
+        lambda **kwargs: writer_calls.append(kwargs)
+        or {"analysis_file_name": "dark-light-analysis.nwb"},
+    )
+    analysis_nwbfile_table = object()
 
     row = _register_existing_dark_light_glm_row(
         key=selection,
@@ -4673,23 +7172,193 @@ def test_dark_light_registration_uses_canonical_selected_paths(
         source_v1ca1_git_commit=None,
         source_spyglass_git_commit=None,
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
-    artifact_dir = (
-        tmp_path
-        / "L14"
-        / "20240611"
-        / "dark_light_glm"
-        / "02_r1_vs_08_r4"
-        / "v1"
-        / str(selection["dark_light_glm_id"])
+    assert register_calls[0]["destination_path"] is None
+    assert writer_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert writer_calls[0]["analysis_nwbfile_table"] is analysis_nwbfile_table
+    assert row["analysis_file_name"] == "dark-light-analysis.nwb"
+
+
+def _terminal_dark_light_glm_result():
+    """Return one canonical no-unit DarkLightGLM result for table tests."""
+    from v1ca1.spyglass import dark_light_glm
+
+    result_id = uuid.uuid4()
+    parameters = {
+        **dark_light_glm.validate_dark_light_glm_parameters(
+            basis_candidate_mode="spatial_bin_size_cm",
+            basis_candidates=(2.0, 4.0),
+            bin_sizes_s=(0.02,),
+            ridges=(0.1,),
+            n_folds=2,
+            min_dark_firing_rate_hz=0.5,
+            min_light_firing_rate_hz=0.5,
+        ),
+        "parameter_name": "test",
+        "parameter_sha256": "a" * 64,
+        "output_rule_sha256": "b" * 64,
+    }
+    result = dark_light_glm._terminal_result(
+        metadata={
+            "dark_light_glm_id": str(result_id),
+            "animal_name": "L14",
+            "date": "20240611",
+            "region": "v1",
+            "light_epoch": "02_r1",
+            "dark_epoch": "08_r4",
+        },
+        parameters=parameters,
+        trajectory_length_cm=36.0,
+        segment_edges=np.asarray([0.0, 0.3, 0.7, 1.0]),
+        analysis_status="no_eligible_units",
     )
-    assert Path(row["artifact_manifest_path"]) == (
-        artifact_dir / "manifest.parquet"
+    return result, result_id
+
+
+def test_dark_light_glm_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """The live writer registers seven selectively fetchable NWB objects."""
+    from v1ca1.spyglass import dark_light_glm
+
+    result, _result_id = _terminal_dark_light_glm_result()
+    analysis_table = _TestAnalysisNwbfile(
+        tmp_path / "dark-light-glm-analysis.nwb"
     )
-    assert Path(row["visual_model_path"]) == (
-        artifact_dir / "selected" / "visual.nc"
+    with pytest.raises(ValueError, match="analysis_nwbfile_table is required"):
+        tables_module._write_dark_light_glm_nwb(
+            nwb_file_name="L1420240102_.nwb",
+            result=result,
+            analysis_nwbfile_table=None,
+        )
+    row = tables_module._write_dark_light_glm_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
     )
+    assert analysis_table.builder.registered is True
+    assert row["analysis_file_name"] == "dark-light-glm-analysis.nwb"
+    assert row["artifact_schema_version"] == (
+        dark_light_glm.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["analysis_status"] == "no_eligible_units"
+    assert {
+        f"{name}_object_id"
+        for name in tables_module._DARK_LIGHT_GLM_NWB_OBJECT_NAMES
+    }.issubset(row)
+    assert dark_light_glm.dark_light_glm_nwb_hashes(result).items() <= row.items()
+
+
+def test_dark_light_glm_loader_uses_fetch_nwb_and_checks_hashes() -> None:
+    """The live loader reconstructs the full search through fetch_nwb()."""
+    from v1ca1.spyglass import dark_light_glm
+
+    result, result_id = _terminal_dark_light_glm_result()
+    objects = dark_light_glm.dark_light_glm_result_to_nwb_objects(result)
+
+    class FetchNwbRelation:
+        def __init__(self) -> None:
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    name: nwb_object.to_dataframe()
+                    for name, nwb_object in objects.items()
+                }
+            ]
+
+    relation = FetchNwbRelation()
+    result_row = {
+        "dark_light_glm_id": result_id,
+        "artifact_schema_version": dark_light_glm.NWB_ARTIFACT_SCHEMA_VERSION,
+        "selected_model_sha256_by_model": (
+            dark_light_glm.dark_light_glm_selected_model_sha256s(result)
+        ),
+        **dark_light_glm.dark_light_glm_nwb_hashes(result),
+    }
+    loaded = tables_module._load_dark_light_glm_result(
+        result_row=result_row,
+        dark_light_glm_table=relation,
+    )
+    assert loaded["analysis_status"] == "no_eligible_units"
+    assert relation.keys == [{"dark_light_glm_id": result_id}]
+    with pytest.raises(ValueError, match="candidate_results_sha256"):
+        tables_module._load_dark_light_glm_result(
+            result_row={
+                **result_row,
+                "candidate_results_sha256": "0" * 64,
+            },
+            dark_light_glm_table=relation,
+        )
+
+
+def test_dark_light_glm_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a DarkLightGLM NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "dark_light_glm_compute": lambda **kwargs: pytest.fail(
+                "DarkLightGLM computation must not start outside populate()."
+            )
+        }
+    )
+    result = bundle["dark_light_glm"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"dark_light_glm_id": uuid.uuid4()})
+
+
+def test_dark_light_glm_failed_insert_removes_new_analysis_nwb(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed result insert removes only the newly written NWB file."""
+    result_id = uuid.uuid4()
+    artifact_path = tmp_path / f"{result_id}.nwb"
+    retained_path = tmp_path / "preexisting.nc"
+    retained_path.write_bytes(b"keep")
+
+    def compute(**_kwargs):
+        artifact_path.write_bytes(b"new")
+        return {
+            "analysis_file_name": artifact_path.name,
+            "artifact_schema_version": "1",
+            "schema_version": "5",
+            "n_units": 2,
+            "n_candidates": 4,
+            "n_selected_models": 4,
+            "analysis_status": "partial_valid",
+            "selected_units_sha256": "a" * 64,
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_path)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"dark_light_glm_id": result_id},
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"dark_light_glm_compute": compute}
+    )
+    result = bundle["dark_light_glm"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"dark_light_glm_id": result_id})
+
+    assert not artifact_path.exists()
+    assert retained_path.read_bytes() == b"keep"
 
 
 def _ripple_glm_selection_inputs() -> dict[str, Any]:
@@ -4876,6 +7545,261 @@ def test_ripple_glm_legacy_resolver_requires_imported_unique_units() -> None:
         _legacy_ripple_glm_unit_identity_resolver(loaded, role="target")
 
 
+def _terminal_ripple_glm_result() -> tuple[dict[str, Any], uuid.UUID]:
+    """Return one canonical no-source RippleGLM result for table tests."""
+    from v1ca1.spyglass import ripple_glm
+
+    result_id = uuid.UUID("94444444-4444-5444-8444-444444444444")
+    result = ripple_glm.compute_ripple_glm(
+        ripple_glm_id=result_id,
+        animal_name="L14",
+        date="20240102",
+        epoch="04_s2",
+        ripple_table=pd.DataFrame(
+            {
+                "epoch": ["04_s2"] * 5,
+                "start_time": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "end_time": [1.05, 2.05, 3.05, 4.05, 5.05],
+            }
+        ),
+        epoch_interval=SimpleNamespace(start=[0.0], end=[10.0]),
+        source_spikes={},
+        source_stable_unit_ids=[],
+        target_spikes={},
+        target_stable_unit_ids=[],
+        upstream_provenance={
+            "detector_zscore_threshold": 2.0,
+            "speed_gated": True,
+        },
+        parameter_name="test",
+    )
+    return result, result_id
+
+
+def test_ripple_glm_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """The live writer registers six selectively fetchable NWB objects."""
+    from v1ca1.spyglass import ripple_glm
+
+    result, _result_id = _terminal_ripple_glm_result()
+    analysis_table = _TestAnalysisNwbfile(
+        tmp_path / "ripple-glm-analysis.nwb"
+    )
+    with pytest.raises(ValueError, match="analysis_nwbfile_table is required"):
+        tables_module._write_ripple_glm_nwb(
+            nwb_file_name="L1420240102_.nwb",
+            result=result,
+            analysis_nwbfile_table=None,
+        )
+    row = tables_module._write_ripple_glm_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
+    )
+    assert analysis_table.builder.registered is True
+    assert row["analysis_file_name"] == "ripple-glm-analysis.nwb"
+    assert row["artifact_schema_version"] == (
+        ripple_glm.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["analysis_status"] == "no_source_units"
+    assert {
+        f"{name}_object_id"
+        for name in tables_module._RIPPLE_GLM_NWB_OBJECT_NAMES
+    }.issubset(row)
+    assert ripple_glm.ripple_glm_nwb_hashes(result).items() <= row.items()
+
+
+def test_ripple_glm_loader_uses_fetch_nwb_and_checks_hashes() -> None:
+    """The live loader reconstructs complete RippleGLM data via fetch_nwb."""
+    from v1ca1.spyglass import ripple_glm
+
+    result, result_id = _terminal_ripple_glm_result()
+    objects = ripple_glm.ripple_glm_result_to_nwb_objects(result)
+
+    class FetchNwbRelation:
+        def __init__(self) -> None:
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    name: nwb_object.to_dataframe()
+                    for name, nwb_object in objects.items()
+                }
+            ]
+
+    relation = FetchNwbRelation()
+    result_row = {
+        "ripple_glm_id": result_id,
+        "artifact_schema_version": ripple_glm.NWB_ARTIFACT_SCHEMA_VERSION,
+        **ripple_glm.ripple_glm_nwb_hashes(result),
+    }
+    loaded = tables_module._load_ripple_glm_result(
+        result_row=result_row,
+        ripple_glm_table=relation,
+    )
+    assert loaded["analysis_status"] == "no_source_units"
+    assert relation.keys == [{"ripple_glm_id": result_id}]
+    with pytest.raises(ValueError, match="target_results_sha256"):
+        tables_module._load_ripple_glm_result(
+            result_row={
+                **result_row,
+                "target_results_sha256": "0" * 64,
+            },
+            ripple_glm_table=relation,
+        )
+
+
+def test_ripple_glm_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a RippleGLM NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "ripple_glm_compute": lambda **kwargs: pytest.fail(
+                "RippleGLM computation must not start outside populate()."
+            )
+        }
+    )
+    result = bundle["ripple_glm"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"ripple_glm_id": uuid.uuid4()})
+
+
+def test_ripple_glm_failed_insert_removes_new_analysis_nwb(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed result insert removes only the newly written NWB file."""
+    result_id = uuid.uuid4()
+    artifact_path = tmp_path / f"{result_id}.nwb"
+    retained_path = tmp_path / "preexisting.nc"
+    retained_path.write_bytes(b"keep")
+
+    def compute(**kwargs):
+        assert kwargs["analysis_nwbfile_table"] is not None
+        artifact_path.write_bytes(b"new")
+        return {
+            "analysis_file_name": artifact_path.name,
+            "artifact_schema_version": "1",
+            "schema_version": "1",
+            "bundle_schema_version": "1",
+            "n_source_units": 0,
+            "n_target_units": 0,
+            "n_source_units_in_fit": 0,
+            "n_target_units_in_fit": 0,
+            "n_valid_target_units": 0,
+            "n_ripples": 0,
+            "selected_ripple_events_sha256": "a" * 64,
+            "selected_units_sha256": "b" * 64,
+            "analysis_status": "no_source_units",
+            "legacy_artifact_provenance": None,
+            "_created_artifact_paths": [str(artifact_path)],
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: {"ripple_glm_id": result_id},
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"ripple_glm_compute": compute}
+    )
+    result = bundle["ripple_glm"]
+
+    def fail_insert(cls, row, **kwargs):
+        raise RuntimeError("database insert failed")
+
+    result.insert1 = classmethod(fail_insert)
+    with pytest.raises(RuntimeError, match="database insert failed"):
+        result().make({"ripple_glm_id": result_id})
+
+    assert not artifact_path.exists()
+    assert retained_path.read_bytes() == b"keep"
+
+
+def test_ripple_glm_compute_writes_analysis_nwb_instead_of_legacy_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The live compute bridge sends canonical science to the NWB writer."""
+    inputs = _ripple_glm_selection_inputs()
+    selection = _build_ripple_glm_selection(inputs)
+    context = {
+        "selection": selection,
+        "parameters": inputs["parameters"],
+        "ripple_table": inputs["ripple_table"],
+        "epoch_interval": inputs["epoch_interval"],
+        "animal_name": "L14",
+        "date": "20240102",
+    }
+    loaded = {
+        "source": {"ts_group": object(), "unit_ids": object()},
+        "target": {"ts_group": object(), "unit_ids": object()},
+    }
+    monkeypatch.setattr(
+        tables_module,
+        "_load_ripple_glm_context",
+        lambda **kwargs: context,
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_load_ripple_glm_spikes",
+        lambda **kwargs: loaded,
+    )
+    from v1ca1.spyglass import ripple_glm
+
+    compute_calls = []
+    writer_calls = []
+    computed = {
+        "upstream_provenance": tables_module._ripple_glm_upstream_provenance(
+            selection
+        ),
+        "selected_ripple_events_sha256": selection[
+            "selected_ripple_events_sha256"
+        ],
+    }
+
+    def compute(**kwargs):
+        compute_calls.append(kwargs)
+        return computed
+
+    def write_nwb(**kwargs):
+        writer_calls.append(kwargs)
+        return {"analysis_file_name": "ripple-glm-analysis.nwb"}
+
+    monkeypatch.setattr(ripple_glm, "compute_ripple_glm", compute)
+    monkeypatch.setattr(tables_module, "_write_ripple_glm_nwb", write_nwb)
+    analysis_nwbfile_table = object()
+    row = _make_ripple_glm_row(
+        key=selection,
+        parameters_table=object(),
+        ripples_table=object(),
+        epoch_intervals_table=object(),
+        region_sorted_spikes_group_table=object(),
+        session_table=object(),
+        nwbfile_table=object(),
+        artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
+    )
+
+    assert compute_calls[0]["source_spikes"] is loaded["source"]["ts_group"]
+    assert compute_calls[0]["target_spikes"] is loaded["target"]["ts_group"]
+    assert writer_calls == [
+        {
+            "nwb_file_name": selection["nwb_file_name"],
+            "result": computed,
+            "analysis_nwbfile_table": analysis_nwbfile_table,
+        }
+    ]
+    assert row["analysis_file_name"] == "ripple-glm-analysis.nwb"
+
+
 def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4945,10 +7869,10 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
     from v1ca1.spyglass import ripple_glm
 
     calls = []
+    writer_calls = []
 
     def register_existing(**kwargs):
         calls.append(kwargs)
-        artifact_dir = Path(kwargs["destination_path"])
         return {
             "upstream_provenance": tables_module._ripple_glm_upstream_provenance(
                 selection
@@ -4964,13 +7888,15 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
             "n_ripples": selection["n_selected_ripples"],
             "selected_units_sha256": "a" * 64,
             "analysis_status": "valid",
+            "artifact_origin": "registered_existing",
             "legacy_artifact_provenance": {"source": "legacy"},
-            "artifact_paths": {
-                "artifact_manifest_path": artifact_dir / "manifest.parquet",
-                "selected_units_path": artifact_dir / "selected_units.parquet",
-                "summary_path": artifact_dir / "summary.parquet",
-                "result_path": artifact_dir / "ripple_glm.nc",
-            },
+        }
+
+    def write_nwb(**kwargs):
+        writer_calls.append(kwargs)
+        return {
+            "analysis_file_name": "ripple-glm-analysis.nwb",
+            "legacy_artifact_provenance": {"source": "legacy"},
         }
 
     monkeypatch.setattr(
@@ -4978,6 +7904,8 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
         "register_existing_ripple_glm_artifact",
         register_existing,
     )
+    monkeypatch.setattr(tables_module, "_write_ripple_glm_nwb", write_nwb)
+    analysis_nwbfile_table = object()
     row = _register_existing_ripple_glm_row(
         key=selection,
         source_result_path=tmp_path / "legacy.nc",
@@ -4990,6 +7918,7 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
         source_v1ca1_git_commit="v1",
         source_spyglass_git_commit="sg",
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     assert len(calls) == 1
@@ -5005,6 +7934,11 @@ def test_ripple_glm_registration_passes_frozen_events_and_role_resolvers(
     assert call["target_legacy_unit_identity_resolver"]["201"][
         "stable_unit_id"
     ] == "v1-merge:20"
+    assert call["destination_path"] is None
+    assert writer_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert writer_calls[0]["analysis_nwbfile_table"] is (
+        analysis_nwbfile_table
+    )
     assert row["legacy_artifact_provenance"] == {"source": "legacy"}
 
 
@@ -5039,6 +7973,51 @@ def _build_ripple_cross_region_xcorr_selection(
         parameters_table=_FakeRelation(inputs["parameters"]),
         ripple_table=inputs["ripple_table"],
     )
+
+
+def _terminal_ripple_cross_region_xcorr_result() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    """Return one exact-selection terminal result without xcorr computation."""
+    from v1ca1.spyglass import ripple_cross_region_xcorr
+
+    inputs = _ripple_cross_region_xcorr_selection_inputs()
+    selection = _build_ripple_cross_region_xcorr_selection(inputs)
+    parameters = inputs["parameters"]
+    result = ripple_cross_region_xcorr.compute_ripple_cross_region_xcorr(
+        ripple_cross_region_xcorr_id=selection[
+            "ripple_cross_region_xcorr_id"
+        ],
+        animal_name="L14",
+        date="20240102",
+        epoch=str(selection["epoch"]),
+        ripple_table=inputs["ripple_table"],
+        ca1_spikes={},
+        ca1_stable_unit_ids=[],
+        v1_spikes={},
+        v1_stable_unit_ids=[],
+        upstream_provenance=(
+            tables_module._ripple_cross_region_xcorr_upstream_provenance(
+                selection
+            )
+        ),
+        expected_selected_ripple_intervals_sha256=selection[
+            "selected_ripple_intervals_sha256"
+        ],
+        parameter_name=parameters[
+            "ripple_cross_region_xcorr_param_name"
+        ],
+        parameter_sha256=selection[
+            "ripple_cross_region_xcorr_parameters_sha256"
+        ],
+        output_rule_sha256=selection[
+            "ripple_cross_region_xcorr_output_rule_sha256"
+        ],
+        **tables_module._ripple_cross_region_xcorr_parameter_kwargs(
+            parameters
+        ),
+    )
+    return result, selection, parameters
 
 
 def test_ripple_cross_region_xcorr_selection_freezes_exact_inputs() -> None:
@@ -5097,12 +8076,239 @@ def test_ripple_cross_region_xcorr_selection_rejects_region_or_nwb_mismatch() ->
         _build_ripple_cross_region_xcorr_selection(inputs)
 
 
+def test_ripple_cross_region_xcorr_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """The live writer registers six selectively fetchable NWB objects."""
+    from v1ca1.spyglass import ripple_cross_region_xcorr
+
+    result, _selection, _parameters = (
+        _terminal_ripple_cross_region_xcorr_result()
+    )
+    analysis_table = _TestAnalysisNwbfile(tmp_path / "xcorr-analysis.nwb")
+    with pytest.raises(ValueError, match="analysis_nwbfile_table is required"):
+        _write_ripple_cross_region_xcorr_nwb(
+            nwb_file_name="L1420240102_.nwb",
+            result=result,
+            analysis_nwbfile_table=None,
+        )
+    row = _write_ripple_cross_region_xcorr_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
+    )
+    assert analysis_table.builder.registered is True
+    assert Path(analysis_table.builder.path).is_file()
+    assert row["analysis_file_name"] == "xcorr-analysis.nwb"
+    assert row["artifact_schema_version"] == (
+        ripple_cross_region_xcorr.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["analysis_status"] == "no_ca1_units"
+    assert {
+        "ca1_units_object_id",
+        "v1_units_object_id",
+        "pair_xcorr_object_id",
+        "lag_axis_object_id",
+        "ripple_support_object_id",
+        "provenance_object_id",
+    }.issubset(row)
+    assert ripple_cross_region_xcorr.ripple_cross_region_xcorr_nwb_hashes(
+        result
+    ).items() <= row.items()
+
+
+def test_ripple_cross_region_xcorr_loader_uses_fetch_nwb_and_checks_hashes(
+) -> None:
+    """The live loader reconstructs all science through fetch_nwb()."""
+    from v1ca1.spyglass import ripple_cross_region_xcorr
+
+    result, selection, parameters = _terminal_ripple_cross_region_xcorr_result()
+    objects = ripple_cross_region_xcorr.ripple_cross_region_xcorr_result_to_nwb_objects(
+        result
+    )
+
+    class FetchNwbRelation:
+        def __init__(self) -> None:
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    name: nwb_object.to_dataframe()
+                    for name, nwb_object in objects.items()
+                }
+            ]
+
+    relation = FetchNwbRelation()
+    hashes = ripple_cross_region_xcorr.ripple_cross_region_xcorr_nwb_hashes(
+        result
+    )
+    result_row = {
+        "ripple_cross_region_xcorr_id": selection[
+            "ripple_cross_region_xcorr_id"
+        ],
+        "analysis_file_name": "xcorr-analysis.nwb",
+        "artifact_schema_version": (
+            ripple_cross_region_xcorr.NWB_ARTIFACT_SCHEMA_VERSION
+        ),
+        **hashes,
+        **{
+            field_name: result[field_name]
+            for field_name in (
+                "n_ripples",
+                "ripple_duration_s",
+                "n_ca1_units",
+                "n_v1_units",
+                "n_ca1_units_in_xcorr",
+                "n_v1_units_in_xcorr",
+                "n_pairs",
+                "n_valid_pairs",
+                "selected_ripple_intervals_sha256",
+                "analysis_status",
+                "artifact_origin",
+                "legacy_artifact_provenance",
+            )
+        },
+    }
+    loaded = _load_ripple_cross_region_xcorr_result(
+        result_row=result_row,
+        result_table=relation,
+        selection_row=selection,
+        parameters_row=parameters,
+        animal_name="L14",
+        date="20240102",
+    )
+    assert loaded["analysis_status"] == "no_ca1_units"
+    assert relation.keys == [
+        {
+            "ripple_cross_region_xcorr_id": selection[
+                "ripple_cross_region_xcorr_id"
+            ]
+        }
+    ]
+    with pytest.raises(ValueError, match="lag_axis_sha256"):
+        _load_ripple_cross_region_xcorr_result(
+            result_row={**result_row, "lag_axis_sha256": "0" * 64},
+            result_table=relation,
+            selection_row=selection,
+            parameters_row=parameters,
+            animal_name="L14",
+            date="20240102",
+        )
+
+
 class _TestIntervals:
     """Minimal Pynapple-like interval bounds for table-layer tests."""
 
     def __init__(self, start, end):
         self.start = np.asarray(start, dtype=float)
         self.end = np.asarray(end, dtype=float)
+
+
+def test_movement_result_loader_uses_fetch_nwb_and_checks_object_hashes() -> None:
+    """The shared downstream loader resolves both objects through fetch_nwb."""
+    import pynapple as nap
+
+    from v1ca1.spyglass import movement
+
+    table = movement._build_movement_table(
+        identity_rows=[
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "1",
+                "stable_unit_id": "merge-a:1",
+                "group_unit_id": 0,
+            }
+        ],
+        animal_name="L14",
+        date="20240102",
+        region="v1",
+        epoch="02_r1",
+        movement_spike_counts=np.asarray([2], dtype=np.int64),
+        movement_duration_s=1.0,
+        movement_firing_rates_hz=np.asarray([2.0]),
+        firing_rate_status="valid",
+        position_sample_count=20,
+        finite_position_sample_count=20,
+        finite_speed_sample_count=20,
+        movement_interval_count=1,
+        speed_threshold_cm_s=4.0,
+        speed_smoothing_sigma_s=0.1,
+    )
+    intervals = nap.IntervalSet(
+        start=np.asarray([10.0]),
+        end=np.asarray([11.0]),
+        time_units="s",
+    )
+
+    class FetchNwbRelation:
+        def __init__(self) -> None:
+            self.keys = []
+            self.fetch_count = 0
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            self.fetch_count += 1
+            return [
+                {
+                    "movement_firing_rate": table.copy(),
+                    "movement_intervals": (
+                        movement.movement_interval_set_to_time_intervals(
+                            intervals
+                        ).to_dataframe()
+                    ),
+                }
+            ]
+
+    relation = FetchNwbRelation()
+    result_row = {
+        "movement_firing_rate_id": uuid.uuid4(),
+        "analysis_file_name": "movement-analysis.nwb",
+        "movement_firing_rate_object_id": "rate-object-id",
+        "movement_intervals_object_id": "interval-object-id",
+        "movement_firing_rate_sha256": (
+            movement.movement_firing_rate_table_sha256(table)
+        ),
+        "movement_intervals_sha256": (
+            movement.movement_interval_set_sha256(intervals)
+        ),
+        "artifact_schema_version": movement.NWB_ARTIFACT_SCHEMA_VERSION,
+        "n_units": 1,
+        "n_valid_units": 1,
+        "n_units_with_spikes": 1,
+        "movement_interval_count": 1,
+        "movement_duration_s": 1.0,
+        "analysis_status": "valid",
+    }
+
+    loaded = tables_module._load_movement_result_artifacts(
+        result_row=result_row,
+        movement_firing_rate_table=relation,
+    )
+
+    pd.testing.assert_frame_equal(loaded["table"], table)
+    assert movement.movement_interval_summary(loaded["movement_intervals"]) == (
+        1,
+        1.0,
+    )
+    assert relation.keys == [
+        {"movement_firing_rate_id": result_row["movement_firing_rate_id"]}
+    ]
+    assert relation.fetch_count == 1
+
+    tampered = {**result_row, "movement_firing_rate_sha256": "0" * 64}
+    with pytest.raises(ValueError, match="movement_firing_rate_sha256"):
+        tables_module._load_movement_result_artifacts(
+            result_row=tampered,
+            movement_firing_rate_table=relation,
+        )
 
 
 def _ripple_cross_region_xcorr_loaded_spikes() -> dict[str, dict[str, Any]]:
@@ -5162,10 +8368,10 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
     from v1ca1.spyglass import ripple_cross_region_xcorr
 
     calls = []
+    writer_calls = []
 
     def register_existing(**kwargs):
         calls.append(kwargs)
-        artifact_dir = Path(kwargs["destination_path"])
         return {
             "upstream_provenance": (
                 tables_module._ripple_cross_region_xcorr_upstream_provenance(
@@ -5187,12 +8393,8 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
             "v1_units_sha256": "b" * 64,
             "summary_sha256": "c" * 64,
             "analysis_status": "valid",
+            "artifact_origin": "registered_existing",
             "legacy_artifact_provenance": {"source": "legacy"},
-            "artifact_manifest_path": artifact_dir / "manifest.parquet",
-            "ca1_units_path": artifact_dir / "ca1_units.parquet",
-            "v1_units_path": artifact_dir / "v1_units.parquet",
-            "summary_path": artifact_dir / "summary.parquet",
-            "result_path": artifact_dir / "ripple_cross_region_xcorr.nc",
         }
 
     monkeypatch.setattr(
@@ -5200,6 +8402,15 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
         "register_existing_ripple_cross_region_xcorr_artifact",
         register_existing,
     )
+    monkeypatch.setattr(
+        tables_module,
+        "_write_ripple_cross_region_xcorr_nwb",
+        lambda **kwargs: (
+            writer_calls.append(kwargs)
+            or {"legacy_artifact_provenance": {"source": "legacy"}}
+        ),
+    )
+    analysis_nwbfile_table = object()
     row = _register_existing_ripple_cross_region_xcorr_row(
         key=selection,
         source_ca1_unit_filter_path=tmp_path / "ca1.parquet",
@@ -5215,6 +8426,7 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
         source_v1ca1_git_commit="v1",
         source_spyglass_git_commit="sg",
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     call = calls[0]
@@ -5223,6 +8435,7 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
     ]
     assert call["ca1_sorting_type"] == "ImportedSpikeSorting"
     assert call["v1_sorting_type"] == "ImportedSpikeSorting"
+    assert call["destination_path"] is None
     assert call["ca1_legacy_identity_resolver"]([101])[0][
         "stable_unit_id"
     ] == "ca1-merge:10"
@@ -5230,6 +8443,8 @@ def test_ripple_cross_region_xcorr_registration_uses_separate_imported_resolvers
         "stable_unit_id"
     ] == "v1-merge:20"
     assert row["legacy_artifact_provenance"] == {"source": "legacy"}
+    assert writer_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert writer_calls[0]["analysis_nwbfile_table"] is analysis_nwbfile_table
 
 
 def test_ripple_cross_region_xcorr_resolver_rejects_nonimported_groups() -> None:
@@ -5253,10 +8468,10 @@ def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:
     assert first["dark_condition"] == "dark"
     assert first["light_train_condition"] == "AB"
     assert first["light_test_condition"] == "BA"
-    assert first["dark_light_manifest_sha256"] == "1" * 64
-    assert first["dark_light_selected_sha256_by_model"] == inputs[
+    assert first["dark_light_glm_sha256"] == "1" * 64
+    assert first["dark_light_selected_model_sha256_by_model"] == inputs[
         "dark_light_snapshot"
-    ]["selected_sha256_by_model"]
+    ]["selected_model_sha256_by_model"]
     assert first["dark_light_parameter_sha256"] == inputs[
         "dark_light_snapshot"
     ]["parameter_sha256"]
@@ -5357,19 +8572,18 @@ def test_swap_glm_context_loads_no_valid_position_movement_artifact(
         end=np.array([], dtype=float),
         time_units="s",
     )
-    artifact_paths = movement.write_movement_artifacts(
-        movement_table,
-        empty_intervals,
-        tmp_path / "movement",
-    )
     movement_result = {
         "movement_firing_rate_id": movement_id,
-        "movement_firing_rate_path": str(
-            artifact_paths["firing_rate_path"]
+        "analysis_file_name": "movement-analysis.nwb",
+        "movement_firing_rate_object_id": "rate-object-id",
+        "movement_intervals_object_id": "interval-object-id",
+        "movement_firing_rate_sha256": (
+            movement.movement_firing_rate_table_sha256(movement_table)
         ),
-        "movement_intervals_path": str(
-            artifact_paths["movement_intervals_path"]
+        "movement_intervals_sha256": (
+            movement.movement_interval_set_sha256(empty_intervals)
         ),
+        "artifact_schema_version": movement.NWB_ARTIFACT_SCHEMA_VERSION,
         "n_units": n_units,
         "n_valid_units": 0,
         "n_units_with_spikes": 0,
@@ -5397,6 +8611,18 @@ def test_swap_glm_context_loads_no_valid_position_movement_artifact(
         tables_module,
         "_load_swap_dark_light_snapshot",
         lambda **kwargs: inputs["dark_light_snapshot"],
+    )
+    monkeypatch.setattr(
+        tables_module,
+        "_fetch_movement_result_nwb_objects",
+        lambda table, key: {
+            "movement_firing_rate": movement_table,
+            "movement_intervals": (
+                movement.movement_interval_set_to_time_intervals(
+                    empty_intervals
+                )
+            ),
+        },
     )
 
     context = tables_module._load_swap_glm_context(
@@ -5470,6 +8696,142 @@ def test_swap_glm_legacy_resolver_requires_imported_unique_units() -> None:
         _legacy_swap_glm_unit_identity_resolver(loaded)
 
 
+def _terminal_swap_glm_result():
+    """Return one canonical no-unit SwapGLM result for NWB table tests."""
+    from v1ca1.spyglass import swap_glm
+
+    inputs = _swap_glm_selection_inputs()
+    selection = _build_swap_glm_selection(inputs)
+    metadata = {
+        "swap_glm_id": str(selection["swap_glm_id"]),
+        "animal_name": "L14",
+        "date": "20240102",
+        "region": "v1",
+        "dark_epoch": selection["dark_epoch"],
+        "light_train_epoch": selection["light_train_epoch"],
+        "light_test_epoch": selection["light_test_epoch"],
+    }
+    parameters = {
+        "parameter_name": inputs["parameters"]["swap_glm_param_name"],
+        "parameter_sha256": selection["swap_glm_parameters_sha256"],
+        "output_rule_sha256": selection["swap_glm_output_rule_sha256"],
+        "swap_light_offset": inputs["parameters"]["swap_light_offset"],
+        "observed_spatial_bin_size_cm": inputs["parameters"][
+            "observed_spatial_bin_size_cm"
+        ],
+    }
+    upstream = {
+        "dark_light_glm_id": str(selection["dark_light_glm_id"]),
+        "dark_light_glm_sha256": selection[
+            "dark_light_glm_sha256"
+        ],
+        "dark_light_selected_model_sha256_by_model": selection[
+            "dark_light_selected_model_sha256_by_model"
+        ],
+        "dark_light_parameter_sha256": selection[
+            "dark_light_parameter_sha256"
+        ],
+        "dark_light_output_rule_sha256": selection[
+            "dark_light_output_rule_sha256"
+        ],
+        "upstream_analysis_status": selection["upstream_analysis_status"],
+    }
+    selected_units = pd.DataFrame(columns=swap_glm.SELECTED_UNIT_COLUMNS)
+    dataset = swap_glm._terminal_dataset(
+        metadata=metadata,
+        unit_ids=np.asarray([], dtype=str),
+        segment_edges=np.linspace(0.0, 1.0, 4),
+        parameters=parameters,
+        upstream_provenance=upstream,
+        analysis_status="no_units",
+    )
+    result = swap_glm.validate_swap_glm_result(
+        {
+            "metadata": metadata,
+            "parameters": parameters,
+            "upstream_provenance": upstream,
+            "selected_units": selected_units,
+            "dataset": dataset,
+            "analysis_status": "no_units",
+            "artifact_origin": "computed",
+            "legacy_artifact_provenance": None,
+        }
+    )
+    return result, selection, inputs
+
+
+def test_swap_glm_write_uses_analysis_nwb_lifecycle(tmp_path: Path) -> None:
+    """The live writer registers seven selectively fetchable NWB objects."""
+    from v1ca1.spyglass import swap_glm
+
+    result, _selection, _inputs = _terminal_swap_glm_result()
+    analysis_table = _TestAnalysisNwbfile(tmp_path / "swap-glm-analysis.nwb")
+    with pytest.raises(ValueError, match="analysis_nwbfile_table is required"):
+        tables_module._write_swap_glm_nwb(
+            nwb_file_name="L1420240102_.nwb",
+            result=result,
+            analysis_nwbfile_table=None,
+        )
+    row = tables_module._write_swap_glm_nwb(
+        nwb_file_name="L1420240102_.nwb",
+        result=result,
+        analysis_nwbfile_table=analysis_table,
+    )
+    assert analysis_table.builder.registered is True
+    assert row["analysis_file_name"] == "swap-glm-analysis.nwb"
+    assert row["artifact_schema_version"] == (
+        swap_glm.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    assert row["analysis_status"] == "no_units"
+    assert {
+        f"{name}_object_id"
+        for name in tables_module._SWAP_GLM_NWB_OBJECT_NAMES
+    }.issubset(row)
+    assert swap_glm.swap_glm_nwb_hashes(result).items() <= row.items()
+
+
+def test_swap_glm_loader_uses_fetch_nwb_and_checks_hashes() -> None:
+    """The live loader reconstructs all SwapGLM science through fetch_nwb."""
+    from v1ca1.spyglass import swap_glm
+
+    result, selection, _inputs = _terminal_swap_glm_result()
+    objects = swap_glm.swap_glm_result_to_nwb_objects(result)
+
+    class FetchNwbRelation:
+        def __init__(self) -> None:
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    name: nwb_object.to_dataframe()
+                    for name, nwb_object in objects.items()
+                }
+            ]
+
+    relation = FetchNwbRelation()
+    result_row = {
+        "swap_glm_id": selection["swap_glm_id"],
+        "artifact_schema_version": swap_glm.NWB_ARTIFACT_SCHEMA_VERSION,
+        **swap_glm.swap_glm_nwb_hashes(result),
+    }
+    loaded = tables_module._load_swap_glm_result(
+        result_row=result_row,
+        swap_glm_table=relation,
+    )
+    assert loaded["analysis_status"] == "no_units"
+    assert relation.keys == [{"swap_glm_id": selection["swap_glm_id"]}]
+    with pytest.raises(ValueError, match="model_results_sha256"):
+        tables_module._load_swap_glm_result(
+            result_row={**result_row, "model_results_sha256": "0" * 64},
+            swap_glm_table=relation,
+        )
+
+
 def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5530,11 +8892,11 @@ def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
     )
     upstream = {
         "dark_light_glm_id": str(selection["dark_light_glm_id"]),
-        "dark_light_manifest_sha256": selection[
-            "dark_light_manifest_sha256"
+        "dark_light_glm_sha256": selection[
+            "dark_light_glm_sha256"
         ],
-        "dark_light_selected_sha256_by_model": selection[
-            "dark_light_selected_sha256_by_model"
+        "dark_light_selected_model_sha256_by_model": selection[
+            "dark_light_selected_model_sha256_by_model"
         ],
         "dark_light_parameter_sha256": selection[
             "dark_light_parameter_sha256"
@@ -5562,15 +8924,16 @@ def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
         return result
 
     monkeypatch.setattr(swap_glm, "compute_swap_glm", compute)
+    write_calls = []
     monkeypatch.setattr(
-        swap_glm,
-        "write_swap_glm_artifact",
-        lambda result, destination, **kwargs: {
-            "artifact_manifest_path": destination / "manifest.parquet",
-            "selected_units_path": destination / "selected_units.parquet",
-            "result_path": destination / "swap_glm.nc",
-        },
+        tables_module,
+        "_write_swap_glm_nwb",
+        lambda **kwargs: (
+            write_calls.append(kwargs)
+            or {"analysis_status": result["analysis_status"]}
+        ),
     )
+    analysis_nwbfile_table = object()
 
     row = _make_swap_glm_row(
         key=selection,
@@ -5588,6 +8951,7 @@ def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
         session_table=object(),
         nwbfile_table=object(),
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     assert len(compute_calls) == 1
@@ -5598,10 +8962,20 @@ def test_swap_glm_make_passes_heldout_nwb_inputs_and_terminal_status(
     assert call["trajectory_intervals"] is trajectory_intervals
     assert call["graph_inputs_by_trajectory"] is graph_inputs
     assert call["position"] is position
+    assert call["dark_light_glm_result"] is inputs[
+        "dark_light_snapshot"
+    ]["bundle"]
+    assert "dark_light_glm_artifact_path" not in call
     assert row["analysis_status"] == "no_valid_position"
+    assert write_calls[0]["result"] is result
+    assert write_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert (
+        write_calls[0]["analysis_nwbfile_table"]
+        is analysis_nwbfile_table
+    )
 
 
-def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
+def test_swap_glm_artifact_link_checks_bundle_identity_and_hashes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5612,11 +8986,11 @@ def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
     selection = _build_swap_glm_selection(inputs)
     upstream = {
         "dark_light_glm_id": str(selection["dark_light_glm_id"]),
-        "dark_light_manifest_sha256": selection[
-            "dark_light_manifest_sha256"
+        "dark_light_glm_sha256": selection[
+            "dark_light_glm_sha256"
         ],
-        "dark_light_selected_sha256_by_model": selection[
-            "dark_light_selected_sha256_by_model"
+        "dark_light_selected_model_sha256_by_model": selection[
+            "dark_light_selected_model_sha256_by_model"
         ],
         "dark_light_parameter_sha256": selection[
             "dark_light_parameter_sha256"
@@ -5667,36 +9041,29 @@ def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
         "validate_swap_glm_result",
         lambda candidate: candidate,
     )
-    artifact_dir = (
-        tmp_path
-        / "L14"
-        / "20240102"
-        / "swap_glm"
-        / (
-            f"{selection['light_train_epoch']}_train_to_"
-            f"{selection['light_test_epoch']}_test"
-        )
-        / f"dark_{selection['dark_epoch']}"
-        / "v1"
-        / str(selection["swap_glm_id"])
-    )
+    hashes = {
+        "selected_units_table_sha256": "a" * 64,
+        "model_metadata_sha256": "b" * 64,
+        "axes_sha256": "c" * 64,
+        "trajectory_metadata_sha256": "d" * 64,
+        "model_results_sha256": "e" * 64,
+        "observed_response_sha256": "f" * 64,
+        "provenance_sha256": "0" * 64,
+    }
+    monkeypatch.setattr(swap_glm, "swap_glm_nwb_hashes", lambda result: hashes)
     row = {
-        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-        "selected_units_path": str(
-            artifact_dir / "selected_units.parquet"
-        ),
-        "swap_glm_path": str(artifact_dir / "swap_glm.nc"),
+        "artifact_schema_version": swap_glm.NWB_ARTIFACT_SCHEMA_VERSION,
         "schema_version": swap_glm.RESULT_SCHEMA_VERSION,
         "bundle_schema_version": swap_glm.BUNDLE_SCHEMA_VERSION,
         "n_units": bundle["n_units"],
         "n_valid_units": bundle["n_valid_units"],
         "analysis_status": bundle["analysis_status"],
         "selected_units_sha256": bundle["selected_units_sha256"],
-        "dark_light_manifest_sha256": upstream[
-            "dark_light_manifest_sha256"
+        "dark_light_glm_sha256": upstream[
+            "dark_light_glm_sha256"
         ],
-        "dark_light_selected_sha256_by_model": upstream[
-            "dark_light_selected_sha256_by_model"
+        "dark_light_selected_model_sha256_by_model": upstream[
+            "dark_light_selected_model_sha256_by_model"
         ],
         "dark_light_parameter_sha256": upstream[
             "dark_light_parameter_sha256"
@@ -5708,6 +9075,8 @@ def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
             "upstream_analysis_status"
         ],
         "artifact_origin": "computed",
+        "legacy_artifact_provenance": None,
+        **hashes,
     }
 
     _validate_swap_glm_artifact_link(
@@ -5720,11 +9089,11 @@ def test_swap_glm_artifact_link_checks_bundle_identity_and_paths(
         date="20240102",
     )
 
-    bad_path_row = {**row, "swap_glm_path": str(tmp_path / "wrong.nc")}
-    with pytest.raises(ValueError, match="canonical bundle"):
+    bad_hash_row = {**row, "model_results_sha256": "9" * 64}
+    with pytest.raises(ValueError, match="model_results_sha256"):
         _validate_swap_glm_artifact_link(
             bundle=bundle,
-            result_row=bad_path_row,
+            result_row=bad_hash_row,
             selection_row=selection,
             parameters_row=inputs["parameters"],
             region_row=inputs["region_row"],
@@ -5809,11 +9178,11 @@ def test_swap_glm_registration_uses_canonical_bundle_and_strict_resolver(
 
     upstream = {
         "dark_light_glm_id": str(selection["dark_light_glm_id"]),
-        "dark_light_manifest_sha256": selection[
-            "dark_light_manifest_sha256"
+        "dark_light_glm_sha256": selection[
+            "dark_light_glm_sha256"
         ],
-        "dark_light_selected_sha256_by_model": selection[
-            "dark_light_selected_sha256_by_model"
+        "dark_light_selected_model_sha256_by_model": selection[
+            "dark_light_selected_model_sha256_by_model"
         ],
         "dark_light_parameter_sha256": selection[
             "dark_light_parameter_sha256"
@@ -5843,6 +9212,17 @@ def test_swap_glm_registration_uses_canonical_bundle_and_strict_resolver(
         "register_existing_swap_glm_artifact",
         register_existing,
     )
+    writer_calls = []
+    monkeypatch.setattr(
+        tables_module,
+        "_write_swap_glm_nwb",
+        lambda **kwargs: writer_calls.append(kwargs) or {
+            "legacy_artifact_provenance": kwargs["result"][
+                "legacy_artifact_provenance"
+            ]
+        },
+    )
+    analysis_nwbfile_table = object()
     row = _register_existing_swap_glm_row(
         key=selection,
         source_result_path=tmp_path / "legacy.nc",
@@ -5862,17 +9242,7 @@ def test_swap_glm_registration_uses_canonical_bundle_and_strict_resolver(
         source_v1ca1_git_commit="v1",
         source_spyglass_git_commit="sg",
         artifact_root=tmp_path,
-    )
-
-    artifact_dir = (
-        tmp_path
-        / "L14"
-        / "20240102"
-        / "swap_glm"
-        / "02_r1_train_to_06_r3_test"
-        / "dark_08_r4"
-        / "v1"
-        / str(selection["swap_glm_id"])
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
     assert resolver_calls
     assert len(register_calls) == 1
@@ -5888,10 +9258,16 @@ def test_swap_glm_registration_uses_canonical_bundle_and_strict_resolver(
     assert isinstance(registration["position_offset_samples"], int)
     assert registration["speed_threshold_cm_s"] == 4.0
     assert isinstance(registration["speed_threshold_cm_s"], float)
-    assert Path(row["artifact_manifest_path"]) == (
-        artifact_dir / "manifest.parquet"
+    assert registration["destination_path"] is None
+    assert registration["dark_light_glm_result"] is inputs[
+        "dark_light_snapshot"
+    ]["bundle"]
+    assert "dark_light_glm_artifact_path" not in registration
+    assert writer_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert (
+        writer_calls[0]["analysis_nwbfile_table"]
+        is analysis_nwbfile_table
     )
-    assert Path(row["swap_glm_path"]) == artifact_dir / "swap_glm.nc"
     assert row["legacy_artifact_provenance"][
         "source_spyglass_git_commit"
     ] == "sg"
@@ -5901,36 +9277,29 @@ def test_swap_glm_failed_insert_removes_new_bundle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed DataJoint insert removes only the newly written UUID bundle."""
+    """A failed DataJoint insert removes only the new analysis NWB file."""
     result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
+    artifact_path = tmp_path / f"{result_id}.nwb"
     retained_path = tmp_path / "preexisting.nc"
     retained_path.write_bytes(b"keep")
 
     def compute(**_kwargs):
-        artifact_dir.mkdir()
-        manifest_path = artifact_dir / "manifest.parquet"
-        selected_units_path = artifact_dir / "selected_units.parquet"
-        swap_path = artifact_dir / "swap_glm.nc"
-        for path in (manifest_path, selected_units_path, swap_path):
-            path.write_bytes(b"new")
+        artifact_path.write_bytes(b"new")
         return {
-            "artifact_manifest_path": str(manifest_path),
-            "selected_units_path": str(selected_units_path),
-            "swap_glm_path": str(swap_path),
-            "schema_version": "4",
+            "analysis_file_name": artifact_path.name,
+            "schema_version": "5",
             "bundle_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 1,
             "analysis_status": "partial_valid",
             "selected_units_sha256": "a" * 64,
-            "dark_light_manifest_sha256": "b" * 64,
-            "dark_light_selected_sha256_by_model": {"visual": "c" * 64},
+            "dark_light_glm_sha256": "b" * 64,
+            "dark_light_selected_model_sha256_by_model": {"visual": "c" * 64},
             "dark_light_parameter_sha256": "d" * 64,
             "dark_light_output_rule_sha256": "e" * 64,
             "upstream_analysis_status": "valid",
             "legacy_artifact_provenance": None,
-            "_created_artifact_paths": [str(artifact_dir)],
+            "_created_artifact_paths": [str(artifact_path)],
         }
 
     monkeypatch.setitem(
@@ -5950,7 +9319,7 @@ def test_swap_glm_failed_insert_removes_new_bundle(
     with pytest.raises(RuntimeError, match="database insert failed"):
         result().make({"swap_glm_id": result_id})
 
-    assert not artifact_dir.exists()
+    assert not artifact_path.exists()
     assert retained_path.read_bytes() == b"keep"
 
 
@@ -6166,7 +9535,7 @@ def test_swap_tuning_make_passes_exact_selected_inputs(
         "movement_selections": {
             "light_test": {"position_series_name": "head_position"}
         },
-        "tuning_curve_artifact_paths": tuning_paths,
+        "tuning_curves_by_role_trajectory": tuning_paths,
         "movement_firing_rate_tables": movement_tables,
         "animal_name": "L14",
         "date": "20240102",
@@ -6214,16 +9583,38 @@ def test_swap_tuning_make_passes_exact_selected_inputs(
         "compute_swap_tuning_curve_comparison",
         compute,
     )
+    write_calls = []
+
+    def write_nwb(**kwargs):
+        write_calls.append(kwargs)
+        return {
+            "analysis_file_name": "swap-tuning.nwb",
+            **{
+                f"{name}_object_id": f"{name}-object-id"
+                for name in (
+                    "selected_units",
+                    "score_summary",
+                    "source_profiles",
+                    "model_profiles",
+                    "geometry",
+                    "provenance",
+                )
+            },
+            "artifact_schema_version": "1",
+            "n_source_units": 5,
+            "n_units": 3,
+            "n_valid_units": 2,
+            "analysis_status": "partial_valid",
+            "selected_units_sha256": selection["selected_units_sha256"],
+            "legacy_artifact_provenance": None,
+        }
+
     monkeypatch.setattr(
-        swap_tuning,
-        "write_swap_tuning_curve_comparison_artifact",
-        lambda result, destination, **kwargs: {
-            "artifact_manifest_path": destination / "manifest.parquet",
-            "selected_units_path": destination / "selected_units.parquet",
-            "summary_path": destination / "summary.parquet",
-            "result_path": destination / "swap_tuning.nc",
-        },
+        tables_module,
+        "_write_swap_tuning_curve_comparison_nwb",
+        write_nwb,
     )
+    analysis_nwbfile_table = object()
 
     row = _make_swap_tuning_curve_comparison_row(
         key=selection,
@@ -6242,11 +9633,13 @@ def test_swap_tuning_make_passes_exact_selected_inputs(
         session_table=object(),
         nwbfile_table=object(),
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     assert len(compute_calls) == 1
     call = compute_calls[0]
-    assert call["tuning_curve_artifact_paths"] is tuning_paths
+    assert call["tuning_curve_artifact_paths"] is None
+    assert call["tuning_curves_by_role_trajectory"] is tuning_paths
     assert call["movement_firing_rate_tables_by_role"] is movement_tables
     assert call["spikes"] is spikes
     assert call["stable_unit_ids"] is stable_unit_ids
@@ -6268,6 +9661,12 @@ def test_swap_tuning_make_passes_exact_selected_inputs(
     ]
     assert call["sources"]["position_series_name"] == "head_position"
     assert "source_spyglass_git_commit" not in call["sources"]
+    assert len(write_calls) == 1
+    assert write_calls[0] == {
+        "nwb_file_name": selection["nwb_file_name"],
+        "result": result,
+        "analysis_nwbfile_table": analysis_nwbfile_table,
+    }
     assert row["n_source_units"] == 5
     assert row["n_units"] == 3
     assert row["n_valid_units"] == 2
@@ -6308,7 +9707,7 @@ def test_swap_tuning_registration_rebuilds_exact_nwb_inputs(
         "movement_selections": {
             "light_test": {"position_series_name": "head_position"}
         },
-        "tuning_curve_artifact_paths": {
+        "tuning_curves_by_role_trajectory": {
             epoch_role: {
                 trajectory_type: tmp_path / f"{epoch_role}-{trajectory_type}.nc"
                 for trajectory_type in _DPP_ENCODING_TRAJECTORIES
@@ -6375,6 +9774,23 @@ def test_swap_tuning_registration_rebuilds_exact_nwb_inputs(
         "register_existing_swap_tuning_curve_comparison_artifact",
         register_existing,
     )
+    write_calls = []
+
+    def write_nwb(**kwargs):
+        write_calls.append(kwargs)
+        return {
+            "analysis_file_name": "registered-swap-tuning.nwb",
+            "legacy_artifact_provenance": kwargs["result"][
+                "legacy_artifact_provenance"
+            ],
+        }
+
+    monkeypatch.setattr(
+        tables_module,
+        "_write_swap_tuning_curve_comparison_nwb",
+        write_nwb,
+    )
+    analysis_nwbfile_table = object()
     row = _register_existing_swap_tuning_curve_comparison_row(
         key=selection,
         source_result_path=tmp_path / "legacy.nc",
@@ -6396,6 +9812,7 @@ def test_swap_tuning_registration_rebuilds_exact_nwb_inputs(
         source_v1ca1_git_commit="v1",
         source_spyglass_git_commit="sg",
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     assert len(register_calls) == 1
@@ -6411,9 +9828,17 @@ def test_swap_tuning_registration_rebuilds_exact_nwb_inputs(
     assert call["movement_intervals_sha256_by_role"] == selection[
         "movement_intervals_sha256_by_role"
     ]
+    assert call["tuning_curve_artifact_paths"] is None
+    assert call["tuning_curves_by_role_trajectory"] is context[
+        "tuning_curves_by_role_trajectory"
+    ]
     assert call["sources"]["position_series_name"] == "head_position"
     assert call["sources"]["source_spyglass_git_commit"] == "sg"
     assert call["source_spyglass_git_commit"] == "sg"
+    assert call["destination_path"] is None
+    assert len(write_calls) == 1
+    assert write_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert write_calls[0]["analysis_nwbfile_table"] is analysis_nwbfile_table
     assert row["legacy_artifact_provenance"][
         "source_spyglass_git_commit"
     ] == "sg"
@@ -6492,33 +9917,29 @@ def test_swap_tuning_artifact_link_checks_identity_and_paths(
         "validate_swap_tuning_curve_comparison_result",
         lambda candidate: candidate,
     )
-    artifact_dir = (
-        tmp_path
-        / "L14"
-        / "20240102"
-        / "swap_tuning_curve_comparison"
-        / "02_r1_train_to_06_r3_test"
-        / "dark_08_r4"
-        / "v1"
-        / str(selection["swap_tuning_curve_comparison_id"])
+    nwb_hashes = {
+        "selected_units_table_sha256": "1" * 64,
+        "score_summary_sha256": "2" * 64,
+        "source_profiles_sha256": "3" * 64,
+        "model_profiles_sha256": "4" * 64,
+        "geometry_sha256": "5" * 64,
+        "provenance_sha256": "6" * 64,
+    }
+    monkeypatch.setattr(
+        swap_tuning,
+        "swap_tuning_curve_comparison_nwb_hashes",
+        lambda candidate: nwb_hashes,
     )
     row = {
-        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-        "selected_units_path": str(
-            artifact_dir / "selected_units.parquet"
-        ),
-        "summary_path": str(artifact_dir / "summary.parquet"),
-        "swap_tuning_curve_comparison_path": str(
-            artifact_dir / "swap_tuning.nc"
-        ),
-        "schema_version": swap_tuning.RESULT_SCHEMA_VERSION,
-        "bundle_schema_version": swap_tuning.BUNDLE_SCHEMA_VERSION,
+        "analysis_file_name": "swap-tuning.nwb",
+        "artifact_schema_version": swap_tuning.NWB_ARTIFACT_SCHEMA_VERSION,
         "n_source_units": 2,
         "n_units": 1,
         "n_valid_units": 1,
         "analysis_status": "valid",
         "selected_units_sha256": selected_digest,
         "artifact_origin": "computed",
+        **nwb_hashes,
     }
 
     _validate_swap_tuning_curve_comparison_artifact_link(
@@ -6545,12 +9966,12 @@ def test_swap_tuning_artifact_link_checks_identity_and_paths(
             date="20240102",
         )
 
-    with pytest.raises(ValueError, match="canonical bundle"):
+    with pytest.raises(ValueError, match="NWB objects"):
         _validate_swap_tuning_curve_comparison_artifact_link(
             bundle=bundle,
             result_row={
                 **row,
-                "summary_path": str(tmp_path / "wrong.parquet"),
+                "score_summary_sha256": "f" * 64,
             },
             selection_row=selection,
             parameters_row=inputs["parameters"],
@@ -6559,6 +9980,83 @@ def test_swap_tuning_artifact_link_checks_identity_and_paths(
             date="20240102",
         )
 
+
+def test_swap_tuning_loader_uses_fetch_nwb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public result loader reconstructs only the six selected NWB objects."""
+    from v1ca1.spyglass import swap_tuning
+
+    result_id = uuid.uuid4()
+    object_names = (
+        "selected_units",
+        "score_summary",
+        "source_profiles",
+        "model_profiles",
+        "geometry",
+        "provenance",
+    )
+    fetched = {name: object() for name in object_names}
+
+    class Relation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [fetched]
+
+    reconstructed = {"reconstructed": True}
+    monkeypatch.setattr(
+        swap_tuning,
+        "swap_tuning_curve_comparison_result_from_nwb_objects",
+        lambda **objects: reconstructed
+        if objects == fetched
+        else pytest.fail("Unexpected NWB object set."),
+    )
+    validation_calls = []
+    monkeypatch.setitem(
+        _load_swap_tuning_curve_comparison_result.__globals__,
+        "_validate_swap_tuning_curve_comparison_artifact_link",
+        lambda **kwargs: validation_calls.append(kwargs),
+    )
+    relation = Relation()
+    result_row = {"swap_tuning_curve_comparison_id": result_id}
+    loaded = _load_swap_tuning_curve_comparison_result(
+        result_row=result_row,
+        result_table=relation,
+        selection_row={"selection": True},
+        parameters_row={"parameters": True},
+        region_row={"region": True},
+        animal_name="L14",
+        date="20240102",
+    )
+    assert loaded is reconstructed
+    assert relation.keys == [
+        {"swap_tuning_curve_comparison_id": result_id}
+    ]
+    assert validation_calls[0]["bundle"] is reconstructed
+    assert validation_calls[0]["result_row"] == result_row
+
+
+def test_swap_tuning_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a swap-tuning NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "swap_tuning_curve_comparison_compute": lambda **kwargs: pytest.fail(
+                "SwapTuningCurveComparison computation must not start outside "
+                "populate()."
+            )
+        }
+    )
+    result = bundle["swap_tuning_curve_comparison"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"swap_tuning_curve_comparison_id": uuid.uuid4()})
 
 def test_tuning_similarity_result_hooks_receive_fetched_selection(
     monkeypatch,
@@ -6573,9 +10071,12 @@ def test_tuning_similarity_result_hooks_receive_fetched_selection(
     }
     calls = []
 
-    def result_row(path: str) -> dict[str, Any]:
+    def result_row(file_name: str) -> dict[str, Any]:
         return {
-            "similarity_path": path,
+            "analysis_file_name": file_name,
+            "similarity_object_id": "similarity-object-id",
+            "similarity_sha256": "f" * 64,
+            "artifact_schema_version": "1",
             "n_units": 3,
             "n_valid_comparisons": 10,
             "n_units_with_valid_comparison": 3,
@@ -6585,12 +10086,12 @@ def test_tuning_similarity_result_hooks_receive_fetched_selection(
 
     def compute(**kwargs):
         calls.append(("compute", kwargs))
-        return result_row("/analysis/tuning-similarity.parquet")
+        return result_row("tuning-similarity.nwb")
 
     def register(**kwargs):
         calls.append(("register", kwargs))
         return {
-            **result_row("/analysis/keyed-tuning-similarity.parquet"),
+            **result_row("registered-tuning-similarity.nwb"),
             "legacy_artifact_provenance": {"source": "all_units"},
         }
 
@@ -6640,6 +10141,9 @@ def test_tuning_similarity_result_hooks_receive_fetched_selection(
         ]
         assert call["movement_firing_rate_table"] is bundle[
             "movement_firing_rate"
+        ]
+        assert call["analysis_nwbfile_table"] is bundle[
+            "analysis_nwbfile"
         ]
     assert calls[1][1]["tuning_curve_parameters_table"] is bundle[
         "tuning_curve_parameters"
@@ -6762,16 +10266,7 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
     )
     calls: dict[str, Any] = {}
     result_table = object()
-    expected_path = (
-        tmp_path
-        / "L14"
-        / "20240102"
-        / "dpp_encoding"
-        / "02_r1"
-        / "ca1"
-        / str(comparison_id)
-        / "dpp_encoding.parquet"
-    )
+    analysis_nwbfile_table = object()
 
     monkeypatch.setitem(
         _make_dpp_encoding_row.__globals__,
@@ -6799,18 +10294,24 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
             "eligible_units_sha256": "d" * 64,
         }
 
-    def write(table, path):
-        calls["write"] = {"table": table, "path": Path(path)}
-        return Path(path)
+    def write(**kwargs):
+        calls["write"] = kwargs
+        return {
+            "analysis_file_name": "dpp-encoding-analysis.nwb",
+            "dpp_encoding_object_id": "dpp-encoding-object-id",
+            "dpp_encoding_sha256": "f" * 64,
+            "artifact_schema_version": "1",
+            "_created_artifact_paths": ["/analysis/dpp-encoding-analysis.nwb"],
+        }
 
     monkeypatch.setattr(
         dpp_encoding,
         "compute_selected_dpp_encoding",
         compute,
     )
-    monkeypatch.setattr(
-        dpp_encoding,
-        "write_dpp_encoding_artifact",
+    monkeypatch.setitem(
+        _make_dpp_encoding_row.__globals__,
+        "_write_dpp_encoding_nwb",
         write,
     )
 
@@ -6831,6 +10332,7 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
         session_table=object(),
         nwbfile_table=object(),
         artifact_root=tmp_path,
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
     compute_call = calls["compute"]
@@ -6876,16 +10378,23 @@ def test_make_dpp_encoding_row_forwards_selected_inputs_and_parameters(
         "stability_tables"
     ]
     assert compute_call["dpp_encoding_id"] == comparison_id
-    assert calls["write"] == {"table": result_table, "path": expected_path}
+    assert calls["write"] == {
+        "nwb_file_name": "L1420240102_.nwb",
+        "table": result_table,
+        "analysis_nwbfile_table": analysis_nwbfile_table,
+    }
     assert row == {
-        "dpp_encoding_path": str(expected_path),
+        "analysis_file_name": "dpp-encoding-analysis.nwb",
+        "dpp_encoding_object_id": "dpp-encoding-object-id",
+        "dpp_encoding_sha256": "f" * 64,
+        "artifact_schema_version": "1",
         "n_units_input": 2,
         "n_units_eligible": 2,
         "n_units_valid": 1,
         "analysis_status": "valid",
         "eligible_units_sha256": "d" * 64,
         "legacy_artifact_provenance": None,
-        "_created_artifact_paths": [str(expected_path)],
+        "_created_artifact_paths": ["/analysis/dpp-encoding-analysis.nwb"],
     }
 
 
@@ -6906,22 +10415,11 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         tmp_path
         / "ca1_02_r1_cv5_bin0p05s_placebin4cm_encoding_summary.parquet"
     )
-    destination = (
-        tmp_path
-        / "analysis"
-        / "L14"
-        / "20240102"
-        / "dpp_encoding"
-        / "02_r1"
-        / "ca1"
-        / str(comparison_id)
-        / "dpp_encoding.parquet"
-    )
-    base_provenance = {
-        "source_path": str(source_path),
-        "legacy_schema": "encoding_summary",
-    }
+    source_path.write_bytes(b"legacy encoding")
     calls: dict[str, Any] = {}
+    normalized_table = _valid_dpp_encoding_table()
+    analysis_nwbfile_table = object()
+    legacy_table = object()
 
     monkeypatch.setitem(
         _register_existing_dpp_encoding_row.__globals__,
@@ -6934,22 +10432,39 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         lambda **kwargs: loaded_spikes,
     )
 
-    def register(**kwargs):
-        calls["register"] = kwargs
-        return {
-            "path": destination,
-            "n_units_eligible": 2,
-            "n_units_valid": 1,
-            "analysis_status": "valid",
-            "eligible_units_sha256": "e" * 64,
-            "legacy_artifact_provenance": base_provenance,
-            "_created_artifact_paths": [str(destination)],
+    def read_parquet(path):
+        calls["source_path"] = Path(path)
+        return legacy_table
+
+    monkeypatch.setattr(pd, "read_parquet", read_parquet)
+
+    def normalize(legacy_table, **kwargs):
+        calls["normalize"] = {
+            "legacy_table": legacy_table,
+            **kwargs,
         }
+        return normalized_table
 
     monkeypatch.setattr(
         dpp_encoding,
-        "register_existing_dpp_encoding_artifact",
-        register,
+        "normalize_legacy_dpp_encoding_table",
+        normalize,
+    )
+
+    def write(**kwargs):
+        calls["write"] = kwargs
+        return {
+            "analysis_file_name": "registered-dpp-encoding.nwb",
+            "dpp_encoding_object_id": "dpp-encoding-object-id",
+            "dpp_encoding_sha256": "f" * 64,
+            "artifact_schema_version": "1",
+            "_created_artifact_paths": ["/analysis/registered-dpp-encoding.nwb"],
+        }
+
+    monkeypatch.setitem(
+        _register_existing_dpp_encoding_row.__globals__,
+        "_write_dpp_encoding_nwb",
+        write,
     )
 
     row = _register_existing_dpp_encoding_row(
@@ -6971,24 +10486,24 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         source_v1ca1_git_commit="source-v1-commit",
         source_spyglass_git_commit="source-spyglass-commit",
         artifact_root=tmp_path / "analysis",
+        analysis_nwbfile_table=analysis_nwbfile_table,
     )
 
-    register_call = calls["register"]
-    assert register_call["source_path"] == source_path
-    assert register_call["destination_path"] == destination
-    assert register_call["unit_identity_resolver"] == {
+    normalize_call = calls["normalize"]
+    assert calls["source_path"] == source_path
+    assert normalize_call["legacy_table"] is legacy_table
+    assert normalize_call["unit_identity_resolver"] == {
         "101": {"spikesorting_merge_id": "merge-a", "unit_id": "10"},
         "102": {"spikesorting_merge_id": "merge-a", "unit_id": "11"},
     }
-    assert register_call["spikes"] is loaded_spikes["ts_group"]
-    assert register_call["stable_unit_ids"] is loaded_spikes["unit_ids"]
-    assert register_call["movement_firing_rate_table"] is context[
+    assert normalize_call["spikes"] is loaded_spikes["ts_group"]
+    assert normalize_call["stable_unit_ids"] is loaded_spikes["unit_ids"]
+    assert normalize_call["movement_firing_rate_table"] is context[
         "movement"
     ]["table"]
-    assert register_call["stability_tables_by_trajectory"] is context[
+    assert normalize_call["stability_tables_by_trajectory"] is context[
         "stability_tables"
     ]
-    assert register_call["source_v1ca1_git_commit"] == "source-v1-commit"
     parameter_names = (
         "n_folds",
         "evaluation_bin_size_s",
@@ -6999,13 +10514,23 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
         "minimum_stability_correlation",
     )
     assert {
-        name: register_call[name] for name in parameter_names
+        name: normalize_call[name] for name in parameter_names
     } == {
         name: context["parameters"][name] for name in parameter_names
     }
+    assert calls["write"] == {
+        "nwb_file_name": "L1420240102_.nwb",
+        "table": normalized_table,
+        "analysis_nwbfile_table": analysis_nwbfile_table,
+    }
 
     expected_provenance = {
-        **base_provenance,
+        "source_path": str(source_path.resolve()),
+        "source_sha256": hashlib.sha256(b"legacy encoding").hexdigest(),
+        "source_v1ca1_git_commit": "source-v1-commit",
+        "legacy_log_likelihood_units": "nats_per_spike",
+        "canonical_log_likelihood_units": "total_nats",
+        "eligible_unit_set_validated": True,
         "source_spyglass_git_commit": "source-spyglass-commit",
         "assumed_parameters": context["parameters"],
         "source_parameter_validation": {
@@ -7027,15 +10552,19 @@ def test_register_dpp_encoding_row_uses_exact_legacy_source_and_resolver(
             "not_reconstructable_from_legacy_summary"
         ),
     }
+    summary = dpp_encoding.summarize_dpp_encoding_table(normalized_table)
     assert row == {
-        "dpp_encoding_path": str(destination),
+        "analysis_file_name": "registered-dpp-encoding.nwb",
+        "dpp_encoding_object_id": "dpp-encoding-object-id",
+        "dpp_encoding_sha256": "f" * 64,
+        "artifact_schema_version": "1",
         "n_units_input": 2,
-        "n_units_eligible": 2,
-        "n_units_valid": 1,
-        "analysis_status": "valid",
-        "eligible_units_sha256": "e" * 64,
+        "n_units_eligible": summary["n_units_eligible"],
+        "n_units_valid": summary["n_units_valid"],
+        "analysis_status": summary["analysis_status"],
+        "eligible_units_sha256": summary["eligible_units_sha256"],
         "legacy_artifact_provenance": expected_provenance,
-        "_created_artifact_paths": [str(destination)],
+        "_created_artifact_paths": ["/analysis/registered-dpp-encoding.nwb"],
     }
 
 
@@ -7273,60 +10802,49 @@ def test_register_existing_preflights_duplicate_before_hook(
             "ripple_modulation",
             "ripple_modulation_id",
             "ripple_modulation_compute",
-            (
-                ("summary_path", "summary.parquet"),
-                ("peri_ripple_firing_rate_path", "peri.parquet"),
-            ),
+            (("analysis_file_name", "ripple-modulation-analysis.nwb"),),
         ),
         (
             "movement_firing_rate",
             "movement_firing_rate_id",
             "movement_firing_rate_compute",
-            (
-                ("movement_firing_rate_path", "movement_firing_rate.parquet"),
-                ("movement_intervals_path", "movement_intervals.npz"),
-            ),
+            (("analysis_file_name", "movement-analysis.nwb"),),
         ),
         (
             "path_specific_place_tuning_curve",
             "path_specific_place_tuning_curve_id",
             "path_specific_place_tuning_curve_compute",
-            (("tuning_curve_path", "tuning_curve.nc"),),
+            (("analysis_file_name", "tuning-curve-analysis.nwb"),),
         ),
         (
             "dpp_tuning_curve",
             "dpp_tuning_curve_id",
             "dpp_tuning_curve_compute",
-            (("tuning_curve_path", "dpp_tuning_curve.nc"),),
+            (("analysis_file_name", "dpp-tuning-analysis.nwb"),),
         ),
         (
             "path_specific_place_tuning_similarity",
             "path_specific_place_tuning_similarity_id",
             "path_specific_place_tuning_similarity_compute",
-            (("similarity_path", "tuning_similarity.parquet"),),
+            (("analysis_file_name", "tuning-similarity.nwb"),),
         ),
         (
             "path_specific_place_stability",
             "path_specific_place_stability_id",
             "path_specific_place_stability_compute",
-            (("stability_path", "stability.parquet"),),
+            (("analysis_file_name", "stability-analysis.nwb"),),
         ),
         (
             "dpp_encoding",
             "dpp_encoding_id",
             "dpp_encoding_compute",
-            (("dpp_encoding_path", "dpp_encoding.parquet"),),
+            (("analysis_file_name", "dpp-encoding-analysis.nwb"),),
         ),
         (
             "motor_encoding",
             "motor_encoding_id",
             "motor_encoding_compute",
-            (
-                ("artifact_manifest_path", "manifest.parquet"),
-                ("selected_units_path", "selected_units.parquet"),
-                ("nested_cv_path", "nested_cv.nc"),
-                ("full_refit_path", "full_refit.nc"),
-            ),
+            (("analysis_file_name", "motor-encoding-analysis.nwb"),),
         ),
         (
             "swap_tuning_curve_comparison",
@@ -7382,10 +10900,26 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
             }
         )
         if table_key == "ripple_modulation":
-            row["n_ripples"] = 3
+            row.update(
+                {
+                    "analysis_file_name": created_paths[0].name,
+                    "ripple_modulation_summary_object_id": "summary-object-id",
+                    "peri_ripple_firing_rate_object_id": "peri-object-id",
+                    "ripple_modulation_summary_sha256": "d" * 64,
+                    "peri_ripple_firing_rate_sha256": "e" * 64,
+                    "artifact_schema_version": "1",
+                    "n_ripples": 3,
+                }
+            )
         if table_key == "movement_firing_rate":
             row.update(
                 {
+                    "analysis_file_name": created_paths[0].name,
+                    "movement_firing_rate_object_id": "rate-object-id",
+                    "movement_intervals_object_id": "interval-object-id",
+                    "movement_firing_rate_sha256": "d" * 64,
+                    "movement_intervals_sha256": "e" * 64,
+                    "artifact_schema_version": "1",
                     "n_units_with_spikes": 1,
                     "movement_interval_count": 2,
                     "movement_duration_s": 5.0,
@@ -7406,6 +10940,14 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
         if table_key == "dpp_tuning_curve":
             row.update(
                 {
+                    "analysis_file_name": created_paths[0].name,
+                    "dpp_tuning_object_id": "dpp-tuning-object-id",
+                    "dpp_bins_object_id": "dpp-bins-object-id",
+                    "dpp_provenance_object_id": "dpp-provenance-object-id",
+                    "dpp_tuning_sha256": "d" * 64,
+                    "dpp_bins_sha256": "e" * 64,
+                    "dpp_provenance_sha256": "f" * 64,
+                    "artifact_schema_version": "1",
                     "n_outbound_trials": 2,
                     "n_inbound_trials": 1,
                 }
@@ -7413,17 +10955,27 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
         if table_key == "path_specific_place_tuning_similarity":
             row.update(
                 {
+                    "analysis_file_name": created_paths[0].name,
+                    "similarity_object_id": "similarity-object-id",
+                    "similarity_sha256": "f" * 64,
+                    "artifact_schema_version": "1",
                     "n_valid_comparisons": 4,
                     "n_units_with_valid_comparison": 1,
                 }
             )
         if table_key == "dpp_encoding":
             row.pop("n_units")
+            row.pop("n_valid_units")
             row.pop("selected_units_sha256")
             row.update(
                 {
+                    "analysis_file_name": created_paths[0].name,
+                    "dpp_encoding_object_id": "dpp-encoding-object-id",
+                    "dpp_encoding_sha256": "f" * 64,
+                    "artifact_schema_version": "1",
                     "n_units_input": 2,
                     "n_units_eligible": 1,
+                    "n_units_valid": 1,
                     "eligible_units_sha256": "c" * 64,
                 }
             )
@@ -7432,6 +10984,15 @@ def test_failed_result_insert_removes_only_hook_reported_artifacts(
             row.pop("n_valid_units")
             row.update(
                 {
+                    "analysis_file_name": created_paths[0].name,
+                    "selected_units_object_id": "selected-units-object-id",
+                    "dataset_index_object_id": "dataset-index-object-id",
+                    "coordinates_object_id": "coordinates-object-id",
+                    "nested_cv_arrays_object_id": "nested-cv-arrays-object-id",
+                    "full_refit_arrays_object_id": "full-refit-arrays-object-id",
+                    "provenance_object_id": "provenance-object-id",
+                    "artifact_schema_version": "1",
+                    "schema_version": "2",
                     "n_units_input": 2,
                     "n_units_eligible": 1,
                     "n_units_valid": 1,
@@ -7886,7 +11447,17 @@ def test_epoch_motor_behavior_activation_definitions_and_defaults() -> None:
         selection_definition
     )
     result = bundle["epoch_motor_behavior"]
-    assert "distribution_summary_path: filepath@analysis" in result.definition
+    assert "-> AnalysisNwbfile" in result.definition
+    for field_name in (
+        "distribution_summary",
+        "progression_summary",
+        "trajectory_qc",
+    ):
+        assert f"{field_name}_object_id: varchar(40)" in result.definition
+        assert f"{field_name}_sha256: char(64)" in result.definition
+    assert "artifact_schema_version: varchar(8)" in result.definition
+    assert "artifact_manifest_path:" not in result.definition
+    assert "distribution_summary_path:" not in result.definition
     assert hasattr(result, "register_existing")
     assert "_insert_calls" not in result.__dict__
 
@@ -7898,18 +11469,14 @@ def test_epoch_motor_behavior_activation_definitions_and_defaults() -> None:
 
 
 def test_epoch_motor_behavior_load_validates_artifact_link(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The result loader delegates checksum and DataJoint-link validation."""
-    from v1ca1.spyglass import epoch_motor_behavior
-
+    """The public loader delegates all rows to the NWB result validator."""
     result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
-    artifact_dir.mkdir()
     result_row = {
         "epoch_motor_behavior_id": result_id,
-        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
+        "analysis_file_name": "epoch-motor-analysis.nwb",
+        "artifact_schema_version": "1",
     }
     selection = {
         "epoch_motor_behavior_id": result_id,
@@ -7921,7 +11488,7 @@ def test_epoch_motor_behavior_load_validates_artifact_link(
     )
     movement = dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS)
     bundle_payload = {"loaded": True}
-    validated_calls = []
+    loader_calls = []
 
     bundle, _schemas, _unit_selection_params = _fake_bundle()
     result = bundle["epoch_motor_behavior"]
@@ -7941,51 +11508,234 @@ def test_epoch_motor_behavior_load_validates_artifact_link(
         raise AssertionError(f"Unexpected table {table!r}")
 
     monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
-    monkeypatch.setattr(
-        epoch_motor_behavior,
-        "load_epoch_motor_behavior_artifact",
-        lambda path: bundle_payload,
-    )
     monkeypatch.setitem(
         _construct_tables.__globals__,
-        "_validate_epoch_motor_behavior_artifact_link",
-        lambda **kwargs: validated_calls.append(kwargs),
+        "_load_epoch_motor_behavior_result",
+        lambda **kwargs: loader_calls.append(kwargs) or bundle_payload,
     )
 
     loaded = result.load_epoch_motor_behavior_bundle(
         {"epoch_motor_behavior_id": result_id}
     )
     assert loaded is bundle_payload
-    assert validated_calls[0]["bundle"] is bundle_payload
-    assert validated_calls[0]["selection_row"] == selection
+    assert loader_calls[0]["result_row"] == result_row
+    assert loader_calls[0]["selection_row"] == selection
+    assert loader_calls[0]["epoch_motor_behavior_table"] is result
 
 
-def test_epoch_motor_behavior_failed_insert_removes_new_bundle(
+@pytest.mark.parametrize(
+    "validation_errors",
+    [None, ["invalid EpochMotorBehavior NWB"]],
+)
+def test_epoch_motor_behavior_write_uses_analysis_nwb_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    validation_errors: list[str] | None,
+) -> None:
+    """Three motor tables are validated before one NWB is registered."""
+    import pynwb
+
+    from v1ca1.spyglass import epoch_motor_behavior
+
+    result = _valid_epoch_motor_behavior_result()
+    analysis_path = tmp_path / "epoch-motor-behavior-analysis.nwb"
+    analysis_table = _TestAnalysisNwbfile(analysis_path)
+    real_validate = pynwb.validate
+
+    def validate_before_registration(*, path):
+        assert not analysis_table.builder.registered
+        assert analysis_path.stat().st_mode & 0o777 == 0o644
+        if validation_errors is not None:
+            return validation_errors
+        return real_validate(path=path)
+
+    monkeypatch.setattr(pynwb, "validate", validate_before_registration)
+    kwargs = {
+        "nwb_file_name": "L1420240102_.nwb",
+        "result": result,
+        "analysis_nwbfile_table": analysis_table,
+    }
+    if validation_errors is not None:
+        with pytest.raises(ValueError, match="failed PyNWB validation"):
+            tables_module._write_epoch_motor_behavior_nwb(**kwargs)
+        assert not analysis_table.builder.registered
+        assert not analysis_path.exists()
+        return
+
+    row = tables_module._write_epoch_motor_behavior_nwb(**kwargs)
+    assert analysis_table.builder.registered
+    assert analysis_path.exists()
+    assert row["analysis_file_name"] == analysis_path.name
+    assert row["artifact_schema_version"] == (
+        epoch_motor_behavior.NWB_ARTIFACT_SCHEMA_VERSION
+    )
+    object_ids = {
+        row[f"{name}_object_id"]
+        for name in (
+            "distribution_summary",
+            "progression_summary",
+            "trajectory_qc",
+        )
+    }
+    assert len(object_ids) == 3
+    assert row["distribution_summary_sha256"] == (
+        epoch_motor_behavior.distribution_summary_sha256(
+            result["distribution_summary"]
+        )
+    )
+    assert row["progression_summary_sha256"] == (
+        epoch_motor_behavior.progression_summary_sha256(
+            result["progression_summary"]
+        )
+    )
+    assert row["trajectory_qc_sha256"] == (
+        epoch_motor_behavior.trajectory_qc_sha256(result["trajectory_qc"])
+    )
+
+
+def test_epoch_motor_behavior_result_loader_uses_fetch_nwb() -> None:
+    """Live motor readers resolve and cross-check all three NWB tables."""
+    from v1ca1.spyglass import epoch_motor_behavior
+
+    bundle = _valid_epoch_motor_behavior_result()
+    result_id = uuid.UUID(bundle["metadata"]["epoch_motor_behavior_id"])
+
+    class EpochMotorBehaviorRelation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [
+                {
+                    "distribution_summary": bundle[
+                        "distribution_summary"
+                    ].copy(),
+                    "progression_summary": bundle[
+                        "progression_summary"
+                    ].copy(),
+                    "trajectory_qc": bundle["trajectory_qc"].copy(),
+                }
+            ]
+
+    relation = EpochMotorBehaviorRelation()
+    result_row = {
+        "epoch_motor_behavior_id": result_id,
+        "artifact_schema_version": (
+            epoch_motor_behavior.NWB_ARTIFACT_SCHEMA_VERSION
+        ),
+        "distribution_summary_sha256": (
+            epoch_motor_behavior.distribution_summary_sha256(
+                bundle["distribution_summary"]
+            )
+        ),
+        "progression_summary_sha256": (
+            epoch_motor_behavior.progression_summary_sha256(
+                bundle["progression_summary"]
+            )
+        ),
+        "trajectory_qc_sha256": epoch_motor_behavior.trajectory_qc_sha256(
+            bundle["trajectory_qc"]
+        ),
+        **{
+            name: bundle[name]
+            for name in (
+                "n_position_samples_input",
+                "n_finite_position_samples",
+                "n_dropped_nonfinite_samples",
+                "n_movement_samples",
+                "movement_duration_s",
+                "n_supported_trajectories",
+                "sampling_rate_hz",
+                "median_sample_interval_s",
+                "maximum_sample_gap_s",
+                "analysis_status",
+                "artifact_origin",
+                "legacy_artifact_provenance",
+            )
+        },
+    }
+    selection = {
+        "epoch_motor_behavior_id": result_id,
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+        "primary_position_series_name": "head_position",
+        "primary_position_role": "translation_anchor",
+        "orientation_reference_position_series_name": "body_position",
+        "orientation_reference_position_role": "orientation_reference",
+        "position_offset_samples": 0,
+        "epoch_motor_behavior_parameters_sha256": bundle["parameters"][
+            "parameter_sha256"
+        ],
+        "epoch_motor_behavior_output_rule_sha256": bundle["parameters"][
+            "output_rule_sha256"
+        ],
+        "movement_parameters_sha256": bundle["movement_parameters"][
+            "movement_parameters_sha256"
+        ],
+    }
+    loaded = tables_module._load_epoch_motor_behavior_result(
+        result_row=result_row,
+        epoch_motor_behavior_table=relation,
+        selection_row=selection,
+        parameters_row=dict(
+            table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS
+        ),
+        movement_parameters_row=dict(table_specs.DEFAULT_MOVEMENT_PARAMETERS),
+        animal_name="L14",
+        date="20240102",
+    )
+    pd.testing.assert_frame_equal(
+        loaded["distribution_summary"],
+        bundle["distribution_summary"],
+        check_dtype=False,
+        check_categorical=False,
+    )
+    assert relation.keys == [{"epoch_motor_behavior_id": result_id}]
+
+    with pytest.raises(ValueError, match="distribution_summary_sha256"):
+        tables_module._load_epoch_motor_behavior_result(
+            result_row={
+                **result_row,
+                "distribution_summary_sha256": "0" * 64,
+            },
+            epoch_motor_behavior_table=relation,
+            selection_row=selection,
+            parameters_row=dict(
+                table_specs.MANUSCRIPT_EPOCH_MOTOR_BEHAVIOR_PARAMETERS
+            ),
+            movement_parameters_row=dict(
+                table_specs.DEFAULT_MOVEMENT_PARAMETERS
+            ),
+            animal_name="L14",
+            date="20240102",
+        )
+
+
+def test_epoch_motor_behavior_failed_insert_removes_new_analysis_nwb(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed result insert removes only the hook-reported UUID directory."""
+    """A failed result insert removes only the hook-reported analysis NWB."""
     result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
+    artifact_path = tmp_path / "epoch-motor-analysis.nwb"
     retained = tmp_path / "retained.parquet"
     retained.write_bytes(b"keep")
 
     def compute(**_kwargs):
-        artifact_dir.mkdir()
-        paths = {}
-        for field_name, filename in (
-            ("artifact_manifest_path", "manifest.parquet"),
-            ("distribution_summary_path", "distribution.parquet"),
-            ("progression_summary_path", "progression.parquet"),
-            ("trajectory_qc_path", "qc.parquet"),
-        ):
-            path = artifact_dir / filename
-            path.write_bytes(b"new")
-            paths[field_name] = str(path)
+        artifact_path.write_bytes(b"new")
         return {
-            **paths,
-            "schema_version": "1",
-            "bundle_schema_version": "1",
+            "analysis_file_name": artifact_path.name,
+            "distribution_summary_object_id": "distribution-object-id",
+            "progression_summary_object_id": "progression-object-id",
+            "trajectory_qc_object_id": "qc-object-id",
+            "distribution_summary_sha256": "a" * 64,
+            "progression_summary_sha256": "b" * 64,
+            "trajectory_qc_sha256": "c" * 64,
+            "artifact_schema_version": "1",
             "n_position_samples_input": 20,
             "n_finite_position_samples": 20,
             "n_dropped_nonfinite_samples": 0,
@@ -7997,7 +11747,7 @@ def test_epoch_motor_behavior_failed_insert_removes_new_bundle(
             "maximum_sample_gap_s": 0.1,
             "analysis_status": "valid",
             "legacy_artifact_provenance": None,
-            "_created_artifact_paths": [str(artifact_dir)],
+            "_created_artifact_paths": [str(artifact_path)],
         }
 
     monkeypatch.setitem(
@@ -8016,8 +11766,24 @@ def test_epoch_motor_behavior_failed_insert_removes_new_bundle(
     result.insert1 = classmethod(fail_insert)
     with pytest.raises(RuntimeError, match="database insert failed"):
         result().make({"epoch_motor_behavior_id": result_id})
-    assert not artifact_dir.exists()
+    assert not artifact_path.exists()
     assert retained.read_bytes() == b"keep"
+
+
+def test_epoch_motor_behavior_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a motor NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "epoch_motor_behavior_compute": lambda **kwargs: pytest.fail(
+                "EpochMotorBehavior computation must not start outside populate()."
+            )
+        }
+    )
+    result = bundle["epoch_motor_behavior"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"epoch_motor_behavior_id": uuid.uuid4()})
 
 
 def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
@@ -8030,6 +11796,7 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
     result_id = uuid.uuid4()
     selection = {
         "epoch_motor_behavior_id": result_id,
+        "nwb_file_name": "L1420240102_.nwb",
         "epoch": "02_r1",
     }
     context = {
@@ -8063,10 +11830,14 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
         }
     )
     captured = []
+    writer_calls = []
 
     def register(**kwargs):
         captured.append(kwargs)
         return {
+            "distribution_summary": pd.DataFrame(),
+            "progression_summary": pd.DataFrame(),
+            "trajectory_qc": pd.DataFrame(),
             "n_position_samples_input": 20,
             "n_finite_position_samples": 20,
             "n_dropped_nonfinite_samples": 0,
@@ -8080,6 +11851,20 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
             "legacy_artifact_provenance": {"verification": "recomputed"},
         }
 
+    def write_nwb(**kwargs):
+        writer_calls.append(kwargs)
+        return {
+            "analysis_file_name": "registered-motor.nwb",
+            "distribution_summary_object_id": "distribution-object-id",
+            "progression_summary_object_id": "progression-object-id",
+            "trajectory_qc_object_id": "qc-object-id",
+            "distribution_summary_sha256": "a" * 64,
+            "progression_summary_sha256": "b" * 64,
+            "trajectory_qc_sha256": "c" * 64,
+            "artifact_schema_version": "1",
+            "_created_artifact_paths": ["registered-motor.nwb"],
+        }
+
     monkeypatch.setitem(
         _construct_tables.__globals__,
         "_load_epoch_motor_behavior_context",
@@ -8089,6 +11874,11 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
         epoch_motor_behavior,
         "register_existing_epoch_motor_behavior_artifact",
         register,
+    )
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_write_epoch_motor_behavior_nwb",
+        write_nwb,
     )
     source_distribution = tmp_path / "legacy_distribution.parquet"
     source_progression = tmp_path / "legacy_progression.parquet"
@@ -8105,6 +11895,7 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
         wtrack_graph_table=object(),
         session_table=object(),
         artifact_root=tmp_path,
+        analysis_nwbfile_table="analysis-table",
     )
     assert captured[0]["source_distribution_path"] == source_distribution
     assert captured[0]["source_progression_path"] == source_progression
@@ -8112,12 +11903,97 @@ def test_epoch_motor_behavior_registration_hook_delegates_strict_recompute(
         context["position_inputs"]["primary_position"]
     )
     assert captured[0]["parameter_sha256"] == "p" * 64
+    assert captured[0]["destination_path"] is None
+    assert captured[0]["write_artifact"] is False
+    assert writer_calls[0]["nwb_file_name"] == "L1420240102_.nwb"
+    assert writer_calls[0]["analysis_nwbfile_table"] == "analysis-table"
     assert row["legacy_artifact_provenance"] == {
         "verification": "recomputed"
     }
-    assert row["_created_artifact_paths"] == [
-        str(tmp_path / "L14" / "20240102" / "epoch_motor_behavior" / "02_r1" / str(result_id))
+    assert row["analysis_file_name"] == "registered-motor.nwb"
+    assert row["_created_artifact_paths"] == ["registered-motor.nwb"]
+
+
+def test_epoch_motor_behavior_registration_uses_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy validation and both motor result inserts are transactional."""
+    result_id = uuid.uuid4()
+    selection = {
+        "epoch_motor_behavior_id": result_id,
+        "nwb_file_name": "L1420240102_.nwb",
+        "epoch": "02_r1",
+    }
+    events = []
+
+    class Connection:
+        in_transaction = False
+
+        @property
+        def transaction(self):
+            connection = self
+
+            class Transaction:
+                def __enter__(self):
+                    events.append("transaction_enter")
+                    connection.in_transaction = True
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    events.append("transaction_exit")
+                    connection.in_transaction = False
+
+            return Transaction()
+
+    connection = Connection()
+
+    def register(**kwargs):
+        assert connection.in_transaction
+        events.append("register_hook")
+        return {
+            "analysis_file_name": "registered-motor.nwb",
+            "distribution_summary_object_id": "distribution-object-id",
+            "progression_summary_object_id": "progression-object-id",
+            "trajectory_qc_object_id": "qc-object-id",
+            "distribution_summary_sha256": "a" * 64,
+            "progression_summary_sha256": "b" * 64,
+            "trajectory_qc_sha256": "c" * 64,
+            "artifact_schema_version": "1",
+            "n_position_samples_input": 20,
+            "n_finite_position_samples": 0,
+            "n_dropped_nonfinite_samples": 20,
+            "n_movement_samples": 0,
+            "movement_duration_s": 0.0,
+            "n_supported_trajectories": 0,
+            "sampling_rate_hz": np.nan,
+            "median_sample_interval_s": np.nan,
+            "maximum_sample_gap_s": np.nan,
+            "analysis_status": "no_valid_position",
+            "legacy_artifact_provenance": {"source": "legacy"},
+        }
+
+    monkeypatch.setitem(
+        _construct_tables.__globals__,
+        "_fetch1_dict",
+        lambda table, key: dict(selection),
+    )
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={"epoch_motor_behavior_register_existing": register}
+    )
+    result = bundle["epoch_motor_behavior"]
+    result.connection = connection
+
+    row = result.register_existing(
+        {"epoch_motor_behavior_id": result_id},
+        source_distribution_path="legacy-distribution.parquet",
+        source_progression_path="legacy-progression.parquet",
+    )
+
+    assert events == [
+        "transaction_enter",
+        "register_hook",
+        "transaction_exit",
     ]
+    assert row["analysis_file_name"] == "registered-motor.nwb"
 
 
 def _cv_pca_selection_inputs(tmp_path: Path) -> dict[str, Any]:
@@ -8197,14 +12073,18 @@ def _cv_pca_selection_inputs(tmp_path: Path) -> dict[str, Any]:
             "unit_filter_params_sha256": "b" * 64,
             "movement_parameters_sha256": movement_parameters_sha256,
         }
-        firing_rate_path = tmp_path / f"{condition}_movement.parquet"
-        intervals_path = tmp_path / f"{condition}_movement.npz"
-        firing_rate_path.write_bytes(f"{condition}-rates".encode())
-        intervals_path.write_bytes(f"{condition}-intervals".encode())
         movement_results[condition] = {
             "movement_firing_rate_id": movement_ids[condition],
-            "movement_firing_rate_path": str(firing_rate_path),
-            "movement_intervals_path": str(intervals_path),
+            "analysis_file_name": f"{condition}-movement.nwb",
+            "movement_firing_rate_object_id": f"{condition}-rate-object",
+            "movement_intervals_object_id": f"{condition}-interval-object",
+            "movement_firing_rate_sha256": hashlib.sha256(
+                f"{condition}-rates".encode()
+            ).hexdigest(),
+            "movement_intervals_sha256": hashlib.sha256(
+                f"{condition}-intervals".encode()
+            ).hexdigest(),
+            "artifact_schema_version": "1",
             "n_units": 2,
             "n_valid_units": 2,
             "n_units_with_spikes": 2,
@@ -8374,6 +12254,18 @@ def test_cv_pca_selection_freezes_every_source_and_uuid_mutation(
         "center_to_right",
     }
 
+    storage_changed = copy.deepcopy(inputs)
+    storage_changed["movement_results"]["dark"].update(
+        {
+            "analysis_file_name": "repacked-dark-movement.nwb",
+            "movement_firing_rate_object_id": "repacked-rate-object",
+            "movement_intervals_object_id": "repacked-interval-object",
+        }
+    )
+    assert _build_cv_pca_selection(storage_changed)["cv_pca_id"] == first[
+        "cv_pca_id"
+    ]
+
     mutations = []
     changed = copy.deepcopy(inputs)
     changed["epoch_rows"]["light"]["condition"] = "BA"
@@ -8473,34 +12365,38 @@ def test_cv_pca_passive_and_standalone_rules_are_identical() -> None:
 
 
 def test_cv_pca_terminal_status_is_inserted_as_a_result_row(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Expected empty-input outcomes remain successful computed rows."""
     result_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
 
     def compute(**_kwargs):
         return {
-            "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-            "result_path": str(artifact_dir / "cv_pca.nc"),
-            "summary_path": str(artifact_dir / "summary.parquet"),
-            "spectrum_path": str(artifact_dir / "within_spectrum.parquet"),
-            "selected_units_path": str(
-                artifact_dir / "selected_units.parquet"
-            ),
-            "lap_assignments_path": str(
-                artifact_dir / "lap_assignments.parquet"
-            ),
-            "trajectory_qc_path": str(
-                artifact_dir / "trajectory_qc.parquet"
-            ),
-            "result_schema_version": "1",
-            "bundle_schema_version": "1",
+            "analysis_file_name": "cv_pca.nwb",
+            **{
+                f"{name}_object_id": f"{name}-object"
+                for name in (
+                    "selected_units",
+                    "lap_assignments",
+                    "trajectory_qc",
+                    "summary",
+                    "spectrum",
+                    "dataset",
+                    "provenance",
+                )
+            },
+            "artifact_schema_version": "1",
             "n_input_units": 2,
             "n_selected_units": 0,
             "analysis_status": "no_movement",
             "selected_units_sha256": "c" * 64,
+            "selected_units_table_sha256": "1" * 64,
+            "lap_assignments_sha256": "2" * 64,
+            "trajectory_qc_sha256": "3" * 64,
+            "summary_sha256": "4" * 64,
+            "spectrum_sha256": "5" * 64,
+            "dataset_sha256": "6" * 64,
+            "provenance_sha256": "7" * 64,
             "legacy_artifact_provenance": None,
             "_created_artifact_paths": [],
         }
@@ -8508,7 +12404,10 @@ def test_cv_pca_terminal_status_is_inserted_as_a_result_row(
     monkeypatch.setitem(
         _construct_tables.__globals__,
         "_fetch1_dict",
-        lambda table, key: {"cv_pca_id": result_id},
+        lambda table, key: {
+            "cv_pca_id": result_id,
+            "nwb_file_name": "session.nwb",
+        },
     )
     bundle, _schemas, _unit_selection_params = _fake_bundle(
         runtime_hooks={"cv_pca_compute": compute}
@@ -8525,19 +12424,12 @@ def test_cv_pca_terminal_status_is_inserted_as_a_result_row(
 
 
 def test_cv_pca_load_validates_artifact_link(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The result loader delegates checksum and DataJoint-link validation."""
-    from v1ca1.spyglass import cv_pca
-
+    """The public loader delegates fetch_nwb reconstruction and validation."""
     result_id = uuid.uuid4()
     group_id = uuid.uuid4()
-    artifact_dir = tmp_path / str(result_id)
-    result_row = {
-        "cv_pca_id": result_id,
-        "artifact_manifest_path": str(artifact_dir / "manifest.parquet"),
-    }
+    result_row = {"cv_pca_id": result_id}
     selection = {
         "cv_pca_id": result_id,
         "cv_pca_param_name": "manuscript_v1_seed47",
@@ -8551,7 +12443,7 @@ def test_cv_pca_load_validates_artifact_link(
         "region_name": "v1",
     }
     bundle_payload = {"loaded": True}
-    validation_calls = []
+    load_calls = []
 
     bundle, _schemas, _unit_selection_params = _fake_bundle()
     result = bundle["cv_pca"]
@@ -8571,26 +12463,95 @@ def test_cv_pca_load_validates_artifact_link(
         raise AssertionError(f"Unexpected table {table!r}")
 
     monkeypatch.setitem(_construct_tables.__globals__, "_fetch1_dict", fetch)
-    load_calls = []
-    monkeypatch.setattr(
-        cv_pca,
-        "load_cv_pca_artifact",
-        lambda path: load_calls.append(Path(path)) or bundle_payload,
-    )
     monkeypatch.setitem(
         _construct_tables.__globals__,
-        "_validate_cv_pca_artifact_link",
-        lambda **kwargs: validation_calls.append(kwargs),
+        "_load_cv_pca_result",
+        lambda **kwargs: load_calls.append(kwargs) or bundle_payload,
     )
 
     loaded = result.load_cv_pca_bundle({"cv_pca_id": result_id})
     assert loaded is bundle_payload
-    assert load_calls == [artifact_dir]
-    assert validation_calls[0]["bundle"] is bundle_payload
+    assert load_calls[0]["result_row"] == result_row
+    assert load_calls[0]["result_table"] is result
+    assert load_calls[0]["selection_row"] == selection
+    assert load_calls[0]["parameters_row"] == parameters
+    assert load_calls[0]["region_row"] == region_row
+
+
+def test_cv_pca_loader_uses_fetch_nwb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cvPCA loader reconstructs exactly the seven selected NWB objects."""
+    from v1ca1.spyglass import cv_pca
+
+    result_id = uuid.uuid4()
+    object_names = (
+        "selected_units",
+        "lap_assignments",
+        "trajectory_qc",
+        "summary",
+        "spectrum",
+        "dataset",
+        "provenance",
+    )
+    fetched = {name: object() for name in object_names}
+
+    class Relation:
+        def __init__(self):
+            self.keys = []
+
+        def __and__(self, key):
+            self.keys.append(dict(key))
+            return self
+
+        def fetch_nwb(self):
+            return [fetched]
+
+    reconstructed = {"reconstructed": True}
+    monkeypatch.setattr(
+        cv_pca,
+        "cv_pca_result_from_nwb_objects",
+        lambda **objects: reconstructed
+        if objects == fetched
+        else pytest.fail("Unexpected CVPCA NWB object set."),
+    )
+    validation_calls = []
+    monkeypatch.setitem(
+        _load_cv_pca_result.__globals__,
+        "_validate_cv_pca_artifact_link",
+        lambda **kwargs: validation_calls.append(kwargs),
+    )
+    relation = Relation()
+    result_row = {"cv_pca_id": result_id}
+    loaded = _load_cv_pca_result(
+        result_row=result_row,
+        result_table=relation,
+        selection_row={"selection": True},
+        parameters_row={"parameters": True},
+        region_row={"region": True},
+        animal_name="L14",
+        date="20240102",
+    )
+    assert loaded is reconstructed
+    assert relation.keys == [{"cv_pca_id": result_id}]
+    assert validation_calls[0]["bundle"] is reconstructed
     assert validation_calls[0]["result_row"] == result_row
-    assert validation_calls[0]["selection_row"] == selection
-    assert validation_calls[0]["parameters_row"] == parameters
-    assert validation_calls[0]["region_row"] == region_row
+
+
+def test_cv_pca_make_requires_populate_transaction() -> None:
+    """Direct make cannot register a cvPCA NWB outside populate()."""
+    bundle, _, _ = _fake_bundle(
+        runtime_hooks={
+            "cv_pca_compute": lambda **kwargs: pytest.fail(
+                "CVPCA computation must not start outside populate()."
+            )
+        }
+    )
+    result = bundle["cv_pca"]
+    result.connection = SimpleNamespace(in_transaction=False)
+
+    with pytest.raises(RuntimeError, match="must run through populate"):
+        result().make({"cv_pca_id": uuid.uuid4()})
 
 
 def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
@@ -8634,15 +12595,6 @@ def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
         lambda **kwargs: context,
     )
     captured = []
-    artifact_paths = cv_pca.get_cv_pca_artifact_paths(
-        animal_name="L14",
-        date="20240102",
-        light_epoch="02_r1",
-        dark_epoch="08_r4",
-        region="v1",
-        cv_pca_id=selection["cv_pca_id"],
-        artifact_root=tmp_path / "analysis",
-    )
     selected_units = pd.DataFrame(
         {
             "spikesorting_merge_id": ["merge-a", "merge-a"],
@@ -8653,7 +12605,6 @@ def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
     def register(**kwargs):
         captured.append(kwargs)
         return {
-            "artifact_paths": artifact_paths,
             "selected_units": selected_units,
             "n_input_units": 2,
             "n_selected_units": 2,
@@ -8661,13 +12612,25 @@ def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
             "legacy_artifact_provenance": {
                 "verification": "exact_nwb_recomputation"
             },
-            "_created_artifact_paths": [
-                str(artifact_paths["artifact_dir"])
-            ],
         }
 
     monkeypatch.setattr(
         cv_pca, "register_existing_cv_pca_artifact", register
+    )
+    write_calls = []
+    expected_row = {
+        "analysis_file_name": "cv_pca.nwb",
+        "analysis_status": "valid",
+        "selected_units_sha256": selection["selected_units_sha256"],
+        "legacy_artifact_provenance": {
+            "verification": "exact_nwb_recomputation"
+        },
+        "_created_artifact_paths": [str(tmp_path / "cv_pca.nwb")],
+    }
+    monkeypatch.setitem(
+        _register_existing_cv_pca_row.__globals__,
+        "_write_cv_pca_nwb",
+        lambda **kwargs: write_calls.append(kwargs) or dict(expected_row),
     )
     legacy_result = tmp_path / "legacy.nc"
     legacy_summary = tmp_path / "legacy_summary.parquet"
@@ -8686,13 +12649,14 @@ def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
         wtrack_graph_table=object(),
         session_table=object(),
         artifact_root=tmp_path / "analysis",
+        analysis_nwbfile_table="analysis-table",
     )
 
     call = captured[0]
     assert call["legacy_result_path"] == legacy_result
     assert call["legacy_summary_path"] == legacy_summary
     assert call["overwrite"] is False
-    assert call["artifact_root"] == tmp_path / "analysis"
+    assert call["artifact_root"] is None
     compute_inputs = call["compute_inputs"]
     assert compute_inputs["spikes"] is loaded_spikes["ts_group"]
     assert compute_inputs["light_position"] is inputs["position_inputs"]["light"]
@@ -8702,16 +12666,10 @@ def test_cv_pca_registration_hook_uses_exact_recomputed_inputs(
     assert compute_inputs["upstream_provenance"] == (
         tables_module._cv_pca_upstream_provenance(selection)
     )
-    assert row["analysis_status"] == "valid"
-    assert row["selected_units_sha256"] == selection[
-        "selected_units_sha256"
-    ]
-    assert row["legacy_artifact_provenance"] == {
-        "verification": "exact_nwb_recomputation"
-    }
-    assert row["_created_artifact_paths"] == [
-        str(artifact_paths["artifact_dir"])
-    ]
+    assert write_calls[0]["nwb_file_name"] == selection["nwb_file_name"]
+    assert write_calls[0]["result"]["analysis_status"] == "valid"
+    assert write_calls[0]["analysis_nwbfile_table"] == "analysis-table"
+    assert row == expected_row
 
 
 def test_cv_pca_failed_insert_removes_only_new_uuid_bundle(
@@ -8720,41 +12678,49 @@ def test_cv_pca_failed_insert_removes_only_new_uuid_bundle(
 ) -> None:
     """A failed database insert removes the hook-reported bundle only."""
     result_id = uuid.uuid4()
-    artifact_dir = tmp_path / "cv_pca" / str(result_id)
+    artifact_path = tmp_path / "cv_pca.nwb"
     retained = tmp_path / "retained.parquet"
     retained.write_bytes(b"keep")
 
     def compute(**_kwargs):
-        artifact_dir.mkdir(parents=True)
-        paths = {}
-        for field_name, filename in (
-            ("artifact_manifest_path", "manifest.parquet"),
-            ("result_path", "cv_pca.nc"),
-            ("summary_path", "summary.parquet"),
-            ("spectrum_path", "within_spectrum.parquet"),
-            ("selected_units_path", "selected_units.parquet"),
-            ("lap_assignments_path", "lap_assignments.parquet"),
-            ("trajectory_qc_path", "trajectory_qc.parquet"),
-        ):
-            path = artifact_dir / filename
-            path.write_bytes(b"new")
-            paths[field_name] = str(path)
+        artifact_path.write_bytes(b"new")
         return {
-            **paths,
-            "result_schema_version": "1",
-            "bundle_schema_version": "1",
+            "analysis_file_name": artifact_path.name,
+            **{
+                f"{name}_object_id": f"{name}-object"
+                for name in (
+                    "selected_units",
+                    "lap_assignments",
+                    "trajectory_qc",
+                    "summary",
+                    "spectrum",
+                    "dataset",
+                    "provenance",
+                )
+            },
+            "artifact_schema_version": "1",
             "n_input_units": 2,
             "n_selected_units": 2,
             "analysis_status": "valid",
             "selected_units_sha256": "c" * 64,
+            "selected_units_table_sha256": "1" * 64,
+            "lap_assignments_sha256": "2" * 64,
+            "trajectory_qc_sha256": "3" * 64,
+            "summary_sha256": "4" * 64,
+            "spectrum_sha256": "5" * 64,
+            "dataset_sha256": "6" * 64,
+            "provenance_sha256": "7" * 64,
             "legacy_artifact_provenance": None,
-            "_created_artifact_paths": [str(artifact_dir)],
+            "_created_artifact_paths": [str(artifact_path)],
         }
 
     monkeypatch.setitem(
         _construct_tables.__globals__,
         "_fetch1_dict",
-        lambda table, key: {"cv_pca_id": result_id},
+        lambda table, key: {
+            "cv_pca_id": result_id,
+            "nwb_file_name": "session.nwb",
+        },
     )
     bundle, _schemas, _unit_selection_params = _fake_bundle(
         runtime_hooks={"cv_pca_compute": compute}
@@ -8767,7 +12733,7 @@ def test_cv_pca_failed_insert_removes_only_new_uuid_bundle(
     result.insert1 = classmethod(fail_insert)
     with pytest.raises(RuntimeError, match="database insert failed"):
         result().make({"cv_pca_id": result_id})
-    assert not artifact_dir.exists()
+    assert not artifact_path.exists()
     assert retained.read_bytes() == b"keep"
 
 

@@ -26,6 +26,13 @@ RESULT_FILENAME = "swap_tuning.nc"
 BUNDLE_SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "3"
 LEGACY_RESULT_SCHEMA_VERSION = "2"
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_SELECTED_UNITS_TABLE_NAME = "swap_tuning_selected_units"
+NWB_SCORE_SUMMARY_TABLE_NAME = "swap_tuning_score_summary"
+NWB_SOURCE_PROFILES_TABLE_NAME = "swap_tuning_source_profiles"
+NWB_MODEL_PROFILES_TABLE_NAME = "swap_tuning_model_profiles"
+NWB_GEOMETRY_TABLE_NAME = "swap_tuning_geometry"
+NWB_PROVENANCE_TABLE_NAME = "swap_tuning_provenance"
 
 MODEL_NAMES = (
     "empirical_visual",
@@ -215,6 +222,44 @@ SCIENTIFIC_VARIABLE_DIMS = {
     "test_light_duration_s": ("trajectory",),
     "segment_edges": ("segment_edge",),
 }
+SOURCE_PROFILE_COLUMNS = (
+    "trajectory",
+    *IDENTITY_COLUMNS,
+    "same_dark_train_tuning_hz",
+    "other_dark_train_tuning_hz",
+    "other_light_train_tuning_hz",
+    "test_light_tuning_hz",
+)
+SOURCE_PROFILE_VECTOR_COLUMNS = SOURCE_PROFILE_COLUMNS[-4:]
+MODEL_PROFILE_COLUMNS = (
+    "model",
+    "trajectory",
+    *IDENTITY_COLUMNS,
+    "model_tuning_hz",
+)
+GEOMETRY_COLUMNS = (
+    "trajectory",
+    "swap_source_trajectory",
+    "swap_segment_index_1based",
+    "swap_segment_start",
+    "swap_segment_end",
+    "test_light_bin_count",
+    "test_light_duration_s",
+    "tp_bin",
+    "segment_edges",
+    "segment_bin_mask",
+)
+GEOMETRY_VECTOR_COLUMNS = GEOMETRY_COLUMNS[-3:]
+PROVENANCE_COLUMNS = (
+    "metadata_json",
+    "parameters_json",
+    "upstream_provenance_json",
+    "dataset_attrs_json",
+    "analysis_status",
+    "artifact_origin",
+    "legacy_artifact_provenance_json",
+    "artifact_schema_version",
+)
 MANIFEST_COLUMNS = (
     "artifact_key",
     "relative_path",
@@ -482,20 +527,42 @@ def _curve_identity_table(curve: Any) -> pd.DataFrame:
 
 def _load_and_validate_tuning_inputs(
     *,
-    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]],
+    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]] | None,
+    tuning_curves_by_role_trajectory: Mapping[str, Mapping[str, Any]] | None,
     metadata: Mapping[str, str],
     graph_length_cm: float,
 ) -> tuple[dict[str, dict[str, Any]], pd.DataFrame, dict[str, dict[str, str]]]:
-    """Load the twelve exact unsmoothed all-trial tuning inputs."""
+    """Load the twelve exact tuning inputs from paths or fetched NWB objects."""
     from v1ca1.spyglass.path_specific_place import (
         PATH_FRACTION_COORDINATE,
         POSITION_DIM,
         load_path_specific_place_artifact,
+        path_specific_place_tuning_curve_sha256,
+        validate_path_specific_place_tuning_curve,
     )
 
-    paths = _normalize_nested_role_mapping(
-        tuning_curve_artifact_paths,
-        name="tuning_curve_artifact_paths",
+    if (tuning_curve_artifact_paths is None) == (
+        tuning_curves_by_role_trajectory is None
+    ):
+        raise ValueError(
+            "Provide exactly one of tuning_curve_artifact_paths and "
+            "tuning_curves_by_role_trajectory."
+        )
+    paths = (
+        None
+        if tuning_curve_artifact_paths is None
+        else _normalize_nested_role_mapping(
+            tuning_curve_artifact_paths,
+            name="tuning_curve_artifact_paths",
+        )
+    )
+    supplied_curves = (
+        None
+        if tuning_curves_by_role_trajectory is None
+        else _normalize_nested_role_mapping(
+            tuning_curves_by_role_trajectory,
+            name="tuning_curves_by_role_trajectory",
+        )
     )
     role_epochs = _role_epochs(metadata)
     curves: dict[str, dict[str, Any]] = {}
@@ -508,8 +575,14 @@ def _load_and_validate_tuning_inputs(
         curves[role] = {}
         hashes[role] = {}
         for trajectory in TRAJECTORY_TYPES:
-            path = Path(paths[role][trajectory])
-            curve = load_path_specific_place_artifact(path)
+            path = None if paths is None else Path(paths[role][trajectory])
+            curve = (
+                validate_path_specific_place_tuning_curve(
+                    supplied_curves[role][trajectory]
+                )
+                if supplied_curves is not None
+                else load_path_specific_place_artifact(path)
+            )
             expected_attrs = {
                 "animal_name": metadata["animal_name"],
                 "date": metadata["date"],
@@ -573,7 +646,11 @@ def _load_and_validate_tuning_inputs(
             ):
                 raise ValueError("The twelve tuning inputs must use the same exact grid.")
             curves[role][trajectory] = curve
-            hashes[role][trajectory] = _file_sha256(path)
+            hashes[role][trajectory] = (
+                path_specific_place_tuning_curve_sha256(curve)
+                if path is None
+                else _file_sha256(path)
+            )
     if reference_identity is None:
         raise ValueError("No PathSpecificPlace tuning inputs were supplied.")
     return curves, reference_identity, hashes
@@ -1424,7 +1501,7 @@ def compute_swap_tuning_curve_comparison(
     dark_epoch: str,
     light_train_epoch: str,
     light_test_epoch: str,
-    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]],
+    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]] | None,
     movement_firing_rate_tables_by_role: Mapping[str, pd.DataFrame],
     spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]],
@@ -1453,6 +1530,8 @@ def compute_swap_tuning_curve_comparison(
     movement_firing_rate_table_sha256_by_role: Mapping[str, str] | None = None,
     movement_intervals_sha256_by_role: Mapping[str, str],
     sources: Mapping[str, Any] | None = None,
+    tuning_curves_by_role_trajectory: Mapping[str, Mapping[str, Any]]
+    | None = None,
 ) -> dict[str, Any]:
     """Compute one empirical swap comparison from selected NWB-backed inputs."""
     metadata = _metadata(
@@ -1506,6 +1585,7 @@ def compute_swap_tuning_curve_comparison(
     )
     curves, curve_identity, curve_hashes = _load_and_validate_tuning_inputs(
         tuning_curve_artifact_paths=tuning_curve_artifact_paths,
+        tuning_curves_by_role_trajectory=tuning_curves_by_role_trajectory,
         metadata=metadata,
         graph_length_cm=graph_length_cm,
     )
@@ -2433,6 +2513,971 @@ def validate_swap_tuning_curve_comparison_result(
     }
 
 
+_SELECTED_UNIT_TEXT_COLUMNS = (*IDENTITY_COLUMNS, "unit_qc_status")
+_SELECTED_UNIT_INTEGER_COLUMNS = (
+    "source_unit_index",
+    "eligible_unit_index",
+    "n_finite_scores",
+    "n_expected_scores",
+)
+_SELECTED_UNIT_BOOLEAN_COLUMNS = (
+    "passes_dark_firing_rate_threshold",
+    "passes_light_firing_rate_threshold",
+    "eligible_for_comparison",
+    "valid_swap_tuning_score",
+)
+_SUMMARY_TEXT_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "swap_tuning_curve_comparison_id",
+    "animal_name",
+    "date",
+    "region",
+    "dark_train_epoch",
+    "light_train_epoch",
+    "light_test_epoch",
+    "trajectory",
+    "model",
+    "swap_source_trajectory",
+    "score_qc_status",
+)
+_SUMMARY_INTEGER_COLUMNS = ("swap_segment_index_1based",)
+_SUMMARY_BOOLEAN_COLUMNS = ("unit_valid",)
+
+
+def _nwb_column_description(name: str) -> str:
+    """Return a compact description for one self-describing scratch column."""
+    return name.replace("_", " ") + "."
+
+
+def _empty_nwb_dynamic_table(
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+    ragged_columns: Sequence[str] = (),
+) -> Any:
+    """Construct a typed zero-row DynamicTable without HDMF row inference."""
+    from hdmf.common import DynamicTable, VectorData, VectorIndex
+
+    output_columns = []
+    for column in columns:
+        if column in ragged_columns:
+            data = VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=np.asarray([], dtype=float),
+            )
+            index = VectorIndex(
+                name=f"{column}_index",
+                data=np.asarray([], dtype=np.int64),
+                target=data,
+            )
+            output_columns.extend((data, index))
+            continue
+        if column in text_columns:
+            values = np.asarray([], dtype="S1")
+        elif column in integer_columns:
+            values = np.asarray([], dtype=np.int64)
+        elif column in boolean_columns:
+            values = np.asarray([], dtype=bool)
+        else:
+            values = np.asarray([], dtype=float)
+        output_columns.append(
+            VectorData(
+                name=column,
+                description=_nwb_column_description(column),
+                data=values,
+            )
+        )
+    return DynamicTable(
+        name=name,
+        description=description,
+        columns=output_columns,
+    )
+
+
+def _normalize_nwb_frame(
+    table: pd.DataFrame,
+    *,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Return one canonical, explicitly typed DataFrame for NWB storage."""
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(columns):
+        raise ValueError("NWB table does not have its canonical schema.")
+    output = table.copy().reset_index(drop=True)
+    for column in text_columns:
+        output[column] = output[column].map(str)
+    for column in integer_columns:
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(
+            np.int64
+        )
+    for column in boolean_columns:
+        values = output[column].tolist()
+        if not all(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError(f"NWB column {column!r} must contain booleans.")
+        output[column] = np.asarray(values, dtype=bool)
+    for column in columns:
+        if column in text_columns or column in integer_columns or column in boolean_columns:
+            continue
+        output[column] = pd.to_numeric(output[column], errors="raise").astype(
+            float
+        )
+    return output.loc[:, list(columns)]
+
+
+def _dynamic_table_from_frame(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> Any:
+    """Convert one explicitly typed frame to an NWB DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    canonical = _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+    if canonical.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=text_columns,
+            integer_columns=integer_columns,
+            boolean_columns=boolean_columns,
+        )
+    return DynamicTable.from_dataframe(
+        name=name,
+        df=canonical,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in columns
+        ],
+    )
+
+
+def _decode_nwb_text(value: Any) -> str:
+    """Return one text value after an HDF5-backed DynamicTable roundtrip."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _frame_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    text_columns: Sequence[str] = (),
+    integer_columns: Sequence[str] = (),
+    boolean_columns: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Load one scalar DynamicTable or Spyglass-fetched DataFrame."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(f"Unexpected swap-tuning NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Swap-tuning tabular NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed_columns = tuple(str(column) for column in table.columns)
+    if set(observed_columns) != set(columns) or len(observed_columns) != len(columns):
+        raise ValueError("Swap-tuning NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in text_columns:
+        table[column] = table[column].map(_decode_nwb_text)
+    return _normalize_nwb_frame(
+        table,
+        columns=columns,
+        text_columns=text_columns,
+        integer_columns=integer_columns,
+        boolean_columns=boolean_columns,
+    )
+
+
+def swap_tuning_selected_units_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the all-source-unit audit to one NWB DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SELECTED_UNITS_TABLE_NAME,
+        description=(
+            "All source-unit eligibility and score audit for empirical swap "
+            f"tuning; v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def swap_tuning_selected_units_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the all-source-unit audit from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SELECTED_UNITS_TABLE_NAME,
+        columns=SELECTED_UNIT_COLUMNS,
+        text_columns=_SELECTED_UNIT_TEXT_COLUMNS,
+        integer_columns=_SELECTED_UNIT_INTEGER_COLUMNS,
+        boolean_columns=_SELECTED_UNIT_BOOLEAN_COLUMNS,
+    )
+
+
+def swap_tuning_score_summary_to_dynamic_table(table: pd.DataFrame) -> Any:
+    """Convert the long-form score summary to one NWB DynamicTable."""
+    return _dynamic_table_from_frame(
+        table,
+        name=NWB_SCORE_SUMMARY_TABLE_NAME,
+        description=(
+            "Long-form empirical swap-model scores and scalar evaluation "
+            f"metadata; v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+        boolean_columns=_SUMMARY_BOOLEAN_COLUMNS,
+    )
+
+
+def swap_tuning_score_summary_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the long-form score summary from its NWB object."""
+    return _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SCORE_SUMMARY_TABLE_NAME,
+        columns=SUMMARY_COLUMNS,
+        text_columns=_SUMMARY_TEXT_COLUMNS,
+        integer_columns=_SUMMARY_INTEGER_COLUMNS,
+        boolean_columns=_SUMMARY_BOOLEAN_COLUMNS,
+    )
+
+
+def _profile_rows(result: Mapping[str, Any], *, model_profiles: bool) -> pd.DataFrame:
+    """Return identity-stable ragged profile rows from one canonical result."""
+    canonical = validate_swap_tuning_curve_comparison_result(result)
+    dataset = canonical["dataset"]
+    eligible = canonical["selected_units"].loc[
+        canonical["selected_units"]["eligible_for_comparison"].astype(bool)
+    ].reset_index(drop=True)
+    if not dataset.data_vars:
+        columns = MODEL_PROFILE_COLUMNS if model_profiles else SOURCE_PROFILE_COLUMNS
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for trajectory_index, trajectory in enumerate(TRAJECTORY_TYPES):
+        for unit_index, unit in eligible.iterrows():
+            identity = {name: str(unit[name]) for name in IDENTITY_COLUMNS}
+            if model_profiles:
+                for model_index, model in enumerate(MODEL_NAMES):
+                    rows.append(
+                        {
+                            "model": model,
+                            "trajectory": trajectory,
+                            **identity,
+                            "model_tuning_hz": np.asarray(
+                                dataset["model_tuning_hz"].values[
+                                    model_index, trajectory_index, :, unit_index
+                                ],
+                                dtype=float,
+                            ),
+                        }
+                    )
+            else:
+                rows.append(
+                    {
+                        "trajectory": trajectory,
+                        **identity,
+                        **{
+                            name: np.asarray(
+                                dataset[name].values[
+                                    trajectory_index, :, unit_index
+                                ],
+                                dtype=float,
+                            )
+                            for name in SOURCE_PROFILE_VECTOR_COLUMNS
+                        },
+                    }
+                )
+    columns = MODEL_PROFILE_COLUMNS if model_profiles else SOURCE_PROFILE_COLUMNS
+    return pd.DataFrame.from_records(rows, columns=columns)
+
+
+def _ragged_profile_to_dynamic_table(
+    table: pd.DataFrame,
+    *,
+    name: str,
+    description: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+) -> Any:
+    """Convert scalar identities plus aligned vectors to one DynamicTable."""
+    from hdmf.common import DynamicTable
+
+    if not isinstance(table, pd.DataFrame) or tuple(table.columns) != tuple(columns):
+        raise ValueError("Swap-tuning profile table has a noncanonical schema.")
+    scalar_columns = tuple(column for column in columns if column not in vector_columns)
+    scalar = table.loc[:, list(scalar_columns)].copy().reset_index(drop=True)
+    for column in scalar_columns:
+        scalar[column] = scalar[column].map(str)
+    if table.empty:
+        return _empty_nwb_dynamic_table(
+            name=name,
+            description=description,
+            columns=columns,
+            text_columns=scalar_columns,
+            ragged_columns=vector_columns,
+        )
+    output = DynamicTable.from_dataframe(
+        name=name,
+        df=scalar,
+        table_description=description,
+        columns=[
+            {"name": column, "description": _nwb_column_description(column)}
+            for column in scalar_columns
+        ],
+    )
+    for column in vector_columns:
+        vectors = [np.asarray(value, dtype=float) for value in table[column]]
+        if any(vector.ndim != 1 or np.isinf(vector).any() for vector in vectors):
+            raise ValueError(f"Swap-tuning profile column {column!r} is invalid.")
+        if all(vector.size == 0 for vector in vectors):
+            # HDMF cannot encode a ragged column with nonzero rows and zero
+            # flattened values. A single NaN is an explicit empty-vector
+            # sentinel; the inverse converter removes it before validation.
+            vectors = [np.asarray([np.nan], dtype=float) for _ in vectors]
+        output.add_column(
+            name=column,
+            description=_nwb_column_description(column),
+            data=vectors,
+            index=True,
+        )
+    return output
+
+
+def _ragged_profile_from_dynamic_table(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    columns: Sequence[str],
+    vector_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Load identity-stable ragged profile rows from one NWB object."""
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(f"Unexpected swap-tuning NWB object {nwb_table.name!r}.")
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("Swap-tuning profile NWB objects must be DynamicTables.")
+    table = table.reset_index(drop=True)
+    observed_columns = tuple(str(column) for column in table.columns)
+    if set(observed_columns) != set(columns) or len(observed_columns) != len(columns):
+        raise ValueError("Swap-tuning profile NWB object has a noncanonical schema.")
+    table = table.loc[:, list(columns)]
+    for column in columns:
+        if column in vector_columns:
+            table[column] = [np.asarray(value, dtype=float) for value in table[column]]
+            if table[column].map(
+                lambda value: value.shape == (1,) and np.isnan(value[0])
+            ).all():
+                table[column] = [np.asarray([], dtype=float) for _ in table[column]]
+            if any(value.ndim != 1 or np.isinf(value).any() for value in table[column]):
+                raise ValueError(f"Swap-tuning profile column {column!r} is invalid.")
+        else:
+            table[column] = table[column].map(_decode_nwb_text)
+    return table.loc[:, list(columns)]
+
+
+def swap_tuning_source_profiles_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store the four source tuning profiles for every path and eligible unit."""
+    return _ragged_profile_to_dynamic_table(
+        _profile_rows(result, model_profiles=False),
+        name=NWB_SOURCE_PROFILES_TABLE_NAME,
+        description=(
+            "Dark, light-train, and held-out light source tuning profiles on "
+            "the normalized progression grid."
+        ),
+        columns=SOURCE_PROFILE_COLUMNS,
+        vector_columns=SOURCE_PROFILE_VECTOR_COLUMNS,
+    )
+
+
+def swap_tuning_source_profiles_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load the per-path source tuning profiles from their NWB object."""
+    return _ragged_profile_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_SOURCE_PROFILES_TABLE_NAME,
+        columns=SOURCE_PROFILE_COLUMNS,
+        vector_columns=SOURCE_PROFILE_VECTOR_COLUMNS,
+    )
+
+
+def swap_tuning_model_profiles_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store every empirical model tuning profile by model, path, and unit."""
+    return _ragged_profile_to_dynamic_table(
+        _profile_rows(result, model_profiles=True),
+        name=NWB_MODEL_PROFILES_TABLE_NAME,
+        description=(
+            "Empirical swap-model tuning profiles on the normalized progression "
+            "grid."
+        ),
+        columns=MODEL_PROFILE_COLUMNS,
+        vector_columns=("model_tuning_hz",),
+    )
+
+
+def swap_tuning_model_profiles_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load empirical model tuning profiles from their NWB object."""
+    return _ragged_profile_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_MODEL_PROFILES_TABLE_NAME,
+        columns=MODEL_PROFILE_COLUMNS,
+        vector_columns=("model_tuning_hz",),
+    )
+
+
+def _geometry_frame(result: Mapping[str, Any]) -> pd.DataFrame:
+    """Return four rows describing the shared grid and swap-segment geometry."""
+    canonical = validate_swap_tuning_curve_comparison_result(result)
+    dataset = canonical["dataset"]
+    evaluated = bool(dataset.data_vars)
+    if evaluated:
+        segment_edges = np.asarray(dataset["segment_edges"].values, dtype=float)
+        tp_bin = np.asarray(dataset.coords["tp_bin"].values, dtype=float)
+    else:
+        segment_edges = np.asarray(
+            json.loads(str(dataset.attrs["segment_edges_json"])), dtype=float
+        )
+        tp_bin = np.asarray([], dtype=float)
+    rows = []
+    for index, trajectory in enumerate(TRAJECTORY_TYPES):
+        segment_index = int(SWAP_CONFIGURATION[trajectory]["segment_index"])
+        rows.append(
+            {
+                "trajectory": trajectory,
+                "swap_source_trajectory": SWAP_CONFIGURATION[trajectory][
+                    "source_trajectory"
+                ],
+                "swap_segment_index_1based": segment_index + 1,
+                "swap_segment_start": float(segment_edges[segment_index]),
+                "swap_segment_end": float(segment_edges[segment_index + 1]),
+                "test_light_bin_count": (
+                    float(dataset["test_light_bin_count"].values[index])
+                    if evaluated
+                    else np.nan
+                ),
+                "test_light_duration_s": (
+                    float(dataset["test_light_duration_s"].values[index])
+                    if evaluated
+                    else np.nan
+                ),
+                "tp_bin": tp_bin.copy(),
+                "segment_edges": segment_edges.copy(),
+                "segment_bin_mask": (
+                    np.asarray(dataset["segment_bin_mask"].values[index], dtype=float)
+                    if evaluated
+                    else np.asarray([], dtype=float)
+                ),
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=GEOMETRY_COLUMNS)
+
+
+def swap_tuning_geometry_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Store progression-bin and swap-segment geometry in one DynamicTable."""
+    return _ragged_profile_to_dynamic_table(
+        _geometry_frame(result),
+        name=NWB_GEOMETRY_TABLE_NAME,
+        description=(
+            "Normalized progression grid, swap segments, scoring support, and "
+            "segment masks for each path."
+        ),
+        columns=GEOMETRY_COLUMNS,
+        vector_columns=GEOMETRY_VECTOR_COLUMNS,
+    )
+
+
+def swap_tuning_geometry_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
+    """Load and validate the four-row swap geometry object."""
+    table = _ragged_profile_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_GEOMETRY_TABLE_NAME,
+        columns=GEOMETRY_COLUMNS,
+        vector_columns=GEOMETRY_VECTOR_COLUMNS,
+    )
+    for column in ("swap_segment_index_1based",):
+        table[column] = pd.to_numeric(table[column], errors="raise").astype(np.int64)
+    for column in (
+        "swap_segment_start",
+        "swap_segment_end",
+        "test_light_bin_count",
+        "test_light_duration_s",
+    ):
+        values = table[column].map(
+            lambda value: np.nan if str(value) == "nan" else value
+        )
+        table[column] = pd.to_numeric(values, errors="raise").astype(float)
+    if table["trajectory"].tolist() != list(TRAJECTORY_TYPES):
+        raise ValueError("Swap-tuning geometry paths are not in canonical order.")
+    return table.loc[:, list(GEOMETRY_COLUMNS)]
+
+
+def _json_ready(value: Any) -> Any:
+    """Return nested metadata using JSON-native scalar and sequence types."""
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready(current) for key, current in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_ready(current) for current in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _provenance_record(result: Mapping[str, Any]) -> dict[str, str]:
+    """Return one detached, self-describing swap-tuning provenance record."""
+    canonical = validate_swap_tuning_curve_comparison_result(result)
+    return {
+        "metadata_json": json.dumps(
+            _json_ready(canonical["metadata"]), sort_keys=True, separators=(",", ":")
+        ),
+        "parameters_json": json.dumps(
+            _json_ready(canonical["parameters"]), sort_keys=True, separators=(",", ":")
+        ),
+        "upstream_provenance_json": json.dumps(
+            _json_ready(canonical["upstream_provenance"]),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "dataset_attrs_json": json.dumps(
+            _json_ready(dict(canonical["dataset"].attrs)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "analysis_status": str(canonical["analysis_status"]),
+        "artifact_origin": str(canonical["artifact_origin"]),
+        "legacy_artifact_provenance_json": json.dumps(
+            _json_ready(canonical["legacy_artifact_provenance"] or {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+    }
+
+
+def swap_tuning_provenance_to_dynamic_table(result: Mapping[str, Any]) -> Any:
+    """Convert result provenance to a single-row NWB DynamicTable."""
+    return _dynamic_table_from_frame(
+        pd.DataFrame.from_records([_provenance_record(result)], columns=PROVENANCE_COLUMNS),
+        name=NWB_PROVENANCE_TABLE_NAME,
+        description=(
+            "Detached swap-tuning selection, parameter, source, and dataset "
+            f"provenance; v1ca1 NWB schema {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=PROVENANCE_COLUMNS,
+        text_columns=PROVENANCE_COLUMNS,
+    )
+
+
+def swap_tuning_provenance_from_dynamic_table(nwb_table: Any) -> dict[str, Any]:
+    """Load and parse one swap-tuning provenance record."""
+    table = _frame_from_dynamic_table(
+        nwb_table,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        columns=PROVENANCE_COLUMNS,
+        text_columns=PROVENANCE_COLUMNS,
+    )
+    if len(table) != 1:
+        raise ValueError("Swap-tuning provenance must contain exactly one row.")
+    record = table.iloc[0].to_dict()
+    if record["artifact_schema_version"] != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("Swap-tuning NWB artifact schema version is unsupported.")
+    try:
+        metadata = json.loads(record["metadata_json"])
+        parameters = json.loads(record["parameters_json"])
+        upstream = json.loads(record["upstream_provenance_json"])
+        dataset_attrs = json.loads(record["dataset_attrs_json"])
+        legacy = json.loads(record["legacy_artifact_provenance_json"])
+    except json.JSONDecodeError as exc:
+        raise ValueError("Swap-tuning NWB provenance contains malformed JSON.") from exc
+    if not all(
+        isinstance(value, Mapping)
+        for value in (metadata, parameters, upstream, dataset_attrs, legacy)
+    ):
+        raise ValueError("Swap-tuning NWB provenance JSON must encode mappings.")
+    return {
+        "metadata": dict(metadata),
+        "parameters": dict(parameters),
+        "upstream_provenance": dict(upstream),
+        "dataset_attrs": dict(dataset_attrs),
+        "analysis_status": record["analysis_status"],
+        "artifact_origin": record["artifact_origin"],
+        "legacy_artifact_provenance": dict(legacy) or None,
+    }
+
+
+def swap_tuning_curve_comparison_result_to_nwb_objects(
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert one complete canonical result to six NWB scratch objects."""
+    canonical = validate_swap_tuning_curve_comparison_result(result)
+    return {
+        "selected_units": swap_tuning_selected_units_to_dynamic_table(
+            canonical["selected_units"]
+        ),
+        "score_summary": swap_tuning_score_summary_to_dynamic_table(
+            canonical["summary"]
+        ),
+        "source_profiles": swap_tuning_source_profiles_to_dynamic_table(canonical),
+        "model_profiles": swap_tuning_model_profiles_to_dynamic_table(canonical),
+        "geometry": swap_tuning_geometry_to_dynamic_table(canonical),
+        "provenance": swap_tuning_provenance_to_dynamic_table(canonical),
+    }
+
+
+def _require_profile_coverage(
+    table: pd.DataFrame,
+    *,
+    selected_units: pd.DataFrame,
+    include_model: bool,
+) -> None:
+    """Require each eligible unit/path/model profile exactly once."""
+    eligible_ids = selected_units.loc[
+        selected_units["eligible_for_comparison"].astype(bool), "stable_unit_id"
+    ].astype(str)
+    expected = {
+        ((model,) if include_model else ()) + (trajectory, stable_unit_id)
+        for model in (MODEL_NAMES if include_model else (None,))
+        for trajectory in TRAJECTORY_TYPES
+        for stable_unit_id in eligible_ids
+    }
+    if include_model:
+        observed = set(
+            zip(
+                table["model"].astype(str),
+                table["trajectory"].astype(str),
+                table["stable_unit_id"].astype(str),
+                strict=True,
+            )
+        )
+    else:
+        observed = set(
+            zip(
+                table["trajectory"].astype(str),
+                table["stable_unit_id"].astype(str),
+                strict=True,
+            )
+        )
+    if len(observed) != len(table) or observed != expected:
+        raise ValueError("Swap-tuning NWB profiles do not cover the expected grid.")
+
+
+def _dataset_from_nwb_frames(
+    *,
+    selected_units: pd.DataFrame,
+    summary: pd.DataFrame,
+    source_profiles: pd.DataFrame,
+    model_profiles: pd.DataFrame,
+    geometry: pd.DataFrame,
+    provenance: Mapping[str, Any],
+) -> Any:
+    """Reconstruct the exact scientific xarray dataset from NWB tables."""
+    import xarray as xr
+
+    eligible = selected_units.loc[
+        selected_units["eligible_for_comparison"].astype(bool)
+    ].reset_index(drop=True)
+    status = str(provenance["analysis_status"])
+    attrs = dict(provenance["dataset_attrs"])
+    segment_edges = np.asarray(geometry.iloc[0]["segment_edges"], dtype=float)
+    if any(
+        not np.array_equal(np.asarray(value, dtype=float), segment_edges)
+        for value in geometry["segment_edges"]
+    ):
+        raise ValueError("Swap-tuning geometry rows disagree on segment edges.")
+    coords = {
+        "model": np.asarray(MODEL_NAMES, dtype=str),
+        "trajectory": np.asarray(TRAJECTORY_TYPES, dtype=str),
+        "unit": np.asarray(eligible["stable_unit_id"], dtype=str),
+        "segment_edge": np.arange(len(segment_edges), dtype=np.int64),
+        **{
+            name: ("unit", np.asarray(eligible[name], dtype=str))
+            for name in IDENTITY_COLUMNS
+        },
+    }
+    evaluated = status in {"valid", "partial_valid", "no_valid_units"}
+    if not evaluated:
+        if not summary.empty or not source_profiles.empty or not model_profiles.empty:
+            raise ValueError("Terminal swap-tuning NWB objects contain profiles or scores.")
+        return xr.Dataset(coords=coords, attrs=attrs)
+
+    _require_profile_coverage(
+        source_profiles, selected_units=selected_units, include_model=False
+    )
+    _require_profile_coverage(
+        model_profiles, selected_units=selected_units, include_model=True
+    )
+    tp_bin = np.asarray(geometry.iloc[0]["tp_bin"], dtype=float)
+    if any(
+        not np.array_equal(np.asarray(value, dtype=float), tp_bin)
+        for value in geometry["tp_bin"]
+    ):
+        raise ValueError("Swap-tuning geometry rows disagree on progression bins.")
+    n_models = len(MODEL_NAMES)
+    n_trajectories = len(TRAJECTORY_TYPES)
+    n_units = len(eligible)
+    n_bins = len(tp_bin)
+    model_index = {name: index for index, name in enumerate(MODEL_NAMES)}
+    trajectory_index = {
+        name: index for index, name in enumerate(TRAJECTORY_TYPES)
+    }
+    unit_index = {
+        str(value): index for index, value in enumerate(eligible["stable_unit_id"])
+    }
+    ll_arrays = {
+        name: np.full((n_models, n_trajectories, n_units), np.nan, dtype=float)
+        for name in ("ll_sum", "ll_bits_per_spike", "ll_bits_per_s")
+    }
+    scalar_arrays = {
+        name: np.full((n_trajectories, n_units), np.nan, dtype=float)
+        for name in (
+            "train_dark_same_rate_hz",
+            "train_dark_other_rate_hz",
+            "train_light_other_rate_hz",
+            "test_light_target_rate_hz",
+            "test_light_spike_sum",
+        )
+    }
+    for row in summary.to_dict("records"):
+        model_i = model_index[str(row["model"])]
+        trajectory_i = trajectory_index[str(row["trajectory"])]
+        unit_i = unit_index[str(row["stable_unit_id"])]
+        for name, values in ll_arrays.items():
+            values[model_i, trajectory_i, unit_i] = float(row[name])
+        for name, values in scalar_arrays.items():
+            observed = float(row[name])
+            previous = values[trajectory_i, unit_i]
+            if np.isfinite(previous) and not np.isclose(
+                previous, observed, rtol=0.0, atol=1e-12, equal_nan=True
+            ):
+                raise ValueError("Swap-tuning score rows disagree on scalar metadata.")
+            values[trajectory_i, unit_i] = observed
+    source_arrays = {
+        name: np.full((n_trajectories, n_bins, n_units), np.nan, dtype=float)
+        for name in SOURCE_PROFILE_VECTOR_COLUMNS
+    }
+    for row in source_profiles.to_dict("records"):
+        trajectory_i = trajectory_index[str(row["trajectory"])]
+        unit_i = unit_index[str(row["stable_unit_id"])]
+        for name, values in source_arrays.items():
+            profile = np.asarray(row[name], dtype=float)
+            if profile.shape != (n_bins,):
+                raise ValueError("Swap-tuning source profile has the wrong length.")
+            values[trajectory_i, :, unit_i] = profile
+    model_tuning = np.full(
+        (n_models, n_trajectories, n_bins, n_units), np.nan, dtype=float
+    )
+    for row in model_profiles.to_dict("records"):
+        profile = np.asarray(row["model_tuning_hz"], dtype=float)
+        if profile.shape != (n_bins,):
+            raise ValueError("Swap-tuning model profile has the wrong length.")
+        model_tuning[
+            model_index[str(row["model"])],
+            trajectory_index[str(row["trajectory"])],
+            :,
+            unit_index[str(row["stable_unit_id"])],
+        ] = profile
+    masks = np.stack(
+        [np.asarray(value, dtype=bool) for value in geometry["segment_bin_mask"]]
+    )
+    if masks.shape != (n_trajectories, n_bins):
+        raise ValueError("Swap-tuning segment masks have the wrong shape.")
+    coords["tp_bin"] = tp_bin
+    data_vars = {
+        "dark_train_movement_firing_rate_hz": (
+            "unit",
+            eligible["dark_movement_firing_rate_hz"].to_numpy(dtype=float),
+        ),
+        "light_train_movement_firing_rate_hz": (
+            "unit",
+            eligible["light_train_movement_firing_rate_hz"].to_numpy(dtype=float),
+        ),
+        "light_test_movement_firing_rate_hz": (
+            "unit",
+            eligible["light_test_movement_firing_rate_hz"].to_numpy(dtype=float),
+        ),
+        **{
+            name: (("model", "trajectory", "unit"), values)
+            for name, values in ll_arrays.items()
+        },
+        "model_tuning_hz": (
+            ("model", "trajectory", "tp_bin", "unit"),
+            model_tuning,
+        ),
+        **{
+            name: (("trajectory", "unit"), values)
+            for name, values in scalar_arrays.items()
+        },
+        **{
+            name: (("trajectory", "tp_bin", "unit"), values)
+            for name, values in source_arrays.items()
+        },
+        "segment_bin_mask": (("trajectory", "tp_bin"), masks),
+        "swap_source_trajectory": (
+            "trajectory",
+            geometry["swap_source_trajectory"].to_numpy(dtype=str),
+        ),
+        "swap_segment_index_1based": (
+            "trajectory",
+            geometry["swap_segment_index_1based"].to_numpy(dtype=np.int64),
+        ),
+        "swap_segment_start": (
+            "trajectory",
+            geometry["swap_segment_start"].to_numpy(dtype=float),
+        ),
+        "swap_segment_end": (
+            "trajectory",
+            geometry["swap_segment_end"].to_numpy(dtype=float),
+        ),
+        "test_light_bin_count": (
+            "trajectory",
+            geometry["test_light_bin_count"].to_numpy(dtype=float),
+        ),
+        "test_light_duration_s": (
+            "trajectory",
+            geometry["test_light_duration_s"].to_numpy(dtype=float),
+        ),
+        "segment_edges": ("segment_edge", segment_edges),
+    }
+    return xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
+
+
+def swap_tuning_curve_comparison_result_from_nwb_objects(
+    *,
+    selected_units: Any,
+    score_summary: Any,
+    source_profiles: Any,
+    model_profiles: Any,
+    geometry: Any,
+    provenance: Any,
+) -> dict[str, Any]:
+    """Reconstruct and validate one result from its six NWB scratch objects."""
+    provenance_record = swap_tuning_provenance_from_dynamic_table(provenance)
+    selected_table = swap_tuning_selected_units_from_dynamic_table(selected_units)
+    summary_table = swap_tuning_score_summary_from_dynamic_table(score_summary)
+    source_table = swap_tuning_source_profiles_from_dynamic_table(source_profiles)
+    model_table = swap_tuning_model_profiles_from_dynamic_table(model_profiles)
+    geometry_table = swap_tuning_geometry_from_dynamic_table(geometry)
+    dataset = _dataset_from_nwb_frames(
+        selected_units=selected_table,
+        summary=summary_table,
+        source_profiles=source_table,
+        model_profiles=model_table,
+        geometry=geometry_table,
+        provenance=provenance_record,
+    )
+    return validate_swap_tuning_curve_comparison_result(
+        {
+            "metadata": provenance_record["metadata"],
+            "parameters": provenance_record["parameters"],
+            "upstream_provenance": provenance_record["upstream_provenance"],
+            "selected_units": selected_table,
+            "summary": summary_table,
+            "dataset": dataset,
+            "analysis_status": provenance_record["analysis_status"],
+            "artifact_origin": provenance_record["artifact_origin"],
+            "legacy_artifact_provenance": provenance_record[
+                "legacy_artifact_provenance"
+            ],
+        }
+    )
+
+
+def _float_array_sha256(values: Any) -> str:
+    """Return a deterministic digest for one float array, including shape."""
+    array = np.ascontiguousarray(np.asarray(values, dtype="<f8"))
+    if np.isnan(array).any():
+        array = array.copy()
+        array[np.isnan(array)] = np.nan
+    digest = hashlib.sha256()
+    digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _ragged_frame_sha256(
+    table: pd.DataFrame,
+    *,
+    vector_columns: Sequence[str],
+) -> str:
+    """Hash scalar row identity and every ordered ragged vector."""
+    scalar_columns = [column for column in table.columns if column not in vector_columns]
+    vectors = {
+        column: [
+            _float_array_sha256(np.asarray(value, dtype=float))
+            for value in table[column]
+        ]
+        for column in vector_columns
+    }
+    return _provenance_sha256(
+        {
+            "scalar_sha256": _table_sha256(table.loc[:, scalar_columns]),
+            "vectors": vectors,
+        }
+    )
+
+
+def swap_tuning_curve_comparison_nwb_hashes(
+    result: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return storage-independent hashes for all six NWB scratch objects."""
+    canonical = validate_swap_tuning_curve_comparison_result(result)
+    source_profiles = _profile_rows(canonical, model_profiles=False)
+    model_profiles = _profile_rows(canonical, model_profiles=True)
+    geometry = _geometry_frame(canonical)
+    return {
+        "selected_units_table_sha256": _table_sha256(
+            canonical["selected_units"]
+        ),
+        "score_summary_sha256": _table_sha256(canonical["summary"]),
+        "source_profiles_sha256": _ragged_frame_sha256(
+            source_profiles, vector_columns=SOURCE_PROFILE_VECTOR_COLUMNS
+        ),
+        "model_profiles_sha256": _ragged_frame_sha256(
+            model_profiles, vector_columns=("model_tuning_hz",)
+        ),
+        "geometry_sha256": _ragged_frame_sha256(
+            geometry, vector_columns=GEOMETRY_VECTOR_COLUMNS
+        ),
+        "provenance_sha256": _provenance_sha256(_provenance_record(canonical)),
+    }
+
+
 def _manifest_common(result: Mapping[str, Any]) -> dict[str, Any]:
     """Return manifest fields shared by every bundle file."""
     metadata = result["metadata"]
@@ -2950,7 +3995,7 @@ def register_existing_swap_tuning_curve_comparison_artifact(
     *,
     source_result_path: Path,
     source_summary_path: Path,
-    destination_path: Path,
+    destination_path: Path | None,
     unit_identity_resolver: Mapping[Any, Mapping[str, Any]]
     | Callable[[Any], Mapping[str, Any]],
     source_sorting_type: str,
@@ -2961,7 +4006,7 @@ def register_existing_swap_tuning_curve_comparison_artifact(
     dark_epoch: str,
     light_train_epoch: str,
     light_test_epoch: str,
-    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]],
+    tuning_curve_artifact_paths: Mapping[str, Mapping[str, Path]] | None,
     movement_firing_rate_tables_by_role: Mapping[str, pd.DataFrame],
     spikes: Any,
     stable_unit_ids: Sequence[Mapping[str, Any]],
@@ -2992,6 +4037,8 @@ def register_existing_swap_tuning_curve_comparison_artifact(
     sources: Mapping[str, Any] | None = None,
     source_v1ca1_git_commit: str | None = None,
     source_spyglass_git_commit: str | None = None,
+    tuning_curves_by_role_trajectory: Mapping[str, Mapping[str, Any]]
+    | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Re-score exact NWB inputs and register only matching legacy outputs."""
@@ -3015,6 +4062,7 @@ def register_existing_swap_tuning_curve_comparison_artifact(
         light_train_epoch=light_train_epoch,
         light_test_epoch=light_test_epoch,
         tuning_curve_artifact_paths=tuning_curve_artifact_paths,
+        tuning_curves_by_role_trajectory=tuning_curves_by_role_trajectory,
         movement_firing_rate_tables_by_role=movement_firing_rate_tables_by_role,
         spikes=spikes,
         stable_unit_ids=stable_unit_ids,
@@ -3111,6 +4159,8 @@ def register_existing_swap_tuning_curve_comparison_artifact(
         }
     )
     registered = validate_swap_tuning_curve_comparison_result(registered)
+    if destination_path is None:
+        return registered
     paths = write_swap_tuning_curve_comparison_artifact(
         registered,
         destination_path,

@@ -1,4 +1,4 @@
-"""Database-free directional path-progression tuning and NetCDF artifacts."""
+"""Directional path-progression tuning and artifact adapters."""
 
 from __future__ import annotations
 
@@ -28,6 +28,34 @@ PATH_FRACTION_COORDINATE = "path_fraction"
 LINEAR_POSITION_COORDINATE = "linear_position_cm"
 SPIKE_COUNT_COORDINATE = place.SPIKE_COUNT_COORDINATE
 IDENTITY_COORDINATES = place.IDENTITY_COORDINATES
+NWB_ARTIFACT_SCHEMA_VERSION = "1"
+NWB_TUNING_TABLE_NAME = "dpp_tuning"
+NWB_BINS_TABLE_NAME = "dpp_bins"
+NWB_PROVENANCE_TABLE_NAME = "dpp_provenance"
+
+_NWB_TUNING_COLUMNS = (
+    "curve_row",
+    "spikesorting_merge_id",
+    "unit_id",
+    "stable_unit_id",
+    "group_unit_id",
+    SPIKE_COUNT_COORDINATE,
+    "firing_rate_hz",
+)
+_NWB_BIN_COLUMNS = (
+    "dpp_bin",
+    "left_edge_dpp",
+    DPP_DIM,
+    "right_edge_dpp",
+    PATH_FRACTION_COORDINATE,
+    "left_edge_cm",
+    LINEAR_POSITION_COORDINATE,
+    "right_edge_cm",
+)
+_NWB_PROVENANCE_COLUMNS = (
+    "artifact_schema_version",
+    "metadata_json",
+)
 
 
 def validate_turn_type(turn_type: str) -> str:
@@ -970,6 +998,530 @@ def validate_dpp_tuning_curve(curve: Any) -> Any:
     return curve
 
 
+def _decoded_nwb_text(value: Any, *, name: str) -> str:
+    """Return one UTF-8 string fetched from a DPP DynamicTable."""
+    if isinstance(value, (bytes, np.bytes_)):
+        try:
+            value = bytes(value).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{name} is not valid UTF-8.") from exc
+    value = str(value)
+    if not value:
+        raise ValueError(f"{name} must be non-empty.")
+    return value
+
+
+def _nwb_table_frame(
+    nwb_table: Any,
+    *,
+    expected_name: str,
+    expected_columns: Sequence[str],
+) -> Any:
+    """Return one fetched DPP DynamicTable as an exact-column DataFrame."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    if isinstance(nwb_table, pd.DataFrame):
+        table = nwb_table.copy()
+    elif isinstance(nwb_table, DynamicTable):
+        if str(nwb_table.name) != expected_name:
+            raise ValueError(
+                f"Unexpected DPP NWB object name {nwb_table.name!r}; "
+                f"expected {expected_name!r}."
+            )
+        table = nwb_table.to_dataframe()
+    else:
+        raise TypeError("DPP NWB objects must be DynamicTables or DataFrames.")
+    observed_columns = tuple(str(column) for column in table.columns)
+    if set(observed_columns) != set(expected_columns) or len(
+        observed_columns
+    ) != len(expected_columns):
+        raise ValueError(
+            f"{expected_name} must contain exactly columns "
+            f"{tuple(expected_columns)!r}."
+        )
+    return table.loc[:, list(expected_columns)].reset_index(drop=True)
+
+
+def _curve_metadata_payload(curve: Any) -> dict[str, Any]:
+    """Return scalar and coordinate metadata needed to rebuild one curve."""
+    validate_dpp_tuning_curve(curve)
+    return {
+        "attrs": dict(curve.attrs),
+        "coordinate_attrs": {
+            str(name): dict(curve.coords[name].attrs)
+            for name in (
+                DPP_DIM,
+                PATH_FRACTION_COORDINATE,
+                LINEAR_POSITION_COORDINATE,
+                SPIKE_COUNT_COORDINATE,
+            )
+        },
+    }
+
+
+def dpp_tuning_to_dynamic_table(curve: Any) -> Any:
+    """Store unit identities, spike counts, and fixed-length DPP vectors."""
+    import pandas as pd
+    from hdmf.common import DynamicTable, VectorData
+
+    canonical = validate_dpp_tuning_curve(curve)
+    n_units = int(canonical.sizes[UNIT_DIM])
+    n_bins = int(canonical.sizes[DPP_DIM])
+    description = (
+        "One row per selected unit with its directional path-progression "
+        f"firing-rate vector; v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+    )
+    if n_units == 0:
+        string_columns = {
+            "spikesorting_merge_id",
+            "unit_id",
+            "stable_unit_id",
+            "group_unit_id",
+        }
+        columns = []
+        for name in _NWB_TUNING_COLUMNS:
+            if name in string_columns:
+                data = np.asarray([], dtype="S1")
+            elif name == "curve_row":
+                data = np.asarray([], dtype=np.int64)
+            elif name == "firing_rate_hz":
+                data = np.empty((0, n_bins), dtype=float)
+            else:
+                data = np.asarray([], dtype=float)
+            columns.append(
+                VectorData(
+                    name=name,
+                    description=(
+                        "Zero-based row in the unit-by-DPP tuning matrix."
+                        if name == "curve_row"
+                        else "Canonical directional progression-tuning field."
+                    ),
+                    data=data,
+                )
+            )
+        return DynamicTable(
+            name=NWB_TUNING_TABLE_NAME,
+            description=description,
+            columns=columns,
+        )
+
+    table = pd.DataFrame(
+        {
+            "curve_row": np.arange(n_units, dtype=np.int64),
+            "spikesorting_merge_id": np.asarray(
+                canonical.coords["spikesorting_merge_id"].values
+            ).astype(str),
+            "unit_id": np.asarray(canonical.coords["unit_id"].values).astype(
+                str
+            ),
+            "stable_unit_id": np.asarray(
+                canonical.coords["stable_unit_id"].values
+            ).astype(str),
+            "group_unit_id": np.asarray(
+                canonical.coords["group_unit_id"].values
+            ).astype(str),
+            SPIKE_COUNT_COORDINATE: np.asarray(
+                canonical.coords[SPIKE_COUNT_COORDINATE].values,
+                dtype=float,
+            ),
+            "firing_rate_hz": [
+                np.asarray(row, dtype=float)
+                for row in np.asarray(canonical.values, dtype=float)
+            ],
+        },
+        columns=list(_NWB_TUNING_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_TUNING_TABLE_NAME,
+        df=table,
+        table_description=description,
+        columns=[
+            {
+                "name": name,
+                "description": (
+                    "Zero-based row in the unit-by-DPP tuning matrix."
+                    if name == "curve_row"
+                    else "Canonical directional progression-tuning field."
+                ),
+            }
+            for name in _NWB_TUNING_COLUMNS
+        ],
+    )
+
+
+def dpp_bins_to_dynamic_table(curve: Any) -> Any:
+    """Store normalized and physical coordinates for every DPP vector bin."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    canonical = validate_dpp_tuning_curve(curve)
+    dpp_edges = place._parse_bin_edges(
+        canonical.attrs["bin_edges_dpp_json"],
+        name="bin_edges_dpp_json",
+    )
+    cm_edges = place._parse_bin_edges(
+        canonical.attrs["bin_edges_cm_json"],
+        name="bin_edges_cm_json",
+    )
+    common_length = float(canonical.attrs["common_graph_length_cm"])
+    if cm_edges.shape != dpp_edges.shape or not np.allclose(
+        cm_edges,
+        dpp_edges * common_length,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError("DPP centimeter bin edges do not match normalized bins.")
+    n_bins = int(canonical.sizes[DPP_DIM])
+    table = pd.DataFrame(
+        {
+            "dpp_bin": np.arange(n_bins, dtype=np.int64),
+            "left_edge_dpp": dpp_edges[:-1],
+            DPP_DIM: np.asarray(canonical.coords[DPP_DIM].values, dtype=float),
+            "right_edge_dpp": dpp_edges[1:],
+            PATH_FRACTION_COORDINATE: np.asarray(
+                canonical.coords[PATH_FRACTION_COORDINATE].values,
+                dtype=float,
+            ),
+            "left_edge_cm": cm_edges[:-1],
+            LINEAR_POSITION_COORDINATE: np.asarray(
+                canonical.coords[LINEAR_POSITION_COORDINATE].values,
+                dtype=float,
+            ),
+            "right_edge_cm": cm_edges[1:],
+        },
+        columns=list(_NWB_BIN_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_BINS_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One row per directional path-progression column of dpp_tuning; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": name,
+                "description": (
+                    "Zero-based tuning-vector column."
+                    if name == "dpp_bin"
+                    else "Canonical directional progression-bin field."
+                ),
+            }
+            for name in _NWB_BIN_COLUMNS
+        ],
+    )
+
+
+def dpp_provenance_to_dynamic_table(curve: Any) -> Any:
+    """Store one canonical JSON metadata record for the complete DPP curve."""
+    import pandas as pd
+    from hdmf.common import DynamicTable
+
+    from v1ca1.spyglass.selection import canonical_json
+
+    table = pd.DataFrame(
+        [
+            {
+                "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+                "metadata_json": canonical_json(_curve_metadata_payload(curve)),
+            }
+        ],
+        columns=list(_NWB_PROVENANCE_COLUMNS),
+    )
+    return DynamicTable.from_dataframe(
+        name=NWB_PROVENANCE_TABLE_NAME,
+        df=table,
+        table_description=(
+            "One provenance record for directional path-progression tuning; "
+            f"v1ca1 schema version {NWB_ARTIFACT_SCHEMA_VERSION}."
+        ),
+        columns=[
+            {
+                "name": "artifact_schema_version",
+                "description": "v1ca1 NWB artifact schema version.",
+            },
+            {
+                "name": "metadata_json",
+                "description": (
+                    "Canonical JSON containing DataArray and coordinate metadata."
+                ),
+            },
+        ],
+    )
+
+
+def _dpp_nwb_frames(
+    tuning: Any,
+    bins: Any,
+    provenance: Any,
+) -> tuple[Any, Any, Any]:
+    """Return the three canonical DPP table frames after structural checks."""
+    tuning_table = _nwb_table_frame(
+        tuning,
+        expected_name=NWB_TUNING_TABLE_NAME,
+        expected_columns=_NWB_TUNING_COLUMNS,
+    )
+    bins_table = _nwb_table_frame(
+        bins,
+        expected_name=NWB_BINS_TABLE_NAME,
+        expected_columns=_NWB_BIN_COLUMNS,
+    )
+    provenance_table = _nwb_table_frame(
+        provenance,
+        expected_name=NWB_PROVENANCE_TABLE_NAME,
+        expected_columns=_NWB_PROVENANCE_COLUMNS,
+    )
+    if len(provenance_table) != 1:
+        raise ValueError("DPP provenance must contain exactly one row.")
+    return tuning_table, bins_table, provenance_table
+
+
+def dpp_tuning_curve_from_nwb_objects(
+    tuning: Any,
+    bins: Any,
+    provenance: Any,
+) -> Any:
+    """Reconstruct the canonical DPP DataArray from three fetched objects."""
+    tuning_table, bins_table, provenance_table = _dpp_nwb_frames(
+        tuning,
+        bins,
+        provenance,
+    )
+    schema_version = _decoded_nwb_text(
+        provenance_table.loc[0, "artifact_schema_version"],
+        name="artifact_schema_version",
+    )
+    if schema_version != NWB_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError("DPP NWB artifact schema version is unsupported.")
+    metadata_json = _decoded_nwb_text(
+        provenance_table.loc[0, "metadata_json"],
+        name="metadata_json",
+    )
+    try:
+        metadata = json.loads(metadata_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("DPP provenance is not valid JSON.") from exc
+    if not isinstance(metadata, Mapping) or set(metadata) != {
+        "attrs",
+        "coordinate_attrs",
+    }:
+        raise ValueError("DPP provenance has an invalid schema.")
+    attrs = dict(metadata["attrs"])
+    coordinate_attrs = dict(metadata["coordinate_attrs"])
+
+    n_units = len(tuning_table)
+    n_bins = len(bins_table)
+    curve_rows = np.asarray(tuning_table["curve_row"], dtype=np.int64)
+    if not np.array_equal(curve_rows, np.arange(n_units, dtype=np.int64)):
+        raise ValueError("DPP curve_row values must be consecutive.")
+    bin_rows = np.asarray(bins_table["dpp_bin"], dtype=np.int64)
+    if not np.array_equal(bin_rows, np.arange(n_bins, dtype=np.int64)):
+        raise ValueError("DPP dpp_bin values must be consecutive.")
+    if n_bins == 0:
+        raise ValueError("DPP tuning requires at least one bin.")
+
+    left_dpp = np.asarray(bins_table["left_edge_dpp"], dtype=float)
+    right_dpp = np.asarray(bins_table["right_edge_dpp"], dtype=float)
+    left_cm = np.asarray(bins_table["left_edge_cm"], dtype=float)
+    right_cm = np.asarray(bins_table["right_edge_cm"], dtype=float)
+    if (
+        not np.all(np.isfinite(left_dpp))
+        or not np.all(np.isfinite(right_dpp))
+        or not np.all(np.isfinite(left_cm))
+        or not np.all(np.isfinite(right_cm))
+        or np.any(right_dpp <= left_dpp)
+        or np.any(right_cm <= left_cm)
+        or not np.allclose(
+            left_dpp[1:], right_dpp[:-1], rtol=1e-10, atol=1e-12
+        )
+        or not np.allclose(
+            left_cm[1:], right_cm[:-1], rtol=1e-10, atol=1e-12
+        )
+    ):
+        raise ValueError("DPP bin edges are invalid or discontinuous.")
+    dpp_edges = np.concatenate((left_dpp[:1], right_dpp))
+    cm_edges = np.concatenate((left_cm[:1], right_cm))
+    common_length = float(attrs["common_graph_length_cm"])
+    if not np.allclose(
+        cm_edges,
+        dpp_edges * common_length,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError("DPP physical and normalized bin edges disagree.")
+
+    if n_units:
+        tuning_rows = [
+            np.asarray(value, dtype=float).reshape(-1)
+            for value in tuning_table["firing_rate_hz"]
+        ]
+        if any(row.shape != (n_bins,) for row in tuning_rows):
+            raise ValueError("Every DPP tuning vector must align with the bin table.")
+        values = np.stack(tuning_rows, axis=0)
+    else:
+        values = np.empty((0, n_bins), dtype=float)
+    identity_rows = [
+        {
+            "spikesorting_merge_id": _decoded_nwb_text(
+                row.spikesorting_merge_id,
+                name="spikesorting_merge_id",
+            ),
+            "unit_id": _decoded_nwb_text(row.unit_id, name="unit_id"),
+            "stable_unit_id": _decoded_nwb_text(
+                row.stable_unit_id,
+                name="stable_unit_id",
+            ),
+            "group_unit_id": _decoded_nwb_text(
+                row.group_unit_id,
+                name="group_unit_id",
+            ),
+        }
+        for row in tuning_table.itertuples(index=False)
+    ]
+    curve = _build_curve(
+        values,
+        identity_rows=identity_rows,
+        spike_counts=np.asarray(
+            tuning_table[SPIKE_COUNT_COORDINATE],
+            dtype=float,
+        ),
+        bin_edges_dpp=dpp_edges,
+        attrs=attrs,
+    )
+    expected_bin_values = {
+        DPP_DIM: np.asarray(bins_table[DPP_DIM], dtype=float),
+        PATH_FRACTION_COORDINATE: np.asarray(
+            bins_table[PATH_FRACTION_COORDINATE],
+            dtype=float,
+        ),
+        LINEAR_POSITION_COORDINATE: np.asarray(
+            bins_table[LINEAR_POSITION_COORDINATE],
+            dtype=float,
+        ),
+    }
+    for coordinate_name, expected_values in expected_bin_values.items():
+        if not np.allclose(
+            expected_values,
+            np.asarray(curve.coords[coordinate_name].values, dtype=float),
+            rtol=1e-10,
+            atol=1e-12,
+        ):
+            raise ValueError(
+                "DPP bin metadata disagrees with curve provenance: "
+                f"{coordinate_name}."
+            )
+    for coordinate_name, values_by_name in coordinate_attrs.items():
+        if coordinate_name not in curve.coords or not isinstance(
+            values_by_name,
+            Mapping,
+        ):
+            raise ValueError("DPP coordinate provenance is invalid.")
+        curve.coords[coordinate_name].attrs.update(dict(values_by_name))
+    return validate_dpp_tuning_curve(curve)
+
+
+def _normalized_float_values(values: Any) -> list[Any]:
+    """Return floats with NaN represented canonically for semantic hashing."""
+    return [
+        None if np.isnan(value) else float(value)
+        for value in np.asarray(values, dtype=float).reshape(-1)
+    ]
+
+
+def dpp_tuning_sha256(curve: Any) -> str:
+    """Digest DPP unit metadata and tuning values independent of storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = validate_dpp_tuning_curve(curve)
+    values = np.asarray(canonical.values, dtype=float)
+    records = []
+    for row_index in range(int(canonical.sizes[UNIT_DIM])):
+        records.append(
+            {
+                "curve_row": row_index,
+                "spikesorting_merge_id": str(
+                    canonical.coords["spikesorting_merge_id"].values[row_index]
+                ),
+                "unit_id": str(canonical.coords["unit_id"].values[row_index]),
+                "stable_unit_id": str(
+                    canonical.coords["stable_unit_id"].values[row_index]
+                ),
+                "group_unit_id": str(
+                    canonical.coords["group_unit_id"].values[row_index]
+                ),
+                SPIKE_COUNT_COORDINATE: _normalized_float_values(
+                    [canonical.coords[SPIKE_COUNT_COORDINATE].values[row_index]]
+                )[0],
+                "firing_rate_hz": _normalized_float_values(values[row_index]),
+            }
+        )
+    return provenance_sha256(
+        {"columns": list(_NWB_TUNING_COLUMNS), "records": records}
+    )
+
+
+def dpp_bins_sha256(curve: Any) -> str:
+    """Digest ordered DPP-bin metadata independent of NWB storage."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    canonical = validate_dpp_tuning_curve(curve)
+    dpp_edges = place._parse_bin_edges(
+        canonical.attrs["bin_edges_dpp_json"],
+        name="bin_edges_dpp_json",
+    )
+    cm_edges = place._parse_bin_edges(
+        canonical.attrs["bin_edges_cm_json"],
+        name="bin_edges_cm_json",
+    )
+    return provenance_sha256(
+        {
+            "dpp_bin": list(range(int(canonical.sizes[DPP_DIM]))),
+            "left_edge_dpp": dpp_edges[:-1].tolist(),
+            DPP_DIM: np.asarray(
+                canonical.coords[DPP_DIM].values,
+                dtype=float,
+            ).tolist(),
+            "right_edge_dpp": dpp_edges[1:].tolist(),
+            PATH_FRACTION_COORDINATE: np.asarray(
+                canonical.coords[PATH_FRACTION_COORDINATE].values,
+                dtype=float,
+            ).tolist(),
+            "left_edge_cm": cm_edges[:-1].tolist(),
+            LINEAR_POSITION_COORDINATE: np.asarray(
+                canonical.coords[LINEAR_POSITION_COORDINATE].values,
+                dtype=float,
+            ).tolist(),
+            "right_edge_cm": cm_edges[1:].tolist(),
+        }
+    )
+
+
+def dpp_provenance_sha256(curve: Any) -> str:
+    """Digest the canonical DPP scalar and coordinate provenance payload."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "artifact_schema_version": NWB_ARTIFACT_SCHEMA_VERSION,
+            "metadata": _curve_metadata_payload(curve),
+        }
+    )
+
+
+def dpp_tuning_curve_sha256(curve: Any) -> str:
+    """Digest all three logical DPP objects as one scientific artifact."""
+    from v1ca1.spyglass.selection import provenance_sha256
+
+    return provenance_sha256(
+        {
+            "dpp_tuning_sha256": dpp_tuning_sha256(curve),
+            "dpp_bins_sha256": dpp_bins_sha256(curve),
+            "dpp_provenance_sha256": dpp_provenance_sha256(curve),
+        }
+    )
+
+
 def _result_summary(curve: Any) -> dict[str, Any]:
     """Return table-friendly scalar metadata around one canonical curve."""
     validate_dpp_tuning_curve(curve)
@@ -1263,6 +1815,10 @@ __all__ = [
     "DPP_DIM",
     "IDENTITY_COORDINATES",
     "LINEAR_POSITION_COORDINATE",
+    "NWB_ARTIFACT_SCHEMA_VERSION",
+    "NWB_BINS_TABLE_NAME",
+    "NWB_PROVENANCE_TABLE_NAME",
+    "NWB_TUNING_TABLE_NAME",
     "PATH_FRACTION_COORDINATE",
     "SPIKE_COUNT_COORDINATE",
     "TRIAL_SUBSETS",
@@ -1271,6 +1827,14 @@ __all__ = [
     "build_dpp_bin_edges",
     "common_graph_length_from_inputs",
     "compute_selected_dpp_tuning_curve",
+    "dpp_bins_sha256",
+    "dpp_bins_to_dynamic_table",
+    "dpp_provenance_sha256",
+    "dpp_provenance_to_dynamic_table",
+    "dpp_tuning_curve_from_nwb_objects",
+    "dpp_tuning_curve_sha256",
+    "dpp_tuning_sha256",
+    "dpp_tuning_to_dynamic_table",
     "get_dpp_artifact_path",
     "get_dpp_trajectory_pair",
     "load_dpp_artifact",

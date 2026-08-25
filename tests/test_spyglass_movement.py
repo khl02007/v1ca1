@@ -94,6 +94,50 @@ def _valid_table(*, first_count: int = 3) -> pd.DataFrame:
     )
 
 
+def _terminal_table(status: str) -> pd.DataFrame:
+    """Return one canonical all-unit terminal movement table."""
+    if status == "no_valid_position":
+        position_count = 1
+        finite_position_count = 1
+        finite_speed_count = 0
+    elif status == "no_movement":
+        position_count = 100
+        finite_position_count = 100
+        finite_speed_count = 100
+    else:
+        raise ValueError(f"Unsupported terminal status {status!r}.")
+    return movement._build_movement_table(
+        identity_rows=[
+            {
+                "spikesorting_merge_id": "merge-a",
+                "unit_id": "11",
+                "stable_unit_id": "merge-a:11",
+                "group_unit_id": 0,
+            },
+            {
+                "spikesorting_merge_id": "merge-b",
+                "unit_id": "22",
+                "stable_unit_id": "merge-b:22",
+                "group_unit_id": 1,
+            },
+        ],
+        animal_name="L14",
+        date="20240611",
+        region="v1",
+        epoch="02_r1",
+        movement_spike_counts=np.zeros(2, dtype=np.int64),
+        movement_duration_s=0.0,
+        movement_firing_rates_hz=np.full(2, np.nan, dtype=float),
+        firing_rate_status=status,
+        position_sample_count=position_count,
+        finite_position_sample_count=finite_position_count,
+        finite_speed_sample_count=finite_speed_count,
+        movement_interval_count=0,
+        speed_threshold_cm_s=4.0,
+        speed_smoothing_sigma_s=0.1,
+    )
+
+
 def test_movement_artifact_paths_are_uuid_keyed_and_session_first(
     tmp_path: Path,
 ) -> None:
@@ -450,3 +494,166 @@ def test_write_artifact_bundle_is_atomic_and_refuses_implicit_overwrite(
         original,
     )
     assert not list(tmp_path.glob(".movement.*"))
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["valid", "no_units", "no_valid_position", "no_movement"],
+)
+def test_nwb_movement_artifacts_roundtrip_all_statuses(
+    status: str,
+    tmp_path: Path,
+) -> None:
+    """Both NWB objects preserve the canonical scientific artifact contract."""
+    from datetime import datetime, timezone
+
+    import pynapple as nap
+    from pynwb import NWBHDF5IO, NWBFile, validate
+    from pynwb.epoch import TimeIntervals
+
+    if status == "valid":
+        expected_table = _valid_table()
+        expected_intervals = nap.IntervalSet(
+            start=np.asarray([10.0, 12.0]),
+            end=np.asarray([11.0, 13.0]),
+            time_units="s",
+        )
+    elif status == "no_units":
+        expected_table = movement.empty_movement_firing_rate_table()
+        expected_intervals = nap.IntervalSet(
+            start=np.asarray([], dtype=float),
+            end=np.asarray([], dtype=float),
+            time_units="s",
+        )
+    else:
+        expected_table = _terminal_table(status)
+        expected_intervals = nap.IntervalSet(
+            start=np.asarray([], dtype=float),
+            end=np.asarray([], dtype=float),
+            time_units="s",
+        )
+
+    rate_object = movement.movement_firing_rate_table_to_dynamic_table(
+        expected_table
+    )
+    interval_object = movement.movement_interval_set_to_time_intervals(
+        expected_intervals
+    )
+    assert rate_object.name == movement.NWB_FIRING_RATE_TABLE_NAME
+    assert tuple(rate_object.colnames) == movement.MOVEMENT_TABLE_COLUMNS
+    assert isinstance(interval_object, TimeIntervals)
+    assert interval_object.name == movement.NWB_MOVEMENT_INTERVALS_NAME
+
+    # The inverse helpers also accept DataFrames returned by Spyglass.fetch_nwb().
+    fetched_table = movement.movement_firing_rate_table_from_dynamic_table(
+        rate_object.to_dataframe()
+    )
+    fetched_intervals = movement.movement_interval_set_from_time_intervals(
+        interval_object.to_dataframe()
+    )
+    pd.testing.assert_frame_equal(fetched_table, expected_table)
+    assert movement.movement_interval_summary(fetched_intervals) == (
+        movement.movement_interval_summary(expected_intervals)
+    )
+
+    nwbfile = NWBFile(
+        session_description="movement artifact test",
+        identifier=f"movement-{status}",
+        session_start_time=datetime(2024, 6, 11, tzinfo=timezone.utc),
+    )
+    rate_object_id = rate_object.object_id
+    interval_object_id = interval_object.object_id
+    nwbfile.add_scratch(rate_object)
+    nwbfile.add_time_intervals(interval_object)
+    path = tmp_path / f"movement-{status}.nwb"
+    with NWBHDF5IO(str(path), mode="w") as io:
+        io.write(nwbfile)
+    assert validate(path=path) == []
+    with NWBHDF5IO(str(path), mode="r", load_namespaces=True) as io:
+        loaded_nwbfile = io.read()
+        restored_table = (
+            movement.movement_firing_rate_table_from_dynamic_table(
+                loaded_nwbfile.objects[rate_object_id]
+            )
+        )
+        restored_intervals = movement.movement_interval_set_from_time_intervals(
+            loaded_nwbfile.objects[interval_object_id]
+        )
+
+        pd.testing.assert_frame_equal(restored_table, expected_table)
+        assert movement.movement_interval_summary(restored_intervals) == (
+            movement.movement_interval_summary(expected_intervals)
+        )
+        assert movement.movement_firing_rate_table_sha256(restored_table) == (
+            movement.movement_firing_rate_table_sha256(expected_table)
+        )
+        assert movement.movement_interval_set_sha256(restored_intervals) == (
+            movement.movement_interval_set_sha256(expected_intervals)
+        )
+
+
+def test_nwb_movement_converters_reject_noncanonical_objects() -> None:
+    """NWB conversion fails loudly on schema, type, and interval corruption."""
+    from hdmf.common import DynamicTable
+    from pynwb.epoch import TimeIntervals
+
+    with pytest.raises(ValueError, match="non-canonical columns"):
+        movement.movement_firing_rate_table_to_dynamic_table(
+            _valid_table().drop(columns="movement_spike_count")
+        )
+
+    wrong_table = DynamicTable.from_dataframe(
+        name="wrong_name",
+        df=_valid_table(),
+    )
+    with pytest.raises(ValueError, match="Unexpected.*object name"):
+        movement.movement_firing_rate_table_from_dynamic_table(wrong_table)
+
+    wrong_intervals = TimeIntervals(name="wrong_name", description="test")
+    with pytest.raises(ValueError, match="Unexpected movement interval"):
+        movement.movement_interval_set_from_time_intervals(wrong_intervals)
+
+    overlapping = pd.DataFrame(
+        {
+            "start_time": [10.0, 10.5],
+            "stop_time": [11.0, 12.0],
+        }
+    )
+    with pytest.raises(ValueError, match="sorted and non-overlapping"):
+        movement.movement_interval_set_from_time_intervals(overlapping)
+
+
+def test_movement_semantic_hashes_change_only_with_scientific_content() -> None:
+    """Semantic hashes are storage-independent and content-sensitive."""
+    import pynapple as nap
+
+    table = _valid_table()
+    table_roundtrip = movement.movement_firing_rate_table_from_dynamic_table(
+        movement.movement_firing_rate_table_to_dynamic_table(table)
+    )
+    assert movement.movement_firing_rate_table_sha256(table) == (
+        movement.movement_firing_rate_table_sha256(table_roundtrip)
+    )
+    assert movement.movement_firing_rate_table_sha256(table) != (
+        movement.movement_firing_rate_table_sha256(_valid_table(first_count=5))
+    )
+
+    intervals = nap.IntervalSet(
+        start=np.asarray([10.0, 12.0]),
+        end=np.asarray([11.0, 13.0]),
+        time_units="s",
+    )
+    interval_roundtrip = movement.movement_interval_set_from_time_intervals(
+        movement.movement_interval_set_to_time_intervals(intervals)
+    )
+    assert movement.movement_interval_set_sha256(intervals) == (
+        movement.movement_interval_set_sha256(interval_roundtrip)
+    )
+    shifted = nap.IntervalSet(
+        start=np.asarray([10.0, 14.0]),
+        end=np.asarray([11.0, 15.0]),
+        time_units="s",
+    )
+    assert movement.movement_interval_set_sha256(intervals) != (
+        movement.movement_interval_set_sha256(shifted)
+    )
