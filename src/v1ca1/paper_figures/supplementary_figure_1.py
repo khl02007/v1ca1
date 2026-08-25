@@ -51,7 +51,9 @@ from v1ca1.paper_figures.figure_1 import (
     plot_stability_panel,
     significance_stars,
 )
-from v1ca1.paper_figures.figure_3_old import load_dark_movement_firing_rate_table
+from v1ca1.paper_figures._ripple_panels import (
+    load_dark_movement_firing_rate_table,
+)
 from v1ca1.paper_figures.heatmaps import setup_heatmap_comparison_panel
 from v1ca1.paper_figures.style import (
     EMPHASIS_HISTOGRAM_KWARGS,

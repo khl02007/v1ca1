@@ -1,8 +1,7 @@
-"""Generate the previous version of Figure 2."""
+"""Share dark/light data loaders and panel plotters."""
 
 from __future__ import annotations
 
-import argparse
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -18,8 +17,6 @@ from v1ca1.helper.plot_wtrack_schematic import (
     get_w_track_geometry,
 )
 from v1ca1.helper.session import (
-    DEFAULT_DATA_ROOT,
-    REGIONS,
     TRAJECTORY_TYPES,
     get_analysis_path,
     load_trajectory_intervals,
@@ -28,7 +25,6 @@ from v1ca1.helper.wtrack import get_wtrack_total_length
 from v1ca1.paper_figures import _figure_2_base as _figure_2
 from v1ca1.paper_figures.datasets import (
     DatasetId,
-    get_processed_datasets,
     normalize_dataset_id,
 )
 from v1ca1.paper_figures.figure_1 import (
@@ -58,23 +54,10 @@ from v1ca1.paper_figures._dark_light import (
     get_cross_trajectory_decoding_tsd_paths,
     get_within_epoch_decoding_tsd_paths,
 )
-from v1ca1.paper_figures.style import (
-    apply_paper_style,
-    figure_size,
-    label_axis,
-    save_figure,
-)
 from v1ca1.paper_figures.w_track_schematic import draw_w_track_arm_side_outlines
 
 
-DEFAULT_OUTPUT_NAME = "figure_2_old"
 DEFAULT_FIGURE_WIDTH_MM = _figure_2.DEFAULT_FIGURE_WIDTH_MM
-DEFAULT_FIGURE_HEIGHT_MM = (
-    _figure_2.PANEL_A_SINGLE_ROW_HEIGHT_MM
-    + _figure_2.PANEL_BC_QUANT_ROW_HEIGHT_MM
-    + _figure_2.PANEL_D_ROW_HEIGHT_MM
-)
-PANEL_B2C2_ROW_WIDTH_RATIOS = (1.0, 1.0)
 PANEL_B2C2_ROW_WSPACE = 0.035
 PANEL_D2E2_ROW_WIDTH_RATIOS = (1.0, 1.0)
 PANEL_D2E2_ROW_WSPACE = 0.050
@@ -1571,481 +1554,26 @@ def plot_panel_e2_decoding_panel(
     decoding_error_table: Any,
     *,
     significance_labels: Sequence[str] = (),
+    cross_ylim: tuple[float, float] | None = None,
+    place_ylim: tuple[float, float] | None = None,
 ) -> None:
     """Plot the Figure 2 dark-light decoding comparison as a standalone panel."""
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
-    _figure_2.plot_panel_c_cross_and_place_decoding(
-        ax,
-        decoding_error_table,
-    )
+    if cross_ylim is None and place_ylim is None:
+        _figure_2.plot_panel_c_cross_and_place_decoding(
+            ax,
+            decoding_error_table,
+        )
+    else:
+        _figure_2.plot_panel_c_cross_and_place_decoding(
+            ax,
+            decoding_error_table,
+            cross_ylim=cross_ylim,
+            place_ylim=place_ylim,
+        )
     format_panel_c2_decoding_axes(ax)
     if significance_labels:
         add_panel_c2_light_dark_brackets(ax, significance_labels)
-
-
-def make_figure_2(
-    *,
-    data_root: Path,
-    output_path: Path,
-    datasets: Sequence[DatasetId],
-    regions: Sequence[str],
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    dpi: int,
-    position_bin_count: int = _figure_2.DEFAULT_POSITION_BIN_COUNT,
-    position_offset: int = _figure_2.DEFAULT_POSITION_OFFSET,
-    speed_threshold_cm_s: float = _figure_2.DEFAULT_SPEED_THRESHOLD_CM_S,
-    sigma_bins: float = _figure_2.DEFAULT_SIGMA_BINS,
-    panel_example_cache_dir: Path | None = None,
-    refresh_panel_example_cache: bool = False,
-    dark_tuning_correlation_threshold: float = (
-        _figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD
-    ),
-    high_dark_tuning_correlation_threshold: float = (
-        _figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD
-    ),
-    decoding_n_permutations: int = DECODING_PERMUTATION_COUNT,
-    decoding_permutation_seed: int = DECODING_PERMUTATION_SEED,
-) -> Path:
-    """Build and save the previous version of Figure 2."""
-    import matplotlib.pyplot as plt
-
-    if decoding_n_permutations <= 0:
-        raise ValueError("decoding_n_permutations must be positive.")
-    if decoding_permutation_seed < 0:
-        raise ValueError("decoding_permutation_seed must be non-negative.")
-    normalized_datasets = [
-        normalize_dataset_id(dataset)
-        for dataset in datasets
-    ]
-    decoding_animal_names = tuple(
-        animal_name
-        for animal_name, _date, _epoch in normalized_datasets
-    )
-    if (
-        not decoding_animal_names
-        or len(set(decoding_animal_names)) != len(decoding_animal_names)
-    ):
-        raise ValueError(
-            "Figure 2E decoding inference requires exactly one data set per "
-            f"animal; received {normalized_datasets!r}."
-        )
-
-    panel_example_cache_dir = (
-        Path(output_path).parent / "cache"
-        if panel_example_cache_dir is None
-        else Path(panel_example_cache_dir)
-    )
-    quant_region = str(regions[0]) if regions else _figure_2.DEFAULT_REGIONS[0]
-    panel_glm_payload = _figure_2.load_panel_glm_data(
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        swap_delta_min_movement_firing_rate_hz=(
-            _figure_2.PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
-        ),
-        swap_delta_min_tuning_stability_correlation=(
-            _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
-        ),
-        swap_model_name=_figure_2.PANEL_C_SWAP_MODEL_NAME,
-        swap_example_count=len(_figure_2.PANEL_C_SWAP_EXAMPLES),
-        swap_requested_examples=_figure_2.PANEL_C_SWAP_EXAMPLES,
-        dark_light_requested_examples=_figure_2.PANEL_C_DARK_LIGHT_EXAMPLES,
-    )
-    panel_a_examples = [
-        _figure_2.load_panel_a_example_data(
-            data_root=data_root,
-            animal_name=animal_name,
-            date=date,
-            region=region,
-            unit_id=unit_id,
-            trajectories=trajectories,
-            dark_epoch=dark_epoch,
-            light_epoch=light_epoch,
-            position_bin_count=position_bin_count,
-            position_offset=position_offset,
-            speed_threshold_cm_s=speed_threshold_cm_s,
-            sigma_bins=sigma_bins,
-            panel_example_cache_dir=panel_example_cache_dir,
-            refresh_panel_example_cache=refresh_panel_example_cache,
-        )
-        for animal_name, date, region, unit_id, trajectories in (
-            _figure_2.FIGURE_2_PANEL_A_EXAMPLES
-        )
-    ]
-    panel_b_overlap_table = _figure_2.load_panel_b_tuning_overlap_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-    )
-    panel_b_overlap_table = _figure_2.filter_panel_b_overlap_by_even_odd_stability(
-        panel_b_overlap_table,
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        min_movement_firing_rate_hz=(
-            _figure_2.PANEL_B_HISTOGRAM_MIN_MOVEMENT_FIRING_RATE_HZ
-        ),
-        min_stability_correlation=(
-            _figure_2.PANEL_B_HISTOGRAM_MIN_TUNING_STABILITY_CORRELATION
-        ),
-    )
-    panel_e_decoding_error_table = _figure_2.load_panel_e_decoding_error_table(
-        data_root=data_root,
-        datasets=datasets,
-        region=quant_region,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-    )
-    panel_e_decoding_trial_error_table = (
-        build_panel_e_decoding_trial_error_table(
-            data_root=data_root,
-            datasets=datasets,
-            region=quant_region,
-            light_epoch=light_epoch,
-            dark_epoch=dark_epoch,
-        )
-    )
-    panel_e_permutation_results = compute_panel_e_decoding_permutation_tests(
-        panel_e_decoding_trial_error_table,
-        n_permutations=decoding_n_permutations,
-        seed=decoding_permutation_seed,
-    )
-    panel_e_significance_labels = build_panel_e_decoding_significance_labels(
-        panel_e_permutation_results,
-        animal_names=decoding_animal_names,
-    )
-
-    apply_paper_style()
-    fig = plt.figure(
-        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
-        constrained_layout=True,
-    )
-    fig.get_layout_engine().set(
-        **_figure_2.CANONICAL_FIGURE_2_CONSTRAINED_LAYOUT_PADS
-    )
-    outer_grid = fig.add_gridspec(
-        nrows=3,
-        ncols=1,
-        height_ratios=[
-            _figure_2.PANEL_A_SINGLE_ROW_HEIGHT_MM,
-            _figure_2.PANEL_BC_QUANT_ROW_HEIGHT_MM,
-            _figure_2.PANEL_D_ROW_HEIGHT_MM,
-        ],
-    )
-    panel_a_axis = fig.add_subplot(outer_grid[0, 0])
-    quant_grid = outer_grid[1, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_B2C2_ROW_WIDTH_RATIOS,
-        wspace=PANEL_B2C2_ROW_WSPACE,
-    )
-    panel_b_axis = fig.add_subplot(quant_grid[0, 0])
-    panel_c_axis = fig.add_subplot(quant_grid[0, 1])
-    bottom_grid = outer_grid[2, 0].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_D2E2_ROW_WIDTH_RATIOS,
-        wspace=PANEL_D2E2_ROW_WSPACE,
-    )
-    panel_d_axis = fig.add_subplot(bottom_grid[0, 0])
-    panel_e_axis = fig.add_subplot(bottom_grid[0, 1])
-
-    plot_panel_a2_examples_single_row(panel_a_axis, panel_a_examples)
-    _figure_2.plot_panel_b_dpp_overlap_with_schematic(
-        panel_b_axis,
-        panel_b_overlap_table,
-        example=panel_a_examples[0],
-        low_threshold=dark_tuning_correlation_threshold,
-        high_threshold=high_dark_tuning_correlation_threshold,
-        show_grouped=False,
-        show_scatter_linear_fit=True,
-        show_scatter_r2=True,
-        scatter_equal_aspect=True,
-    )
-    _figure_2._replace_nested_text(
-        panel_b_axis,
-        "DPP index",
-        "DPP index (DPPI)",
-        fontsize=_figure_2.MIN_PUBLICATION_FONTSIZE_PT,
-    )
-    plot_panel_d2_architecture_panel(panel_c_axis)
-    plot_panel_d2_swap_results_panel(
-        panel_d_axis,
-        panel_glm_payload["swap_delta"],
-        panel_glm_payload["swap_examples"],
-        model_name=_figure_2.PANEL_C_SWAP_MODEL_NAME,
-        model_colors=_figure_2.PANEL_C_SWAP_MODEL_COLORS_2_3,
-        model_labels=_figure_2.PANEL_C_SWAP_MODEL_LABELS_2_3,
-    )
-    plot_panel_e2_decoding_panel(
-        panel_e_axis,
-        panel_e_decoding_error_table,
-        significance_labels=panel_e_significance_labels,
-    )
-
-    label_axis(panel_a_axis, "A", x=-0.02, y=_figure_2.PANEL_A_LABEL_Y)
-    panel_a_label = panel_a_axis.texts[-1]
-    panel_a_axis.set_title(
-        "Example DPP cells in dark and light",
-        fontsize=8,
-        pad=_figure_2.PANEL_A_TITLE_PAD,
-    )
-    label_axis(panel_b_axis, "B", x=-0.035, y=_figure_2.PANEL_B_LABEL_Y, va="baseline")
-    panel_b_label = panel_b_axis.texts[-1]
-    panel_b_title = panel_b_axis.set_title(
-        "Dark and light DPP coding",
-        fontsize=8,
-        pad=_figure_2.PANEL_B_TITLE_PAD,
-    )
-    label_axis(panel_c_axis, "C", x=-0.035, y=_figure_2.PANEL_B_LABEL_Y, va="baseline")
-    panel_c_label = panel_c_axis.texts[-1]
-    label_axis(panel_d_axis, "D", x=-0.02, y=_figure_2.PANEL_BC_LABEL_Y)
-    panel_d_label = panel_d_axis.texts[-1]
-    label_axis(panel_e_axis, "E", x=-0.035, y=_figure_2.PANEL_BC_LABEL_Y)
-    panel_e_label = panel_e_axis.texts[-1]
-    panel_c_title = panel_c_axis.set_title(
-        "Two models that relate dark and light activity",
-        fontsize=8,
-        pad=_figure_2.PANEL_B_TITLE_PAD,
-    )
-    panel_d_title = panel_d_axis.set_title(
-        "Dark and light cue-swap prediction comparison",
-        fontsize=8,
-        pad=_figure_2.PANEL_BC_TITLE_PAD,
-    )
-    panel_e_title = panel_e_axis.set_title(
-        "Dark and light decoding comparison",
-        fontsize=8,
-        pad=_figure_2.PANEL_BC_TITLE_PAD,
-    )
-
-    _figure_2._raise_text_to_minimum_fontsize(
-        fig,
-        _figure_2.MIN_PUBLICATION_FONTSIZE_PT,
-    )
-    fig.canvas.draw()
-    fig.set_layout_engine(None)
-    _figure_2._set_axis_horizontal_bounds(
-        panel_a_axis,
-        left=_figure_2.PANEL_A_HORIZONTAL_AXIS_BOUNDS[0],
-        width=_figure_2.PANEL_A_HORIZONTAL_AXIS_BOUNDS[1],
-    )
-    panel_a_axis_height = panel_a_axis.get_position().height
-    _figure_2._set_axis_height_preserving_top(panel_b_axis, panel_a_axis_height)
-    _figure_2._set_axis_height_preserving_top(panel_c_axis, panel_a_axis_height)
-    _figure_2._scale_axis_width_from_left(
-        panel_b_axis,
-        _figure_2.PANEL_B_HORIZONTAL_WIDTH_SCALE,
-    )
-    fig.canvas.draw()
-    _figure_2._align_text_to_reference_display_x(panel_b_label, panel_a_label)
-    _figure_2._align_text_to_reference_display_x(panel_d_label, panel_a_label)
-    _figure_2._align_texts_to_reference_display_y(
-        (panel_d_title, panel_d_label, panel_e_title, panel_e_label)
-    )
-    _align_text_tops_to_reference_display_y(
-        fig,
-        (panel_d_title, panel_d_label, panel_e_title, panel_e_label),
-    )
-    _figure_2._align_texts_to_reference_display_y(
-        (panel_b_title, panel_b_label, panel_c_title, panel_c_label)
-    )
-    _align_panel_b_top_histogram_label_to_scatter(fig, panel_b_axis)
-
-    save_figure(fig, output_path, dpi=dpi, bbox_inches=None)
-    plt.close(fig)
-    print(f"Saved old Figure 2 to {output_path}")
-    return output_path
-
-
-def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for old Figure 2 generation."""
-    parser = argparse.ArgumentParser(description="Generate old Figure 2.")
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Base directory containing analysis outputs. Default: {DEFAULT_DATA_ROOT}",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=_figure_2.DEFAULT_OUTPUT_DIR,
-        help=f"Directory for figure output. Default: {_figure_2.DEFAULT_OUTPUT_DIR}",
-    )
-    parser.add_argument(
-        "--output-name",
-        default=DEFAULT_OUTPUT_NAME,
-        help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
-    )
-    parser.add_argument(
-        "--panel-example-cache-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for cached example-cell rasters and rate curves. "
-            "Default: <output-dir>/cache."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-panel-example-cache",
-        action="store_true",
-        help="Recompute example-cell data and overwrite matching caches.",
-    )
-    parser.add_argument(
-        "--dark-tuning-correlation-threshold",
-        "--dpp-index-threshold",
-        dest="dark_tuning_correlation_threshold",
-        type=float,
-        default=_figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD,
-        help=(
-            "Dark tuning-correlation threshold for Panel B low/high grouping. "
-            f"Default: {_figure_2.PANEL_B_DARK_TUNING_CORRELATION_THRESHOLD}"
-        ),
-    )
-    parser.add_argument(
-        "--high-dark-tuning-correlation-threshold",
-        type=float,
-        default=_figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD,
-        help=(
-            "Upper dark tuning-correlation threshold for Panel B high group. "
-            f"Default: {_figure_2.PANEL_B_HIGH_DARK_TUNING_CORRELATION_THRESHOLD}"
-        ),
-    )
-    parser.add_argument(
-        "--format",
-        dest="output_format",
-        choices=_figure_2.FIGURE_FORMATS,
-        default=_figure_2.DEFAULT_OUTPUT_FORMAT,
-        help=f"Output format. Default: {_figure_2.DEFAULT_OUTPUT_FORMAT}",
-    )
-    parser.add_argument(
-        "--dataset",
-        action="append",
-        type=_figure_2.parse_dataset_id,
-        help=(
-            "Animal/date data set to include as animal:date. May be repeated. "
-            "Default: use v1ca1.paper_figures.datasets."
-        ),
-    )
-    parser.add_argument(
-        "--region",
-        action="append",
-        choices=REGIONS,
-        help=(
-            "Region to include. May be repeated. "
-            f"Default: {', '.join(_figure_2.DEFAULT_REGIONS)}."
-        ),
-    )
-    parser.add_argument("--light-epoch", default=None, help="Light run epoch.")
-    parser.add_argument("--dark-epoch", default=None, help="Dark run epoch.")
-    parser.add_argument(
-        "--position-bin-count",
-        type=int,
-        default=_figure_2.DEFAULT_POSITION_BIN_COUNT,
-        help=(
-            "Number of bins from normalized trajectory position 0 to 1. "
-            f"Default: {_figure_2.DEFAULT_POSITION_BIN_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--position-offset",
-        type=int,
-        default=_figure_2.DEFAULT_POSITION_OFFSET,
-        help=(
-            "Number of leading position samples to ignore. "
-            f"Default: {_figure_2.DEFAULT_POSITION_OFFSET}"
-        ),
-    )
-    parser.add_argument(
-        "--speed-threshold-cm-s",
-        type=float,
-        default=_figure_2.DEFAULT_SPEED_THRESHOLD_CM_S,
-        help=(
-            "Speed threshold in cm/s used to define movement intervals. "
-            f"Default: {_figure_2.DEFAULT_SPEED_THRESHOLD_CM_S}"
-        ),
-    )
-    parser.add_argument(
-        "--sigma-bins",
-        type=float,
-        default=_figure_2.DEFAULT_SIGMA_BINS,
-        help=f"Gaussian smoothing width in bins. Default: {_figure_2.DEFAULT_SIGMA_BINS}",
-    )
-    parser.add_argument(
-        "--decoding-n-permutations",
-        type=int,
-        default=DECODING_PERMUTATION_COUNT,
-        help=(
-            "Label permutations used for Figure 2E decoding inference. "
-            f"Default: {DECODING_PERMUTATION_COUNT}"
-        ),
-    )
-    parser.add_argument(
-        "--decoding-permutation-seed",
-        type=int,
-        default=DECODING_PERMUTATION_SEED,
-        help=(
-            "Random seed used for Figure 2E decoding inference. "
-            f"Default: {DECODING_PERMUTATION_SEED}"
-        ),
-    )
-    parser.add_argument(
-        "--dpi",
-        type=int,
-        default=300,
-        help="Rasterization dpi for saved output. Default: 300",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    """Run old Figure 2 generation."""
-    args = parse_arguments(argv)
-    datasets = args.dataset if args.dataset is not None else get_processed_datasets()
-    regions = tuple(args.region) if args.region is not None else _figure_2.DEFAULT_REGIONS
-    output_path = _figure_2.build_output_path(
-        args.output_dir,
-        args.output_name,
-        args.output_format,
-    )
-    panel_example_cache_dir = (
-        args.panel_example_cache_dir
-        if args.panel_example_cache_dir is not None
-        else args.output_dir / "cache"
-    )
-    make_figure_2(
-        data_root=args.data_root,
-        output_path=output_path,
-        datasets=datasets,
-        regions=regions,
-        light_epoch=args.light_epoch,
-        dark_epoch=args.dark_epoch,
-        dpi=args.dpi,
-        position_bin_count=args.position_bin_count,
-        position_offset=args.position_offset,
-        speed_threshold_cm_s=args.speed_threshold_cm_s,
-        sigma_bins=args.sigma_bins,
-        panel_example_cache_dir=panel_example_cache_dir,
-        refresh_panel_example_cache=args.refresh_panel_example_cache,
-        dark_tuning_correlation_threshold=args.dark_tuning_correlation_threshold,
-        high_dark_tuning_correlation_threshold=(
-            args.high_dark_tuning_correlation_threshold
-        ),
-        decoding_n_permutations=args.decoding_n_permutations,
-        decoding_permutation_seed=args.decoding_permutation_seed,
-    )
-
-
-if __name__ == "__main__":
-    main()

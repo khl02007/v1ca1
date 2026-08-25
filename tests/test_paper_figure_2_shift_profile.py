@@ -826,7 +826,7 @@ def test_panel_b_profile_and_panel_c_scatter_share_x_axis_and_label_level() -> N
     plt.close(fig)
 
 
-def test_population_profile_averages_paths_within_neuron_before_equal_neuron_mean(
+def test_population_profile_averages_paths_within_neuron_before_neuron_median(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cells with more available paths do not receive greater population weight."""
@@ -943,16 +943,16 @@ def test_population_profile_averages_paths_within_neuron_before_equal_neuron_mea
             [0.9, 0.9, 0.9],
         ]
     )
-    expected_mean = np.mean(neuron_curves, axis=0)
+    expected_median = np.median(neuron_curves, axis=0)
     pooled_path_mean = np.asarray([0.31, 0.45, 0.39])
-    assert not np.allclose(expected_mean, pooled_path_mean)
-    mean_lines = [
-        line for line in axis.lines if "mean" in line.get_label().lower()
+    assert not np.allclose(expected_median, pooled_path_mean)
+    median_lines = [
+        line for line in axis.lines if "median" in line.get_label().lower()
     ]
-    assert len(mean_lines) == 1
-    assert mean_lines[0].get_label() == "Mean across neurons"
-    np.testing.assert_allclose(mean_lines[0].get_xdata(), shifts)
-    np.testing.assert_allclose(mean_lines[0].get_ydata(), expected_mean)
+    assert len(median_lines) == 1
+    assert median_lines[0].get_label() == "Median across neurons"
+    np.testing.assert_allclose(median_lines[0].get_xdata(), shifts)
+    np.testing.assert_allclose(median_lines[0].get_ydata(), expected_median)
     assert len(fill_calls) == 1
     np.testing.assert_allclose(fill_calls[0]["x"], shifts)
     np.testing.assert_allclose(
@@ -1072,8 +1072,8 @@ def test_shift_profile_cache_records_cohort_grid_and_summary_semantics(
         "neuron"
     )
     assert metadata["display_summary"] == (
-        "mean_and_interquartile_range_across_neuron_level_profiles_at_each_"
-        "shift_with_zero_shift_median_and_interquartile_range"
+        "median_and_interquartile_range_across_neuron_level_profiles_at_each_"
+        "shift"
     )
     assert "silent_in_both_conditions" in metadata[
         "post_filter_exclusion"

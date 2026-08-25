@@ -16,7 +16,7 @@ import pandas as pd
 from v1ca1.helper.session import TRAJECTORY_TYPES
 from v1ca1.paper_figures import _dark_light
 from v1ca1.paper_figures import figure_2 as canonical
-from v1ca1.paper_figures import figure_2_old as legacy
+from v1ca1.paper_figures import _figure_2_panels as panel_helpers
 from v1ca1.paper_figures._spyglass_figure_artifact import (
     get_figure_provenance_path,
     promote_spyglass_figure,
@@ -1031,7 +1031,7 @@ def _build_panel_d_swap_payload(
         region,
         unit_id,
         trajectory,
-    ) in legacy._figure_2.PANEL_C_SWAP_EXAMPLES:
+    ) in panel_helpers._figure_2.PANEL_C_SWAP_EXAMPLES:
         if str(region) != REGION:
             continue
         loaded = loaded_by_session[(str(animal_name), str(date))]
@@ -1181,12 +1181,12 @@ def _append_decoding_laps(
     decoded_path: Path,
 ) -> np.ndarray:
     """Append lap medians and return all finite normalized errors."""
-    timestamps, absolute_error = legacy._align_absolute_error_with_times(
+    timestamps, absolute_error = panel_helpers._align_absolute_error_with_times(
         true,
         decoded,
     )
     absolute_error = np.asarray(absolute_error, dtype=float) / float(normalization)
-    legacy._append_panel_e_trial_errors(
+    panel_helpers._append_panel_e_trial_errors(
         records,
         timestamps=np.asarray(timestamps, dtype=float),
         absolute_error=absolute_error,
@@ -1238,10 +1238,16 @@ def _build_panel_e_decoding_tables(
     sessions: Sequence[Mapping[str, Any]],
     *,
     scratch_root: Path,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build pooled and lap-level decoding tables from new artifacts and NWB."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build pooled, per-animal, and lap-level decoding tables."""
     pooled_place: dict[str, list[np.ndarray]] = {"light": [], "dark": []}
     pooled_cross: dict[tuple[str, str, str], list[np.ndarray]] = {}
+    individual_place: dict[
+        tuple[str, str, str, str], list[np.ndarray]
+    ] = {}
+    individual_cross: dict[
+        tuple[str, str, str, str, str, str], list[np.ndarray]
+    ] = {}
     trial_records: list[dict[str, Any]] = []
     comparison, comparison_label, transfer_family, pairs = (
         _dark_light.PANEL_E_CROSS_COMPARISONS[0]
@@ -1299,12 +1305,20 @@ def _build_panel_e_decoding_tables(
                     decoded_path=place_decoded_path,
                 )
             # The same complete Tsd was used above for each lap family; pool it once.
-            timestamps, place_error = legacy._align_absolute_error_with_times(
-                place["true"], place["decoded"]
+            timestamps, place_error = (
+                panel_helpers._align_absolute_error_with_times(
+                    place["true"],
+                    place["decoded"],
+                )
             )
             del timestamps
             finite_place = np.asarray(place_error, dtype=float) / path_length_cm
-            pooled_place[epoch_type].append(finite_place[np.isfinite(finite_place)])
+            finite_place = finite_place[np.isfinite(finite_place)]
+            pooled_place[epoch_type].append(finite_place)
+            individual_place.setdefault(
+                (animal_name, date, epoch_type, epoch),
+                [],
+            ).append(finite_place)
 
             cross_record, cross_root = _path_progression_record(
                 session,
@@ -1358,8 +1372,19 @@ def _build_panel_e_decoding_tables(
                     (epoch_type, str(comparison), str(comparison_label)),
                     [],
                 ).append(np.concatenate(cross_values))
+                individual_cross.setdefault(
+                    (
+                        animal_name,
+                        date,
+                        epoch_type,
+                        epoch,
+                        str(comparison),
+                        str(comparison_label),
+                    ),
+                    [],
+                ).append(np.concatenate(cross_values))
 
-    rows = []
+    pooled_rows = []
     for epoch_type, values in pooled_place.items():
         finite = [value for value in values if value.size]
         if finite:
@@ -1374,7 +1399,7 @@ def _build_panel_e_decoding_tables(
                 comparison_label="Place",
             )
             if row is not None:
-                rows.append(row)
+                pooled_rows.append(row)
     for (epoch_type, comparison, label), values in pooled_cross.items():
         row = _dark_light._summarize_panel_e_errors(
             np.concatenate(values),
@@ -1387,15 +1412,61 @@ def _build_panel_e_decoding_tables(
             comparison_label=label,
         )
         if row is not None:
-            rows.append(row)
+            pooled_rows.append(row)
+
+    individual_rows = []
+    for (
+        animal_name,
+        date,
+        epoch_type,
+        epoch,
+    ), values in individual_place.items():
+        finite = [value for value in values if value.size]
+        if finite:
+            row = _dark_light._summarize_panel_e_errors(
+                np.concatenate(finite),
+                animal_name=animal_name,
+                date=date,
+                epoch_type=epoch_type,
+                epoch=epoch,
+                analysis="place",
+                comparison="place",
+                comparison_label="Place",
+            )
+            if row is not None:
+                individual_rows.append(row)
+    for (
+        animal_name,
+        date,
+        epoch_type,
+        epoch,
+        comparison,
+        label,
+    ), values in individual_cross.items():
+        row = _dark_light._summarize_panel_e_errors(
+            np.concatenate(values),
+            animal_name=animal_name,
+            date=date,
+            epoch_type=epoch_type,
+            epoch=epoch,
+            analysis="cross_trajectory",
+            comparison=comparison,
+            comparison_label=label,
+        )
+        if row is not None:
+            individual_rows.append(row)
     return (
         pd.DataFrame.from_records(
-            rows,
+            pooled_rows,
+            columns=_dark_light.PANEL_E_ERROR_SUMMARY_COLUMNS,
+        ),
+        pd.DataFrame.from_records(
+            individual_rows,
             columns=_dark_light.PANEL_E_ERROR_SUMMARY_COLUMNS,
         ),
         pd.DataFrame.from_records(
             trial_records,
-            columns=legacy.PANEL_E_TRIAL_ERROR_TABLE_COLUMNS,
+            columns=panel_helpers.PANEL_E_TRIAL_ERROR_TABLE_COLUMNS,
         ),
     )
 

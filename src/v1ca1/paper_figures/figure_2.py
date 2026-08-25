@@ -16,7 +16,7 @@ from v1ca1.helper.wtrack import (
     get_wtrack_segment_edges,
     get_wtrack_total_length,
 )
-from v1ca1.paper_figures import figure_2_old as _figure_2
+from v1ca1.paper_figures import _figure_2_panels as _figure_2
 from v1ca1.paper_figures.datasets import (
     DatasetId,
     get_processed_datasets,
@@ -4105,8 +4105,8 @@ def build_panel_h_shift_profile_cache_metadata(
             "per_neuron"
         ),
         "display_summary": (
-            "mean_and_interquartile_range_across_neuron_level_profiles_at_"
-            "each_shift_with_zero_shift_median_and_interquartile_range"
+            "median_and_interquartile_range_across_neuron_level_profiles_at_"
+            "each_shift"
         ),
         "columns": list(PANEL_H_SHIFT_PROFILE_COLUMNS),
     }
@@ -7488,7 +7488,7 @@ def plot_panel_h_shift_profiles(axes: Sequence[Any], table: Any) -> None:
 
 
 def plot_population_shift_profile(ax: Any, table: Any) -> None:
-    """Plot an equal-neuron mean after averaging each neuron's valid paths."""
+    """Plot the neuron median after averaging each neuron's valid paths."""
     neuron_keys = (
         "animal_name",
         "date",
@@ -7529,9 +7529,9 @@ def plot_population_shift_profile(ax: Any, table: Any) -> None:
     grouped = neuron_profiles.groupby("normalized_shift", sort=True)[
         "rescaled_overlap"
     ]
-    mean_summary = grouped.mean()
-    shifts = np.asarray(mean_summary.index, dtype=float)
-    mean = np.asarray(mean_summary, dtype=float)
+    median_summary = grouped.median()
+    shifts = np.asarray(median_summary.index, dtype=float)
+    median = np.asarray(median_summary, dtype=float)
     lower = np.asarray(grouped.quantile(0.25), dtype=float)
     upper = np.asarray(grouped.quantile(0.75), dtype=float)
     zero_values = np.asarray(
@@ -7571,10 +7571,10 @@ def plot_population_shift_profile(ax: Any, table: Any) -> None:
         )
         ax.plot(
             shifts,
-            mean,
+            median,
             color="0.22",
             linewidth=1.2,
-            label="Mean across neurons",
+            label="Median across neurons",
         )
     ax.axvline(
         0.0,
@@ -7623,7 +7623,7 @@ def plot_population_shift_profile(ax: Any, table: Any) -> None:
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         order = [
-            labels.index("Mean across neurons"),
+            labels.index("Median across neurons"),
             labels.index("IQR across neurons"),
         ]
         ax.legend(

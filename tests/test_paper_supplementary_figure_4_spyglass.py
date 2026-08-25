@@ -6,234 +6,163 @@ import json
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import pytest
-import xarray as xr
 
 from v1ca1.paper_figures import supplementary_figure_4_spyglass as figure
 
 
-def _swap_dataset() -> xr.Dataset:
-    """Return visual and scalar held-out scores for two paths and units."""
-    models = np.asarray(["visual", figure.SCALAR_MODEL], dtype=str)
-    trajectories = np.asarray(["center_to_left", "center_to_right"], dtype=str)
-    units = np.asarray([11, 12], dtype=int)
-    ll_sum = np.asarray(
-        [
-            [[10.0, 5.0], [4.0, 4.0]],
-            [[8.0, 6.0], [4.0, 3.0]],
-        ]
-    )
-    bits = np.asarray(
-        [
-            [[1.0, 0.5], [0.4, 0.4]],
-            [[0.8, 0.6], [0.4, 0.3]],
-        ]
-    )
-    return xr.Dataset(
-        data_vars={
-            figure.swap_glm.PRIMARY_METRIC: (
-                ("model", "trajectory", "unit"),
-                bits - bits[[0]],
-            ),
-            figure._RAW_LL_SUM: (
-                ("model", "trajectory", "unit"),
-                ll_sum,
-            ),
-            figure._RAW_LL_BITS_PER_SPIKE: (
-                ("model", "trajectory", "unit"),
-                bits,
-            ),
-            figure._TEST_BIN_COUNT: (("trajectory",), np.asarray([7, 8])),
-            figure._SWAP_SEGMENT: (("trajectory",), np.asarray([3, 3])),
-        },
-        coords={"model": models, "trajectory": trajectories, "unit": units},
-    )
-
-
-def _empirical_summary() -> pd.DataFrame:
-    """Return pointwise additive rows plus a deliberately better decoy model."""
-    rows = []
-    pointwise_ll = {
-        ("center_to_left", 11): (9.0, 0.9, 7),
-        ("center_to_left", 12): (4.0, 0.4, 7),
-        ("center_to_right", 11): (5.0, 0.5, 8),
-        ("center_to_right", 12): (4.0, 0.4, 8),
-    }
-    for model in (
-        figure.EMPIRICAL_ADDITIVE_MODEL,
-        "empirical_segment_additive_delta",
-    ):
-        for (trajectory, unit), (ll_sum, bits, n_bins) in pointwise_ll.items():
-            if model != figure.EMPIRICAL_ADDITIVE_MODEL:
-                ll_sum, bits = 100.0, 10.0
-            rows.append(
-                {
-                    "animal_name": "L12",
-                    "date": "20240421",
-                    "region": figure.REGION,
-                    "dark_train_epoch": "08_r4",
-                    "light_train_epoch": figure.LIGHT_TRAIN_EPOCH,
-                    "light_test_epoch": figure.LIGHT_TEST_EPOCH,
-                    "trajectory": trajectory,
-                    "unit": unit,
-                    "model": model,
-                    "ll_sum": ll_sum,
-                    "ll_bits_per_spike": bits,
-                    "test_light_bin_count": n_bins,
-                    "score_qc_status": "valid",
-                    "unit_valid": True,
-                }
-            )
-    return pd.DataFrame.from_records(rows)
-
-
-def _mixed_inputs(tmp_path: Path) -> tuple[dict[Any, Any], dict[Any, Any]]:
-    """Return matched synthetic parent and empirical result dictionaries."""
-    key = ("L12", "20240421")
-    loaded = {
-        key: {
-            "dataset": _swap_dataset(),
-            "metadata": {
-                "dark_epoch": "08_r4",
-                "light_train_epoch": figure.LIGHT_TRAIN_EPOCH,
-                "light_test_epoch": figure.LIGHT_TEST_EPOCH,
-            },
-            "source_path": tmp_path / "swap-glm" / "manifest.parquet",
-        }
-    }
-    empirical = {
-        key: {
-            "summary": _empirical_summary(),
-            "source_path": tmp_path / "swap-tuning" / "manifest.parquet",
-        }
-    }
-    return loaded, empirical
-
-
 def _payload(run_dir: Path) -> dict[str, Any]:
-    """Return a minimal already-adapted Supplementary Figure 4 payload."""
     return {
         "run_dir": run_dir,
         "campaign": {"run_id": run_dir.name},
         "datasets": figure.EXPECTED_DATASETS,
         "regions": (figure.REGION,),
-        "scalar_swap_delta_table": pd.DataFrame({"kind": ["scalar"]}),
-        "mixed_full_additive_table": pd.DataFrame({"kind": ["pointwise"]}),
+        "cv_pca_table": pd.DataFrame({"condition": ["dark", "light"]}),
+        "decoding_data": {
+            "decoding_error": pd.DataFrame({"value": [1.0]}),
+            "individual_decoding_error": pd.DataFrame({"value": [2.0]}),
+            "decoding_significance_labels": {"L12": "*"},
+            "individual_decoding_significance_labels": {
+                animal_name: ("*", "**")
+                for animal_name, _date, _epoch in figure.EXPECTED_DATASETS
+            },
+        },
     }
 
 
-def test_adapter_uses_empirical_pointwise_additive_and_cli_defaults() -> None:
-    assert figure.EMPIRICAL_ADDITIVE_MODEL == (
-        "empirical_pointwise_additive_delta"
-    )
-    assert figure.EMPIRICAL_ADDITIVE_MODEL != figure.figure_3_adapter.ADDITIVE_MODEL
-
-    args = figure.parse_arguments(["--run-id", "run"])
-
-    assert args.run_id == "run"
-    assert args.output_format == "svg"
-    assert args.dpi == 300
-    with pytest.raises(SystemExit):
-        figure.parse_arguments(["--run-id", "run", "--replace-promoted-output"])
-
-
-def test_empirical_identity_is_checked_and_mapped_to_sorting_units() -> None:
-    selected = pd.DataFrame(
-        {
-            "spikesorting_merge_id": ["merge", "merge"],
-            "unit_id": [101, 102],
-            "stable_unit_id": ["merge:101", "merge:102"],
-            "group_unit_id": ["group:101", "group:102"],
-        }
-    )
-    summary = pd.concat(
-        [selected.iloc[[0]], selected.iloc[[1]], selected.iloc[[0]]],
-        ignore_index=True,
-    )
-    result = {"selected_units": selected, "summary": summary}
-
-    mapped = figure._map_empirical_summary(
-        result,
-        sorting_unit_by_nwb_id={"101": 11, "102": 12},
-    )
-
-    assert mapped["unit"].tolist() == [11, 12, 11]
-    changed = summary.copy()
-    changed.loc[0, "stable_unit_id"] = "wrong"
-    with pytest.raises(ValueError, match="identity disagree"):
-        figure._map_empirical_summary(
-            {"selected_units": selected, "summary": changed},
-            sorting_unit_by_nwb_id={"101": 11, "102": 12},
-        )
-
-
-def test_mixed_table_selects_pointwise_additive_not_decoy(tmp_path: Path) -> None:
-    loaded, empirical = _mixed_inputs(tmp_path)
-    summary = empirical[("L12", "20240421")]["summary"]
-    summary.loc[
-        summary["model"].eq(figure.EMPIRICAL_ADDITIVE_MODEL)
-        & summary["trajectory"].eq("center_to_left")
-        & summary["unit"].eq(11),
-        "unit_valid",
-    ] = False
-
-    table = figure._build_mixed_full_additive_table(loaded, empirical)
-
-    assert len(table) == 4
-    assert table["winner"].tolist() == ["V", "MS", "A", "tie"]
-    assert table["A_ll_sum"].tolist() == [9.0, 4.0, 5.0, 4.0]
-    assert np.allclose(
-        table["delta_V_minus_A_bits_per_spike"],
-        [0.1, 0.1, -0.1, 0.0],
-    )
-    assert np.allclose(
-        table["delta_V_minus_task_bits_per_spike"],
-        [0.2, -0.1, 0.0, 0.1],
-    )
-
-
-def test_offline_context_patches_only_active_loaders_and_restores(
+def test_cv_pca_bundle_maps_to_current_paired_table(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    payload = _payload(run_dir)
-    original_scalar = figure.canonical.load_panel_h_swap_delta_table
-    original_mixed = figure.canonical.load_mixed_glm_full_additive_delta_table
-
-    with figure._offline_sources(payload):
-        scalar = figure.canonical.load_panel_h_swap_delta_table(
-            data_root=run_dir,
-            datasets=payload["datasets"],
-            region=figure.REGION,
-            dark_epoch=None,
-            min_movement_firing_rate_hz=(
-                figure.figure_2_adapter.MINIMUM_MOVEMENT_FIRING_RATE_HZ
+    session = {
+        "animal_name": "L12",
+        "date": "20240421",
+        "epochs": {"dark": "08_r4"},
+        "artifacts": {
+            "cv_pca": [
+                {
+                    "region": figure.REGION,
+                    "dark_epoch": "08_r4",
+                    "light_epoch": figure.figure_2_adapter.LIGHT_EPOCH,
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        figure,
+        "_artifact_manifest_path",
+        lambda *_args, **_kwargs: tmp_path / "cv" / "manifest.parquet",
+    )
+    monkeypatch.setattr(
+        figure.cv_pca,
+        "load_cv_pca_artifact",
+        lambda _path: {
+            "animal_name": "L12",
+            "date": "20240421",
+            "region": figure.REGION,
+            "dark_epoch": "08_r4",
+            "light_epoch": figure.figure_2_adapter.LIGHT_EPOCH,
+            "artifact_origin": "computed",
+            "summary": pd.DataFrame(
+                {
+                    "condition": ["dark", "light"],
+                    "within_cv_participation_ratio": [2.0, 3.0],
+                    "n_units": [11, 11],
+                }
             ),
-            min_tuning_stability_correlation=(
-                figure.figure_2_adapter.MINIMUM_STABILITY_CORRELATION
-            ),
-            model_name=figure.SCALAR_MODEL,
-        )
-        mixed = figure.canonical.load_mixed_glm_full_additive_delta_table(
-            data_root=run_dir,
-            datasets=payload["datasets"],
-            region=figure.REGION,
-            dark_epoch=None,
-        )
-        assert scalar is payload["scalar_swap_delta_table"]
-        assert mixed is payload["mixed_full_additive_table"]
-
-    assert figure.canonical.load_panel_h_swap_delta_table is original_scalar
-    assert (
-        figure.canonical.load_mixed_glm_full_additive_delta_table
-        is original_mixed
+        },
     )
 
+    table = figure._build_cv_pca_table(tmp_path, [session])
 
-def test_render_is_atomic_and_writes_receipt(
+    assert table["condition"].tolist() == ["dark", "light"]
+    assert table["participation_ratio"].tolist() == [2.0, 3.0]
+    assert table["n_units"].tolist() == [11, 11]
+
+
+def test_decoding_builder_uses_fixed_permutation_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = pd.DataFrame({"summary": [1]})
+    individual_summary = pd.DataFrame({"individual_summary": [2]})
+    trial = pd.DataFrame({"trial": [3]})
+    calls: list[tuple[int, int]] = []
+    significance_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        figure.figure_2_adapter,
+        "_build_panel_e_decoding_tables",
+        lambda *_args, **_kwargs: (summary, individual_summary, trial),
+    )
+
+    def permutations(
+        _table: Any,
+        *,
+        n_permutations: int,
+        seed: int,
+    ) -> pd.DataFrame:
+        calls.append((n_permutations, seed))
+        return pd.DataFrame(
+            {
+                "animal_name": [
+                    animal_name
+                    for animal_name, _date, _epoch in figure.EXPECTED_DATASETS
+                    for _analysis in ("cross_trajectory", "place")
+                ],
+                "analysis": [
+                    analysis
+                    for _dataset in figure.EXPECTED_DATASETS
+                    for analysis in ("cross_trajectory", "place")
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        figure.canonical.figure_2,
+        "compute_panel_e_decoding_permutation_tests",
+        permutations,
+    )
+    def build_labels(
+        _result: Any,
+        *,
+        animal_names: tuple[str, ...],
+    ) -> tuple[str, str]:
+        names = tuple(animal_names)
+        significance_calls.append(names)
+        return "cross", "place"
+
+    monkeypatch.setattr(
+        figure.canonical.figure_2,
+        "build_panel_e_decoding_significance_labels",
+        build_labels,
+    )
+
+    output = figure._build_decoding_data(tmp_path, [], scratch_root=tmp_path)
+
+    assert output["decoding_error"] is summary
+    assert output["individual_decoding_error"] is individual_summary
+    assert output["decoding_trial_error"] is trial
+    expected_animals = tuple(
+        animal_name
+        for animal_name, _date, _epoch in figure.EXPECTED_DATASETS
+    )
+    assert significance_calls == [
+        expected_animals,
+        *((animal_name,) for animal_name in expected_animals),
+    ]
+    assert output["individual_decoding_significance_labels"] == {
+        animal_name: ("cross", "place") for animal_name in expected_animals
+    }
+    assert calls == [
+        (
+            figure.canonical.figure_2.DECODING_PERMUTATION_COUNT,
+            figure.canonical.figure_2.DECODING_PERMUTATION_SEED,
+        )
+    ]
+
+
+def test_context_and_atomic_render_use_only_two_payloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,40 +173,56 @@ def test_render_is_atomic_and_writes_receipt(
         json.dumps(payload["campaign"]),
         encoding="utf-8",
     )
-    output = figure.get_output_path(run_dir=run_dir)
+    original_decoding = figure.canonical.load_panel_a_decoding_data
+    original_cv = (
+        figure.canonical.supplementary_figure_5.load_panel_a_cv_pca_participation_ratio_table
+    )
+
+    with figure._offline_sources(payload):
+        assert figure.canonical.load_panel_a_decoding_data(
+            data_root=run_dir,
+            datasets=payload["datasets"],
+            region=figure.REGION,
+            light_epoch=None,
+            dark_epoch=None,
+            decoding_n_permutations=(
+                figure.canonical.figure_2.DECODING_PERMUTATION_COUNT
+            ),
+            decoding_permutation_seed=(
+                figure.canonical.figure_2.DECODING_PERMUTATION_SEED
+            ),
+        ) is payload["decoding_data"]
+        assert (
+            figure.canonical.supplementary_figure_5.load_panel_a_cv_pca_participation_ratio_table(
+                data_root=run_dir,
+                datasets=payload["datasets"],
+            )
+            is payload["cv_pca_table"]
+        )
+    assert figure.canonical.load_panel_a_decoding_data is original_decoding
+    assert (
+        figure.canonical.supplementary_figure_5.load_panel_a_cv_pca_participation_ratio_table
+        is original_cv
+    )
 
     def render(**kwargs: Any) -> Path:
-        scalar = figure.canonical.load_panel_h_swap_delta_table(
+        assert figure.canonical.load_panel_a_decoding_data(
             data_root=kwargs["data_root"],
             datasets=kwargs["datasets"],
             region=kwargs["region"],
+            light_epoch=kwargs["light_epoch"],
             dark_epoch=kwargs["dark_epoch"],
-            min_movement_firing_rate_hz=(
-                figure.figure_2_adapter.MINIMUM_MOVEMENT_FIRING_RATE_HZ
-            ),
-            min_tuning_stability_correlation=(
-                figure.figure_2_adapter.MINIMUM_STABILITY_CORRELATION
-            ),
-            model_name=figure.SCALAR_MODEL,
-        )
-        mixed = figure.canonical.load_mixed_glm_full_additive_delta_table(
-            data_root=kwargs["data_root"],
-            datasets=kwargs["datasets"],
-            region=kwargs["region"],
-            dark_epoch=kwargs["dark_epoch"],
-        )
-        assert scalar is payload["scalar_swap_delta_table"]
-        assert mixed is payload["mixed_full_additive_table"]
-        kwargs["output_path"].write_text("supp4", encoding="utf-8")
+            decoding_n_permutations=kwargs["decoding_n_permutations"],
+            decoding_permutation_seed=kwargs["decoding_permutation_seed"],
+        ) is payload["decoding_data"]
+        kwargs["output_path"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_path"].write_text("supp2", encoding="utf-8")
         return kwargs["output_path"]
 
     monkeypatch.setattr(figure.canonical, "make_supplementary_figure_4", render)
-
+    output = figure.get_output_path(run_dir=run_dir)
     assert figure.render_supplementary_figure_4(
         payload,
         output_path=output,
     ) == output
-    assert output.read_text(encoding="utf-8") == "supp4"
     assert figure.get_figure_provenance_path(output).is_file()
-    with pytest.raises(FileExistsError):
-        figure.render_supplementary_figure_4(payload, output_path=output)

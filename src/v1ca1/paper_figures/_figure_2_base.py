@@ -1109,6 +1109,9 @@ def plot_panel_b_dpp_overlap_with_schematic(
 def plot_panel_c_cross_and_place_decoding(
     ax: Any,
     decoding_error_table: Any,
+    *,
+    cross_ylim: tuple[float, float] | None = None,
+    place_ylim: tuple[float, float] | None = None,
 ) -> None:
     """Plot Figure 2 Panel C as compact cross-path and place decoding."""
     ax.set_xlim(0.0, 1.0)
@@ -1116,9 +1119,18 @@ def plot_panel_c_cross_and_place_decoding(
     ax.axis("off")
     cross_ax = ax.inset_axes(PANEL_C_CROSS_DECODING_AXIS_BOUNDS)
     place_ax = ax.inset_axes(PANEL_C_PLACE_DECODING_AXIS_BOUNDS)
-    _plot_panel_e_cross_axis(cross_ax, decoding_error_table)
+    _plot_panel_e_cross_axis(
+        cross_ax,
+        decoding_error_table,
+        ylim=cross_ylim,
+    )
     cross_ax.set_title("Cross-path\ndecoding", fontsize=5.8, pad=1.5)
-    _plot_panel_e_place_axis(place_ax, decoding_error_table, ylabel=None)
+    _plot_panel_e_place_axis(
+        place_ax,
+        decoding_error_table,
+        ylabel=None,
+        ylim=place_ylim,
+    )
     place_ax.set_title("Path-specific\nplace decoding", fontsize=5.8, pad=1.0)
 
 

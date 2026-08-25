@@ -1959,11 +1959,11 @@ def _missing_panel_quant_artifacts(
 
 
 def _raise_for_missing_panel_quant_artifacts(missing: Sequence[dict[str, str]]) -> None:
-    """Raise a concise error listing missing C/D/E artifacts."""
+    """Raise a concise error listing missing dark/light panel artifacts."""
     if not missing:
         return
     lines = [
-        "Missing required old Figure 3 C/D/E artifact(s). Run the listed analysis "
+        "Missing required dark/light panel artifact(s). Run the listed analysis "
         "workflow(s) first:"
     ]
     lines.extend(
@@ -3768,6 +3768,7 @@ def _plot_panel_e_place_axis(
     decoding_error_table: Any,
     *,
     ylabel: str | None = "Abs. norm. error",
+    ylim: tuple[float, float] | None = None,
 ) -> None:
     """Plot pooled within-epoch place-decoding median/IQR errors by epoch."""
     table = decoding_error_table[
@@ -3779,7 +3780,7 @@ def _plot_panel_e_place_axis(
         [PANEL_QUANT_EPOCH_LABELS[epoch_type] for epoch_type in PANEL_QUANT_EPOCH_ORDER]
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
-    ax.set_ylim(*PANEL_E_PLACE_ERROR_YLIM)
+    ax.set_ylim(*(PANEL_E_PLACE_ERROR_YLIM if ylim is None else ylim))
     ax.set_title("Route-specific\nplace decoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No place\ndecoding", ha="center", va="center")
@@ -3815,6 +3816,7 @@ def _plot_panel_e_cross_axis(
     decoding_error_table: Any,
     *,
     ylabel: str | None = "Abs. norm. error",
+    ylim: tuple[float, float] | None = None,
 ) -> None:
     """Plot pooled cross-trajectory TP decoding median/IQR errors by epoch."""
     table = decoding_error_table[
@@ -3827,10 +3829,13 @@ def _plot_panel_e_cross_axis(
         [PANEL_QUANT_EPOCH_LABELS[epoch_type] for epoch_type in PANEL_QUANT_EPOCH_ORDER]
     )
     ax.set_xlim(0.5, len(PANEL_QUANT_EPOCH_ORDER) + 0.5)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.set_title("Cross-route\ndecoding", fontsize=5.8, pad=1.5)
     if table.empty:
         ax.text(0.5, 0.5, "No cross-route\ndecoding", ha="center", va="center")
-        _set_panel_e_error_ylim(ax, table)
+        if ylim is None:
+            _set_panel_e_error_ylim(ax, table)
         _style_panel_e_error_axis(ax, ylabel=ylabel)
         return
 
@@ -3856,7 +3861,8 @@ def _plot_panel_e_cross_axis(
         )
 
     _add_panel_e_error_summary_text(ax, table)
-    _set_panel_e_error_ylim(ax, table)
+    if ylim is None:
+        _set_panel_e_error_ylim(ax, table)
     _style_panel_e_error_axis(ax, ylabel=ylabel)
 
 

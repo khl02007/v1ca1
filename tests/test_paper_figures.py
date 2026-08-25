@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 import v1ca1.paper_figures.datasets as datasets_module
-import v1ca1.paper_figures.supplementary_figure_4 as supp_figure_4_module
-import v1ca1.paper_figures.supplementary_figure_3 as supp_figure_3_module
+import v1ca1.paper_figures.supplementary_figure_6 as supp_figure_4_module
+import v1ca1.paper_figures.supplementary_figure_5 as supp_figure_3_module
 from v1ca1.paper_figures import (
     DEFAULT_DPI,
     PAPER_RC_PARAMS,

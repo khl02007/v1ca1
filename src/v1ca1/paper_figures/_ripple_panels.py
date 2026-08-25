@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""Share ripple-analysis data loaders and panel plotters."""
 
-"""Generate the previous Figure 3 ripple-modulation and GLM panels."""
+from __future__ import annotations
 
 import argparse
 import json
@@ -21,7 +21,6 @@ from v1ca1.helper.session import (
 )
 from v1ca1.paper_figures.datasets import (
     DatasetId,
-    get_processed_datasets,
     make_dataset_id,
     make_figure_3_epoch_ids,
     normalize_dataset_id,
@@ -29,7 +28,6 @@ from v1ca1.paper_figures.datasets import (
 from v1ca1.paper_figures._figure_3_shared import (
     DARK_MOVEMENT_FR_CACHE_COLUMNS,
     DARK_MOVEMENT_FR_CACHE_VERSION,
-    DEFAULT_FIGURE_HEIGHT_MM,
     DEFAULT_FIGURE_WIDTH_MM,
     load_dark_movement_firing_rate_cache,
     save_dark_movement_firing_rate_cache,
@@ -60,16 +58,12 @@ if TYPE_CHECKING:
 
 DEFAULT_OUTPUT_DIR = Path("paper_figures") / "output"
 DEFAULT_FIGURE_CACHE_DIR = DEFAULT_OUTPUT_DIR / "cache"
-DEFAULT_OUTPUT_NAME = "figure_3_old"
-LEGACY_CACHE_FIGURE_NAME = "figure_3"
+RIPPLE_CACHE_FIGURE_NAME = "figure_3"
 DEFAULT_OUTPUT_FORMAT = "pdf"
 DEFAULT_EXAMPLE_DATASET = ("L14", "20240611", "08_r4")
 DEFAULT_XCORR_DATASET = ("L15", "20241121", "02_r1")
 DEFAULT_PANEL_B_SCHEMATIC_DATASET = ("L15", "20241121", "02_r1")
 FIGURE_FORMATS = ("pdf", "svg", "png", "tiff")
-PANEL_ABC_WIDTH_RATIOS = (1.0, 1.0, 2.0)
-PANEL_BOTTOM_WIDTH_RATIOS = (1.0, 4.0)
-PANEL_ABC_HEADER_LABEL_X_OFFSETS = (-0.18, -0.08, 0.0)
 PANEL_D_XLABEL_Y = -0.22
 PANEL_D_SINGLE_EPOCH_SIMILARITY_LEFT = 0.92
 PANEL_D_SINGLE_EPOCH_SIMILARITY_WIDTH = 0.18
@@ -189,6 +183,10 @@ SIGNIFICANCE_P_VALUE = 0.05
 PANEL_C_SIGNIFICANCE_P_VALUE = 0.05
 PANEL_BC_SIGNIFICANT_UNIT_COLOR = REGION_COLORS["v1"]
 PANEL_C_SOURCE_COMPARISON_COLOR = PANEL_BC_SIGNIFICANT_UNIT_COLOR
+PANEL_C_SOURCE_MIXED_MODEL_PERMUTATIONS = 100_000
+PANEL_C_SOURCE_MIXED_MODEL_RANDOM_SEED = 20260820
+PANEL_C_SOURCE_MIXED_MODEL_PERMUTATION_BATCH_SIZE = 1_000
+PANEL_C_SOURCE_MIXED_MODEL_PROFILE_ITERATIONS = 45
 PANEL_D_SIGNIFICANCE_P_VALUE = PANEL_C_SIGNIFICANCE_P_VALUE
 PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ = 0.5
 PANEL_D_DARK_ACTIVITY_COLORS = {
@@ -201,13 +199,19 @@ PANEL_E_SINGLE_EPOCH_COLUMN_BOUNDS = (
     (0.0, 0.0),
 )
 PANEL_E_SINGLE_EPOCH_AXIS_VERTICAL_BOUNDS = (0.17, 0.72)
-PANEL_E_WIDTH_FRACTION = 0.60
 PANEL_E_DPPI_AXIS_BOUNDS = (0.65, 0.17, 0.25, 0.72)
 PANEL_E_ACTIVITY_NULL_PERMUTATIONS = 1_000_000
 PANEL_E_ACTIVITY_NULL_RANDOM_SEED = 20260710
 PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE = 1_000
+PANEL_E_MIXED_MODEL_PERMUTATIONS = 100_000
+PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE = 1_000
 PANEL_F_DPPI_NULL_PERMUTATIONS = 20_000
 PANEL_F_DPPI_NULL_RANDOM_SEED = 59
+PANEL_F_DPPI_MIXED_MODEL_PERMUTATIONS = 100_000
+PANEL_F_DPPI_MIXED_MODEL_PERMUTATION_BATCH_SIZE = 1_000
+PANEL_F_DPPI_MIXED_MODEL_PROFILE_ITERATIONS = 45
+PANEL_F_DPPI_TEST_MEAN_RANK = "mean_rank_permutation"
+PANEL_F_DPPI_TEST_MIXED_MODEL = "animal_random_intercept_mixed_model"
 PANEL_F_DPPI_HISTOGRAM_BIN_EDGES = np.linspace(0.0, 1.0, 11)
 PANEL_F_DPPI_HISTOGRAM_ALPHA = 0.65
 PANEL_E_DPPI_SIGNIFICANCE_GAP_POINTS = 2.0
@@ -1492,7 +1496,7 @@ def build_panel_b_schematic_cache_metadata(
     """Return metadata identifying the cached panel B real-spike schematic example."""
     return {
         "cache_version": PANEL_B_SCHEMATIC_CACHE_VERSION,
-        "figure": LEGACY_CACHE_FIGURE_NAME,
+        "figure": RIPPLE_CACHE_FIGURE_NAME,
         "panel": "B",
         "artifact": "ripple_glm_schematic_spikes",
         "data_root": str(Path(data_root)),
@@ -2430,7 +2434,7 @@ def build_dark_movement_firing_rate_cache_metadata(
     """Return metadata that identifies one dark movement firing-rate cache."""
     return {
         "cache_version": DARK_MOVEMENT_FR_CACHE_VERSION,
-        "figure": LEGACY_CACHE_FIGURE_NAME,
+        "figure": RIPPLE_CACHE_FIGURE_NAME,
         "panel": "D",
         "artifact": "dark_movement_firing_rate",
         "data_root": str(Path(data_root)),
@@ -6550,6 +6554,875 @@ def compute_dark_active_dppi_mean_rank_permutation(
     }
 
 
+def _evaluate_random_intercept_profile_likelihood(
+    transformed_variance_ratio: np.ndarray,
+    selected_y_sums: np.ndarray,
+    *,
+    group_sizes: np.ndarray,
+    selected_counts: np.ndarray,
+    group_y_sums: np.ndarray,
+    group_y_squared_sums: np.ndarray,
+    n_observations: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate profiled ML fits for random-intercept model labelings."""
+    variance_ratio = transformed_variance_ratio / (
+        1.0 - transformed_variance_ratio
+    )
+    denominators = 1.0 + variance_ratio[:, np.newaxis] * group_sizes
+    covariance_terms = variance_ratio[:, np.newaxis] / denominators
+
+    intercept_crossproduct = np.sum(group_sizes / denominators, axis=1)
+    predictor_crossproduct = np.sum(selected_counts / denominators, axis=1)
+    predictor_sum_of_squares = np.sum(
+        selected_counts - covariance_terms * selected_counts**2,
+        axis=1,
+    )
+    intercept_y_crossproduct = np.sum(group_y_sums / denominators, axis=1)
+    predictor_y_crossproduct = np.sum(
+        selected_y_sums
+        - covariance_terms * selected_counts * group_y_sums,
+        axis=1,
+    )
+    y_sum_of_squares = np.sum(
+        group_y_squared_sums - covariance_terms * group_y_sums**2,
+        axis=1,
+    )
+
+    determinant = (
+        intercept_crossproduct * predictor_sum_of_squares
+        - predictor_crossproduct**2
+    )
+    intercept = (
+        predictor_sum_of_squares * intercept_y_crossproduct
+        - predictor_crossproduct * predictor_y_crossproduct
+    ) / determinant
+    coefficient = (
+        intercept_crossproduct * predictor_y_crossproduct
+        - predictor_crossproduct * intercept_y_crossproduct
+    ) / determinant
+    residual_sum_of_squares = y_sum_of_squares - (
+        intercept_y_crossproduct * intercept
+        + predictor_y_crossproduct * coefficient
+    )
+    residual_variance = residual_sum_of_squares / float(n_observations)
+    objective = (
+        float(n_observations) * np.log(residual_variance)
+        + np.sum(np.log(denominators), axis=1)
+    )
+    return objective, coefficient, residual_variance
+
+
+def _profile_random_intercept_mixed_model_coefficients(
+    selected_y_sums: np.ndarray,
+    *,
+    group_sizes: np.ndarray,
+    selected_counts: np.ndarray,
+    group_y_sums: np.ndarray,
+    group_y_squared_sums: np.ndarray,
+    n_observations: int,
+    n_iterations: int = PANEL_F_DPPI_MIXED_MODEL_PROFILE_ITERATIONS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return profiled-ML coefficients and variances for many labelings."""
+    n_models = int(selected_y_sums.shape[0])
+    lower = np.zeros(n_models, dtype=float)
+    upper = np.full(n_models, 1.0 - 1e-10, dtype=float)
+    golden_ratio = (np.sqrt(5.0) - 1.0) / 2.0
+    likelihood_kwargs = {
+        "group_sizes": group_sizes,
+        "selected_counts": selected_counts,
+        "group_y_sums": group_y_sums,
+        "group_y_squared_sums": group_y_squared_sums,
+        "n_observations": n_observations,
+    }
+    for _iteration in range(int(n_iterations)):
+        left_probe = upper - golden_ratio * (upper - lower)
+        right_probe = lower + golden_ratio * (upper - lower)
+        left_objective = _evaluate_random_intercept_profile_likelihood(
+            left_probe,
+            selected_y_sums,
+            **likelihood_kwargs,
+        )[0]
+        right_objective = _evaluate_random_intercept_profile_likelihood(
+            right_probe,
+            selected_y_sums,
+            **likelihood_kwargs,
+        )[0]
+        choose_left = left_objective <= right_objective
+        upper = np.where(choose_left, right_probe, upper)
+        lower = np.where(choose_left, lower, left_probe)
+
+    transformed_variance_ratio = (lower + upper) / 2.0
+    objective, coefficient, residual_variance = (
+        _evaluate_random_intercept_profile_likelihood(
+            transformed_variance_ratio,
+            selected_y_sums,
+            **likelihood_kwargs,
+        )
+    )
+    zero_ratio = np.zeros(n_models, dtype=float)
+    zero_objective, zero_coefficient, zero_residual_variance = (
+        _evaluate_random_intercept_profile_likelihood(
+            zero_ratio,
+            selected_y_sums,
+            **likelihood_kwargs,
+        )
+    )
+    use_zero_ratio = zero_objective <= objective
+    coefficient = np.where(use_zero_ratio, zero_coefficient, coefficient)
+    residual_variance = np.where(
+        use_zero_ratio,
+        zero_residual_variance,
+        residual_variance,
+    )
+    variance_ratio = transformed_variance_ratio / (
+        1.0 - transformed_variance_ratio
+    )
+    variance_ratio = np.where(use_zero_ratio, 0.0, variance_ratio)
+    return coefficient, variance_ratio, residual_variance
+
+
+def _compute_within_animal_mixed_model_permutation(
+    outcome_values: np.ndarray,
+    predictable: np.ndarray,
+    animal_names: np.ndarray,
+    *,
+    n_permutations: int,
+    random_seed: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Shuffle labels within animal and refit the random-intercept LMM."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
+    unique_animals = np.unique(animal_names)
+    group_indices = [
+        np.flatnonzero(animal_names == animal_name)
+        for animal_name in unique_animals
+    ]
+    group_outcomes = [outcome_values[indices] for indices in group_indices]
+    group_sizes = np.asarray(
+        [values.size for values in group_outcomes],
+        dtype=float,
+    )
+    selected_counts_integer = np.asarray(
+        [np.sum(predictable[indices]) for indices in group_indices],
+        dtype=int,
+    )
+    selected_counts = selected_counts_integer.astype(float)
+    group_y_sums = np.asarray(
+        [np.sum(values) for values in group_outcomes],
+        dtype=float,
+    )
+    group_y_squared_sums = np.asarray(
+        [np.sum(values**2) for values in group_outcomes],
+        dtype=float,
+    )
+    observed_selected_y_sums = np.asarray(
+        [
+            np.sum(outcome_values[indices][predictable[indices]])
+            for indices in group_indices
+        ],
+        dtype=float,
+    )[np.newaxis, :]
+    profile_kwargs = {
+        "group_sizes": group_sizes,
+        "selected_counts": selected_counts,
+        "group_y_sums": group_y_sums,
+        "group_y_squared_sums": group_y_squared_sums,
+        "n_observations": int(outcome_values.size),
+    }
+    observed_coefficient, observed_variance_ratio, observed_residual_variance = (
+        _profile_random_intercept_mixed_model_coefficients(
+            observed_selected_y_sums,
+            **profile_kwargs,
+        )
+    )
+
+    rng = np.random.default_rng(random_seed)
+    null_coefficients = np.empty(int(n_permutations), dtype=float)
+    for start in range(0, int(n_permutations), int(batch_size)):
+        stop = min(start + int(batch_size), int(n_permutations))
+        current_batch_size = stop - start
+        selected_y_sums = np.empty(
+            (current_batch_size, len(group_outcomes)),
+            dtype=float,
+        )
+        for group_index, (values, n_selected) in enumerate(
+            zip(group_outcomes, selected_counts_integer, strict=True)
+        ):
+            if n_selected == 0:
+                selected_y_sums[:, group_index] = 0.0
+                continue
+            if n_selected == values.size:
+                selected_y_sums[:, group_index] = np.sum(values)
+                continue
+            random_keys = rng.random((current_batch_size, values.size))
+            selected_indices = np.argpartition(
+                random_keys,
+                int(n_selected) - 1,
+                axis=1,
+            )[:, : int(n_selected)]
+            selected_y_sums[:, group_index] = values[selected_indices].sum(axis=1)
+        null_coefficients[start:stop] = (
+            _profile_random_intercept_mixed_model_coefficients(
+                selected_y_sums,
+                **profile_kwargs,
+            )[0]
+        )
+
+    return {
+        "observed_coefficient": float(observed_coefficient[0]),
+        "observed_variance_ratio": float(observed_variance_ratio[0]),
+        "observed_residual_variance": float(observed_residual_variance[0]),
+        "null_coefficients": null_coefficients,
+    }
+
+
+def _fit_within_animal_permuted_random_intercept_lmm(
+    outcome_values: np.ndarray,
+    predictor: np.ndarray,
+    animal_names: np.ndarray,
+    *,
+    n_permutations: int,
+    random_seed: int,
+    permutation_batch_size: int,
+) -> dict[str, Any]:
+    """Fit one random-intercept LMM and test it by within-animal shuffling."""
+    import pandas as pd
+    import warnings
+
+    import statsmodels.formula.api as smf
+
+    empty_result = {
+        "coefficient": float("nan"),
+        "standard_error": float("nan"),
+        "z_value": float("nan"),
+        "p_value": float("nan"),
+        "wald_p_value": float("nan"),
+        "confidence_interval": (float("nan"), float("nan")),
+        "random_intercept_variance": float("nan"),
+        "residual_variance": float("nan"),
+        "converged": False,
+        "fit_warnings": [],
+        "permutation_observed_coefficient": float("nan"),
+        "permutation_extreme_count": 0,
+        "permutation_null_mean": float("nan"),
+        "permutation_null_standard_deviation": float("nan"),
+        "null_coefficients": np.asarray([], dtype=float),
+    }
+    outcome_values = np.asarray(outcome_values, dtype=float)
+    predictor = np.asarray(predictor, dtype=bool)
+    animal_names = np.asarray(animal_names, dtype=str)
+    valid = np.isfinite(outcome_values)
+    outcome_values = outcome_values[valid]
+    predictor = predictor[valid]
+    animal_names = animal_names[valid]
+    if (
+        outcome_values.size == 0
+        or not np.any(predictor)
+        or not np.any(~predictor)
+        or np.unique(animal_names).size < 2
+    ):
+        return empty_result
+
+    model_table = pd.DataFrame(
+        {
+            "outcome": outcome_values,
+            "predictor": predictor.astype(float),
+            "animal_name": animal_names,
+        }
+    )
+    model = smf.mixedlm(
+        "outcome ~ predictor",
+        model_table,
+        groups=model_table["animal_name"],
+        re_formula="1",
+    )
+    try:
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            fitted = model.fit(reml=False, method="powell", disp=False)
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        return {
+            **empty_result,
+            "fit_warnings": [f"{type(exc).__name__}: {exc}"],
+        }
+
+    fit_warnings = [str(warning.message) for warning in caught_warnings]
+    converged = bool(fitted.converged)
+    coefficient = float(fitted.fe_params["predictor"])
+    standard_error = float(fitted.bse_fe["predictor"])
+    z_value = (
+        coefficient / standard_error
+        if np.isfinite(standard_error) and standard_error > 0.0
+        else float("nan")
+    )
+    wald_p_value = (
+        float(fitted.pvalues["predictor"])
+        if converged
+        else float("nan")
+    )
+    confidence_interval = fitted.conf_int().loc["predictor"].to_numpy(dtype=float)
+    random_effect_covariance = np.asarray(fitted.cov_re, dtype=float)
+    fitted_result = {
+        **empty_result,
+        "coefficient": coefficient,
+        "standard_error": standard_error,
+        "z_value": float(z_value),
+        "wald_p_value": wald_p_value,
+        "confidence_interval": tuple(confidence_interval.tolist()),
+        "random_intercept_variance": float(random_effect_covariance[0, 0]),
+        "residual_variance": float(fitted.scale),
+        "converged": converged,
+        "fit_warnings": fit_warnings,
+    }
+    if not converged:
+        return fitted_result
+
+    permutation = _compute_within_animal_mixed_model_permutation(
+        outcome_values,
+        predictor,
+        animal_names,
+        n_permutations=int(n_permutations),
+        random_seed=int(random_seed),
+        batch_size=int(permutation_batch_size),
+    )
+    permutation_observed_coefficient = float(
+        permutation["observed_coefficient"]
+    )
+    if not np.isclose(
+        permutation_observed_coefficient,
+        coefficient,
+        rtol=5e-5,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            "Profiled and statsmodels mixed-model coefficients do not agree: "
+            f"{permutation_observed_coefficient} versus {coefficient}."
+        )
+    null_coefficients = np.asarray(
+        permutation["null_coefficients"],
+        dtype=float,
+    )
+    permutation_extreme_count = int(
+        np.sum(
+            np.abs(null_coefficients)
+            >= abs(permutation_observed_coefficient)
+        )
+    )
+    p_value = float(
+        (permutation_extreme_count + 1.0)
+        / (float(n_permutations) + 1.0)
+    )
+    return {
+        **fitted_result,
+        "p_value": p_value,
+        "permutation_observed_coefficient": permutation_observed_coefficient,
+        "permutation_extreme_count": permutation_extreme_count,
+        "permutation_null_mean": float(np.mean(null_coefficients)),
+        "permutation_null_standard_deviation": float(
+            np.std(null_coefficients)
+        ),
+        "null_coefficients": null_coefficients,
+    }
+
+
+def compute_dark_activity_significance_fraction_mixed_model_permutation(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_MIXED_MODEL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    permutation_batch_size: int = (
+        PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
+) -> dict[str, Any]:
+    """Test dark-activity enrichment with a permuted linear-probability LMM."""
+    base_statistics = compute_dark_activity_significance_fraction_permutation(
+        payload,
+        epoch_type=epoch_type,
+        p_value_threshold=p_value_threshold,
+        n_permutations=1,
+        random_seed=random_seed,
+    )
+    empty_model_result = {
+        "test_name": "within_animal_permuted_linear_probability_mixed_model",
+        "formula": "dark_active ~ glm_significant + (1 | animal_name)",
+        "alternative": "two-sided",
+        "p_value_method": "empirical_absolute_coefficient",
+        "fit_method": "maximum_likelihood_powell",
+        "permutation_fit_method": "profile_maximum_likelihood",
+        "permutation_scheme": "glm_significance_labels_shuffled_within_animal",
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "permutation_batch_size": int(permutation_batch_size),
+    }
+    if int(base_statistics.get("n_total", 0)) == 0:
+        return {**base_statistics, **empty_model_result, "p_value": float("nan")}
+
+    glm_significant = []
+    dark_active = []
+    animal_names = []
+    for row in base_statistics.get("per_dataset", []):
+        animal_name = str(row["animal_name"])
+        n_active = int(row["n_active"])
+        n_inactive = int(row["n_inactive"])
+        n_active_significant = int(row["n_active_significant"])
+        n_inactive_significant = int(row["n_inactive_significant"])
+        glm_significant.extend(
+            [1.0] * n_active_significant
+            + [0.0] * (n_active - n_active_significant)
+        )
+        dark_active.extend([True] * n_active)
+        animal_names.extend([animal_name] * n_active)
+        glm_significant.extend(
+            [1.0] * n_inactive_significant
+            + [0.0] * (n_inactive - n_inactive_significant)
+        )
+        dark_active.extend([False] * n_inactive)
+        animal_names.extend([animal_name] * n_inactive)
+
+    model_statistics = _fit_within_animal_permuted_random_intercept_lmm(
+        np.asarray(dark_active, dtype=float),
+        np.asarray(glm_significant, dtype=bool),
+        np.asarray(animal_names, dtype=str),
+        n_permutations=int(n_permutations),
+        random_seed=int(random_seed),
+        permutation_batch_size=int(permutation_batch_size),
+    )
+    return {
+        **base_statistics,
+        **empty_model_result,
+        **model_statistics,
+        "extreme_count": int(model_statistics["permutation_extreme_count"]),
+    }
+
+
+def compute_dark_activity_devexp_mixed_model_permutation(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_MIXED_MODEL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    permutation_batch_size: int = (
+        PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
+) -> dict[str, Any]:
+    """Test significant-cell deviance with a within-animal-permuted LMM."""
+    base_statistics = compute_dark_activity_devexp_median_permutation(
+        payload,
+        epoch_type=epoch_type,
+        p_value_threshold=p_value_threshold,
+        n_permutations=1,
+        random_seed=random_seed,
+        batch_size=1,
+    )
+    model_metadata = {
+        "test_name": "within_animal_permuted_random_intercept_mixed_model",
+        "formula": "ripple_devexp_mean ~ dark_active + (1 | animal_name)",
+        "alternative": "two-sided",
+        "p_value_method": "empirical_absolute_coefficient",
+        "fit_method": "maximum_likelihood_powell",
+        "permutation_fit_method": "profile_maximum_likelihood",
+        "permutation_scheme": "dark_activity_labels_shuffled_within_animal",
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "permutation_batch_size": int(permutation_batch_size),
+    }
+    table = payload.get("devexp_table")
+    if table is None or not len(table):
+        return {**base_statistics, **model_metadata, "p_value": float("nan")}
+
+    import pandas as pd
+
+    epoch_rows = table[
+        table["epoch_type"].astype(str) == str(epoch_type)
+    ].copy()
+    devexp_values = pd.to_numeric(
+        epoch_rows["ripple_devexp_mean"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    p_values = pd.to_numeric(
+        epoch_rows["ripple_devexp_p_value"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    dark_rates_hz = pd.to_numeric(
+        epoch_rows["dark_firing_rate_hz"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    significant = (
+        np.isfinite(devexp_values)
+        & np.isfinite(p_values)
+        & np.isfinite(dark_rates_hz)
+        & (p_values < float(p_value_threshold))
+    )
+    dark_activity_threshold_hz = float(
+        payload.get(
+            "dark_activity_threshold_hz",
+            PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+        )
+    )
+    model_statistics = _fit_within_animal_permuted_random_intercept_lmm(
+        devexp_values[significant],
+        dark_rates_hz[significant] >= dark_activity_threshold_hz,
+        epoch_rows.loc[significant, "animal_name"].astype(str).to_numpy(),
+        n_permutations=int(n_permutations),
+        random_seed=int(random_seed),
+        permutation_batch_size=int(permutation_batch_size),
+    )
+    return {
+        **base_statistics,
+        **model_metadata,
+        **model_statistics,
+        "extreme_count": int(model_statistics["permutation_extreme_count"]),
+    }
+
+
+def compute_glm_dark_activity_mixed_model_statistics(
+    payload: Mapping[str, Any],
+    *,
+    epoch_types: Sequence[str] = PANEL_D_EPOCH_ORDER,
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    n_permutations: int = PANEL_E_MIXED_MODEL_PERMUTATIONS,
+    random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+    permutation_batch_size: int = (
+        PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
+) -> dict[str, dict[str, Any]]:
+    """Return the mixed-model permutation tests used by Figure 4E."""
+    return {
+        str(epoch_type): {
+            "devexp": compute_dark_activity_devexp_mixed_model_permutation(
+                payload,
+                epoch_type=str(epoch_type),
+                p_value_threshold=p_value_threshold,
+                n_permutations=n_permutations,
+                random_seed=random_seed,
+                permutation_batch_size=permutation_batch_size,
+            ),
+            "significant_fraction": (
+                compute_dark_activity_significance_fraction_mixed_model_permutation(
+                    payload,
+                    epoch_type=str(epoch_type),
+                    p_value_threshold=p_value_threshold,
+                    n_permutations=n_permutations,
+                    random_seed=random_seed,
+                    permutation_batch_size=permutation_batch_size,
+                )
+            ),
+        }
+        for epoch_type in epoch_types
+    }
+
+
+def compute_dark_active_dppi_predictability_mixed_model(
+    payload: Mapping[str, Any],
+    *,
+    epoch_type: str = "light",
+    p_value_threshold: float = PANEL_D_SIGNIFICANCE_P_VALUE,
+    logit_clip_epsilon: float = 1e-6,
+    n_permutations: int = PANEL_F_DPPI_MIXED_MODEL_PERMUTATIONS,
+    random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
+    permutation_batch_size: int = (
+        PANEL_F_DPPI_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
+) -> dict[str, Any]:
+    """Test predictability with a within-animal-permuted random-intercept LMM."""
+    if not 0.0 < float(logit_clip_epsilon) < 0.5:
+        raise ValueError("logit_clip_epsilon must be between zero and 0.5.")
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if permutation_batch_size <= 0:
+        raise ValueError("permutation_batch_size must be positive.")
+
+    empty_result = {
+        "test_name": "within_animal_permuted_random_intercept_mixed_model",
+        "formula": "logit_dppi ~ predictable + (1 | animal_name)",
+        "alternative": "two-sided",
+        "p_value_method": "empirical_absolute_coefficient",
+        "fit_method": "maximum_likelihood_bfgs",
+        "permutation_fit_method": "profile_maximum_likelihood",
+        "permutation_scheme": "predictability_labels_shuffled_within_animal",
+        "predictable_definition": f"ripple_devexp_p_value < {p_value_threshold:g}",
+        "comparison_group": "all_other_dark_active_finite_dppi_cells",
+        "logit_clip_epsilon": float(logit_clip_epsilon),
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "permutation_batch_size": int(permutation_batch_size),
+        "n_reference": 0,
+        "n_selected": 0,
+        "n_nonselected": 0,
+        "n_animals": 0,
+        "coefficient": float("nan"),
+        "standard_error": float("nan"),
+        "z_value": float("nan"),
+        "p_value": float("nan"),
+        "wald_p_value": float("nan"),
+        "permutation_observed_coefficient": float("nan"),
+        "permutation_extreme_count": 0,
+        "permutation_null_mean": float("nan"),
+        "permutation_null_standard_deviation": float("nan"),
+        "confidence_interval": (float("nan"), float("nan")),
+        "random_intercept_variance": float("nan"),
+        "residual_variance": float("nan"),
+        "converged": False,
+        "fit_warnings": [],
+        "per_animal": [],
+        "reference_values": np.asarray([], dtype=float),
+        "selected_values": np.asarray([], dtype=float),
+        "nonselected_values": np.asarray([], dtype=float),
+        "null_coefficients": np.asarray([], dtype=float),
+    }
+    reference_table = payload.get("dark_active_dppi_reference_table")
+    devexp_table = payload.get("devexp_table")
+    if reference_table is None or devexp_table is None:
+        return empty_result
+    if not len(reference_table) or not len(devexp_table):
+        return empty_result
+
+    import pandas as pd
+
+    key_columns = ["animal_name", "date", "unit", "dark_epoch"]
+    required_reference_columns = key_columns + ["same_turn_tuning_similarity"]
+    required_devexp_columns = key_columns + [
+        "epoch_type",
+        "same_turn_tuning_similarity",
+        "ripple_devexp_p_value",
+        "dark_firing_rate_hz",
+    ]
+    missing_reference_columns = sorted(
+        set(required_reference_columns).difference(reference_table.columns)
+    )
+    missing_devexp_columns = sorted(
+        set(required_devexp_columns).difference(devexp_table.columns)
+    )
+    if missing_reference_columns:
+        raise ValueError(
+            "Dark-active DPPI reference table is missing columns "
+            f"{missing_reference_columns!r}."
+        )
+    if missing_devexp_columns:
+        raise ValueError(
+            f"Deviance-explained table is missing columns {missing_devexp_columns!r}."
+        )
+
+    reference_rows = reference_table[required_reference_columns].copy()
+    reference_rows["same_turn_tuning_similarity"] = pd.to_numeric(
+        reference_rows["same_turn_tuning_similarity"],
+        errors="coerce",
+    )
+    reference_rows = reference_rows[
+        np.isfinite(
+            reference_rows["same_turn_tuning_similarity"].to_numpy(dtype=float)
+        )
+    ].copy()
+    if reference_rows.duplicated(key_columns).any():
+        raise ValueError(
+            "Dark-active DPPI reference table contains duplicate neuron IDs."
+        )
+
+    epoch_rows = devexp_table[
+        devexp_table["epoch_type"].astype(str) == str(epoch_type)
+    ].copy()
+    similarity_values = pd.to_numeric(
+        epoch_rows["same_turn_tuning_similarity"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    p_values = pd.to_numeric(
+        epoch_rows["ripple_devexp_p_value"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    dark_rates_hz = pd.to_numeric(
+        epoch_rows["dark_firing_rate_hz"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    dark_activity_threshold_hz = float(
+        payload.get(
+            "dark_activity_threshold_hz",
+            PANEL_D_DARK_ACTIVITY_THRESHOLD_HZ,
+        )
+    )
+    selected = (
+        np.isfinite(similarity_values)
+        & np.isfinite(p_values)
+        & np.isfinite(dark_rates_hz)
+        & (p_values < float(p_value_threshold))
+        & (dark_rates_hz >= dark_activity_threshold_hz)
+    )
+    selected_keys = epoch_rows.loc[selected, key_columns].copy()
+    if selected_keys.duplicated(key_columns).any():
+        raise ValueError(
+            "Deviance-explained table contains duplicate predictable neuron IDs."
+        )
+
+    reference_index = pd.MultiIndex.from_frame(reference_rows[key_columns])
+    selected_index = pd.MultiIndex.from_frame(selected_keys[key_columns])
+    missing_selected = selected_index.difference(reference_index)
+    if len(missing_selected):
+        raise ValueError(
+            "Predictable dark-active neurons are missing from the DPPI reference "
+            "population."
+        )
+    predictable = np.asarray(reference_index.isin(selected_index), dtype=bool)
+    reference_values = reference_rows["same_turn_tuning_similarity"].to_numpy(
+        dtype=float
+    )
+    selected_values = reference_values[predictable]
+    nonselected_values = reference_values[~predictable]
+    n_reference = int(reference_values.size)
+    n_selected = int(selected_values.size)
+    n_nonselected = int(nonselected_values.size)
+    animal_names = reference_rows["animal_name"].astype(str).to_numpy()
+    unique_animals = np.unique(animal_names)
+    n_animals = int(unique_animals.size)
+    per_animal = [
+        {
+            "animal_name": str(animal_name),
+            "n_reference": int(np.sum(animal_names == animal_name)),
+            "n_selected": int(
+                np.sum((animal_names == animal_name) & predictable)
+            ),
+            "n_nonselected": int(
+                np.sum((animal_names == animal_name) & ~predictable)
+            ),
+        }
+        for animal_name in unique_animals
+    ]
+    data_result = {
+        **empty_result,
+        "n_reference": n_reference,
+        "n_selected": n_selected,
+        "n_nonselected": n_nonselected,
+        "n_animals": n_animals,
+        "per_animal": per_animal,
+        "reference_values": reference_values,
+        "selected_values": selected_values,
+        "nonselected_values": nonselected_values,
+    }
+    if n_selected == 0 or n_nonselected == 0 or n_animals < 2:
+        return data_result
+
+    clipped_values = np.clip(
+        reference_values,
+        float(logit_clip_epsilon),
+        1.0 - float(logit_clip_epsilon),
+    )
+    model_table = pd.DataFrame(
+        {
+            "logit_dppi": np.log(clipped_values) - np.log1p(-clipped_values),
+            "predictable": predictable.astype(float),
+            "animal_name": animal_names,
+        }
+    )
+
+    import warnings
+
+    import statsmodels.formula.api as smf
+
+    model = smf.mixedlm(
+        "logit_dppi ~ predictable",
+        model_table,
+        groups=model_table["animal_name"],
+        re_formula="1",
+    )
+    try:
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            fitted = model.fit(reml=False, method="bfgs", disp=False)
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        return {
+            **data_result,
+            "fit_warnings": [f"{type(exc).__name__}: {exc}"],
+        }
+
+    fit_warnings = [str(warning.message) for warning in caught_warnings]
+    converged = bool(fitted.converged)
+    coefficient = float(fitted.fe_params["predictable"])
+    standard_error = float(fitted.bse_fe["predictable"])
+    z_value = (
+        coefficient / standard_error
+        if np.isfinite(standard_error) and standard_error > 0.0
+        else float("nan")
+    )
+    wald_p_value = (
+        float(fitted.pvalues["predictable"])
+        if converged
+        else float("nan")
+    )
+    confidence_interval = fitted.conf_int().loc["predictable"].to_numpy(dtype=float)
+    random_effect_covariance = np.asarray(fitted.cov_re, dtype=float)
+    if not converged:
+        return {
+            **data_result,
+            "coefficient": coefficient,
+            "standard_error": standard_error,
+            "z_value": float(z_value),
+            "wald_p_value": wald_p_value,
+            "confidence_interval": tuple(confidence_interval.tolist()),
+            "random_intercept_variance": float(random_effect_covariance[0, 0]),
+            "residual_variance": float(fitted.scale),
+            "fit_warnings": fit_warnings,
+        }
+
+    permutation = _compute_within_animal_mixed_model_permutation(
+        model_table["logit_dppi"].to_numpy(dtype=float),
+        predictable,
+        animal_names,
+        n_permutations=int(n_permutations),
+        random_seed=int(random_seed),
+        batch_size=int(permutation_batch_size),
+    )
+    permutation_observed_coefficient = float(
+        permutation["observed_coefficient"]
+    )
+    if not np.isclose(
+        permutation_observed_coefficient,
+        coefficient,
+        rtol=1e-5,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            "Profiled and statsmodels mixed-model coefficients do not agree: "
+            f"{permutation_observed_coefficient} versus {coefficient}."
+        )
+    null_coefficients = np.asarray(
+        permutation["null_coefficients"],
+        dtype=float,
+    )
+    permutation_extreme_count = int(
+        np.sum(
+            np.abs(null_coefficients)
+            >= abs(permutation_observed_coefficient)
+        )
+    )
+    p_value = float(
+        (permutation_extreme_count + 1.0)
+        / (float(n_permutations) + 1.0)
+    )
+    return {
+        **data_result,
+        "coefficient": coefficient,
+        "standard_error": standard_error,
+        "z_value": float(z_value),
+        "p_value": p_value,
+        "wald_p_value": wald_p_value,
+        "permutation_observed_coefficient": permutation_observed_coefficient,
+        "permutation_extreme_count": permutation_extreme_count,
+        "permutation_null_mean": float(np.mean(null_coefficients)),
+        "permutation_null_standard_deviation": float(
+            np.std(null_coefficients)
+        ),
+        "confidence_interval": tuple(confidence_interval.tolist()),
+        "random_intercept_variance": float(random_effect_covariance[0, 0]),
+        "residual_variance": float(fitted.scale),
+        "converged": converged,
+        "fit_warnings": fit_warnings,
+        "null_coefficients": null_coefficients,
+    }
+
+
 def plot_dark_active_dppi_distribution_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
@@ -6558,14 +7431,29 @@ def plot_dark_active_dppi_distribution_panel(
     n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
     random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
     axis_bounds: tuple[float, float, float, float] = (0.14, 0.17, 0.83, 0.72),
+    show_significance_marker: bool = True,
+    show_nonsignificant_p_value: bool = False,
+    statistical_test: str = PANEL_F_DPPI_TEST_MEAN_RANK,
 ) -> dict[str, Any]:
-    """Plot predictable-neuron dark DPPI with rank-permutation significance."""
-    analysis = compute_dark_active_dppi_mean_rank_permutation(
-        payload,
-        epoch_type=epoch_type,
-        n_permutations=n_permutations,
-        random_seed=random_seed,
-    )
+    """Plot predictable-neuron dark DPPI with the requested significance test."""
+    if statistical_test == PANEL_F_DPPI_TEST_MEAN_RANK:
+        analysis = compute_dark_active_dppi_mean_rank_permutation(
+            payload,
+            epoch_type=epoch_type,
+            n_permutations=n_permutations,
+            random_seed=random_seed,
+        )
+        displayed_p_value = float(analysis["monte_carlo_p_value"])
+    elif statistical_test == PANEL_F_DPPI_TEST_MIXED_MODEL:
+        analysis = compute_dark_active_dppi_predictability_mixed_model(
+            payload,
+            epoch_type=epoch_type,
+            n_permutations=n_permutations,
+            random_seed=random_seed,
+        )
+        displayed_p_value = float(analysis["p_value"])
+    else:
+        raise ValueError(f"Unknown Panel F statistical test {statistical_test!r}.")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
@@ -6595,9 +7483,10 @@ def plot_dark_active_dppi_distribution_panel(
         linewidth=0.0,
         zorder=2,
     )
-    displayed_p_value = float(analysis["monte_carlo_p_value"])
-    significance_stars = _format_significance_stars(displayed_p_value)
-    if significance_stars:
+    significance_text = _format_significance_stars(displayed_p_value)
+    if show_nonsignificant_p_value and significance_text == "n.s.":
+        significance_text = rf"$p={displayed_p_value:.3f}$"
+    if show_significance_marker and significance_text:
         from matplotlib.transforms import ScaledTranslation
 
         histogram_counts, _count_edges = np.histogram(
@@ -6615,7 +7504,7 @@ def plot_dark_active_dppi_distribution_panel(
         plot_ax.text(
             peak_left,
             peak_height,
-            significance_stars,
+            significance_text,
             ha="right",
             va="top",
             fontsize=7,
@@ -6636,11 +7525,13 @@ def plot_glm_dark_epoch_properties_panel(
     ax: "Axes",
     payload: Mapping[str, Any],
     *,
-    n_permutations: int = PANEL_F_DPPI_NULL_PERMUTATIONS,
+    n_permutations: int = PANEL_F_DPPI_MIXED_MODEL_PERMUTATIONS,
     random_seed: int = PANEL_F_DPPI_NULL_RANDOM_SEED,
-    activity_n_permutations: int = PANEL_E_ACTIVITY_NULL_PERMUTATIONS,
+    activity_n_permutations: int = PANEL_E_MIXED_MODEL_PERMUTATIONS,
     activity_random_seed: int = PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
-    activity_devexp_batch_size: int = PANEL_E_DEVEXP_PERMUTATION_BATCH_SIZE,
+    activity_devexp_batch_size: int = (
+        PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
     single_epoch_column_bounds: tuple[
         tuple[float, float],
         tuple[float, float],
@@ -6652,12 +7543,12 @@ def plot_glm_dark_epoch_properties_panel(
     dppi_axis_bounds: tuple[float, float, float, float] = PANEL_E_DPPI_AXIS_BOUNDS,
 ) -> dict[str, Any]:
     """Plot dark activity and DPPI properties of ripple-predictable V1 cells."""
-    activity_statistics_by_epoch = compute_glm_dark_activity_statistics(
+    activity_statistics_by_epoch = compute_glm_dark_activity_mixed_model_statistics(
         payload,
         epoch_types=PANEL_D_EPOCH_ORDER,
         n_permutations=activity_n_permutations,
         random_seed=activity_random_seed,
-        devexp_batch_size=activity_devexp_batch_size,
+        permutation_batch_size=activity_devexp_batch_size,
     )
     plot_glm_behavior_association_panel(
         ax,
@@ -6675,6 +7566,7 @@ def plot_glm_dark_epoch_properties_panel(
         n_permutations=n_permutations,
         random_seed=random_seed,
         axis_bounds=dppi_axis_bounds,
+        statistical_test=PANEL_F_DPPI_TEST_MIXED_MODEL,
     )
     return {
         **dppi_analysis,
@@ -6753,6 +7645,429 @@ def compute_source_predictor_paired_sign_test(table: Any) -> dict[str, Any]:
     }
 
 
+def _evaluate_random_intercept_only_profile_likelihood(
+    transformed_variance_ratio: np.ndarray,
+    group_y_sums: np.ndarray,
+    *,
+    group_sizes: np.ndarray,
+    group_y_squared_sums: np.ndarray,
+    n_observations: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate profiled ML fits for intercept-only random-intercept LMMs."""
+    variance_ratio = transformed_variance_ratio / (
+        1.0 - transformed_variance_ratio
+    )
+    denominators = 1.0 + variance_ratio[:, np.newaxis] * group_sizes
+    covariance_terms = variance_ratio[:, np.newaxis] / denominators
+
+    intercept_crossproduct = np.sum(group_sizes / denominators, axis=1)
+    intercept_y_crossproduct = np.sum(group_y_sums / denominators, axis=1)
+    y_sum_of_squares = np.sum(
+        group_y_squared_sums
+        - covariance_terms * group_y_sums**2,
+        axis=1,
+    )
+    coefficient = intercept_y_crossproduct / intercept_crossproduct
+    residual_sum_of_squares = y_sum_of_squares - (
+        intercept_y_crossproduct * coefficient
+    )
+    residual_variance = np.maximum(
+        residual_sum_of_squares / float(n_observations),
+        np.finfo(float).tiny,
+    )
+    objective = (
+        float(n_observations) * np.log(residual_variance)
+        + np.sum(np.log(denominators), axis=1)
+    )
+    return objective, coefficient, residual_variance
+
+
+def _profile_random_intercept_only_coefficients(
+    group_y_sums: np.ndarray,
+    *,
+    group_sizes: np.ndarray,
+    group_y_squared_sums: np.ndarray,
+    n_observations: int,
+    n_iterations: int = PANEL_C_SOURCE_MIXED_MODEL_PROFILE_ITERATIONS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return profiled-ML intercepts and variances for many LMM fits."""
+    n_models = int(group_y_sums.shape[0])
+    lower = np.zeros(n_models, dtype=float)
+    upper = np.full(n_models, 1.0 - 1e-10, dtype=float)
+    golden_ratio = (np.sqrt(5.0) - 1.0) / 2.0
+    likelihood_kwargs = {
+        "group_sizes": group_sizes,
+        "group_y_squared_sums": group_y_squared_sums,
+        "n_observations": n_observations,
+    }
+    for _iteration in range(int(n_iterations)):
+        left_probe = upper - golden_ratio * (upper - lower)
+        right_probe = lower + golden_ratio * (upper - lower)
+        left_objective = _evaluate_random_intercept_only_profile_likelihood(
+            left_probe,
+            group_y_sums,
+            **likelihood_kwargs,
+        )[0]
+        right_objective = _evaluate_random_intercept_only_profile_likelihood(
+            right_probe,
+            group_y_sums,
+            **likelihood_kwargs,
+        )[0]
+        choose_left = left_objective <= right_objective
+        upper = np.where(choose_left, right_probe, upper)
+        lower = np.where(choose_left, lower, left_probe)
+
+    transformed_variance_ratio = (lower + upper) / 2.0
+    objective, coefficient, residual_variance = (
+        _evaluate_random_intercept_only_profile_likelihood(
+            transformed_variance_ratio,
+            group_y_sums,
+            **likelihood_kwargs,
+        )
+    )
+    zero_ratio = np.zeros(n_models, dtype=float)
+    zero_objective, zero_coefficient, zero_residual_variance = (
+        _evaluate_random_intercept_only_profile_likelihood(
+            zero_ratio,
+            group_y_sums,
+            **likelihood_kwargs,
+        )
+    )
+    use_zero_ratio = zero_objective <= objective
+    coefficient = np.where(use_zero_ratio, zero_coefficient, coefficient)
+    residual_variance = np.where(
+        use_zero_ratio,
+        zero_residual_variance,
+        residual_variance,
+    )
+    variance_ratio = transformed_variance_ratio / (
+        1.0 - transformed_variance_ratio
+    )
+    variance_ratio = np.where(use_zero_ratio, 0.0, variance_ratio)
+    return coefficient, variance_ratio, residual_variance
+
+
+def _compute_paired_delta_random_intercept_permutation(
+    delta_values: np.ndarray,
+    animal_names: np.ndarray,
+    *,
+    n_permutations: int,
+    random_seed: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Sign-flip paired deltas and refit the animal random-intercept LMM."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if random_seed < 0:
+        raise ValueError("random_seed must be non-negative.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
+    unique_animals = np.unique(animal_names)
+    group_values = [
+        delta_values[animal_names == animal_name]
+        for animal_name in unique_animals
+    ]
+    group_sizes = np.asarray(
+        [values.size for values in group_values],
+        dtype=float,
+    )
+    group_y_squared_sums = np.asarray(
+        [np.sum(values**2) for values in group_values],
+        dtype=float,
+    )
+    observed_group_sums = np.asarray(
+        [np.sum(values) for values in group_values],
+        dtype=float,
+    )[np.newaxis, :]
+    profile_kwargs = {
+        "group_sizes": group_sizes,
+        "group_y_squared_sums": group_y_squared_sums,
+        "n_observations": int(delta_values.size),
+    }
+    observed_coefficient, observed_variance_ratio, observed_residual_variance = (
+        _profile_random_intercept_only_coefficients(
+            observed_group_sums,
+            **profile_kwargs,
+        )
+    )
+
+    rng = np.random.default_rng(random_seed)
+    null_coefficients = np.empty(int(n_permutations), dtype=float)
+    for start in range(0, int(n_permutations), int(batch_size)):
+        stop = min(start + int(batch_size), int(n_permutations))
+        current_batch_size = stop - start
+        permuted_group_sums = np.empty(
+            (current_batch_size, len(group_values)),
+            dtype=float,
+        )
+        for group_index, values in enumerate(group_values):
+            signs = (
+                2
+                * rng.integers(
+                    0,
+                    2,
+                    size=(current_batch_size, values.size),
+                    dtype=np.int8,
+                )
+                - 1
+            )
+            permuted_group_sums[:, group_index] = signs @ values
+        null_coefficients[start:stop] = (
+            _profile_random_intercept_only_coefficients(
+                permuted_group_sums,
+                **profile_kwargs,
+            )[0]
+        )
+
+    return {
+        "observed_coefficient": float(observed_coefficient[0]),
+        "observed_variance_ratio": float(observed_variance_ratio[0]),
+        "observed_residual_variance": float(observed_residual_variance[0]),
+        "null_coefficients": null_coefficients,
+    }
+
+
+def compute_source_predictor_paired_mixed_model_permutation(
+    table: Any,
+    *,
+    n_permutations: int = PANEL_C_SOURCE_MIXED_MODEL_PERMUTATIONS,
+    random_seed: int = PANEL_C_SOURCE_MIXED_MODEL_RANDOM_SEED,
+    permutation_batch_size: int = (
+        PANEL_C_SOURCE_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+    ),
+) -> dict[str, Any]:
+    """Test paired source-model differences with a permuted animal LMM."""
+    if n_permutations <= 0:
+        raise ValueError("n_permutations must be positive.")
+    if random_seed < 0:
+        raise ValueError("random_seed must be non-negative.")
+    if permutation_batch_size <= 0:
+        raise ValueError("permutation_batch_size must be positive.")
+
+    n_input_pairs = 0 if table is None else int(len(table))
+    empty_result = {
+        "test_name": "paired_delta_random_intercept_mixed_model_permutation",
+        "formula": (
+            "vector_minus_mean_deviance_explained ~ 1 + "
+            "(1 | animal_name)"
+        ),
+        "alternative": "vector_greater_than_mean_activity",
+        "unit_of_analysis": "paired_v1_unit",
+        "p_value_method": "empirical_coefficient_greater_or_equal",
+        "fit_method": "maximum_likelihood_powell",
+        "permutation_fit_method": "profile_maximum_likelihood",
+        "permutation_scheme": (
+            "source_model_labels_swapped_independently_within_v1_unit"
+        ),
+        "n_permutations": int(n_permutations),
+        "random_seed": int(random_seed),
+        "permutation_batch_size": int(permutation_batch_size),
+        "n_input_pairs": n_input_pairs,
+        "n_finite_pairs": 0,
+        "n_nonfinite_pairs": n_input_pairs,
+        "n_animals": 0,
+        "n_vector_greater": 0,
+        "n_mean_activity_greater": 0,
+        "n_ties": 0,
+        "n_tested": 0,
+        "fraction_vector_greater": float("nan"),
+        "mean_delta_vector_minus_mean": float("nan"),
+        "median_delta_vector_minus_mean": float("nan"),
+        "coefficient": float("nan"),
+        "standard_error": float("nan"),
+        "z_value": float("nan"),
+        "p_value": float("nan"),
+        "wald_p_value_two_sided": float("nan"),
+        "confidence_interval": (float("nan"), float("nan")),
+        "random_intercept_variance": float("nan"),
+        "residual_variance": float("nan"),
+        "converged": False,
+        "fit_warnings": [],
+        "permutation_observed_coefficient": float("nan"),
+        "permutation_extreme_count": 0,
+        "permutation_null_mean": float("nan"),
+        "permutation_null_standard_deviation": float("nan"),
+        "per_animal": [],
+        "delta_values": np.asarray([], dtype=float),
+        "null_coefficients": np.asarray([], dtype=float),
+    }
+    if table is None or not len(table):
+        return empty_result
+
+    required_columns = {
+        "animal_name",
+        "mean_activity_devexp_mean",
+        "vector_devexp_mean",
+    }
+    missing_columns = sorted(required_columns.difference(table.columns))
+    if missing_columns:
+        raise ValueError(
+            "Source-predictor comparison table is missing columns "
+            f"{missing_columns!r}."
+        )
+
+    mean_activity_values = np.asarray(
+        table["mean_activity_devexp_mean"],
+        dtype=float,
+    )
+    vector_values = np.asarray(table["vector_devexp_mean"], dtype=float)
+    animal_names = table["animal_name"].astype(str).to_numpy()
+    finite_pairs = np.isfinite(mean_activity_values) & np.isfinite(vector_values)
+    delta_values = vector_values[finite_pairs] - mean_activity_values[finite_pairs]
+    animal_names = animal_names[finite_pairs]
+    n_finite_pairs = int(delta_values.size)
+    n_vector_greater = int(np.sum(delta_values > 0.0))
+    n_mean_activity_greater = int(np.sum(delta_values < 0.0))
+    n_ties = int(np.sum(delta_values == 0.0))
+    n_tested = n_vector_greater + n_mean_activity_greater
+    fraction_vector_greater = (
+        n_vector_greater / n_tested if n_tested else float("nan")
+    )
+    unique_animals = np.unique(animal_names)
+    per_animal = [
+        {
+            "animal_name": str(animal_name),
+            "n_finite_pairs": int(np.sum(animal_names == animal_name)),
+            "mean_delta_vector_minus_mean": float(
+                np.mean(delta_values[animal_names == animal_name])
+            ),
+            "median_delta_vector_minus_mean": float(
+                np.median(delta_values[animal_names == animal_name])
+            ),
+        }
+        for animal_name in unique_animals
+    ]
+    data_result = {
+        **empty_result,
+        "n_finite_pairs": n_finite_pairs,
+        "n_nonfinite_pairs": n_input_pairs - n_finite_pairs,
+        "n_animals": int(unique_animals.size),
+        "n_vector_greater": n_vector_greater,
+        "n_mean_activity_greater": n_mean_activity_greater,
+        "n_ties": n_ties,
+        "n_tested": n_tested,
+        "fraction_vector_greater": float(fraction_vector_greater),
+        "mean_delta_vector_minus_mean": (
+            float(np.mean(delta_values))
+            if n_finite_pairs
+            else float("nan")
+        ),
+        "median_delta_vector_minus_mean": (
+            float(np.median(delta_values))
+            if n_finite_pairs
+            else float("nan")
+        ),
+        "per_animal": per_animal,
+        "delta_values": delta_values,
+    }
+    if n_finite_pairs == 0 or unique_animals.size < 2:
+        return data_result
+
+    import pandas as pd
+    import warnings
+
+    import statsmodels.formula.api as smf
+
+    model_table = pd.DataFrame(
+        {
+            "delta": delta_values,
+            "animal_name": animal_names,
+        }
+    )
+    model = smf.mixedlm(
+        "delta ~ 1",
+        model_table,
+        groups=model_table["animal_name"],
+        re_formula="1",
+    )
+    try:
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            fitted = model.fit(reml=False, method="powell", disp=False)
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        return {
+            **data_result,
+            "fit_warnings": [f"{type(exc).__name__}: {exc}"],
+        }
+
+    fit_warnings = [str(warning.message) for warning in caught_warnings]
+    converged = bool(fitted.converged)
+    coefficient = float(fitted.fe_params["Intercept"])
+    standard_error = float(fitted.bse_fe["Intercept"])
+    z_value = (
+        coefficient / standard_error
+        if np.isfinite(standard_error) and standard_error > 0.0
+        else float("nan")
+    )
+    wald_p_value = (
+        float(fitted.pvalues["Intercept"])
+        if converged
+        else float("nan")
+    )
+    confidence_interval = fitted.conf_int().loc["Intercept"].to_numpy(
+        dtype=float
+    )
+    random_effect_covariance = np.asarray(fitted.cov_re, dtype=float)
+    fitted_result = {
+        **data_result,
+        "coefficient": coefficient,
+        "standard_error": standard_error,
+        "z_value": float(z_value),
+        "wald_p_value_two_sided": wald_p_value,
+        "confidence_interval": tuple(confidence_interval.tolist()),
+        "random_intercept_variance": float(random_effect_covariance[0, 0]),
+        "residual_variance": float(fitted.scale),
+        "converged": converged,
+        "fit_warnings": fit_warnings,
+    }
+    if not converged:
+        return fitted_result
+
+    permutation = _compute_paired_delta_random_intercept_permutation(
+        delta_values,
+        animal_names,
+        n_permutations=int(n_permutations),
+        random_seed=int(random_seed),
+        batch_size=int(permutation_batch_size),
+    )
+    permutation_observed_coefficient = float(
+        permutation["observed_coefficient"]
+    )
+    if not np.isclose(
+        permutation_observed_coefficient,
+        coefficient,
+        rtol=5e-5,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            "Profiled and statsmodels paired-delta mixed-model coefficients "
+            "do not agree: "
+            f"{permutation_observed_coefficient} versus {coefficient}."
+        )
+    null_coefficients = np.asarray(
+        permutation["null_coefficients"],
+        dtype=float,
+    )
+    permutation_extreme_count = int(
+        np.sum(null_coefficients >= permutation_observed_coefficient)
+    )
+    p_value = float(
+        (permutation_extreme_count + 1.0)
+        / (float(n_permutations) + 1.0)
+    )
+    return {
+        **fitted_result,
+        "p_value": p_value,
+        "permutation_observed_coefficient": permutation_observed_coefficient,
+        "permutation_extreme_count": permutation_extreme_count,
+        "permutation_null_mean": float(np.mean(null_coefficients)),
+        "permutation_null_standard_deviation": float(
+            np.std(null_coefficients)
+        ),
+        "null_coefficients": null_coefficients,
+    }
+
+
 def _scatter_source_predictor_comparison_points(ax: "Axes", table: Any) -> None:
     """Plot paired source-model estimates colored by vector-model significance."""
     x_values = np.asarray(table["mean_activity_devexp_mean"], dtype=float)
@@ -6802,10 +8117,15 @@ def _plot_source_predictor_comparison_axis(
     summary_location: str = "upper_left",
     summary_mode: str = "full",
     show_significance_marker: bool = False,
+    statistics_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plot vector-model deviance explained against mean-activity control."""
     lower, upper = axis_limits
-    statistics = compute_source_predictor_paired_sign_test(table)
+    statistics = (
+        compute_source_predictor_paired_sign_test(table)
+        if statistics_override is None
+        else dict(statistics_override)
+    )
     ax.plot(
         [lower, upper],
         [lower, upper],
@@ -6953,6 +8273,8 @@ def plot_glm_source_predictor_comparison_panel(
     x_label_y: float = 0.035,
     x_label: str = "Mean CA1 activity\ndev. explained",
     annotate_pooled_sign_test: bool = False,
+    annotate_pooled_inference: bool = False,
+    pooled_statistics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Plot full CA1 vector GLM performance against mean CA1 activity."""
     import pandas as pd
@@ -7006,7 +8328,7 @@ def plot_glm_source_predictor_comparison_panel(
         summary_location = "lower_right" if compact_labels else "upper_left"
     gap = 0.030
     width = (right - left - gap * (len(groups) - 1)) / len(groups)
-    pooled_statistics: dict[str, Any] | None = None
+    returned_pooled_statistics: dict[str, Any] | None = None
     for index, (title, rows, pooled) in enumerate(groups):
         child_ax = ax.inset_axes([left + index * (width + gap), bottom, width, height])
         child_title = title if show_group_titles and not compact_labels else ""
@@ -7018,10 +8340,16 @@ def plot_glm_source_predictor_comparison_panel(
             pooled=pooled,
             summary_location=summary_location,
             summary_mode="n_only" if compact_labels else "full",
-            show_significance_marker=annotate_pooled_sign_test and pooled,
+            show_significance_marker=(
+                (annotate_pooled_sign_test or annotate_pooled_inference)
+                and pooled
+            ),
+            statistics_override=(
+                pooled_statistics if pooled else None
+            ),
         )
         if pooled:
-            pooled_statistics = group_statistics
+            returned_pooled_statistics = group_statistics
         if compact_labels:
             child_ax.set_xlabel("Mean CA1\ndev. explained", fontsize=6, labelpad=0.8)
             if index == 0:
@@ -7060,7 +8388,7 @@ def plot_glm_source_predictor_comparison_panel(
             fontsize=6.0,
             transform=ax.transAxes,
         )
-    return pooled_statistics
+    return returned_pooled_statistics
 
 
 def filter_epoch_payloads(
@@ -7174,351 +8502,14 @@ def add_aligned_panel_headers(
         )
 
 
-def _align_axes_xaxis_baselines(
-    reference_ax: "Axes",
-    target_axes: Sequence["Axes"],
-) -> None:
-    """Align target x-axis baselines to one resolved reference axis."""
-    from matplotlib.transforms import Bbox
-
-    reference_bottom = reference_ax.get_position().y0
-    for target_ax in target_axes:
-        box = target_ax.get_position()
-        target_ax.set_axes_locator(None)
-        target_ax.set_position(
-            Bbox.from_extents(box.x0, reference_bottom, box.x1, box.y1)
-        )
-
-
-def _align_xaxis_labels_to_reference(
-    reference_ax: "Axes",
-    target_axes: Sequence["Axes"],
-) -> None:
-    """Align target x-axis labels to the reference label in display space."""
-    reference_label = reference_ax.xaxis.label
-    reference_display_y = reference_label.get_transform().transform(
-        reference_label.get_position()
-    )[1]
-    for target_ax in target_axes:
-        target_label = target_ax.xaxis.label
-        target_transform = target_label.get_transform()
-        target_display_x = target_transform.transform(target_label.get_position())[0]
-        aligned_position = target_transform.inverted().transform(
-            (target_display_x, reference_display_y)
-        )
-        target_label.set_position(aligned_position)
-
-
-def make_figure_3(
+def parse_ripple_figure_arguments(
+    argv: Sequence[str] | None = None,
     *,
-    data_root: Path,
-    output_path: Path,
-    datasets: Sequence[DatasetId],
-    example_dataset: DatasetId,
-    light_epoch: str | None,
-    dark_epoch: str | None,
-    sleep_epoch: str | None,
-    regions: Sequence[str],
-    ripple_threshold_zscore: float | None,
-    ripple_window_s: float,
-    ripple_window_offset_s: float,
-    ripple_selection: str,
-    ridge_strength: float,
-    dark_movement_fr_cache_dir: Path | None,
-    refresh_dark_movement_fr_cache: bool,
-    refresh_panel_b_schematic_cache: bool,
-    dpi: int,
-    panel_d_tuning_similarity_metric: str = DEFAULT_PANEL_D_TUNING_SIMILARITY_METRIC,
-) -> Path:
-    """Build and save the previous version of Figure 3."""
-    import matplotlib.pyplot as plt
-
-    apply_paper_style()
-    heatmap_epoch_tables = load_pooled_ripple_heatmap_epoch_tables(
-        data_root,
-        datasets,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        sleep_epoch=sleep_epoch,
-        ripple_threshold_zscore=ripple_threshold_zscore,
-    )
-    glm_epoch_tables = load_glm_epoch_summary_tables(
-        data_root,
-        datasets,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        sleep_epoch=sleep_epoch,
-        epoch_types=PANEL_C_EPOCH_ORDER,
-        ripple_window_s=ripple_window_s,
-        ripple_window_offset_s=ripple_window_offset_s,
-        ripple_selection=ripple_selection,
-        ridge_strength=ridge_strength,
-    )
-    schematic_animal, schematic_date, schematic_epoch = normalize_dataset_id(
-        DEFAULT_PANEL_B_SCHEMATIC_DATASET
-    )
-    ripple_schematic_trace: dict[str, Any] | None = None
-    try:
-        ripple_schematic_trace = load_or_build_panel_b_schematic_example(
-            data_root,
-            cache_dir=DEFAULT_FIGURE_CACHE_DIR,
-            animal_name=schematic_animal,
-            date=schematic_date,
-            epoch=schematic_epoch,
-            ripple_threshold_zscore=ripple_threshold_zscore,
-            time_before_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
-            time_after_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
-            n_units_per_region=DEFAULT_PANEL_B_SCHEMATIC_N_UNITS_PER_REGION,
-            target_ripple_duration_s=DEFAULT_PANEL_B_SCHEMATIC_TARGET_DURATION_S,
-            refresh_cache=refresh_panel_b_schematic_cache,
-        )
-    except (FileNotFoundError, KeyError, ValueError) as exc:
-        print(
-            "Panel B using fallback schematic spikes because the real-spike cache "
-            f"could not be built for {schematic_animal} {schematic_date} "
-            f"{schematic_epoch}: {exc}"
-        )
-        example_animal, example_date, example_epoch = normalize_dataset_id(example_dataset)
-        try:
-            ripple_schematic_trace = load_example_ripple_lfp_trace(
-                data_root,
-                animal_name=example_animal,
-                date=example_date,
-                epoch=example_epoch,
-                ripple_threshold_zscore=ripple_threshold_zscore,
-                time_before_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_BEFORE_S,
-                time_after_s=DEFAULT_PANEL_B_SCHEMATIC_TIME_AFTER_S,
-            )
-        except (FileNotFoundError, KeyError, ValueError) as fallback_exc:
-            print(
-                "Panel B using fully synthetic schematic because saved ripple-band LFP "
-                f"was unavailable for {example_animal} {example_date} "
-                f"{example_epoch}: {fallback_exc}"
-            )
-    panel_b_prediction_examples: list[dict[str, Any]] = []
-    try:
-        panel_b_prediction_examples = load_panel_b_prediction_examples(
-            data_root,
-            ripple_window_s=ripple_window_s,
-            ripple_window_offset_s=ripple_window_offset_s,
-            ripple_selection=ripple_selection,
-            ridge_strength=ridge_strength,
-        )
-    except (FileNotFoundError, KeyError, ValueError) as exc:
-        print(f"Panel B prediction examples unavailable: {exc}")
-    behavior_payload = load_glm_dark_activity_devexp_tables(
-        data_root,
-        datasets,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        sleep_epoch=sleep_epoch,
-        ripple_window_s=ripple_window_s,
-        ripple_window_offset_s=ripple_window_offset_s,
-        ripple_selection=ripple_selection,
-        ridge_strength=ridge_strength,
-        dark_movement_fr_cache_dir=dark_movement_fr_cache_dir,
-        refresh_dark_movement_fr_cache=refresh_dark_movement_fr_cache,
-        tuning_similarity_metric=panel_d_tuning_similarity_metric,
-    )
-    source_comparison_payload = load_glm_source_predictor_comparison_tables(
-        data_root,
-        datasets,
-        light_epoch=light_epoch,
-        dark_epoch=dark_epoch,
-        sleep_epoch=sleep_epoch,
-        ripple_window_s=ripple_window_s,
-        ripple_window_offset_s=ripple_window_offset_s,
-        ripple_selection=ripple_selection,
-        ridge_strength=ridge_strength,
-    )
-    xcorr_payload: dict[str, Any] | None = None
-    xcorr_animal, xcorr_date, xcorr_epoch = normalize_dataset_id(DEFAULT_XCORR_DATASET)
-    try:
-        xcorr_payload = load_top_ca1_xcorr_panel_data(
-            data_root,
-            animal_name=xcorr_animal,
-            date=xcorr_date,
-            epoch=xcorr_epoch,
-            state=DEFAULT_XCORR_STATE,
-            top_n_ca1_units=DEFAULT_XCORR_TOP_CA1_UNITS,
-            bin_size_s=DEFAULT_XCORR_BIN_SIZE_S,
-            max_lag_s=DEFAULT_XCORR_MAX_LAG_S,
-            display_vmax=DEFAULT_XCORR_DISPLAY_VMAX,
-        )
-    except (FileNotFoundError, KeyError, ValueError) as exc:
-        print(
-            "Panel B xcorr unavailable for "
-            f"{xcorr_animal} {xcorr_date} {xcorr_epoch}: {exc}"
-        )
-    panel_a_epoch_tables = filter_epoch_payloads(heatmap_epoch_tables, PANEL_A_EPOCH_ORDER)
-    panel_c_epoch_tables = filter_epoch_payloads(glm_epoch_tables, PANEL_C_EPOCH_ORDER)
-    fig = plt.figure(
-        figsize=figure_size(DEFAULT_FIGURE_WIDTH_MM, DEFAULT_FIGURE_HEIGHT_MM),
-        constrained_layout=True,
-    )
-    outer_grid = fig.add_gridspec(
-        nrows=2,
-        ncols=3,
-        height_ratios=[0.66, 0.34],
-        width_ratios=PANEL_ABC_WIDTH_RATIOS,
-    )
-    lower_grid = outer_grid[1, :].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=PANEL_BOTTOM_WIDTH_RATIOS,
-    )
-    panel_e_grid = lower_grid[0, 1].subgridspec(
-        nrows=1,
-        ncols=2,
-        width_ratios=(PANEL_E_WIDTH_FRACTION, 1.0 - PANEL_E_WIDTH_FRACTION),
-        wspace=0.0,
-    )
-    axes = [
-        fig.add_subplot(outer_grid[0, 0]),
-        fig.add_subplot(outer_grid[0, 1]),
-        fig.add_subplot(outer_grid[0, 2]),
-        fig.add_subplot(lower_grid[0, 0]),
-        fig.add_subplot(panel_e_grid[0, 0]),
-    ]
-
-    plot_epoch_ripple_heatmap_panel(
-        axes[0],
-        panel_a_epoch_tables,
-        regions=regions,
-        expand_heatmaps_vertically=True,
-        show_modulation_histogram=False,
-    )
-    axes[0].set_title("Ripple-triggered\nmean firing rates", fontsize=7.2, pad=2)
-    if xcorr_payload is not None:
-        panel_b_xcorr_payload = prepare_xcorr_payload_for_display(
-            xcorr_payload,
-        )
-        plot_top_ca1_xcorr_panel(
-            axes[1],
-            panel_b_xcorr_payload,
-            lag_label_y=-0.055,
-            compact_unit_titles=True,
-        )
-    else:
-        axes[1].axis("off")
-        axes[1].text(
-            0.5,
-            0.5,
-            "No xcorr data",
-            ha="center",
-            va="center",
-            fontsize=6,
-            transform=axes[1].transAxes,
-        )
-    axes[1].set_title("CA1-V1 correlogram\nduring ripples", fontsize=7.2, pad=2)
-    plot_glm_analysis_panel(
-        axes[2],
-        panel_c_epoch_tables,
-        ripple_trace=ripple_schematic_trace,
-        prediction_examples=panel_b_prediction_examples,
-    )
-    panel_c_title = "Predicting V1 activity during ripples with CA1 activity"
-    axes[2].set_title(panel_c_title, fontsize=7.2, pad=2)
-    panel_d_sign_test = plot_glm_source_predictor_comparison_panel(
-        axes[3],
-        source_comparison_payload,
-        include_per_animal=False,
-        include_pooled=True,
-        compact_labels=True,
-        show_color_note=False,
-        annotate_pooled_sign_test=True,
-    )
-    axes[3].set_title(
-        "CA1 spike vector vs.\nmean CA1 activity",
-        fontsize=7.2,
-        pad=2,
-    )
-    plot_glm_dark_epoch_properties_panel(axes[4], behavior_payload)
-    panel_e_title = "Relationship to dark-active DPP coding"
-    axes[4].set_title(panel_e_title, fontsize=7.2, pad=2)
-
-    fig.canvas.draw()
-    fig.set_constrained_layout(False)
-    if axes[3].child_axes:
-        _align_axes_xaxis_baselines(
-            axes[3].child_axes[0],
-            axes[4].child_axes,
-        )
-        fig.canvas.draw()
-    if len(axes[4].child_axes) >= 3:
-        _align_xaxis_labels_to_reference(
-            axes[4].child_axes[2],
-            axes[4].child_axes[:2],
-        )
-        fig.canvas.draw()
-    panel_a_box = axes[0].get_position()
-    panel_d_box = axes[3].get_position()
-    panel_a_label_x = (
-        panel_a_box.x0 + PANEL_ABC_HEADER_LABEL_X_OFFSETS[0] * panel_a_box.width
-    )
-    panel_d_label_x_offset = (panel_a_label_x - panel_d_box.x0) / panel_d_box.width
-    add_aligned_panel_headers(
-        fig,
-        axes[:3],
-        labels=("A", "B", "C"),
-        titles=(
-            "Ripple-triggered\nmean firing rates",
-            "CA1-V1 correlogram\nduring ripples",
-            panel_c_title,
-        ),
-        label_x_offsets=PANEL_ABC_HEADER_LABEL_X_OFFSETS,
-        fontsize=7.2,
-    )
-    add_aligned_panel_headers(
-        fig,
-        (axes[3], axes[4]),
-        labels=("D", "E"),
-        titles=(
-            "CA1 spike vector vs.\nmean CA1 activity",
-            panel_e_title,
-        ),
-        label_x_offsets=(
-            panel_d_label_x_offset,
-            -0.04 / PANEL_E_WIDTH_FRACTION,
-        ),
-        fontsize=7.2,
-    )
-
-    save_figure(fig, output_path, dpi=dpi)
-    plt.close(fig)
-    for missing in behavior_payload["missing_artifacts"]:
-        print(
-            "Panel E dark-activity missing "
-            f"{missing['artifact']} for {missing['animal_name']} "
-            f"{missing['date']} {missing['epoch']}: {missing['path']}"
-        )
-    for missing in source_comparison_payload["missing_artifacts"]:
-        print(
-            "Panel D source-comparison missing "
-            f"{missing['artifact']} for {missing['animal_name']} "
-            f"{missing['date']} {missing['epoch']} "
-            f"({missing['source_predictor_mode']}): {missing['path']}"
-        )
-    if panel_d_sign_test is not None:
-        p_value = float(panel_d_sign_test["p_value"])
-        p_value_text = f"{p_value:.3g}" if np.isfinite(p_value) else "nan"
-        print(
-            "Panel D pooled one-sided exact paired sign test: "
-            f"{panel_d_sign_test['n_vector_greater']}/"
-            f"{panel_d_sign_test['n_tested']} non-tied V1 units favor the "
-            "CA1 vector model; "
-            f"{panel_d_sign_test['n_ties']} ties; p={p_value_text}"
-        )
-    print(f"Saved old Figure 3 to {output_path}")
-    return output_path
-
-
-def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for old Figure 3 generation."""
+    default_output_name: str,
+) -> argparse.Namespace:
+    """Parse shared command-line arguments for ripple-analysis figures."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Generate old Figure 3 CA1 ripple modulation and CA1-to-V1 GLM panels."
-        )
+        description="Generate ripple modulation and CA1-to-V1 GLM panels."
     )
     parser.add_argument(
         "--data-root",
@@ -7534,8 +8525,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-name",
-        default=DEFAULT_OUTPUT_NAME,
-        help=f"Output basename without extension. Default: {DEFAULT_OUTPUT_NAME}",
+        default=default_output_name,
+        help=f"Output basename without extension. Default: {default_output_name}",
     )
     parser.add_argument(
         "--format",
@@ -7575,7 +8566,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--light-epoch",
         default=None,
         help=(
-            "Light run epoch for Figure 3 panels. "
+            "Light run epoch for the ripple-analysis panels. "
             "Default: use v1ca1.paper_figures.datasets registry."
         ),
     )
@@ -7583,7 +8574,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dark-epoch",
         default=None,
         help=(
-            "Dark run epoch for Figure 3 panels. "
+            "Dark run epoch for the ripple-analysis panels. "
             "Default: use each data set's registered dark epoch."
         ),
     )
@@ -7591,7 +8582,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--sleep-epoch",
         default=None,
         help=(
-            "Sleep epoch for Figure 3 panels. "
+            "Sleep epoch for the ripple-analysis panels. "
             "Default: use v1ca1.paper_figures.datasets registry."
         ),
     )
@@ -7645,7 +8636,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("allripples", "deduped", "single"),
         default=DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION,
         help=(
-            "Ripple-GLM selection suffix for Figure 3 Panels B-D. "
+            "Ripple-GLM event selection. "
             f"Default: {DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION}"
         ),
     )
@@ -7662,38 +8653,3 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Rasterization dpi for saved output. Default: 300",
     )
     return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    """Run old Figure 3 generation."""
-    args = parse_arguments(argv)
-    datasets = args.dataset if args.dataset is not None else get_processed_datasets()
-    regions = tuple(args.region) if args.region is not None else DEFAULT_REGIONS
-    output_path = build_output_path(
-        args.output_dir,
-        args.output_name,
-        args.output_format,
-    )
-    make_figure_3(
-        data_root=args.data_root,
-        output_path=output_path,
-        datasets=datasets,
-        example_dataset=args.example_dataset,
-        light_epoch=args.light_epoch,
-        dark_epoch=args.dark_epoch,
-        sleep_epoch=args.sleep_epoch,
-        regions=regions,
-        ripple_threshold_zscore=args.ripple_threshold_zscore,
-        ripple_window_s=args.ripple_window_s,
-        ripple_window_offset_s=args.ripple_window_offset_s,
-        ripple_selection=args.ripple_selection,
-        ridge_strength=args.ridge_strength,
-        dark_movement_fr_cache_dir=args.dark_movement_fr_cache_dir,
-        refresh_dark_movement_fr_cache=args.refresh_dark_movement_fr_cache,
-        refresh_panel_b_schematic_cache=args.refresh_panel_b_schematic_cache,
-        dpi=args.dpi,
-    )
-
-
-if __name__ == "__main__":
-    main()

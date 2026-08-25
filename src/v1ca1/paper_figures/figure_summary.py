@@ -23,7 +23,7 @@ from v1ca1.paper_figures.figure_1 import (
     load_or_compute_panel_e_example_data,
     plot_panel_e_example,
 )
-from v1ca1.paper_figures.figure_2_old import (
+from v1ca1.paper_figures._figure_2_panels import (
     DEFAULT_POSITION_BIN_COUNT,
     DEFAULT_POSITION_OFFSET,
     DEFAULT_REGIONS,

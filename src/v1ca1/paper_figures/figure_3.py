@@ -10,7 +10,7 @@ from typing import Any
 
 from v1ca1.helper.session import DEFAULT_DATA_ROOT, REGIONS
 from v1ca1.paper_figures import _figure_2_base
-from v1ca1.paper_figures import figure_2_old as _figure_2
+from v1ca1.paper_figures import _figure_2_panels as _figure_2
 from v1ca1.paper_figures._dark_light import (
     PANEL_H_HELDOUT_LIGHT_EPOCH,
     PANEL_H_TRAIN_LIGHT_EPOCH,

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from v1ca1.paper_figures import figure_2_old as figure_2_module
+from v1ca1.paper_figures import _figure_2_panels as figure_2_module
 from v1ca1.paper_figures import figure_3 as figure_3_module
 
 
@@ -193,13 +193,12 @@ def test_defaults_and_output_path_match_figure_3_conventions() -> None:
 
 def test_canonical_figure_3_is_promoted_and_independent() -> None:
     code = (
-        "import importlib.util, sys; "
+        "import importlib.util; "
         "from v1ca1.paper_figures import figure_3; "
         "assert figure_3.DEFAULT_OUTPUT_NAME == 'figure_3'; "
         "assert figure_3.PANEL_TITLES[0] == "
         "'Three models that relate dark and light activity'; "
         "assert not hasattr(figure_3, 'PANEL_BC_SPLIT_LABEL_Y'); "
-        "assert 'v1ca1.paper_figures.figure_3_old' not in sys.modules; "
         "assert importlib.util.find_spec("
         "'v1ca1.paper_figures.figure_3_2') is None"
     )

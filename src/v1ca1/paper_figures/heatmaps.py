@@ -346,7 +346,7 @@ def load_dark_dpp_filtered_unit_keys(
         if path.exists():
             table = pd.read_parquet(path)
         else:
-            from v1ca1.paper_figures.figure_3_old import (
+            from v1ca1.paper_figures._ripple_panels import (
                 _compute_similarity_from_saved_curves,
             )
 

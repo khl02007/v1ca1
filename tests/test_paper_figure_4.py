@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 import v1ca1.paper_figures.figure_4 as figure_4_module
@@ -56,6 +57,252 @@ def test_defaults_keep_figure_3_width_and_use_figure_4_output() -> None:
 
     with pytest.raises(ValueError, match="Unknown output format"):
         build_output_path(args.output_dir, args.output_name, "jpg")
+
+
+def test_panel_f_mixed_model_compares_predictable_cells_within_animal() -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("statsmodels")
+    rng = np.random.default_rng(8)
+    reference_rows = []
+    devexp_rows = []
+    animal_intercepts = {
+        "A": -0.45,
+        "B": -0.15,
+        "C": 0.15,
+        "D": 0.45,
+    }
+    for animal_name, animal_intercept in animal_intercepts.items():
+        for unit in range(40):
+            predictable = unit < 20
+            logit_dppi = (
+                animal_intercept
+                + 0.55 * predictable
+                + float(rng.normal(scale=0.18))
+            )
+            dppi = 1.0 / (1.0 + np.exp(-logit_dppi))
+            identity = {
+                "animal_name": animal_name,
+                "date": "20200101",
+                "unit": unit,
+                "dark_epoch": "08_r4",
+            }
+            reference_rows.append(
+                {
+                    **identity,
+                    "same_turn_tuning_similarity": dppi,
+                }
+            )
+            devexp_rows.append(
+                {
+                    **identity,
+                    "epoch_type": "light",
+                    "same_turn_tuning_similarity": dppi,
+                    "ripple_devexp_p_value": 0.01 if predictable else 0.50,
+                    "dark_firing_rate_hz": 1.0,
+                }
+            )
+
+    result = (
+        figure_4_module._figure_3.compute_dark_active_dppi_predictability_mixed_model(
+            {
+                "dark_active_dppi_reference_table": pd.DataFrame(reference_rows),
+                "devexp_table": pd.DataFrame(devexp_rows),
+                "dark_activity_threshold_hz": 0.5,
+            },
+            n_permutations=4_999,
+            random_seed=31,
+        )
+    )
+
+    assert result["test_name"] == (
+        "within_animal_permuted_random_intercept_mixed_model"
+    )
+    assert result["formula"] == "logit_dppi ~ predictable + (1 | animal_name)"
+    assert result["p_value_method"] == "empirical_absolute_coefficient"
+    assert result["permutation_scheme"] == (
+        "predictability_labels_shuffled_within_animal"
+    )
+    assert result["n_permutations"] == 4_999
+    assert result["n_animals"] == 4
+    assert result["n_reference"] == 160
+    assert result["n_selected"] == 80
+    assert result["n_nonselected"] == 80
+    assert result["converged"] is True
+    assert result["coefficient"] == pytest.approx(0.55, abs=0.08)
+    assert result["permutation_observed_coefficient"] == pytest.approx(
+        result["coefficient"],
+        abs=1e-5,
+    )
+    assert result["p_value"] < 0.01
+    assert result["wald_p_value"] < 0.001
+    assert result["null_coefficients"].shape == (4_999,)
+    assert [row["n_selected"] for row in result["per_animal"]] == [20] * 4
+
+
+def test_panel_e_uses_within_animal_permuted_mixed_models() -> None:
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("statsmodels")
+    rng = np.random.default_rng(18)
+    reference_rows = []
+    devexp_rows = []
+    inactive_significant_counts = (3, 5, 7, 9)
+    active_significant_counts = (13, 15, 17, 19)
+    for animal_index, animal_name in enumerate(("A", "B", "C", "D")):
+        for unit in range(40):
+            dark_active = unit >= 20
+            group_unit = unit - 20 if dark_active else unit
+            n_significant = (
+                active_significant_counts[animal_index]
+                if dark_active
+                else inactive_significant_counts[animal_index]
+            )
+            glm_significant = group_unit < n_significant
+            dark_firing_rate_hz = 1.0 if dark_active else 0.2
+            reference_rows.append(
+                {
+                    "animal_name": animal_name,
+                    "date": "20200101",
+                    "unit": unit,
+                    "dark_firing_rate_hz": dark_firing_rate_hz,
+                }
+            )
+            devexp_rows.append(
+                {
+                    "animal_name": animal_name,
+                    "date": "20200101",
+                    "unit": unit,
+                    "epoch_type": "light",
+                    "ripple_devexp_p_value": (
+                        0.01 if glm_significant else 0.50
+                    ),
+                    "ripple_devexp_mean": (
+                        0.03 * animal_index
+                        + 0.08 * dark_active
+                        + float(rng.normal(scale=0.01))
+                    ),
+                    "dark_firing_rate_hz": dark_firing_rate_hz,
+                }
+            )
+
+    result = figure_4_module._figure_3.compute_glm_dark_activity_mixed_model_statistics(
+        {
+            "dark_activity_reference_table": pd.DataFrame(reference_rows),
+            "devexp_table": pd.DataFrame(devexp_rows),
+            "dark_activity_threshold_hz": 0.5,
+        },
+        n_permutations=1_999,
+        random_seed=41,
+        permutation_batch_size=200,
+    )["light"]
+
+    fraction = result["significant_fraction"]
+    assert fraction["test_name"] == (
+        "within_animal_permuted_linear_probability_mixed_model"
+    )
+    assert fraction["formula"] == (
+        "dark_active ~ glm_significant + (1 | animal_name)"
+    )
+    assert fraction["permutation_scheme"] == (
+        "glm_significance_labels_shuffled_within_animal"
+    )
+    assert fraction["n_total"] == 160
+    assert fraction["n_active"] == fraction["n_inactive"] == 80
+    assert fraction["coefficient"] > 0.4
+    assert fraction["p_value"] < 0.01
+
+    devexp = result["devexp"]
+    assert devexp["test_name"] == (
+        "within_animal_permuted_random_intercept_mixed_model"
+    )
+    assert devexp["formula"] == (
+        "ripple_devexp_mean ~ dark_active + (1 | animal_name)"
+    )
+    assert devexp["n_active"] == 64
+    assert devexp["n_inactive"] == 24
+    assert devexp["coefficient"] == pytest.approx(0.08, abs=0.02)
+    assert devexp["p_value"] < 0.01
+
+
+def test_panel_f_mixed_model_p_value_controls_star_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    legacy = figure_4_module._figure_3
+    monkeypatch.setattr(
+        legacy,
+        "compute_dark_active_dppi_predictability_mixed_model",
+        lambda *_args, **_kwargs: {
+            "selected_values": [0.42, 0.55, 0.63],
+            "p_value": 0.0005,
+        },
+    )
+    monkeypatch.setattr(
+        legacy,
+        "compute_dark_active_dppi_mean_rank_permutation",
+        lambda *_args, **_kwargs: pytest.fail("The rank test was used."),
+    )
+    fig, ax = plt.subplots()
+
+    legacy.plot_dark_active_dppi_distribution_panel(
+        ax,
+        {},
+        statistical_test=legacy.PANEL_F_DPPI_TEST_MIXED_MODEL,
+    )
+
+    assert [text.get_text() for text in ax.child_axes[0].texts] == ["***"]
+    plt.close(fig)
+
+
+def test_figure_4_panels_e_and_f_request_mixed_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    legacy = figure_4_module._figure_3
+    calls: dict[str, Any] = {}
+    def fake_compute_activity(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls["activity_statistics_kwargs"] = kwargs
+        return {}
+
+    monkeypatch.setattr(
+        legacy,
+        "compute_glm_dark_activity_mixed_model_statistics",
+        fake_compute_activity,
+    )
+    monkeypatch.setattr(
+        legacy,
+        "plot_glm_behavior_association_panel",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_plot_dppi(_ax: Any, _payload: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.update(kwargs)
+        return {"p_value": 0.01}
+
+    monkeypatch.setattr(
+        legacy,
+        "plot_dark_active_dppi_distribution_panel",
+        fake_plot_dppi,
+    )
+    fig, ax = plt.subplots()
+
+    legacy.plot_glm_dark_epoch_properties_panel(ax, {})
+
+    assert calls["activity_statistics_kwargs"] == {
+        "epoch_types": legacy.PANEL_D_EPOCH_ORDER,
+        "n_permutations": legacy.PANEL_E_MIXED_MODEL_PERMUTATIONS,
+        "random_seed": legacy.PANEL_E_ACTIVITY_NULL_RANDOM_SEED,
+        "permutation_batch_size": (
+            legacy.PANEL_E_MIXED_MODEL_PERMUTATION_BATCH_SIZE
+        ),
+    }
+    assert calls["statistical_test"] == legacy.PANEL_F_DPPI_TEST_MIXED_MODEL
+    plt.close(fig)
 
 
 def test_panel_data_loader_reads_only_retained_figure_3_panels(

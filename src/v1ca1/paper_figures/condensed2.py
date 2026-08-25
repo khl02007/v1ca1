@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from v1ca1.paper_figures import figure_2
-from v1ca1.paper_figures import figure_2_old
+from v1ca1.paper_figures import _figure_2_panels as figure_2_panels
 from v1ca1.paper_figures import figure_summary as base
 from v1ca1.paper_figures.condensed import (
     CONDENSED_FIGURE_HEIGHT_MM,
@@ -46,6 +46,7 @@ CONDENSED2_TURN_GROUP_BOUNDS = (
     (0.58, 0.19, 0.40, 0.75),
 )
 CONDENSED2_TURN_GROUP_LABELS = ("Right turn", "Left turn")
+CONDENSED2_TURN_GROUP_LABEL_Y = 0.14
 CONDENSED2_TRAJECTORY_LAYOUT = (
     ("center_to_left", (0.08, 0.63, 0.28, 0.26)),
     ("right_to_center", (0.08, 0.27, 0.28, 0.26)),
@@ -182,7 +183,7 @@ def _draw_panel_a_turn_groups(ax: Any) -> None:
         )
         ax.text(
             left + 0.5 * width,
-            0.08,
+            CONDENSED2_TURN_GROUP_LABEL_Y,
             label,
             ha="center",
             va="center",
@@ -198,13 +199,17 @@ def plot_dark_light_example_panel(
     example_number: int,
 ) -> None:
     """Plot one Figure 2 new example in a condensed single-column layout."""
-    figure_2_old.plot_panel_a_example(
+    figure_2_panels.plot_panel_a_example(
         ax,
         example,
         title=None,
-        dark_epoch_axis_left=figure_2_old.PANEL_A_SINGLE_ROW_DARK_EPOCH_LEFT,
-        light_epoch_axis_left=figure_2_old.PANEL_A_SINGLE_ROW_LIGHT_EPOCH_LEFT,
-        epoch_axis_width=figure_2_old.PANEL_A_SINGLE_ROW_EPOCH_AXIS_WIDTH,
+        dark_epoch_axis_left=(
+            figure_2_panels.PANEL_A_SINGLE_ROW_DARK_EPOCH_LEFT
+        ),
+        light_epoch_axis_left=(
+            figure_2_panels.PANEL_A_SINGLE_ROW_LIGHT_EPOCH_LEFT
+        ),
+        epoch_axis_width=figure_2_panels.PANEL_A_SINGLE_ROW_EPOCH_AXIS_WIDTH,
         schematic_axis_left=CONDENSED2_PANEL_B_ICON_LEFT,
         schematic_axis_width=CONDENSED2_PANEL_B_ICON_WIDTH,
         schematic_axis_height=CONDENSED2_PANEL_B_ICON_HEIGHT,
@@ -225,7 +230,7 @@ def plot_dark_light_example_panel(
         rate_ax.set_xlabel("")
         rate_ax.tick_params(
             axis="x",
-            labelsize=figure_2_old.MIN_PUBLICATION_FONTSIZE_PT,
+            labelsize=figure_2_panels.MIN_PUBLICATION_FONTSIZE_PT,
             pad=0.4,
         )
     ax.text(
@@ -234,7 +239,7 @@ def plot_dark_light_example_panel(
         f"Example {example_number}",
         ha="center",
         va="top",
-        fontsize=figure_2_old.MIN_PUBLICATION_FONTSIZE_PT,
+        fontsize=figure_2_panels.MIN_PUBLICATION_FONTSIZE_PT,
         transform=ax.transAxes,
     )
     _set_shared_x_label(ax)
@@ -268,7 +273,7 @@ def make_condensed2_figure(
         for example_number in CONDENSED2_FIGURE_2_EXAMPLE_NUMBERS
     ]
     examples = [
-        figure_2_old.load_panel_a_example_data(
+        figure_2_panels.load_panel_a_example_data(
             data_root=data_root,
             animal_name=animal_name,
             date=date,

@@ -1792,7 +1792,7 @@ def load_supplementary_figures_session_manifest(
         scratch_root=scratch_root,
     )
     if canonical_json(current) != canonical_json(dict(parent)):
-        raise ValueError("Supplementary Figure 2 parent changed after computation.")
+        raise ValueError("Supplementary Figure 4 parent changed after computation.")
     expected_pointer = _parent_session_pointer(
         parent,
         animal_name=str(session["animal_name"]),

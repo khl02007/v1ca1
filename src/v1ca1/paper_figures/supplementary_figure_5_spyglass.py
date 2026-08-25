@@ -1,4 +1,4 @@
-"""Render Supplementary Figure 5 from a retained offline Figure 3 campaign."""
+"""Render Supplementary Figure 5 from retained Spyglass motor artifacts."""
 
 from __future__ import annotations
 
@@ -10,35 +10,113 @@ from pathlib import Path
 from typing import Any
 import uuid
 
-from v1ca1.paper_figures import figure_4_spyglass as figure_4_adapter
+import pandas as pd
+
+from v1ca1.paper_figures import figure_2_spyglass as figure_2_adapter
 from v1ca1.paper_figures import supplementary_figure_5 as canonical
 from v1ca1.paper_figures._spyglass_figure_artifact import (
     get_figure_provenance_path,
     promote_spyglass_figure,
     write_figure_provenance,
 )
+from v1ca1.paper_figures.datasets import normalize_dataset_id
+from v1ca1.spyglass import epoch_motor_behavior
 from v1ca1.spyglass.offline.manifests import DEFAULT_SCRATCH_ROOT
 
 
 DEFAULT_OUTPUT_NAME = "supplementary_figure_5_spyglass"
 DEFAULT_OUTPUT_FORMAT = "svg"
 DEFAULT_DPI = 300
-EXPECTED_DATASETS = figure_4_adapter.EXPECTED_DATASETS
-LIGHT_EPOCH = figure_4_adapter.LIGHT_EPOCH
-REGIONS = figure_4_adapter.REGIONS
-RIPPLE_WINDOW_S = figure_4_adapter.legacy.DEFAULT_RIPPLE_WINDOW_S
-RIPPLE_WINDOW_OFFSET_S = (
-    figure_4_adapter.legacy.DEFAULT_RIPPLE_WINDOW_OFFSET_S
-)
-RIPPLE_SELECTION = (
-    figure_4_adapter.legacy.DEFAULT_FIGURE_3_GLM_RIPPLE_SELECTION
-)
-RIDGE_STRENGTH = figure_4_adapter.legacy.DEFAULT_RIDGE_STRENGTH
+EXPECTED_DATASETS = figure_2_adapter.EXPECTED_DATASETS
+LIGHT_EPOCH = canonical.MOTOR_PANEL_LIGHT_EPOCH
 FIGURE_ARTIFACT_KIND = "complete_spyglass_supplementary_figure_5"
 
 
-class _UnexpectedLegacyRequest(RuntimeError):
-    """Signal a source request outside the retained campaign contract."""
+def _artifact_manifest_path(
+    record: Mapping[str, Any],
+    *,
+    run_dir: Path,
+) -> Path:
+    """Resolve one checksum-bearing motor artifact manifest."""
+    for field in ("artifact_manifest_path", "manifest_path"):
+        try:
+            return figure_2_adapter._record_artifact_path(
+                record,
+                field,
+                run_dir=run_dir,
+            )
+        except (KeyError, ValueError):
+            continue
+    raise ValueError("EpochMotorBehavior record has no artifact manifest path.")
+
+
+def _build_motor_progression_table(
+    run_dir: Path,
+    sessions: Sequence[Mapping[str, Any]],
+) -> pd.DataFrame:
+    """Pool dark and light progression summaries from validated bundles."""
+    tables: list[pd.DataFrame] = []
+    for session in sessions:
+        animal_name = str(session["animal_name"])
+        date = str(session["date"])
+        dark_epoch = str(session["epochs"]["dark"])
+        for epoch_type, epoch in (("dark", dark_epoch), ("light", LIGHT_EPOCH)):
+            record = figure_2_adapter._one_record(
+                session["artifacts"].get("epoch_motor_behavior", ()),
+                label="EpochMotorBehavior artifact",
+                epoch=epoch,
+            )
+            manifest_path = _artifact_manifest_path(record, run_dir=run_dir)
+            loaded = epoch_motor_behavior.load_epoch_motor_behavior_artifact(
+                manifest_path.parent
+            )
+            metadata = loaded["metadata"]
+            expected = {
+                "animal_name": animal_name,
+                "date": date,
+                "epoch": epoch,
+            }
+            if any(
+                str(metadata.get(name)) != value
+                for name, value in expected.items()
+            ):
+                raise ValueError(
+                    "EpochMotorBehavior metadata disagrees with its session."
+                )
+            if str(loaded.get("artifact_origin", "")) != "computed":
+                raise ValueError(
+                    "Supplementary Figure 5 requires computed motor artifacts."
+                )
+            table = loaded["progression_summary"].copy()
+            table["animal_name"] = animal_name
+            table["date"] = date
+            table["dark_epoch"] = dark_epoch
+            table["light_epoch"] = LIGHT_EPOCH
+            table["dataset_label"] = f"{animal_name} {date}"
+            table["epoch_type"] = epoch_type
+            table["source_path"] = str(manifest_path)
+            tables.append(table)
+    if not tables:
+        raise ValueError("Supplementary Figure 5 has no motor artifacts.")
+    output = pd.concat(tables, ignore_index=True, sort=False)
+    required = set(canonical.MOTOR_PANEL_COLUMNS).union(
+        {
+            "animal_name",
+            "date",
+            "dark_epoch",
+            "light_epoch",
+            "dataset_label",
+            "epoch_type",
+            "source_path",
+        }
+    )
+    missing = sorted(required.difference(output.columns))
+    if missing:
+        raise ValueError(
+            "EpochMotorBehavior progression summaries are missing columns "
+            f"{missing!r}."
+        )
+    return output
 
 
 def load_supplementary_figure_5_payload(
@@ -46,137 +124,66 @@ def load_supplementary_figure_5_payload(
     run_id: str,
     scratch_root: Path = DEFAULT_SCRATCH_ROOT,
 ) -> dict[str, Any]:
-    """Load only the retained artifacts used by Supplementary Figure 5."""
-    from v1ca1.spyglass.offline.figure_3 import (
-        FIGURE_3_PIPELINE,
-        load_figure_3_campaign,
+    """Load the active Supplementary Figure 5 inputs from one campaign."""
+    from v1ca1.spyglass.offline.supplementary_figures import (
+        SUPPLEMENTARY_FIGURES_PIPELINE,
+        load_supplementary_figures_campaign,
     )
 
-    run_dir, campaign, unordered_sessions = load_figure_3_campaign(
+    run_dir, campaign, unordered_sessions = load_supplementary_figures_campaign(
         run_id,
         scratch_root=scratch_root,
     )
     if str(campaign.get("analysis_parameters", {}).get("pipeline")) != (
-        FIGURE_3_PIPELINE
+        SUPPLEMENTARY_FIGURES_PIPELINE
     ):
-        raise ValueError("Selected campaign is not a retained Figure 3 run.")
-    sessions = figure_4_adapter._ordered_sessions(unordered_sessions)
-    unit_maps = {
-        (str(session["animal_name"]), str(session["date"])): (
-            figure_4_adapter._load_nwb_sorting_unit_maps(session)
-        )
-        for session in sessions
-    }
-    glm_results = figure_4_adapter._load_glm_results(
-        run_dir,
-        sessions,
-        unit_maps,
-    )
+        raise ValueError("Selected run is not a supplementary-figures campaign.")
+    summaries = campaign.get("sessions", ())
+    if not summaries or any(
+        str(summary.get("status")) != "complete" for summary in summaries
+    ):
+        raise ValueError("Every supplementary campaign session must be complete.")
+    sessions = figure_2_adapter._ordered_sessions(unordered_sessions)
     return {
         "run_dir": run_dir,
         "campaign": campaign,
         "sessions": sessions,
         "datasets": EXPECTED_DATASETS,
-        "regions": REGIONS,
-        "heatmap_epoch_tables": (
-            figure_4_adapter._load_modulation_epoch_tables(
-                run_dir,
-                sessions,
-                unit_maps,
-            )
-        ),
-        "source_comparison_payload": (
-            figure_4_adapter._build_source_comparison_payload(
-                sessions,
-                glm_results,
-            )
+        "regions": (),
+        "motor_progression_table": _build_motor_progression_table(
+            run_dir,
+            sessions,
         ),
     }
 
 
-def _require_common_request(
-    data_root: Path,
-    datasets: Sequence[Any],
-    kwargs: Mapping[str, Any],
-    *,
-    payload: Mapping[str, Any],
-) -> None:
-    """Reject renderer requests outside the fixed light-only campaign."""
-    try:
-        figure_4_adapter._require_common_request(
-            data_root,
-            datasets,
-            kwargs,
-            payload=payload,
-        )
-    except figure_4_adapter._UnexpectedLegacyRequest as exc:
-        raise _UnexpectedLegacyRequest(str(exc)) from exc
-
-
-def _require_glm_settings(kwargs: Mapping[str, Any]) -> None:
-    """Reject renderer requests for GLM settings absent from the campaign."""
-    try:
-        figure_4_adapter._require_glm_settings(kwargs)
-    except figure_4_adapter._UnexpectedLegacyRequest as exc:
-        raise _UnexpectedLegacyRequest(str(exc)) from exc
-
-
 @contextmanager
 def _offline_sources(payload: Mapping[str, Any]):
-    """Inject the two validated payloads bound by the canonical renderer."""
-    original_heatmaps = canonical.load_pooled_ripple_heatmap_epoch_tables
-    original_source_comparison = (
-        canonical.load_glm_source_predictor_comparison_tables
-    )
+    """Inject only the active motor-table loader into the renderer."""
+    original = canonical.load_panel_b_motor_progression_table
 
-    def load_heatmaps(
+    def load_motor(
+        *,
         data_root: Path,
         datasets: Sequence[Any],
-        **kwargs: Any,
-    ) -> Any:
-        _require_common_request(
-            data_root,
-            datasets,
-            kwargs,
-            payload=payload,
-        )
-        if kwargs.get("ripple_threshold_zscore") is not None:
-            raise _UnexpectedLegacyRequest(
-                "Supplementary Figure 5 cannot rethreshold retained ripples."
-            )
-        return payload["heatmap_epoch_tables"]
-
-    def load_source_comparison(
-        data_root: Path,
-        datasets: Sequence[Any],
-        **kwargs: Any,
-    ) -> Any:
-        _require_common_request(
-            data_root,
-            datasets,
-            kwargs,
-            payload=payload,
-        )
-        _require_glm_settings(kwargs)
-        if tuple(kwargs.get("epoch_types", ())) != tuple(
-            canonical.PANEL_E_GLM_EPOCH_ORDER
+        light_epoch: str = LIGHT_EPOCH,
+    ) -> pd.DataFrame:
+        if Path(data_root).resolve(strict=True) != Path(payload["run_dir"]).resolve(
+            strict=True
         ):
-            raise _UnexpectedLegacyRequest(
-                "Supplementary Figure 5 requested foreign GLM epochs."
-            )
-        return payload["source_comparison_payload"]
+            raise ValueError("Supplementary Figure 5 requested a foreign root.")
+        observed = tuple(normalize_dataset_id(value) for value in datasets)
+        if observed != tuple(payload["datasets"]):
+            raise ValueError("Supplementary Figure 5 requested foreign sessions.")
+        if str(light_epoch) != LIGHT_EPOCH:
+            raise ValueError("Supplementary Figure 5 requested a foreign light epoch.")
+        return payload["motor_progression_table"]
 
-    canonical.load_pooled_ripple_heatmap_epoch_tables = load_heatmaps
-    canonical.load_glm_source_predictor_comparison_tables = (
-        load_source_comparison
-    )
+    canonical.load_panel_b_motor_progression_table = load_motor
     try:
         yield
     finally:
-        canonical.load_pooled_ripple_heatmap_epoch_tables = original_heatmaps
-        canonical.load_glm_source_predictor_comparison_tables = (
-            original_source_comparison
-        )
+        canonical.load_panel_b_motor_progression_table = original
 
 
 def get_output_path(
@@ -184,17 +191,13 @@ def get_output_path(
     run_dir: Path,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
 ) -> Path:
-    """Return the canonical run-local Supplementary Figure 5 output path."""
+    """Return the immutable run-local Supplementary Figure 5 path."""
     output_format = str(output_format).lower()
     if output_format not in canonical.FIGURE_FORMATS:
         raise ValueError(
             f"output_format must be one of {canonical.FIGURE_FORMATS!r}."
         )
-    return (
-        Path(run_dir)
-        / "figures"
-        / f"{DEFAULT_OUTPUT_NAME}.{output_format}"
-    )
+    return Path(run_dir) / "figures" / f"{DEFAULT_OUTPUT_NAME}.{output_format}"
 
 
 def promote_supplementary_figure_5(
@@ -204,7 +207,7 @@ def promote_supplementary_figure_5(
     destination_path: Path,
     replace: bool = False,
 ) -> Path:
-    """Publish a validated Supplementary Figure 5 and its receipt."""
+    """Publish one validated Supplementary Figure 5 and receipt."""
     return promote_spyglass_figure(
         payload,
         source_path=source_path,
@@ -224,49 +227,31 @@ def render_supplementary_figure_5(
     run_dir = Path(payload["run_dir"]).resolve(strict=True)
     output_path = Path(output_path).resolve(strict=False)
     if not output_path.is_relative_to(run_dir):
-        raise ValueError(
-            "Supplementary Figure 5 output must remain inside its campaign run."
-        )
-    if output_path.exists():
-        raise FileExistsError(
-            "Refusing to overwrite Supplementary Figure 5 output: "
-            f"{output_path}"
-        )
+        raise ValueError("Output must remain inside its supplementary campaign.")
     provenance_path = get_figure_provenance_path(output_path)
-    if provenance_path.exists():
+    if output_path.exists() or provenance_path.exists():
         raise FileExistsError(
-            "Refusing to overwrite Supplementary Figure 5 provenance: "
-            f"{provenance_path}"
+            f"Refusing to overwrite Supplementary Figure 5: {output_path}"
         )
     if output_path.suffix.lower().lstrip(".") not in canonical.FIGURE_FORMATS:
-        raise ValueError("Supplementary Figure 5 output has an unsupported format.")
+        raise ValueError("Unsupported Supplementary Figure 5 output format.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(
         f".{output_path.stem}.{uuid.uuid4().hex}.tmp{output_path.suffix}"
     )
-    linked_output = False
+    linked = False
     try:
         with _offline_sources(payload):
             rendered = canonical.make_supplementary_figure_5(
                 data_root=run_dir,
                 output_path=temporary_path,
                 datasets=payload["datasets"],
-                regions=payload["regions"],
-                light_epoch=LIGHT_EPOCH,
-                dark_epoch=None,
-                sleep_epoch=None,
-                ripple_threshold_zscore=None,
-                ripple_window_s=RIPPLE_WINDOW_S,
-                ripple_window_offset_s=RIPPLE_WINDOW_OFFSET_S,
-                ripple_selection=RIPPLE_SELECTION,
-                ridge_strength=RIDGE_STRENGTH,
                 dpi=int(dpi),
             )
         if Path(rendered).resolve(strict=True) != temporary_path:
-            raise ValueError(
-                "Supplementary Figure 5 renderer returned an unexpected path."
-            )
+            raise ValueError("Renderer returned an unexpected output path.")
         os.link(temporary_path, output_path)
-        linked_output = True
+        linked = True
         temporary_path.unlink()
         write_figure_provenance(
             payload,
@@ -275,7 +260,7 @@ def render_supplementary_figure_5(
         )
     except BaseException:
         temporary_path.unlink(missing_ok=True)
-        if linked_output:
+        if linked:
             output_path.unlink(missing_ok=True)
             provenance_path.unlink(missing_ok=True)
         raise
@@ -283,30 +268,18 @@ def render_supplementary_figure_5(
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse database-free Supplementary Figure 5 renderer arguments."""
+    """Parse Supplementary Figure 5 Spyglass renderer arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument(
-        "--scratch-root",
-        type=Path,
-        default=DEFAULT_SCRATCH_ROOT,
-    )
+    parser.add_argument("--scratch-root", type=Path, default=DEFAULT_SCRATCH_ROOT)
     parser.add_argument(
         "--output-format",
         choices=canonical.FIGURE_FORMATS,
         default=DEFAULT_OUTPUT_FORMAT,
     )
     parser.add_argument("--output-path", type=Path)
-    parser.add_argument(
-        "--promote-to",
-        type=Path,
-        help="Publish the validated artifact and receipt to this path.",
-    )
-    parser.add_argument(
-        "--replace-promoted-output",
-        action="store_true",
-        help="Explicitly replace an existing promoted artifact and receipt.",
-    )
+    parser.add_argument("--promote-to", type=Path)
+    parser.add_argument("--replace-promoted-output", action="store_true")
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     args = parser.parse_args(argv)
     if args.replace_promoted_output and args.promote_to is None:
@@ -315,7 +288,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Load one Figure 3 campaign and render Supplementary Figure 5."""
+    """Load one supplementary campaign and render Supplementary Figure 5."""
     args = parse_arguments(argv)
     payload = load_supplementary_figure_5_payload(
         run_id=args.run_id,
@@ -334,7 +307,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_path=output_path,
         dpi=args.dpi,
     )
-    print(f"Saved offline Spyglass Supplementary Figure 5 to {path}")
+    print(f"Saved Spyglass Supplementary Figure 5 to {path}")
     if args.promote_to is not None:
         promoted = promote_supplementary_figure_5(
             payload,
@@ -342,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             destination_path=args.promote_to,
             replace=args.replace_promoted_output,
         )
-        print(f"Promoted validated Supplementary Figure 5 to {promoted}")
+        print(f"Promoted Spyglass Supplementary Figure 5 to {promoted}")
 
 
 if __name__ == "__main__":
@@ -352,7 +325,6 @@ if __name__ == "__main__":
 __all__ = [
     "DEFAULT_OUTPUT_NAME",
     "EXPECTED_DATASETS",
-    "FIGURE_ARTIFACT_KIND",
     "get_output_path",
     "load_supplementary_figure_5_payload",
     "main",

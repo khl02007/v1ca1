@@ -1,13 +1,12 @@
-"""Generate Figure 4 from Figure 3 panels B, C, and E."""
+"""Generate Figure 4 ripple and CA1-to-V1 model summaries."""
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from v1ca1.paper_figures import figure_3_old as _figure_3
+from v1ca1.paper_figures import _ripple_panels as _figure_3
 from v1ca1.paper_figures.datasets import DatasetId, get_processed_datasets
 from v1ca1.paper_figures.style import PANEL_LABEL_KWARGS
 
@@ -386,21 +385,12 @@ def make_figure_4(
     return output_path
 
 
-def _argv_has_output_name(argv: Sequence[str]) -> bool:
-    """Return whether command-line arguments explicitly set the output name."""
-    return any(
-        argument == "--output-name" or argument.startswith("--output-name=")
-        for argument in argv
-    )
-
-
 def parse_arguments(argv: Sequence[str] | None = None) -> Any:
-    """Parse Figure 4 arguments using the Figure 3 data-selection interface."""
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = _figure_3.parse_arguments(raw_argv)
-    if not _argv_has_output_name(raw_argv):
-        args.output_name = DEFAULT_OUTPUT_NAME
-    return args
+    """Parse Figure 4 ripple-analysis arguments."""
+    return _figure_3.parse_ripple_figure_arguments(
+        argv,
+        default_output_name=DEFAULT_OUTPUT_NAME,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
