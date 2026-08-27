@@ -596,10 +596,10 @@ def _validate_dark_light_glm_parameter_row(
             )
             raise ValueError(f"{field_name} must be {qualifier} and finite.")
         values[field_name] = value
-    use_speed = values["use_speed"]
-    if not isinstance(use_speed, (bool, np.bool_)):
-        raise TypeError("use_speed must be one bool scalar.")
-    values["use_speed"] = bool(use_speed)
+    values["use_speed"] = _database_bool(
+        values["use_speed"],
+        name="use_speed",
+    )
     validated = validate_dark_light_glm_parameters(
         basis_candidate_mode=values["basis_candidate_mode"],
         basis_candidates=values["basis_candidates"],
@@ -648,6 +648,10 @@ def _validate_swap_glm_parameter_row(
             "swap_glm_param_name must be a non-empty string of at most "
             "64 characters."
         )
+    values["swap_light_offset"] = _database_bool(
+        values["swap_light_offset"],
+        name="swap_light_offset",
+    )
     validated = validate_swap_glm_parameters(
         swap_light_offset=values["swap_light_offset"],
         observed_spatial_bin_size_cm=values[
@@ -15448,13 +15452,16 @@ def _write_swap_tuning_curve_comparison_nwb(
                         )
                     }
                 )
-                if (
-                    swap_tuning_curve_comparison_nwb_hashes(stored)
-                    != expected_hashes
-                ):
+                stored_hashes = swap_tuning_curve_comparison_nwb_hashes(stored)
+                if stored_hashes != expected_hashes:
+                    changed_objects = sorted(
+                        name
+                        for name, expected in expected_hashes.items()
+                        if stored_hashes.get(name) != expected
+                    )
                     raise ValueError(
                         "SwapTuningCurveComparison NWB objects changed during "
-                        "write."
+                        f"write: {changed_objects!r}."
                     )
     except Exception:
         if analysis_file_path is not None:

@@ -696,8 +696,8 @@ decoding_output_rule_sha256: char(64)
 PATH_PROGRESSION_DECODING_DEFINITION = """
 # One shared-cohort path-progression decoding analysis NWB.
 -> PathProgressionDecodingSelection
--> AnalysisNwbfile
 ---
+-> AnalysisNwbfile
 unit_eligibility_object_id: varchar(40)
 selected_units_object_id: varchar(40)
 decoding_summary_object_id: varchar(40)
@@ -730,6 +730,7 @@ transfer_family: varchar(64)
 source_trajectory: varchar(32)
 target_trajectory: varchar(32)
 ---
+-> AnalysisNwbfile
 true_progression_object_id: varchar(40)
 decoded_progression_object_id: varchar(40)
 decoding_support_object_id: varchar(40)
@@ -775,8 +776,8 @@ path_specific_place_decoding_output_rule_sha256: char(64)
 PATH_SPECIFIC_PLACE_DECODING_DEFINITION = """
 # One within-epoch path-specific physical-place decoding analysis NWB.
 -> PathSpecificPlaceDecodingSelection
--> AnalysisNwbfile
 ---
+-> AnalysisNwbfile
 selected_units_object_id: varchar(40)
 fold_qc_object_id: varchar(40)
 decoding_summary_object_id: varchar(40)

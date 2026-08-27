@@ -771,6 +771,45 @@ def test_analysis_nwb_objects_roundtrip_valid_and_terminal_results(
     assert loaded["analysis_status"] == result["analysis_status"]
 
 
+def test_ragged_frame_hash_canonicalizes_scalar_nan_payloads() -> None:
+    """Equivalent scalar NaNs retain one hash across NWB/HDF5 round-trips."""
+    canonical_nan = np.asarray([0x7FF8000000000000], dtype=np.uint64).view(
+        np.float64
+    )[0]
+    alternate_nan = np.asarray([0x7FF8000000000001], dtype=np.uint64).view(
+        np.float64
+    )[0]
+    first = pd.DataFrame(
+        {"name": ["row"], "value": [canonical_nan], "vector": [[1.0]]}
+    )
+    second = pd.DataFrame(
+        {"name": ["row"], "value": [alternate_nan], "vector": [[1.0]]}
+    )
+
+    assert module._ragged_frame_sha256(
+        first,
+        vector_columns=("vector",),
+    ) == module._ragged_frame_sha256(second, vector_columns=("vector",))
+
+
+def test_geometry_loader_preserves_float_text_bits(monkeypatch) -> None:
+    """Duration text uses Python's exact finite-float round-trip parser."""
+    geometry = module._geometry_frame(_compute(monkeypatch))
+    expected = 3 * 0.05
+    geometry["test_light_duration_s"] = geometry[
+        "test_light_duration_s"
+    ].map(str)
+    geometry.loc[0, "test_light_duration_s"] = str(expected)
+
+    loaded = module.swap_tuning_geometry_from_dynamic_table(geometry)
+
+    assert np.asarray(
+        [loaded.loc[0, "test_light_duration_s"]], dtype=np.float64
+    ).view(np.uint64)[0] == np.asarray([expected], dtype=np.float64).view(
+        np.uint64
+    )[0]
+
+
 def test_per_unit_score_failure_is_isolated(monkeypatch) -> None:
     result = _compute(monkeypatch)
     audit = result["selected_units"].copy()

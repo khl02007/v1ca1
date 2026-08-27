@@ -111,6 +111,28 @@ from v1ca1.spyglass.tables import (
 from v1ca1.spyglass.spikes import _sorting_output_sessions
 
 
+def test_every_analysis_nwb_result_uses_a_secondary_foreign_key() -> None:
+    artifact_definitions = {
+        name: definition
+        for name, definition in table_specs.TABLE_DEFINITIONS.items()
+        if "-> AnalysisNwbfile" in definition
+    }
+
+    assert len(artifact_definitions) == 17
+    for name, definition in artifact_definitions.items():
+        primary, secondary = definition.split("---", maxsplit=1)
+        assert "-> AnalysisNwbfile" not in primary, name
+        assert "-> AnalysisNwbfile" in secondary, name
+
+    transfer_primary, transfer_secondary = (
+        table_specs.PATH_PROGRESSION_DECODING_TRANSFER_DEFINITION.split(
+            "---", maxsplit=1
+        )
+    )
+    assert "-> AnalysisNwbfile" not in transfer_primary
+    assert "-> AnalysisNwbfile" in transfer_secondary
+
+
 class _FakeTable:
     @classmethod
     def insert1(cls, row, **kwargs):
@@ -6973,6 +6995,9 @@ def test_dark_light_glm_parameters_and_selection_are_frozen() -> None:
         table_specs.CURRENT_V5_V1_DARK_LIGHT_GLM_PARAMETERS
     )
     assert _validate_dark_light_glm_parameter_row(parameters) == parameters
+    assert _validate_dark_light_glm_parameter_row(
+        {**parameters, "use_speed": np.int64(int(parameters["use_speed"]))}
+    ) == parameters
     first = _build_dark_light_glm_selection(
         _dark_light_glm_selection_inputs()
     )
@@ -8457,6 +8482,14 @@ def test_ripple_cross_region_xcorr_resolver_rejects_nonimported_groups() -> None
 def test_swap_glm_parameters_and_selection_freeze_upstream_artifacts() -> None:
     parameters = dict(table_specs.DEFAULT_SWAP_GLM_PARAMETERS)
     assert _validate_swap_glm_parameter_row(parameters) == parameters
+    assert _validate_swap_glm_parameter_row(
+        {
+            **parameters,
+            "swap_light_offset": np.int64(
+                int(parameters["swap_light_offset"])
+            ),
+        }
+    ) == parameters
     inputs = _swap_glm_selection_inputs()
 
     first = _build_swap_glm_selection(inputs)

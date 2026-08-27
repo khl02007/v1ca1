@@ -12,12 +12,17 @@ activation, ingestion, selection insertion, and population are all explicit.
 Use the `v1ca1-spyglass` environment. Standard Spyglass ingestion must first
 create the session, NWB, and spike-sorting rows.
 
+Create missing project tables and register `AnalysisNwbfile` once per
+deployment:
+
+```bash
+conda run -n v1ca1-spyglass python -m v1ca1.spyglass.deploy
+```
+
 ```python
 from v1ca1.spyglass import activate, ingest_v1ca1_nwb
 
 tables = activate()
-# Run once per deployment.
-tables["analysis_nwbfile"]().register_with_spyglass()
 
 # Inspect the project catalog before inserting it.
 preview = ingest_v1ca1_nwb(
@@ -139,6 +144,7 @@ for transfers contained in its parent's analysis NWB.
 
 - `table_specs.py`: passive DataJoint definitions and presets.
 - `tables.py`: activation and table implementations.
+- `deploy.py`: idempotent schema creation and analysis-table registration.
 - `nwb.py` and `ingest.py`: NWB cataloging and insertion.
 - `spikes.py` and `region_sorted_spikes.py`: regional unit selection and
   spike loading.

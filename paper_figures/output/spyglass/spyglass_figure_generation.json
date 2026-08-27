@@ -1,0 +1,1908 @@
+{
+  "analysis_nwbfile_schema_name": "kyuv1ca1_nwbfile",
+  "figures": [
+    {
+      "name": "figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_1.svg",
+      "sha256": "02f45268381f943ed04b090bc2e693a104eb84e2bcc4f4483741bc2d834b7df7",
+      "size_bytes": 3242380
+    },
+    {
+      "name": "figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_2.svg",
+      "sha256": "0b50442ce82da077b31b4aa0c24d87853f813e37d3a7b7e8fd1a8a628e7893a8",
+      "size_bytes": 5974783
+    },
+    {
+      "name": "figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_3.svg",
+      "sha256": "d1542530290e8286503709158311e84f29047aa8fb20812583102d19fae86790",
+      "size_bytes": 146001
+    },
+    {
+      "name": "figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_4.svg",
+      "sha256": "7e8af4d38393306ec10f4595a533e7b1cc027fbc0fdeb9c7e3adaa43bdad95f9",
+      "size_bytes": 465306
+    },
+    {
+      "name": "supplementary_figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_1.svg",
+      "sha256": "ab38563a581f8922d373cfe8f81d6bf962b1608aff2cce38e7e3318aee37b86a",
+      "size_bytes": 230068
+    },
+    {
+      "name": "supplementary_figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_2.svg",
+      "sha256": "60eb1ceb6236bb62f9f2fa73b5b680caa534d20778e2573e7b28f58abaf03fef",
+      "size_bytes": 168952
+    },
+    {
+      "name": "supplementary_figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_3.svg",
+      "sha256": "e7ff99b46dcaa55199d02a90c0ae71a0307eca74d38e23a47a9dd339a5c09903",
+      "size_bytes": 278605
+    },
+    {
+      "name": "supplementary_figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_4.svg",
+      "sha256": "756fc778d80aab21261fbf829533cdfe6ac7f803194c8233631bda8a10da718b",
+      "size_bytes": 77796
+    },
+    {
+      "name": "supplementary_figure_5",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_5.svg",
+      "sha256": "bd72abe20a9302754b2331aaa3466e2afc91789823634fdc3616ba682c3097d5",
+      "size_bytes": 360085
+    },
+    {
+      "name": "supplementary_figure_6",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_6.svg",
+      "sha256": "1acea54f3d933211542286cfd4b88e3912dd42044bc96230f1a3312456e4ba42",
+      "size_bytes": 122890
+    },
+    {
+      "name": "supplementary_figure_7",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_7.svg",
+      "sha256": "2970e0e80499f3fb2fa33d521a7abe9731670f5213b17f347ec0de26c295468a",
+      "size_bytes": 292240
+    },
+    {
+      "name": "supplementary_figure_8",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_8.svg",
+      "sha256": "93b11076f1981c74c49e54e71a38131cf1c9f27e475dbb6f1ecd205514c2c934",
+      "size_bytes": 383264
+    }
+  ],
+  "nwb_root": "/stelmo/nwb/raw",
+  "result_rows": [
+    {
+      "analysis_file_name": "L1920250930_augmented_NIPYC1YS9H.nwb",
+      "artifact_origin": "computed",
+      "id_field": "cv_pca_id",
+      "result_id": "65c996ae-efd6-5a14-8540-21ba31a9ac59",
+      "table": "cv_pca"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_TOJ9BPEOEY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "cv_pca_id",
+      "result_id": "8fd65415-3c38-5c9e-b034-333fee11c2ca",
+      "table": "cv_pca"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_IKQDGLML2L.nwb",
+      "artifact_origin": "computed",
+      "id_field": "cv_pca_id",
+      "result_id": "c6d7cfd7-136a-5b7d-8dba-d2f5de5642af",
+      "table": "cv_pca"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_0IWK9W0XLZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "cv_pca_id",
+      "result_id": "f6baeb05-6823-5521-8b81-497671c8507f",
+      "table": "cv_pca"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_UWJ3AOH8U6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "dpp_encoding_id",
+      "result_id": "5cfe2a9c-dd16-5faf-98c3-187ab18559a5",
+      "table": "dpp_encoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_WZMTA6XID5.nwb",
+      "artifact_origin": "computed",
+      "id_field": "dpp_encoding_id",
+      "result_id": "684b4c8d-3f60-51a3-b5cf-3a91eb59f7ce",
+      "table": "dpp_encoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_Z1GTYP9T5C.nwb",
+      "artifact_origin": "computed",
+      "id_field": "dpp_encoding_id",
+      "result_id": "7613f9cc-cc42-5ff4-b52a-562e027f7605",
+      "table": "dpp_encoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_ZARR458X2O.nwb",
+      "artifact_origin": "computed",
+      "id_field": "dpp_encoding_id",
+      "result_id": "9965aeab-be62-5346-be56-5001a9846e48",
+      "table": "dpp_encoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_AWY9NHZZ53.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "05cf4973-5426-520e-b374-1ce00454405f",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_OA1HNRX25I.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "1205c15e-8c1e-56a9-b8c3-90efd9795c46",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_ALGM0HE7E0.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "1ae63a6f-ca79-54e2-9864-1b411d4c8438",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_5GLVAF1YO6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "25cafb3a-c697-57a2-9065-5d5c88cea37a",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_RR1CUW63IR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "26e517be-b898-5759-a1d2-57a080c8bd6f",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_0A0MPPOH6C.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "4f2c55a6-02e8-594c-b39c-88f36251fcdc",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_Y1H740GKEK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "4f9e45b7-8cb0-585c-a1b5-70cd28562d01",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_ZLPDMVJ9P2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "epoch_motor_behavior_id",
+      "result_id": "a312a82c-0b22-57ac-ad70-dd6ddaaf7db5",
+      "table": "epoch_motor_behavior"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_LIQUFY8ZPK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "motor_encoding_id",
+      "result_id": "27e92f6c-266f-501a-81f1-041b8c327aaa",
+      "table": "motor_encoding"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_YTC5Q9B5HI.nwb",
+      "artifact_origin": "computed",
+      "id_field": "motor_encoding_id",
+      "result_id": "298d27f1-d34f-5c7d-b31e-bb37c78c15f6",
+      "table": "motor_encoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_QNSRN4AYYT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "motor_encoding_id",
+      "result_id": "5286d74a-160d-57b0-9deb-98bbc3882893",
+      "table": "motor_encoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_NLMX76QS92.nwb",
+      "artifact_origin": "computed",
+      "id_field": "motor_encoding_id",
+      "result_id": "67b65442-a9d0-5449-b610-7fa08cc325bc",
+      "table": "motor_encoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_EMX1YAXY4C.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "0636bd55-2c05-52e7-b58c-fa0b2f4ab32d",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_86J4VRYIPT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "0ab26d7f-5c19-526a-afee-6bfc31aabbcb",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_1YK1HF7BFM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "2078f6a6-3215-5217-b4a2-d35f029fd954",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_NCMS1P6JU6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "28648283-9d43-505d-9795-341c6f3fd636",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_TDW5FSR2K7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "4200b26c-cfdf-5001-aa53-3a11e9ad4345",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_X5LWS1ERHZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "59cf91ed-0898-5ea5-9c82-46668550a86c",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_HAFK9YU0RK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "6d3757ad-5e19-55de-bc47-03e658f1056c",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_V660GTSFTI.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "70293122-a7fd-5780-bad1-5a6e0ec2be44",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BC50XHA3FQ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "8d4895fc-44f2-5547-a8b4-a14adcc857f5",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_8SA26ROHLP.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "8f1011bd-9d86-5340-990a-f94923288567",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_VV3RD9K4VC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "b43cddab-3a57-5fac-9439-710246825745",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_CINB27U9GM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "b495231a-8abc-59ab-b7ae-a41d66899e59",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_93QD8PWYCR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "c2c1f72e-fec6-518f-a2d6-9c348de8c9a6",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_S8V8RIM7R1.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "cb1ea722-753f-5ee7-ba6d-9be302e023f8",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_I09Z3BMUTD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "ce07f484-3d86-5407-8ea2-8f84f6ded14d",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_TOG2XB8F9U.nwb",
+      "artifact_origin": "computed",
+      "id_field": "movement_firing_rate_id",
+      "result_id": "d7a87db2-93de-59a1-81d8-521e436c57a0",
+      "table": "movement_firing_rate"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_1G5CLI3ZON.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "0f1231c3-3255-525e-b29e-f7cf8f0dfb47",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_RUBXBF5X0Y.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "1fa260ac-9121-59ea-b2ff-63f600e59dd5",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_F9W963FXJZ.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "6d98fe5a-1059-5ced-a34f-12c61781ac4a",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_LRJTZ6EYJ0.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "802d4931-0ac1-5307-8319-7da23b6e45be",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_9ZIDTTGCLH.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "8b32a420-fa21-5937-a053-8269247fad32",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_A7MBMWQYRT.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "962e5583-d3af-5bfd-ab1a-5683e25ffd60",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_0MBECCD1E6.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "9a81b22f-4da8-5a0d-896a-f2d6dead5481",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_HZ4XYTY714.nwb",
+      "artifact_origin": null,
+      "id_field": "path_progression_decoding_id",
+      "result_id": "bf1c70fe-7a72-5d65-80f3-9f9ac49916cd",
+      "table": "path_progression_decoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_LSLEM9YFN5.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "03253295-a6db-5027-bcdb-ae2366b0a5c7",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_BKHQHX0AW8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "46329222-5651-587c-bb53-7601e18bf9fe",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_PUM05RVMS2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "808b3858-51e7-581f-9810-26f76e3ca05b",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_66V8V8OU18.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "8ddae6b5-723c-5646-acdf-7c9c21691231",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_T620O6UOSJ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "90c012a5-5026-5ba5-90b2-aadcd070339a",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_OK056CEN6Z.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "bdfeb438-6df7-53e2-8913-696687193b16",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_2XFUQ4DARH.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "ce3be920-3122-5be5-ba84-79a056474e69",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_UWVJHMUSCG.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_decoding_id",
+      "result_id": "ee657afb-f6fd-5e01-89d5-32bc5a9cf75e",
+      "table": "path_specific_place_decoding"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_R9KPS20UQI.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "022fef7f-a2c1-53dc-9c80-938044663504",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_M7LY03FDZ8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "0bdb97a4-b5d9-5c0f-9d03-7f76e94115f0",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_UCG72HGJKR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "0e6976dc-c03a-5fb6-a4ed-a7aeb65c3ccf",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_OE2WII7IIK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "1078f4c4-f575-527a-98fa-30a55c0934c9",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_MAMGBKVHJA.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "1a3e5cef-e55a-56fe-8f91-8b2cad6f1183",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_3FDVAQR083.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "1dd17c93-8a9c-5763-957f-75dfaa624e75",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_B4RXSN0IAY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "2d760505-7489-5120-96b7-8ea7009e46b1",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_DBV4K81OAS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "2ef1cefa-a93e-5950-9c94-080a8b0b9c02",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_F5W79F45P3.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "2f852fb8-73fd-5027-aba8-9eaaa0cd7a26",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_WC6ZGAMJCC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "31f660a2-255a-55e4-a710-29e0f552a584",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_KBSB8TTN92.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "32aea783-038c-5fe9-aa22-d5ef24a5f5e8",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_W1GPXYVT0Z.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "3493144a-c360-519e-ab29-1548f83c06bb",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_4DSR3HOUR8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "3a6a22a5-07d9-511f-a2ed-4c80844c47f4",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_3ABXX46DJ6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "40fa76d3-30f7-5e6c-a34c-791f0973c8e5",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_7IZFNXW7EB.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "492feeff-3159-5d59-b08d-bc62ff1fd5d0",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_HLUWQLB9M7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "4d9e19fb-daf1-5738-aa32-bb3e6950f42c",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_OO8C81JPXF.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "5012b5ff-fdbe-50bc-884b-11807dc5827b",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_J7U8FSWWAQ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "53424393-a694-5aa8-a9d4-e46a07e798e2",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_UM3HWT8ADZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "59cb1538-b94e-5b5f-8144-84591452693a",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_137NNMTJ18.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "73ce78bc-0d1d-50d9-a356-d102c1ade657",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_8DLD0NNDSW.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "796c7c4a-776c-56da-8260-7ccb32c00f6d",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_7LVF7BO1JP.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "803cf207-8915-5be3-aab0-de4a0e201e3c",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_X758LJHA07.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "897e232b-c80a-534d-aedf-7a909d7d5bb6",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_6V8D5XDBOF.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "89ffc193-6729-5f79-8b4e-cf9500f0b2e3",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_FODLZ4T8QL.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "a02fdd97-6e52-5553-b567-6bf81c60c3e2",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_NZBM0MVM1L.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "a074d4a8-9b31-5913-8d09-0380946f2c6e",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_XB4UWIJYIY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "a3612209-5568-5223-befd-ad67ea2c172f",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_4SP1OA6WPW.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "a795866a-a84e-5534-bb60-4bd78219071a",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_HPK71RUAEO.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "aaa359f9-77b5-570e-a5f5-dd7b0640766e",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_7PALX39JLT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "b2e9a49c-59f8-5d4e-9a61-81de0d184fd5",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_GIC2G7ET1R.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "b49aa985-7f83-5b17-97b8-76cef4d1506e",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_P7TOEH7IZY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "b8f40301-7b1d-5dba-92b9-e39d1f74d2a2",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_A8KE2BJKRC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "b9948ead-096a-5ab1-b83b-e7b17ac0f2d4",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_8CD5AS59TU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "bc732512-0323-55e7-9765-73acb1e0943a",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_ULNZMG54LE.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "bfcf7049-bb7a-5ea3-aa8c-c5bcc2d8afdb",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_913OB7UL9N.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "c30a355f-b1cd-51ec-9254-c98a0a07fe5d",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_HMFSWP3VO5.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "c749d625-0c60-568a-9aef-7ade595a0c34",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_CLQ8I6NJQ7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "ccaf1e3e-4d0f-57f3-b095-fc051f9df85d",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_HVUC1Q983M.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "cf96b735-66c9-5f01-a73e-9fa39be9f428",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_2UX0L00AGE.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "d2649509-7b82-50cb-8e4a-d0e7e95aed52",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_8CT2MQIWGD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "d98c5b1e-15b8-5a90-9a33-863291c4df8f",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_IT1U80NLG4.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "e68a4700-867f-59e3-bbc9-fbaf441c6213",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_Z4QXT3LYXV.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "ec0a81c2-0ab9-5aa3-b42c-e21f2d524730",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_OP96CF923J.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "ecc6d503-723c-5f6a-9197-e2975168e492",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_0SB8GOVBOV.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "ed4b5e3f-a4e5-5f6f-ba5e-c5f9f5a1136c",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_H3M0B19EWA.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "f552f1e1-e686-539e-a127-d24b2765a317",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_KWXNX6BW9R.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "f9f9b588-91d9-58f6-8740-8579f0e94563",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_SNAI9FAMYQ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_stability_id",
+      "result_id": "fe348a6c-17a1-5c12-a524-2f929d9f6b49",
+      "table": "path_specific_place_stability"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_T4B0N558TY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "0380bd5f-077a-5bee-af91-1508d3518266",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_J6JEX92ZBO.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "04008313-3156-5b7b-9356-62649763bab1",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_FMJ631NIKF.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "05a5d53d-1121-5b45-9686-a8bea3b90e3d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_X8G725A7E8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "061a89a0-8a89-57c6-808c-44ac03ad1c43",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_OCHC99MC35.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "07cf4108-3cff-56ef-8ffb-6d9ed8c0701f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_Q52PQYNAUG.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "08f615c0-14c7-54bd-ab62-5e8de19428f2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_N54IGZZH0L.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "090083df-9dd8-58e8-89ff-adefe8a27b94",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_XDL6R6GCMC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "0dd975aa-f242-50b8-a5a0-c3736c1bbf9c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_UAWYHZ6OWA.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "0e02f22a-5776-5fa5-be92-14ce4126589b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_Z40OSFUKPT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "0e8a3f1c-6fbf-5bfc-909d-b098b664015d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_D87U4M5KAW.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "111326c4-0bf5-5e4c-a574-724264cef250",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_CIBHBRU3F9.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "1211944f-d9a4-5cce-b906-8140c7002801",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_QJTEAX2QYS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "128574ef-bb5c-5344-a6b4-21099e1e3c21",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_HR08A12W17.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "1308cbf8-c260-5b2f-afa1-96bbb69dde61",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_4NQ5Y79W4K.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "171f5c3f-47c3-5015-932d-5fa6efbd482b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_KMWHXXNRZ2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "172b4cfc-5fc9-51c7-b387-628d6fd7e3a4",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_3GINYCAVHC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "1828980c-219e-5efd-a9d3-6b48d521a11d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_GVWBUQ6SWB.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "1d35d5cc-440e-52cd-be1a-8d869da5af3a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BD324YZMZP.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "1dcf7f65-bf7e-5ae7-84b8-f6449d46584a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_RT97BCKSVK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "218985ab-4330-53a0-b332-779b852cdd7b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_BDYCAPBLFZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "21ab44ad-5ee0-585b-b472-70c3e2dab4e5",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_TL2VMJ5023.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "25b00d87-134a-52f5-bfb8-b8b4b6ae457f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_2277FZ4LDX.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "263cf0ae-603b-5f4d-8c63-d64874a97900",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_5ASHVZ1A55.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "2cc4e968-f4a8-5538-a42a-a8e8d512daa3",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_YLVZPFJJTD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "305b5a0e-879f-5f48-a2c4-3b8070a5ce9d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_HEU2UYKLZI.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "349e4a03-1615-5c16-9eb9-f5cb3137970c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_N0Z1Y8IUQD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3666c028-1c49-5d7e-8c58-ab27f2294241",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_YF9B4XMVHX.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3a50ee69-78b9-5480-9550-ae019c059aa8",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_7HGULHNYNY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3b34de39-fdbd-59c0-bfdc-823f54cc10c2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_YNAY9D1FVJ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3dad9a2c-5424-5a5e-b56c-c53142558766",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_KMDBBAVIEJ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3e79bc0f-931d-5273-b720-b076a448b38a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BY2SY3NCO2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "3fe39fa6-8fa7-5e05-9147-87a4fd66f093",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_0YU6QAS8UK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "400f2991-264b-5038-9c10-d847db5f2301",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BQ510IBCIM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "40204bc2-85ad-59d6-b97e-b3a0615f545c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_EQ9X306OEM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4714a56a-2553-5939-b7ab-72d04931cac1",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_R685CJNRNL.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4b7fe8df-2609-572e-b643-82f57a0538e3",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_547UT6YR62.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4b9f518d-106a-5787-8458-6cf479625857",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_FRVRCR2J5N.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4c688afc-4cb7-5b22-b768-b313a9ca3a4b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_KTGHONCRYJ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4d80182e-7670-59e5-9d75-f50f4514e536",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_RMT7B0OPOH.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "4e523b1c-5bc0-564f-abba-9c7379454353",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_Z8E43YMOAY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5174b7ec-b4da-55cc-94bc-d8ae240454a9",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_VJ60B8231K.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "525bb3d6-e40a-5b61-b832-f5a45ca222d9",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_Y698XFS1AC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5293a70f-9156-515e-8745-6c355dd04b0f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_E8UXBTG222.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5383bbd6-43fa-5063-876e-b138c823918f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_BEF04BZQSH.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "544a67b3-ad24-5d54-992e-8e357f334547",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_UK4U7YFBAJ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5612cb2b-14f6-591e-a781-30d506764500",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_G8PK07I1R4.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5bc242fd-740f-5fb5-b205-c5deb11c6bbd",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_850MZ7SQ5J.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5beda95c-6609-5c1d-bbf3-2c25b439ea5e",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_MRA23UZNG2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5cbd29b4-bf83-539d-bdc7-c9dd4b3dc69e",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_058OALXFUD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "5cda4a4c-3ced-5fa2-a33d-23f0eb1ff5cc",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_XAVWNGKJ1K.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "65d54b7b-3f8a-53d2-84f0-a4f87403a144",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_7KCVFDA5EK.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "6641767f-7af7-51df-ad60-97628e31ea38",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_YO6U14NOMR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "679644c7-663b-5119-815b-cddd158e3cc8",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_PE011VJG3N.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "69118aa5-2498-5b14-9250-f5e22c2f016f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_W1PSNJI5D1.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "6ba7028e-7eaf-5efb-958f-7e807b5ad538",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_32AFRUDKFR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "6c5b18db-585f-50aa-a06c-97c117b13822",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_TBOQZ0VIYX.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "6d3da855-1da5-5ffd-9dfb-42d83f674adb",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_ENIZMM1OL0.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "6ecb7572-308f-509c-878a-d971904e61b8",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_2M2JSQL6ZZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "727a00da-d567-516b-8d1d-1c81d4489a50",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_TZMOS04R7A.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "772eadbf-5444-50d4-9cfa-0ab74d1c89c8",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_XOFY5BNXE3.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "7a46b5f9-dd0f-57a7-8a80-922168728ca4",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_2JP6OG5OTL.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "7b012c53-ec8e-5137-87f6-8ecf34060705",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_WDH1AO2VT2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "7c1fc3fb-7140-558e-a05a-afdb690f28a4",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_GUN0PF28QQ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "7c3a3697-61c2-567b-bdab-998312361870",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_KEWWM4AMA0.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "82c96a33-8ee4-5a1a-a873-0566186cbbfe",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_C4IBJ0MX6I.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "84ec2a64-6f26-51cf-b0fe-875ccb07ed62",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_N7G64FCUJ9.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "8639cf2a-a42b-59e5-a2e7-bfed8b4d2ea2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_GJLVPDT0ZZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "86a184ea-72da-52e2-a021-6935e0059d19",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_C68NX2FXJW.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "8a3207d8-7878-5336-9e01-4595ec87f660",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_1KZTSDVAJZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "8bef251d-d9f8-5fd7-9ba2-0a823dc95d20",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_C3MYAFM1RU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "8c78f806-9ac9-5e49-a885-2a41db3d9408",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_53P7YISX4V.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "8dafc6e0-a48f-5d24-b600-3556d8b1cdca",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_FHHDPCXK3A.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "907abb4a-1ae7-5bb5-ad27-7ac749c2513c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_R9KCW2LSB7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "92617e62-651a-5afe-84ff-6fd319fe258b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_ORGTBEYXAA.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "92c065c7-000d-5128-8211-e8beada76be6",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_EA273WPX3M.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "935f38c8-1f60-528b-ab65-f02efdc49291",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_OGTCAKP6P8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9548220b-e39b-5c7c-86fd-cb65c409213b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_JABOQI2U4K.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "95a53dce-0837-5e2a-9766-a5d47a55fd85",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_SA2EWOQ2LM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9691b9c0-d0f2-54ab-a92b-b9d76f235c51",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_3YBW0O3288.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "98008b2c-3689-5a7e-9989-4e829280eae9",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_QHHRRQ667U.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9a761a81-7664-583b-b61a-6c08694a3977",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_OWWVYND2P7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9b3b8014-437e-5cba-9dff-e84f713d654a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_NIOQBOTZSC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9d3ce6f8-3d1a-58b4-800b-8b98dd0047c2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_WA9PB9WRX6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "9f8dce83-5ddd-5873-a410-dc3c774cd5f0",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_OJSG9YO5S6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "a0b5604f-38e5-5817-8f89-667c3d4bb6f1",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_NEV8QM1X4T.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "a201d207-05d9-5bd2-9d00-ff32554a5664",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_TO3FKFB8SG.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "a8555370-a5c2-5893-9068-e6c22a5492e3",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_JCLU07RH6T.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "a923d4a0-71a1-5327-9fbd-e9928e822ae3",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BBH8RBESBE.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "aebe6b93-48dd-53f4-89b2-57c81c86d14d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_BOG52AZA9T.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b28b97af-7913-5bc7-9edf-71edb92e1f72",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_S0E6C1FRNV.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b2ad77eb-b672-5988-a7a6-2f641c0a122a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_XWDBG3YA1S.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b2ca8c1d-9705-56a3-8cef-baeb9b7285ab",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_L8QFSQ7DH1.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b38c2a93-b1e8-5d70-9e90-40f1f9febef1",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_PEDN95J7Q4.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b50a79a0-93c5-5be2-b84a-cc0c8bed9505",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_MYF4VP8VCY.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b52aa2e9-0a30-57a1-b27f-0a70ccdac7fc",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_BU6PFVLXBG.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "b814b459-5347-503a-9df6-22d31e688cad",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_WNHFUGWGEM.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "bd06e1fd-613a-5e09-b042-5568bf88520d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_IV8DX4HHD7.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "bd406c2e-1b09-52f6-a8e4-a06229fd7acb",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_1E9BLNE76E.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c04b084c-e032-508c-87ed-c2fc90695756",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_F38RLWTTCC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c093f3d7-dea9-5827-bf53-df42870f7c70",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_3OBXCH05BH.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c1f8d8bb-d36f-5e1c-ab97-d0bc4e415333",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_CESUGKSKY2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c36d0b82-e7c3-5bf9-93fa-8a35dd7f7060",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_0ZJAFML6K8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c485cdef-6d5b-5146-b1e4-dce05f3c59bb",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_NGYTAYT6OF.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c7f694db-720f-5505-a61e-75b40978e7aa",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_X8C59FI2XR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "c93767ed-ab8b-5d31-b6c2-067277199e5a",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_JVYWMPA5C2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ca7a9c1c-fdb3-5d95-a3c7-260e2e0998ab",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_IBGG1F4600.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "d20fa679-d12a-5dbc-8d10-9750369f0e9e",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_6I76PYX3TF.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "d3f34c30-7919-57fd-a20a-2105f0b6e13c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_5GS5O3G0SU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "d79899c2-3774-50f7-b519-3e08d6897d45",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_CFUGEHU5GQ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "dd6e04a0-994b-5533-81c2-b461fa4dee8c",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_5RG35ONY0B.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "dfc0e215-4567-5f7c-a6a5-4920d7cb3968",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_2O4S141OET.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e03e9e2c-50af-5018-91ca-9a998a7b4f21",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_04QY9LCPOT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e192f1c8-aeee-5d1b-a618-b6d4902833ba",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_FGEX10B476.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e2b503fa-9d93-5dd7-af34-57a073c3a442",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_QGEH2U8X4W.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e2bbea5e-e79f-5a9a-9c36-b19056fdcf3b",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_D6NRF9WEY9.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e4f4157f-ac5a-59a1-8d0a-e8dc01c36abc",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_T6XGFRLYEE.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "e9652fe7-fc3f-5bfc-99a6-669a895ecdcc",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_1YLM2DDYWI.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ed31a0c9-6908-532f-82d7-660d446995c2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_54YR7EFJPB.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ee6b9453-df3f-5fd1-8ec2-5d605e9a027f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_VCS7IK9B2P.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ee86cfb6-099a-5821-ba10-852813b94e5e",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_IGTZ07CVK3.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ef4c259e-8b4a-5248-9521-af823660216d",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_CHJHMFP71F.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "efe2f455-d012-56ca-80f5-70711fd497a2",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_4593LH0TUR.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "f0125e94-18ca-5d36-b604-c423da518b06",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_FMW76F7CN4.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "f166c39f-a901-5a4c-b890-c5636d332039",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_AIGYP8H2VT.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "f167b003-ac71-5a3e-a8f8-4127e8bc033f",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_8JV8HG5ODE.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "f4d6a2c8-90e1-591c-a506-d8b589ec3e41",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_JKXMYY65PX.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "fb996b9b-ecab-55c6-b1f3-509154121b0e",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_KVPFQ55UYD.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_curve_id",
+      "result_id": "ff0d2950-798e-570c-9b52-578745b9e7f4",
+      "table": "path_specific_place_tuning_curve"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_0OGA1ZBI1P.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "34e1bc4d-f17d-5e5a-95a3-a7c11872ba61",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_0DO31ASA26.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "3e50ff64-fd37-5cbe-bdeb-72832b7d4098",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_AJO6AUI1A9.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "7f81b916-885e-59c9-9719-e679d195b245",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_CO82TSDJA8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "8a30cfb2-c71a-5c10-bb41-97f21985d8ff",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_ZY6JU7AZA2.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "94d3b543-6a02-5fc3-86af-12365bd16642",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_0BRI6O1URS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "9bf7b1af-36cb-5f04-a6b2-bf6b214e75ca",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_XTCGKPF91X.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "ddb9e427-b6db-5935-af44-4574168d9eb1",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_9X5RRM7WXS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "path_specific_place_tuning_similarity_id",
+      "result_id": "ff873999-f167-527e-9380-4e8974a94c21",
+      "table": "path_specific_place_tuning_similarity"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_XHZ9FN3UA1.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_cross_region_xcorr_id",
+      "result_id": "fccaf3b5-e017-56cc-bb7d-7ae720f6ae03",
+      "table": "ripple_cross_region_xcorr"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_QYMXUSLZXS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "15c24045-eb10-5750-98c0-646b57793027",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_GHDVXLNDKU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "16fecf1d-ab66-5922-8ff5-5359cc89cce7",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_OUDMKWMRF3.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "41ea98f8-dc6e-5e90-832d-1f9642c4356f",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_TG2ZS768H6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "4380cbe9-3e19-5002-b3a6-17f6c7933129",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_KQVJZK79IV.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "451b019a-2598-55b1-892f-77257be0d638",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_WAISRDPAAU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "7567238f-deb5-5345-aa56-5378930ecadb",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_NG45OGNF93.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "c90de9c9-4170-5a5a-9cdc-3d84fb11ff60",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_JF0XSHJTN8.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_glm_id",
+      "result_id": "e6751c87-5dc1-5239-bd9c-cfca59e5ea99",
+      "table": "ripple_glm"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_5QJT2NS0MS.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "0dc1cfff-0f49-53fc-82d3-4c57713eb823",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_JJ8MPXLO3Z.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "159fe024-3f69-5efd-b51f-adc4a045ea9f",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_WQY77TT8J4.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "225872c6-34ba-53df-838e-a09768a4f92f",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_1158HC3X7P.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "2806203c-0f73-5c2b-87bb-de8ceb5af622",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_3GL08B9FYC.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "33dfb393-6486-54ce-8b0a-44567c3497be",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_MNAD46X9TU.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "42383445-b0b0-57d1-93a1-b340975483b3",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_89FOZAFUQ6.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "5db7aeb8-b09c-59dc-97be-1e3900eee706",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_NSW6988TU9.nwb",
+      "artifact_origin": "computed",
+      "id_field": "ripple_modulation_id",
+      "result_id": "d549b85e-528b-5e1b-9bc8-0486fe042dfa",
+      "table": "ripple_modulation"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_OVGCIX5UF5.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_glm_id",
+      "result_id": "16220e56-a189-5b90-a896-24b16cdff295",
+      "table": "swap_glm"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_2DZMT8U7BZ.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_glm_id",
+      "result_id": "5f6a66c4-4725-5a3f-9288-9134c10ebba8",
+      "table": "swap_glm"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_SQIPBI9FMG.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_glm_id",
+      "result_id": "7794b00d-8949-52bf-84d3-b5fe39baf5ed",
+      "table": "swap_glm"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_3FOG9PP571.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_glm_id",
+      "result_id": "82496052-a845-529d-a3f8-1f757d5289f2",
+      "table": "swap_glm"
+    },
+    {
+      "analysis_file_name": "L1520241121_augmented_P6VE7E8J4F.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_tuning_curve_comparison_id",
+      "result_id": "149bcac2-1cad-5bb1-a50c-0e636c7c99ec",
+      "table": "swap_tuning_curve_comparison"
+    },
+    {
+      "analysis_file_name": "L1920250930_augmented_0PSUKJAN6Y.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_tuning_curve_comparison_id",
+      "result_id": "2fbc0834-207b-5bd0-ab7e-7ddaa5b5c937",
+      "table": "swap_tuning_curve_comparison"
+    },
+    {
+      "analysis_file_name": "L1420240611_augmented_MZKP6D04A5.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_tuning_curve_comparison_id",
+      "result_id": "d04c62b5-130e-506d-81f5-7b9dd516c906",
+      "table": "swap_tuning_curve_comparison"
+    },
+    {
+      "analysis_file_name": "L1220240421_augmented_TEVTURF8TW.nwb",
+      "artifact_origin": "computed",
+      "id_field": "swap_tuning_curve_comparison_id",
+      "result_id": "fc4ac76f-1746-5fbf-b04e-43753e5e3281",
+      "table": "swap_tuning_curve_comparison"
+    }
+  ],
+  "schema_name": "kyuv1ca1"
+}

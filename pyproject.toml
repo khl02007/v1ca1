@@ -41,7 +41,7 @@ figurl = [
     "sortingview>=0.13",
 ]
 glm = [
-    "jax>=0.4",
+    "jax[cuda12]==0.6.2",
 ]
 test = [
     "pytest>=8.0",

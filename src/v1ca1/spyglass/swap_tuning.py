@@ -2678,6 +2678,11 @@ def _decode_nwb_text(value: Any) -> str:
     return str(value)
 
 
+def _decode_nwb_float(value: Any) -> float:
+    """Parse one NWB text scalar with Python's exact float round-trip."""
+    return float(_decode_nwb_text(value))
+
+
 def _frame_from_dynamic_table(
     nwb_table: Any,
     *,
@@ -3033,10 +3038,7 @@ def swap_tuning_geometry_from_dynamic_table(nwb_table: Any) -> pd.DataFrame:
         "test_light_bin_count",
         "test_light_duration_s",
     ):
-        values = table[column].map(
-            lambda value: np.nan if str(value) == "nan" else value
-        )
-        table[column] = pd.to_numeric(values, errors="raise").astype(float)
+        table[column] = table[column].map(_decode_nwb_float).astype(float)
     if table["trajectory"].tolist() != list(TRAJECTORY_TYPES):
         raise ValueError("Swap-tuning geometry paths are not in canonical order.")
     return table.loc[:, list(GEOMETRY_COLUMNS)]
@@ -3437,6 +3439,11 @@ def _ragged_frame_sha256(
 ) -> str:
     """Hash scalar row identity and every ordered ragged vector."""
     scalar_columns = [column for column in table.columns if column not in vector_columns]
+    scalar_table = table.loc[:, scalar_columns].copy()
+    for column in scalar_table.select_dtypes(include=[np.floating]).columns:
+        values = scalar_table[column].to_numpy(copy=True)
+        values[np.isnan(values)] = np.nan
+        scalar_table[column] = values
     vectors = {
         column: [
             _float_array_sha256(np.asarray(value, dtype=float))
@@ -3446,7 +3453,7 @@ def _ragged_frame_sha256(
     }
     return _provenance_sha256(
         {
-            "scalar_sha256": _table_sha256(table.loc[:, scalar_columns]),
+            "scalar_sha256": _table_sha256(scalar_table),
             "vectors": vectors,
         }
     )
