@@ -1140,8 +1140,6 @@ def _figure_4_schematic_payload(
     database: SpyglassFigureDatabase,
 ) -> dict[str, Any]:
     """Reconstruct the fixed L15 schematic from NWB plus modulation output."""
-    import pynwb
-
     from v1ca1.spyglass.nwb import catalog_augmented_nwb, load_interval_set
     from v1ca1.spyglass.offline import figure_3 as source_builder
     from v1ca1.spyglass.offline.figure_3_schematic_supplement import (
@@ -1155,12 +1153,7 @@ def _figure_4_schematic_payload(
     )
     spec = database.spec(animal_name, date)
     modulation = database.ripple_modulation(spec, region="ca1")[0]
-    with pynwb.NWBHDF5IO(
-        str(database.registered_nwb_path(spec)),
-        mode="r",
-        load_namespaces=True,
-    ) as io:
-        nwbfile = io.read()
+    with database.open_source_nwb(spec) as nwbfile:
         catalog = catalog_augmented_nwb(
             nwbfile, nwb_file_name=database.nwb_file_name(spec)
         )

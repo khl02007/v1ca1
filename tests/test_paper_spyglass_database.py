@@ -6,8 +6,9 @@ from v1ca1.paper_figures._spyglass_database import SpyglassFigureDatabase
 
 
 class _FakeNwbfile:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, nwbfile: object) -> None:
         self.path = Path(path)
+        self.nwbfile = nwbfile
         self.restrictions = []
         self.fetch_count = 0
 
@@ -18,19 +19,15 @@ class _FakeNwbfile:
     def __len__(self) -> int:
         return 1
 
-    def fetch1(self):
+    def fetch_nwb(self):
         self.fetch_count += 1
-        return {"nwb_file_name": self.path.name}
-
-    def get_abs_path(self, nwb_file_name: str) -> str:
-        assert nwb_file_name == self.path.name
-        return str(self.path)
+        return [self.nwbfile]
 
 
-def test_registered_nwb_path_does_not_require_original_source(tmp_path):
+def test_source_nwb_uses_spyglass_fetch_and_cache(tmp_path):
     registered_path = tmp_path / "L1420240611_augmented_.nwb"
-    registered_path.touch()
-    nwbfile = _FakeNwbfile(registered_path)
+    source_nwb = object()
+    nwbfile = _FakeNwbfile(registered_path, source_nwb)
     database = object.__new__(SpyglassFigureDatabase)
     database.nwb_root = tmp_path
     database.runtime = {
@@ -44,8 +41,10 @@ def test_registered_nwb_path_does_not_require_original_source(tmp_path):
 
     assert not database.raw_nwb_path(spec).exists()
     assert database.nwb_file_name(spec) == registered_path.name
-    assert database.registered_nwb_path(spec) == registered_path
-    assert database.registered_nwb_path(spec) == registered_path
+    with database.open_source_nwb(spec) as fetched:
+        assert fetched is source_nwb
+    with database.open_source_nwb(spec) as fetched:
+        assert fetched is source_nwb
     assert nwbfile.restrictions == [
         {"nwb_file_name": registered_path.name}
     ]

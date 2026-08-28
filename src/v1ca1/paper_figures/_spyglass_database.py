@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -84,20 +85,23 @@ class SpyglassFigureDatabase:
             )
         return str(self._cache[cache_key])
 
-    def registered_nwb_path(self, spec: Mapping[str, str]) -> Path:
-        """Fetch and return the augmented NWB copy registered by Spyglass."""
+    @contextmanager
+    def open_source_nwb(self, spec: Mapping[str, str]) -> Iterator[Any]:
+        """Yield one cached source NWB fetched through Spyglass."""
         nwb_file_name = self.nwb_file_name(spec)
-        cache_key = ("registered_nwb_path", nwb_file_name)
+        cache_key = ("source_nwb", nwb_file_name)
         if cache_key not in self._cache:
-            _one_row(
-                self.runtime["Nwbfile"],
-                {"nwb_file_name": nwb_file_name},
-                label="registered Nwbfile row",
-            )
-            self._cache[cache_key] = Path(
-                self.runtime["Nwbfile"].get_abs_path(nwb_file_name)
-            ).resolve(strict=True)
-        return Path(self._cache[cache_key])
+            nwbfiles = (
+                self.runtime["Nwbfile"]
+                & {"nwb_file_name": nwb_file_name}
+            ).fetch_nwb()
+            if len(nwbfiles) != 1:
+                raise ValueError(
+                    f"Expected one source NWB for {nwb_file_name}; "
+                    f"found {len(nwbfiles)}."
+                )
+            self._cache[cache_key] = nwbfiles[0]
+        yield self._cache[cache_key]
 
     def group_name(self, spec: Mapping[str, str]) -> str:
         """Return the canonical imported all-unit sorting group name."""
@@ -634,14 +638,7 @@ class SpyglassFigureDatabase:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        import pynwb
-
-        with pynwb.NWBHDF5IO(
-            str(self.registered_nwb_path(spec)),
-            mode="r",
-            load_namespaces=True,
-        ) as io:
-            nwbfile = io.read()
+        with self.open_source_nwb(spec) as nwbfile:
             units = getattr(nwbfile, "units", None)
             if units is None:
                 raise ValueError("Augmented NWB has no Units table.")
@@ -692,20 +689,13 @@ class SpyglassFigureDatabase:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        import pynwb
-
         from v1ca1.spyglass.nwb import (
             catalog_augmented_nwb,
             load_interval_set,
             load_wtrack_graph,
         )
 
-        with pynwb.NWBHDF5IO(
-            str(self.registered_nwb_path(spec)),
-            mode="r",
-            load_namespaces=True,
-        ) as io:
-            nwbfile = io.read()
+        with self.open_source_nwb(spec) as nwbfile:
             catalog = catalog_augmented_nwb(
                 nwbfile,
                 nwb_file_name=self.nwb_file_name(spec),
@@ -771,8 +761,6 @@ class SpyglassFigureDatabase:
         specifications: Sequence[Mapping[str, Any]],
     ) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
         """Compute fixed example-cell panels from each registered source NWB."""
-        import pynwb
-
         from v1ca1.spyglass.offline.figure_1_examples import (
             compute_nwb_example_payload,
         )
@@ -788,12 +776,7 @@ class SpyglassFigureDatabase:
         output: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         for (animal_name, date), rows in grouped.items():
             spec = self.spec(animal_name, date)
-            with pynwb.NWBHDF5IO(
-                str(self.registered_nwb_path(spec)),
-                mode="r",
-                load_namespaces=True,
-            ) as io:
-                nwbfile = io.read()
+            with self.open_source_nwb(spec) as nwbfile:
                 for row in rows:
                     trajectories = tuple(
                         str(value)
