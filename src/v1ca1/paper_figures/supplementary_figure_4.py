@@ -56,8 +56,9 @@ PANEL_TITLES = (
     supplementary_figure_5.PANEL_A_CV_PCA_TITLE,
     INDIVIDUAL_DECODING_PANEL_TITLE,
 )
-PANEL_C_ANIMAL_LABEL_X = -0.005
+PANEL_C_ANIMAL_LABEL_X = -0.13
 PANEL_C_ANIMAL_LABEL_FONTSIZE = 6.0
+PANEL_C_ANIMAL_LABEL_COLOR = "black"
 PANEL_C_YLIM_PADDING = 1.08
 PANEL_C_FINE_YLIM_STEP = 0.05
 PANEL_C_STANDARD_YLIM_STEP = 0.1
@@ -404,7 +405,7 @@ def make_supplementary_figure_4(
             ha="right",
             va="center",
             fontsize=PANEL_C_ANIMAL_LABEL_FONTSIZE,
-            color="0.25",
+            color=PANEL_C_ANIMAL_LABEL_COLOR,
             transform=panel_c_axis.transAxes,
         )
         if animal_index == 0:

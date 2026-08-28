@@ -577,11 +577,20 @@ def test_make_supplementary_figure_4_draws_requested_panels_only(
             for text in ax.texts
             if text.get_fontweight() == "bold"
         ]
-        calls["animal_labels"] = [
-            text.get_text()
+        animal_label_texts = [
+            text
             for ax in fig.axes
             for text in ax.texts
             if text.get_text() in {dataset[0] for dataset in datasets}
+        ]
+        calls["animal_labels"] = [
+            text.get_text() for text in animal_label_texts
+        ]
+        calls["animal_label_positions"] = [
+            text.get_position() for text in animal_label_texts
+        ]
+        calls["animal_label_colors"] = [
+            text.get_color() for text in animal_label_texts
         ]
         calls["titles"] = [
             ax.get_title() for ax in fig.axes if ax.get_title()
@@ -655,6 +664,12 @@ def test_make_supplementary_figure_4_draws_requested_panels_only(
     assert calls["panel_labels"] == ["A", "B", "C"]
     assert calls["titles"] == list(figure.PANEL_TITLES)
     assert calls["animal_labels"] == [dataset[0] for dataset in datasets]
+    assert calls["animal_label_positions"] == [
+        (figure.PANEL_C_ANIMAL_LABEL_X, 0.5)
+    ] * len(datasets)
+    assert calls["animal_label_colors"] == [
+        figure.PANEL_C_ANIMAL_LABEL_COLOR
+    ] * len(datasets)
     panel_a_bounds, panel_b_bounds, *panel_c_bounds = calls["bounds"]
     assert panel_a_bounds[0] < panel_b_bounds[0]
     assert panel_a_bounds[1] == pytest.approx(panel_b_bounds[1])
@@ -669,8 +684,8 @@ def test_make_supplementary_figure_4_draws_requested_panels_only(
     assert panel_c_bounds[2][0] < panel_c_bounds[3][0]
     assert panel_c_bounds[0][0] == pytest.approx(panel_c_bounds[2][0])
     assert panel_c_bounds[1][0] == pytest.approx(panel_c_bounds[3][0])
-    assert panel_c_bounds[0][0] == pytest.approx(panel_a_bounds[0])
-    assert panel_c_bounds[1][0] == pytest.approx(panel_b_bounds[0])
+    assert panel_c_bounds[0][0] > panel_a_bounds[0]
+    assert panel_c_bounds[1][0] > panel_b_bounds[0]
     panel_c_row_center = 0.5 * (
         panel_c_bounds[0][0]
         + panel_c_bounds[1][0]

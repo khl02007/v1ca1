@@ -68,11 +68,11 @@ class SpyglassFigureDatabase:
         return dict(matches[0])
 
     def raw_nwb_path(self, spec: Mapping[str, str]) -> Path:
-        """Return the configured augmented NWB source path."""
+        """Return the expected pre-ingestion augmented NWB source path."""
         return (
             self.nwb_root
             / f"{spec['animal_name']}{spec['date']}_augmented.nwb"
-        ).resolve(strict=True)
+        ).resolve(strict=False)
 
     def nwb_file_name(self, spec: Mapping[str, str]) -> str:
         """Return the standard Spyglass filename registered for one source."""
@@ -83,6 +83,21 @@ class SpyglassFigureDatabase:
                 self.raw_nwb_path(spec),
             )
         return str(self._cache[cache_key])
+
+    def registered_nwb_path(self, spec: Mapping[str, str]) -> Path:
+        """Fetch and return the augmented NWB copy registered by Spyglass."""
+        nwb_file_name = self.nwb_file_name(spec)
+        cache_key = ("registered_nwb_path", nwb_file_name)
+        if cache_key not in self._cache:
+            _one_row(
+                self.runtime["Nwbfile"],
+                {"nwb_file_name": nwb_file_name},
+                label="registered Nwbfile row",
+            )
+            self._cache[cache_key] = Path(
+                self.runtime["Nwbfile"].get_abs_path(nwb_file_name)
+            ).resolve(strict=True)
+        return Path(self._cache[cache_key])
 
     def group_name(self, spec: Mapping[str, str]) -> str:
         """Return the canonical imported all-unit sorting group name."""
@@ -622,7 +637,7 @@ class SpyglassFigureDatabase:
         import pynwb
 
         with pynwb.NWBHDF5IO(
-            str(self.raw_nwb_path(spec)),
+            str(self.registered_nwb_path(spec)),
             mode="r",
             load_namespaces=True,
         ) as io:
@@ -686,7 +701,7 @@ class SpyglassFigureDatabase:
         )
 
         with pynwb.NWBHDF5IO(
-            str(self.raw_nwb_path(spec)),
+            str(self.registered_nwb_path(spec)),
             mode="r",
             load_namespaces=True,
         ) as io:
@@ -774,7 +789,7 @@ class SpyglassFigureDatabase:
         for (animal_name, date), rows in grouped.items():
             spec = self.spec(animal_name, date)
             with pynwb.NWBHDF5IO(
-                str(self.raw_nwb_path(spec)),
+                str(self.registered_nwb_path(spec)),
                 mode="r",
                 load_namespaces=True,
             ) as io:

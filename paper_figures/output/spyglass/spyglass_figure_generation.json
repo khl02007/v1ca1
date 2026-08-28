@@ -1,80 +1,266 @@
 {
   "analysis_nwbfile_schema_name": "kyuv1ca1_nwbfile",
+  "dpi": 600,
   "figures": [
     {
+      "format": "svg",
       "name": "figure_1",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_1.svg",
-      "sha256": "02f45268381f943ed04b090bc2e693a104eb84e2bcc4f4483741bc2d834b7df7",
-      "size_bytes": 3242380
+      "sha256": "78f2b3bccb0b09426cc09a6e09213c95e3ce27dc331a76f9b29cd146e6089d65",
+      "size_bytes": 3962300
     },
     {
+      "format": "svg",
       "name": "figure_2",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_2.svg",
-      "sha256": "0b50442ce82da077b31b4aa0c24d87853f813e37d3a7b7e8fd1a8a628e7893a8",
+      "sha256": "d65b0ab30a527c37c91d7e67fa3936b1ab4d7c48761941157a83d7e9f2e3b52d",
       "size_bytes": 5974783
     },
     {
+      "format": "svg",
       "name": "figure_3",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_3.svg",
-      "sha256": "d1542530290e8286503709158311e84f29047aa8fb20812583102d19fae86790",
-      "size_bytes": 146001
+      "sha256": "fd7a2d9459a32748d5c28885e65e508e970c734c454e21fd06f4630987f59ceb",
+      "size_bytes": 146118
     },
     {
+      "format": "svg",
       "name": "figure_4",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_4.svg",
-      "sha256": "7e8af4d38393306ec10f4595a533e7b1cc027fbc0fdeb9c7e3adaa43bdad95f9",
-      "size_bytes": 465306
+      "sha256": "c6bd54598a317073b48a60423656b0bb1d8ad1a6278896f1654c404420f1b4b0",
+      "size_bytes": 520633
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_1",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_1.svg",
-      "sha256": "ab38563a581f8922d373cfe8f81d6bf962b1608aff2cce38e7e3318aee37b86a",
-      "size_bytes": 230068
+      "sha256": "a16cfe65b037d91ac99a76626b8475d9ba0bb4f98de1aabd66cbef799732bd2d",
+      "size_bytes": 596769
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_2",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_2.svg",
-      "sha256": "60eb1ceb6236bb62f9f2fa73b5b680caa534d20778e2573e7b28f58abaf03fef",
+      "sha256": "e572cf67e35f9d4fb1fed37bdcd3b7e98bc7255bb0694e0facb5a727302f079f",
       "size_bytes": 168952
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_3",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_3.svg",
-      "sha256": "e7ff99b46dcaa55199d02a90c0ae71a0307eca74d38e23a47a9dd339a5c09903",
+      "sha256": "4eea9638f1513193fd483d38b6f526481016c8d81b06024175086f8067a24450",
       "size_bytes": 278605
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_4",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_4.svg",
-      "sha256": "756fc778d80aab21261fbf829533cdfe6ac7f803194c8233631bda8a10da718b",
-      "size_bytes": 77796
+      "sha256": "5c6c3717f03c15714c479d3fdec730855688c840f65366165d20d5caee048405",
+      "size_bytes": 77696
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_5",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_5.svg",
-      "sha256": "bd72abe20a9302754b2331aaa3466e2afc91789823634fdc3616ba682c3097d5",
+      "sha256": "cb7682d1d816b883e0c447c34b0eb576f80f2f499425df37e6d43faf23467714",
       "size_bytes": 360085
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_6",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_6.svg",
-      "sha256": "1acea54f3d933211542286cfd4b88e3912dd42044bc96230f1a3312456e4ba42",
+      "sha256": "e71b29336dc3911cf2db9b58c1eca42a104baeecfd35f07eb0a66ae13641265a",
       "size_bytes": 122890
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_7",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_7.svg",
-      "sha256": "2970e0e80499f3fb2fa33d521a7abe9731670f5213b17f347ec0de26c295468a",
-      "size_bytes": 292240
+      "sha256": "6485bc1aa46a1813ef810e980952b0864e3f3baf0deda5a65d369d06f66a0e32",
+      "size_bytes": 495480
     },
     {
+      "format": "svg",
       "name": "supplementary_figure_8",
       "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_8.svg",
-      "sha256": "93b11076f1981c74c49e54e71a38131cf1c9f27e475dbb6f1ecd205514c2c934",
+      "sha256": "0abeddc507b02ac164d55bbecca5689e4a450732e58154bf97e95d55b076f34b",
       "size_bytes": 383264
+    },
+    {
+      "format": "pdf",
+      "name": "figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_1.pdf",
+      "sha256": "3efd7d4e1184b43b55b83e0f878953e1261e325aab422fa69ded534f630a07c1",
+      "size_bytes": 808565
+    },
+    {
+      "format": "pdf",
+      "name": "figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_2.pdf",
+      "sha256": "3267f3729716e06f24682c683f6f4663e806ea6d553f209ce691bc6fe4b400ac",
+      "size_bytes": 577231
+    },
+    {
+      "format": "pdf",
+      "name": "figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_3.pdf",
+      "sha256": "4228d52451f695724dc45d9007872d24d62509a413c185f720589058f2a252ba",
+      "size_bytes": 55057
+    },
+    {
+      "format": "pdf",
+      "name": "figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_4.pdf",
+      "sha256": "b49d9999639fa2bc93524328a2958d4c93f59a4f2294ba6a864514471541d3c9",
+      "size_bytes": 122676
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_1.pdf",
+      "sha256": "f527f40d86545c514e02fe3f520e10b748bc214c41a173e4a4bb24b56f6b78f5",
+      "size_bytes": 376707
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_2.pdf",
+      "sha256": "ee72b61cccabea054981752a7ecf175521348332624b3c1bcc3b9f1efccbf16d",
+      "size_bytes": 39765
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_3.pdf",
+      "sha256": "b77a9c5d41e5a33891ba73a74a610be70daedb108a77f472abaaea3c8f9e016f",
+      "size_bytes": 56483
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_4.pdf",
+      "sha256": "31186a88e78b1819ffd0deac0479646c547f8b8e3e44dd85470b9a5706a5d6f3",
+      "size_bytes": 30825
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_5",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_5.pdf",
+      "sha256": "623ede980ee12f173569d69176432811dbbb7e9708e170f3a2c25bb5b323d199",
+      "size_bytes": 90928
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_6",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_6.pdf",
+      "sha256": "f6144ebda61ea6df1ceec0251d5d6168f1c8de673ce6bdd035149d22d70cb47b",
+      "size_bytes": 34992
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_7",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_7.pdf",
+      "sha256": "77f9a5d189f9e635b00fee84f6ca40a8d2f47eccf625bda290a6dd6c77660a03",
+      "size_bytes": 187366
+    },
+    {
+      "format": "pdf",
+      "name": "supplementary_figure_8",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_8.pdf",
+      "sha256": "dabb4644408c010e7b1ac8a26f16c4ad90ea2746603e82e5be234a1f45fade6e",
+      "size_bytes": 63754
+    },
+    {
+      "format": "png",
+      "name": "figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_1.png",
+      "sha256": "56bcd1ef10ef8f1846bdcc13950101c206ffc28075f32e7d74bb8b25cbb03492",
+      "size_bytes": 2053284
+    },
+    {
+      "format": "png",
+      "name": "figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_2.png",
+      "sha256": "422aacb0592bc636c9f14204c14cc6342a03e02f745c7ae66ccc08df290504bc",
+      "size_bytes": 967232
+    },
+    {
+      "format": "png",
+      "name": "figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_3.png",
+      "sha256": "64125922ab07b74b78a44bca6829342a0ab1bfd7ba92b375a8a893a398e6bae4",
+      "size_bytes": 499598
+    },
+    {
+      "format": "png",
+      "name": "figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/figure_4.png",
+      "sha256": "959f42cf0e91af4ca9e8c8bc2e245f15d29bebf8acf1b01c430c40cacd26a909",
+      "size_bytes": 759261
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_1",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_1.png",
+      "sha256": "6f835335135c4dd7b956e34c6780573334a9641cb6d9f16067b85b9e8707ac0b",
+      "size_bytes": 572211
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_2",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_2.png",
+      "sha256": "947feaf2bab29cd673156f9a6f5c8b3c0a708d5ca90a38acd2e68b40f16dc2a2",
+      "size_bytes": 914087
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_3",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_3.png",
+      "sha256": "19ca62907a77286a4091fae7f8681c0cdb8eaf3a6adc2edea2d1f3a12a159030",
+      "size_bytes": 897891
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_4",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_4.png",
+      "sha256": "2e5f0ed4387203165b442f69e54aed8c343c729fdf0a11d9ba77e67b423269e2",
+      "size_bytes": 543427
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_5",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_5.png",
+      "sha256": "3f9e9571725acc6fdf6649ec52c774606c3da137aa2054545d66675a13fc9a32",
+      "size_bytes": 1561874
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_6",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_6.png",
+      "sha256": "720bd4d20e021cf3f5fe0bbfe8f789466b9dbdc5e151aebcba6dc369c6359c27",
+      "size_bytes": 578165
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_7",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_7.png",
+      "sha256": "71934d7c754e3f9c1ad14375d24069ddb46a538007c99ce608a6fa793e91f9a8",
+      "size_bytes": 989088
+    },
+    {
+      "format": "png",
+      "name": "supplementary_figure_8",
+      "path": "/home/kyu/repos/v1ca1/paper_figures/output/spyglass/supplementary_figure_8.png",
+      "sha256": "a746390cc83d955e85b53e10a78f7eeb914939128c9875890abd4f51a3e665fa",
+      "size_bytes": 766641
     }
   ],
   "nwb_root": "/stelmo/nwb/raw",
+  "output_formats": [
+    "svg",
+    "pdf",
+    "png"
+  ],
   "result_rows": [
     {
       "analysis_file_name": "L1920250930_augmented_NIPYC1YS9H.nwb",

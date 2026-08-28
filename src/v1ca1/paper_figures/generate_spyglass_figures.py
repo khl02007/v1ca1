@@ -1156,7 +1156,9 @@ def _figure_4_schematic_payload(
     spec = database.spec(animal_name, date)
     modulation = database.ripple_modulation(spec, region="ca1")[0]
     with pynwb.NWBHDF5IO(
-        str(database.raw_nwb_path(spec)), mode="r", load_namespaces=True
+        str(database.registered_nwb_path(spec)),
+        mode="r",
+        load_namespaces=True,
     ) as io:
         nwbfile = io.read()
         catalog = catalog_augmented_nwb(
@@ -1957,18 +1959,31 @@ def generate_spyglass_figures(
     output_dir: Path,
     figure_names: Sequence[str] = FIGURE_NAMES,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
+    output_formats: Sequence[str] | None = None,
     dpi: int = DEFAULT_DPI,
     replace: bool = False,
 ) -> list[Path]:
-    """Build requested payloads once and render all selected figures."""
+    """Build requested payloads once and render every requested format."""
     selected = tuple(dict.fromkeys(str(name) for name in figure_names))
     unknown = sorted(set(selected).difference(FIGURE_NAMES))
     if unknown:
         raise ValueError(f"Unknown figure names {unknown!r}.")
-    if str(output_format) not in figure_1.FIGURE_FORMATS:
+    requested_formats = (
+        (str(output_formats),)
+        if isinstance(output_formats, str)
+        else tuple(str(value) for value in output_formats or ())
+    )
+    formats = tuple(
+        dict.fromkeys(requested_formats or (str(output_format),))
+    )
+    unknown_formats = sorted(set(formats).difference(figure_1.FIGURE_FORMATS))
+    if unknown_formats:
         raise ValueError(
-            f"output_format must be one of {figure_1.FIGURE_FORMATS!r}."
+            f"output formats must be among {figure_1.FIGURE_FORMATS!r}; "
+            f"found {unknown_formats!r}."
         )
+    if int(dpi) <= 0:
+        raise ValueError("dpi must be positive.")
     run_dir = Path(output_dir).resolve(strict=False)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2070,21 +2085,37 @@ def generate_spyglass_figures(
             _render_supplementary_figure_8,
         ),
     }
-    outputs = []
-    for name in selected:
-        payload_name, renderer = renderers[name]
-        output_path = run_dir / f"{name}.{output_format}"
-        _emit("render_started", figure=name, output_path=output_path)
-        outputs.append(
-            _atomic_render(
+    output_records = []
+    for current_format in formats:
+        for name in selected:
+            payload_name, renderer = renderers[name]
+            output_path = run_dir / f"{name}.{current_format}"
+            _emit(
+                "render_started",
+                figure=name,
+                output_format=current_format,
+                output_path=output_path,
+            )
+            rendered = _atomic_render(
                 output_path,
                 replace=replace,
                 render=lambda temporary, renderer=renderer, payload_name=payload_name: renderer(
                     payloads[payload_name], temporary, dpi=int(dpi)
                 ),
             )
-        )
-        _emit("render_complete", figure=name, output_path=output_path)
+            output_records.append(
+                {
+                    "name": name,
+                    "format": current_format,
+                    "path": rendered,
+                }
+            )
+            _emit(
+                "render_complete",
+                figure=name,
+                output_format=current_format,
+                output_path=output_path,
+            )
 
     manifest = {
         "schema_name": database.schema_name,
@@ -2092,14 +2123,17 @@ def generate_spyglass_figures(
             database.analysis_nwbfile_schema_name
         ),
         "nwb_root": str(database.nwb_root),
+        "dpi": int(dpi),
+        "output_formats": list(formats),
         "figures": [
             {
-                "name": name,
-                "path": str(path),
-                "sha256": _file_sha256(path),
-                "size_bytes": path.stat().st_size,
+                "name": record["name"],
+                "format": record["format"],
+                "path": str(record["path"]),
+                "sha256": _file_sha256(record["path"]),
+                "size_bytes": record["path"].stat().st_size,
             }
-            for name, path in zip(selected, outputs, strict=True)
+            for record in output_records
         ],
         "result_rows": database.selected_rows(),
     }
@@ -2112,8 +2146,14 @@ def generate_spyglass_figures(
         encoding="utf-8",
     )
     os.replace(temporary_manifest, manifest_path)
-    _emit("generation_complete", figures=len(outputs), manifest=manifest_path)
-    return outputs
+    _emit(
+        "generation_complete",
+        figures=len(selected),
+        formats=formats,
+        outputs=len(output_records),
+        manifest=manifest_path,
+    )
+    return [record["path"] for record in output_records]
 
 
 def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -2126,10 +2166,18 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=FIGURE_NAMES,
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument(
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument(
         "--output-format",
         choices=figure_1.FIGURE_FORMATS,
         default=DEFAULT_OUTPUT_FORMAT,
+    )
+    format_group.add_argument(
+        "--output-formats",
+        nargs="+",
+        choices=figure_1.FIGURE_FORMATS,
+        default=None,
+        help="Render all formats after building database payloads once.",
     )
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     parser.add_argument("--replace", action="store_true")
@@ -2161,6 +2209,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_dir=args.output_dir,
         figure_names=args.figures,
         output_format=args.output_format,
+        output_formats=args.output_formats,
         dpi=args.dpi,
         replace=args.replace,
     )
