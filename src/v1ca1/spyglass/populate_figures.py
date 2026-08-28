@@ -133,6 +133,16 @@ def _emit(event: str, **values: Any) -> None:
     )
 
 
+def _register_analysis_nwbfile_table(tables: Mapping[str, Any]) -> None:
+    """Register the activated custom analysis-NWB table with Spyglass."""
+    analysis_nwbfile_table = tables.get("analysis_nwbfile")
+    if analysis_nwbfile_table is None:
+        raise RuntimeError(
+            "Activation did not return the AnalysisNwbfile table."
+        )
+    analysis_nwbfile_table().register_with_spyglass()
+
+
 def _load_runtime(
     *,
     schema_name: str,
@@ -172,6 +182,7 @@ def _load_runtime(
         create_schema=False,
         create_tables=False,
     )
+    _register_analysis_nwbfile_table(tables)
     return {
         "dj": dj,
         "tables": tables,

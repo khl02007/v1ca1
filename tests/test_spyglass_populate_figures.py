@@ -6,6 +6,7 @@ import pytest
 
 from v1ca1.spyglass.populate_figures import (
     STAGE_ORDER,
+    _register_analysis_nwbfile_table,
     _require_expected_result_primary_key,
     _require_one_pending_populate_job,
     figure_dataset_specs,
@@ -34,6 +35,17 @@ class _FakeResultTable:
 
     def __init__(self, pending_count: int):
         self.key_source = _FakePendingRelation(pending_count)
+
+
+class _FakeAnalysisNwbfile:
+    def __init__(self):
+        self.registration_count = 0
+
+    def __call__(self):
+        return self
+
+    def register_with_spyglass(self):
+        self.registration_count += 1
 
 
 def test_figure_dataset_specs_match_current_manuscript_cohort() -> None:
@@ -98,6 +110,16 @@ def test_stages_are_explicit_and_dependency_ordered() -> None:
     assert stages_through("status") == ()
     with pytest.raises(ValueError, match="Unknown population stage"):
         stages_through("unknown")
+
+
+def test_runtime_registers_custom_analysis_nwbfile_table() -> None:
+    analysis_nwbfile = _FakeAnalysisNwbfile()
+
+    _register_analysis_nwbfile_table({"analysis_nwbfile": analysis_nwbfile})
+
+    assert analysis_nwbfile.registration_count == 1
+    with pytest.raises(RuntimeError, match="did not return"):
+        _register_analysis_nwbfile_table({})
 
 
 def test_population_guard_rejects_unexpected_live_primary_key() -> None:
