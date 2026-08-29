@@ -137,6 +137,11 @@ Each computed row owns one immutable analysis NWB file. The row stores its
 Load results through the table's public loader or `fetch_nwb()`; do not open
 the stored path directly.
 
+The published export uses [DANDI:001958 version
+0.260829.0404](https://doi.org/10.48324/dandi.001958/0.260829.0404). The
+[Docker reproduction package](https://github.com/khl02007/v1ca1-spyglass-export-docker)
+contains the database and figure-generation environments.
+
 `PathProgressionDecoding.Transfer` stores selectively fetchable object IDs
 for transfers contained in its parent's analysis NWB.
 
