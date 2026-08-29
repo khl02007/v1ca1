@@ -4,9 +4,21 @@
 
 Analysis code related to Lee et al. 2026.
 
+## Reproducibility
+
+- Software: [Zenodo DOI
+  10.5281/zenodo.22155664](https://doi.org/10.5281/zenodo.22155664)
+- Data: [DANDI:001958, version
+  0.260829.0404](https://doi.org/10.48324/dandi.001958/0.260829.0404)
+- Containers: [Docker reproduction
+  package](https://github.com/khl02007/v1ca1-spyglass-export-docker), using
+  [`khl02007/spyglass-hub-kyu_v1ca1:latest`](https://hub.docker.com/r/khl02007/spyglass-hub-kyu_v1ca1)
+  and
+  [`khl02007/spyglass-db-kyu_v1ca1:latest`](https://hub.docker.com/r/khl02007/spyglass-db-kyu_v1ca1)
+
 ## Repository layout
 
-Within `src/v1ca1/`:
+Key packages within `src/v1ca1/`:
 
 - `helper/`: session paths and loaders, timestamps, intervals,
   logging, and W-track utilities.
@@ -19,11 +31,11 @@ Within `src/v1ca1/`:
   analyses.
 - `behavior/` and `raster/`: behavioral summaries and
   trajectory/place-field visualizations.
-- `communication_subspace/` and `topology/`: retained specialized and legacy
+- `communication_subspace/`, `multiday/`, and `topology/`: specialized
   analyses.
 - `paper_figures/`: manuscript figure builders.
-- `spyglass/`: project-owned `kyuv1ca1` Spyglass tables and
-  database-free computation adapters.
+- `spyglass/`: project-owned `kyuv1ca1` DataJoint tables and analysis-NWB
+  computations.
 
 At the repository root:
 
@@ -32,9 +44,6 @@ At the repository root:
 - `figurl/`: per-session, per-shank spike-sorting FigURL records.
 - `tests/`: unit and workflow tests, using synthetic or mocked inputs where
   practical.
-
-Some analysis packages retain `legacy/` scripts for provenance. Prefer the
-newer CLI-oriented modules and shared helpers for new work.
 
 ## Setup
 
@@ -127,23 +136,34 @@ provenance in the new file. It does not recompute the underlying analyses.
 ## Manuscript figures
 
 Figure builders live in `v1ca1.paper_figures`; generated PDF, PNG, and SVG
-files live in `paper_figures/output`. The configured processed data sets can
-be inspected before rendering:
+files live in `paper_figures/output`. Generate the published database-backed
+figure set in the Spyglass environment:
+
+```bash
+conda run -n v1ca1-spyglass \
+  python -m v1ca1.spyglass.export_figures --replace
+```
+
+This generates Figures 1–4 and Supplementary Figures 1–8 in SVG, PDF, and PNG
+at 600 dpi under `paper_figures/output/spyglass`, while logging the database
+rows and NWB files used. Inspect configured data sets or generate individual
+figures through their module CLIs:
 
 ```bash
 python -m v1ca1.paper_figures.datasets --include-light-sleep
 python -m v1ca1.paper_figures.figure_1 --format svg
 ```
 
-Figures depend on the expected artifacts under the analysis root. Run a
-builder with `--help` to see its data, cache, asset, and output options.
+Individual builders depend on the expected artifacts under the analysis root.
+Run one with `--help` to see its data, cache, asset, and output options.
 
 ## Spyglass pipeline
 
 `v1ca1.spyglass` defines the project-owned `kyuv1ca1` source, parameter,
 selection, and computed tables. It indexes data in augmented NWBs and standard
-Spyglass spike-sorting tables, while computed artifacts remain separate from
-the source NWB files. Standard Spyglass ingestion must be completed first.
+Spyglass spike-sorting tables. Each computed row owns an immutable analysis NWB
+file separate from its source NWB. Standard Spyglass ingestion must be
+completed first when creating a new deployment.
 
 Use the separate `v1ca1-spyglass` environment. Importing `v1ca1.spyglass` is
 passive; explicit calls such as `activate()` and `ingest_v1ca1_nwb()` declare
