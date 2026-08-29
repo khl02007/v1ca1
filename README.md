@@ -1,5 +1,7 @@
 # Lee V1-CA1 Project
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22155664.svg)](https://doi.org/10.5281/zenodo.22155664)
+
 Analysis code related to Lee et al. 2026.
 
 ## Repository layout
