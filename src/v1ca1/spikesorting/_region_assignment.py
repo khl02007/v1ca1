@@ -7,6 +7,18 @@ from typing import Any
 EXPECTED_PROBE_COUNT = 4
 EXPECTED_SHANK_COUNT = 4
 
+# The 20240421 L12 assignments are approved for all four probes across these
+# multiday sessions. Keep their per-probe regions and per-shank depth thresholds.
+SESSION_REGION_ASSIGNMENT_REFERENCES: dict[str, dict[str, str]] = {
+    "L12": {
+        "20240417": "20240421",
+        "20240418": "20240421",
+        "20240419": "20240421",
+        "20240423": "20240421",
+        "20240417_20240418_20240419_20240421_20240423": "20240421",
+    },
+}
+
 SESSION_REGION_ASSIGNMENTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     "L12": {
         "20240421": [
@@ -607,7 +619,7 @@ def get_session_region_assignment_rules(
     animal_name: str,
     date: str,
 ) -> list[dict[str, Any]]:
-    """Return validated region-assignment rules for one animal/date session."""
+    """Return validated session rules, using an explicitly approved reference if needed."""
     rules_by_date = SESSION_REGION_ASSIGNMENTS.get(str(animal_name))
     if rules_by_date is None:
         raise KeyError(
@@ -615,6 +627,10 @@ def get_session_region_assignment_rules(
         )
 
     rules = rules_by_date.get(str(date))
+    if rules is None:
+        reference_date = SESSION_REGION_ASSIGNMENT_REFERENCES.get(str(animal_name), {}).get(str(date))
+        if reference_date is not None:
+            rules = rules_by_date.get(reference_date)
     if rules is None:
         raise KeyError(
             "No region assignment rules configured for session "

@@ -50,6 +50,52 @@ def test_get_session_region_assignment_rules_returns_valid_rules(
     assert loaded_rules == rules
 
 
+@pytest.mark.parametrize(
+    "date",
+    [
+        "20240417",
+        "20240418",
+        "20240419",
+        "20240421",
+        "20240423",
+        "20240417_20240418_20240419_20240421_20240423",
+    ],
+)
+def test_l12_multiday_sessions_preserve_all_reference_probe_assignments(date: str) -> None:
+    reference = _region_assignment.get_session_region_assignment_rules("L12", "20240421")
+    rules = _region_assignment.get_session_region_assignment_rules("L12", date)
+
+    assert rules == reference
+    indexed = _region_assignment.index_rules_by_probe_shank(rules)
+    for probe_idx in (0, 3):
+        for shank_idx in range(4):
+            assert indexed[(probe_idx, shank_idx)]["region"] == "v1"
+    for probe_idx in (1, 2):
+        for shank_idx in range(4):
+            rule = indexed[(probe_idx, shank_idx)]
+            assert rule["reference_depth"] == (-286.0 if shank_idx < 2 else -390.0)
+            assert rule["below_region"] == "ca1"
+            assert rule["above_or_equal_region"] == "s1"
+
+
+def test_explicit_l12_session_rules_take_precedence_over_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit_rules = _make_complete_rules()
+    monkeypatch.setattr(
+        _region_assignment,
+        "SESSION_REGION_ASSIGNMENTS",
+        {"L12": {"20240417": explicit_rules}},
+    )
+
+    assert _region_assignment.get_session_region_assignment_rules("L12", "20240417") == explicit_rules
+
+
+def test_l12_reference_does_not_apply_to_unapproved_sessions() -> None:
+    with pytest.raises(KeyError, match="No region assignment rules configured for session"):
+        _region_assignment.get_session_region_assignment_rules("L12", "20240420")
+
+
 def test_build_curated_unit_groups_mirrors_merge_then_filter_behavior() -> None:
     curation_payload = {
         "labelsByUnit": {
